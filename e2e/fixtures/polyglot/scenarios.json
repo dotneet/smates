@@ -145,7 +145,16 @@
       "tools/tests/test_slug.py",
       "tools/tests/test_cli.py"
     ],
-    "orphans": []
+    "orphans": [],
+    "hints": {
+      "tools/tests/test_slug.py": {
+        "top": [
+          "tools/polytools/slug.py"
+        ],
+        "verdict": "changed-inputs",
+        "output": "test_slug.py::test_slugify"
+      }
+    }
   },
   {
     "name": "shared schema.json selects exactly one test per language",

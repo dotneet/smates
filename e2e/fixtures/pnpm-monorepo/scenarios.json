@@ -169,7 +169,16 @@
     "fails": [
       "packages/api/test/users.test.ts"
     ],
-    "orphans": []
+    "orphans": [],
+    "hints": {
+      "packages/api/test/users.test.ts": {
+        "top": [
+          "packages/api/src/users.ts"
+        ],
+        "verdict": "changed-inputs",
+        "output": "expected"
+      }
+    }
   },
   {
     "name": "dynamic-import-computed-path-locale",
