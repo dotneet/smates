@@ -83,3 +83,38 @@ jobs:
           test "$EXIT_CODE" = 0
           test "$VERSION" = source
           smates version
+
+  pr-comment:
+    # Dogfoods the action's pull request comment: smates' selection for its own Go
+    # packages, kept as one sticky comment. Selection only, so no tests run twice.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # no state is cached: diff against the base branch
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - id: smates
+        uses: ./
+        with:
+          version: source
+          command: select
+          args: --suite go:root --no-agent
+          cache: 'false'
+          comment: 'true'
+      - name: Check the comment
+        # Pull requests from forks get a read-only token: the action skips the comment.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          URL: ${{ steps.smates.outputs.comment-url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$URL"
+          gh api "repos/$GITHUB_REPOSITORY/issues/comments/${URL##*-}" --jq .body | tee comment.md
+          head -n1 comment.md | grep -qx '<!-- smates-summary -->'
+          grep -q '^### smates: ' comment.md

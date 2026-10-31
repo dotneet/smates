@@ -101,6 +101,9 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 	if err != nil || len(injected) == 0 || res.ExitCode == 0 || len(res.Observations) > 0 || !rc.Record {
 		return res, err
 	}
+	if ctx.Err() != nil {
+		return res, ctx.Err() // interrupted, not rejected
+	}
 	if len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
 		return res, nil
 	}

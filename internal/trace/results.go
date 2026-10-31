@@ -30,19 +30,19 @@ func Results(traceDir, repoRoot string) map[string]Result {
 			if !ok {
 				continue
 			}
-			addResult(out, r, ev.Status, ev.Ms)
+			addResult(out, r, ev.Status, ev.Ms, ev.Msg)
 		}
 		f.Close()
 	}
 	return out
 }
 
-func addResult(m map[string]Result, file, status string, ms int64) {
+func addResult(m map[string]Result, file, status string, ms int64, msg string) {
 	prev, seen := m[file]
 	if seen && prev.Status == "fail" {
 		status = "fail"
 	}
-	m[file] = Result{Status: status, Ms: prev.Ms + ms}
+	m[file] = Result{Status: status, Ms: prev.Ms + ms, Message: JoinMessage(prev.Message, msg)}
 }
 
 // JUnit reads a JUnit XML report and returns per-file results. Files are taken from the
@@ -53,12 +53,17 @@ func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	type problem struct {
+		Message string `xml:"message,attr"`
+		Text    string `xml:",chardata"`
+	}
 	type testcase struct {
-		File      string     `xml:"file,attr"`
-		Classname string     `xml:"classname,attr"`
-		Time      float64    `xml:"time,attr"`
-		Failures  []struct{} `xml:"failure"`
-		Errors    []struct{} `xml:"error"`
+		Name      string    `xml:"name,attr"`
+		File      string    `xml:"file,attr"`
+		Classname string    `xml:"classname,attr"`
+		Time      float64   `xml:"time,attr"`
+		Failures  []problem `xml:"failure"`
+		Errors    []problem `xml:"error"`
 	}
 	type suite struct {
 		Name   string     `xml:"name,attr"`
@@ -98,11 +103,16 @@ func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 			if !ok {
 				continue
 			}
-			st := "pass"
-			if len(c.Failures) > 0 || len(c.Errors) > 0 {
+			st, msg := "pass", ""
+			for _, pr := range append(c.Failures, c.Errors...) {
 				st = "fail"
+				text := strings.TrimSpace(pr.Text)
+				if text == "" || !strings.Contains(text, pr.Message) {
+					text = strings.TrimSpace(pr.Message + "\n" + text)
+				}
+				msg = JoinMessage(msg, c.Name+": "+text)
 			}
-			addResult(out, f, st, int64(c.Time*1000))
+			addResult(out, f, st, int64(c.Time*1000), msg)
 		}
 		for _, sub := range s.Suites {
 			if sub.File == "" {

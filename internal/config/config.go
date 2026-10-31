@@ -32,6 +32,8 @@ type Config struct {
 	State string `yaml:"state"`
 	// FullRunBranches: branches on which `smates run` runs everything (default: the default branch).
 	FullRunBranches []string `yaml:"full_run_branches"`
+	// Flaky configures what happens to tests known to be flaky.
+	Flaky FlakyConfig `yaml:"flaky"`
 
 	// Path is the file the config was loaded from ("" when auto-detected).
 	Path string `yaml:"-"`
@@ -92,6 +94,20 @@ type AgentConfig struct {
 	Effort string `yaml:"effort"`
 	// Instructions are appended to the system prompt (project-specific hints).
 	Instructions string `yaml:"instructions"`
+	// ExplainFailures lets `smates run` ask the agent for the probable cause of failing
+	// tests (default true; only with the built-in backend).
+	ExplainFailures *bool `yaml:"explain_failures"`
+	// ExplainMax bounds the failing tests explained per run (default 3).
+	ExplainMax int `yaml:"explain_max"`
+}
+
+// FlakyConfig: smates always detects and reports flaky tests (a unit whose outcome
+// flipped while its inputs stayed the same); a failure is never hidden by default.
+type FlakyConfig struct {
+	// Retry re-runs a failing unit that is already known to be flaky up to this many
+	// times; when it then passes, it is reported as flaky and does not fail the run.
+	// Only applies when every failure of the suite run is such a unit. Default 0.
+	Retry int `yaml:"retry"`
 }
 
 // DefaultIgnore are changes that never need tests unless some test reads them.
@@ -177,6 +193,15 @@ func (c *Config) Normalize() error {
 	}
 	if a.Effort == "" {
 		a.Effort = "low"
+	}
+	if a.ExplainMax == 0 {
+		a.ExplainMax = 3
+	}
+	if a.ExplainMax < 0 {
+		return fmt.Errorf("agent.explain_max must not be negative (got %d)", a.ExplainMax)
+	}
+	if c.Flaky.Retry < 0 || c.Flaky.Retry > 5 {
+		return fmt.Errorf("flaky.retry must be between 0 and 5 (got %d)", c.Flaky.Retry)
 	}
 	names := map[string]bool{}
 	for i := range c.Suites {

@@ -123,6 +123,63 @@ not reported as definite misses. Units that ran but left no trace in a failing r
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+### Flaky tests
+
+Because every entry stores the content hash of every input, a flaky test can be detected
+by proof: if a unit's outcome flips between pass and fail while its inputs are the same,
+something nondeterministic or invisible to smates decided it. "The same inputs" means one
+of:
+
+- every dependency recorded by the previous run still has the same hash, and every file
+  the unit depends on now but did not record then is unchanged since the recorded
+  snapshot (so a dependency the previous trace missed cannot hide a real change);
+- an earlier outcome in the unit's history has the same *fingerprint* (a hash of its whole
+  dependency map);
+- both outcomes come from the same run (a failed attempt and its retry).
+
+Only outcomes reported for the unit itself count: inferred statuses, `unknown`, runs with
+runner arguments passed through (`smates run -- ...`), and entries written before outcome
+histories existed are never evidence. Each entry keeps its last 8
+outcomes (status, fingerprint, time) and, once flaky, the evidence (flip count, first and
+last flip, commit). Detection never changes selection: a failure is re-run next time as
+always. The opt-in `flaky.retry` re-runs a failing unit that is already known to be flaky
+(only when every failure of the suite run is such a unit) and lets the run pass if the
+retry passes; the flip is recorded and reported like any other.
+
+### Failure hints
+
+The same data explains failures. For a failing unit `T`, the candidates are the keys of
+`D(T)` (plus what the failing run itself traced) whose hash differs from the one recorded
+in `T`'s previous entry — "changed since this test last ran". Without an entry, they are
+`D(T)` ∩ the selection's changed files (snapshot or base revision); in a full run with
+neither, there is no basis and the hint says so. The hints are computed per suite right
+after it runs and before its results are recorded, since recording overwrites the entry.
+
+Ranking is by tier, then most recent modification, then directory proximity to the test
+file: code the test imports directly (static graph), other code, the test file itself,
+data, configuration (suite inputs, manifests, lockfiles), then directory listings,
+existence checks and opaque trees. A failure with no changed input is reported as such
+(flaky, environmental, or untraceable), or as "already failing" when the previous entry
+did not pass; orphans of the run are offered as candidates in that case, since they are
+exactly the changes smates cannot attribute. A failure inferred from a shared exit code is
+marked, as it may belong to another unit.
+
+Reporters also return a bounded failure message per file (vitest and jest reporters, the
+pytest plugin, JUnit `<failure>` text, and the per-package block of `go test` output);
+runners that only give exit codes (node:test, bun, custom) have none.
+
+The optional explanation is one request per failure without tools: system prompt (fixed,
+cacheable), the candidate list, the failure output (≤ 6 KB, ANSI stripped) and the diffs of
+the top three candidates (≤ 8 KB, produced like the orphan agent's `git_diff`: recorded blob,
+else the base revision or HEAD; ignored files and paths outside the repository are never
+read), answered with structured outputs (`file`, `line`, `reason`, `confidence`). At most
+`agent.explain_max` (3) per run, non-inferred failures first; requests start as soon as
+their suite has finished and run in parallel with later suites, each capped at 30 s; the
+run only waits for them before saving the state. Answers are cached in the state's agent
+cache under a key of the test, its candidates' hashes and its failure output with
+durations, addresses and timestamps masked. Errors are reported in one line and never
+change the exit code. The external `agent.command` backend is not used for explanations.
+
 ## 4. State
 
 `.smates/state.json.gz` (gitignored), interned JSON (paths and hashes stored once). A full
@@ -130,7 +187,25 @@ run rewrites the snapshot and all entries; a selective run updates the entries o
 it ran. Moving the state between CI runs is a thin layer: the GitHub Action uses
 `actions/cache` (branch, falling back to the default branch); other CIs can use their cache
 or `smates state push/pull` (a git ref, `refs/smates/state/<branch>`); shards are combined
-with `smates state merge`.
+with `smates state merge`, which keeps the newer entry of each test but unions outcome
+histories and flake evidence (flip counts take the maximum, since both sides usually share
+a past). Outcome histories and flake evidence are optional fields, so state files from
+before them still load and the format version is unchanged.
+
+### Summaries for reviewers
+
+`internal/summary` renders a selection (and, for `run`, its result) as Markdown for the
+job summary and for pull request comments (`--markdown`, `select --format markdown`,
+the action's `comment` input). The selection carries the "why" it needs: for each
+changed dependency of a selected test, `Test.Via` says how it reached the test (the test
+file itself, a suite input or rule, the static import graph, or only the traced reads of
+its last run), additions for orphans carry the orphan files (`Addition.Files`), and
+`Result.OrphanHandling` records whether each orphan was explained by a reference scan,
+the agent (or judged irrelevant by it), the `orphans` policy, or ignored. Time saved is
+the sum of the recorded durations of the skipped tests. A sharded summary covers only
+the tests its shard owns, because each shard's state only knows those. The output is
+deterministic and bounded (per-file and per-list truncation with counts, collapsible
+sections); other features append their own sections (`summary.Section`).
 
 ## 5. Agent
 
@@ -142,11 +217,65 @@ budget; answers are validated against the test inventory and cached per change. 
 failure falls back to the orphan policy. An external agent CLI can be plugged in instead
 (`agent.command`).
 
-## 6. Verification
+## 6. Watch mode
+
+`smates watch` is a loop around `smates run`: every cycle loads the project, selects
+against the current state and runs with recording, so a watch session leaves the same
+state behind as the equivalent `smates run` calls, and later commands (or CI) see it.
+
+**Change detection** polls instead of subscribing to file system events. A watcher would
+be a dependency (fsnotify), needs one watch per directory (inotify limits) or per file
+(kqueue on macOS, which also misses edits inside watched directories), and still has to
+reimplement `.gitignore`. A poll is one `git --no-optional-locks status --porcelain=v2
+--branch --untracked-files=all` (cheap with git's stat cache, and with `core.fsmonitor`
+on huge trees; it takes no locks, so it never races the user's own git commands) plus an
+`lstat` of each listed file. A tree state is HEAD plus the metadata (size, mtime, mode)
+of every dirty file. Two states differ in a file when:
+
+- it is dirty in either and its metadata differs (an edit or a revert; staging and
+  committing keep the metadata, so they are no change), or
+- it is clean in both but HEAD moved and the two commits differ in it (checkout, pull,
+  reset), from `git diff --name-only old new`.
+
+Files modified within 2 seconds of a scan are "racy" (coarse file system clocks, e.g. a
+Linux tick, can give a quick same-size rewrite the same mtime): their content hash is
+recorded too, and the next scan hashes them again. The poll interval backs off to twice
+the cost of a scan on trees where `git status` is slow.
+
+**Cycles.** A change starts settling: the tree is polled until nothing changed for the
+debounce period (capped at 10× that, at least 5 s, for endless writers), and the net
+change since the last cycle starts one; a burst that nets out (a temp file come and
+gone) starts none. Changes made while a cycle runs are compared against the tree it
+started from once it ends, so they start exactly one follow-up. Changes never start a
+cycle when they are smates' state (and its temp file), vendored and cache directories,
+coverage and JUnit reports, or editor temp files; anything else does, including files the
+orphan check ignores (a test may read them). As a guard against tests that write
+non-ignored files, a change set seen during three runs in a row is taken for test
+output: it stops starting runs (until it changes while idle).
+
+**Orphans.** Every cycle after the first applies the orphan policy only to orphans among
+the files that changed since the previous cycle (the rest were handled at start, or are
+branch changes that a state without a full-run snapshot reports on every run). The agent
+is called only with `--agent`, so a burst of saves never turns into a burst of LLM calls;
+without it `orphans: agent` behaves like `smates run --no-agent`.
+
+**Stopping.** Watch runs test commands in their own process group; cancelling a cycle
+(`q`, Ctrl-C, SIGTERM, SIGHUP) sends SIGINT to the whole group and SIGKILL after 5 s, and
+kills stragglers that outlive the runner. (Tests get no stdin; one that opened the terminal itself would
+be stopped by job control, as a background job.) Keys are read in non-canonical, no-echo
+terminal mode with signals left on, so Ctrl-C keeps working (line mode where termios is
+not available).
+
+## 7. Verification
 
 - Unit tests for every package (`go test -race ./...`).
 - End-to-end fixtures per ecosystem (`e2e/fixtures/*`: vitest, pnpm monorepo, jest, node:test,
   bun, pytest/uv, Go, polyglot) full of dependencies static analysis misses.
-  `TestScenarios` checks expected selections and shadow-mode escapes per scenario;
+  `TestScenarios` checks expected selections and shadow-mode escapes per scenario, and that
+  every test a scenario breaks gets a failure hint naming the edited file;
   `TestMutations` breaks every source, data and script file in turn and requires that every
-  test failing because of it was selected.
+  test failing because of it was selected. `TestFlaky` flips a test through a file outside
+  the repository and checks detection, reselection, `smates flaky` and `flaky.retry`.
+  `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while
+  it runs and checks each cycle's selection and result, that runs do not retrigger it, and
+  that SIGINT stops it.

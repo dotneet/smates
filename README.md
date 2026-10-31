@@ -27,6 +27,9 @@ smates: done in 6.2s: ran 7 of 412 test unit(s), exit code 0
   iterates over, scripts started as subprocesses, shared pytest fixtures.
 - **Safe by construction**: content-hash fingerprints, failed tests always re-run, new
   tests always run, and every uncertainty resolves to running *more*.
+- **Points at the cause of a failure**: a failing test comes with the changed files among
+  its inputs, and optionally a one-line explanation from the agent
+  ([failure hints](#failure-hints)).
 - **Works anywhere**: GitHub Action included; any other CI uses the same CLI and a plain
   state file.
 
@@ -127,7 +130,11 @@ jobs:
 On pushes to the default branch everything runs and the state is refreshed; on pull
 requests only affected tests run. The state is kept in the Actions cache per branch,
 falling back to the default branch's. Outputs (`selected`, `total`, `skip`, `run-all`)
-let you skip downstream jobs, and a summary is written to the job page. See
+let you skip downstream jobs, and a summary is written to the job page. With
+`comment: true` (and `permissions: pull-requests: write`) the same summary becomes one
+pull request comment, updated on every push: how many tests in which suites the change
+affects, which changed file selected which test and how it depends on it, how changes
+no test depends on were handled, and the recorded test time skipped. See
 [docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices) and
 [docs/ci/other-ci.md](docs/ci/other-ci.md) (GitLab, CircleCI, Buildkite, Jenkins).
 
@@ -168,11 +175,15 @@ orphans: agent        # agent | all | ignore
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
+flaky:
+  retry: 0            # re-run a failing, already known flaky test up to N times (default 0: never hide a failure)
 agent:
   model: claude-haiku-5-5
   max_turns: 12
   timeout: 120s
   instructions: "e2e/ tests talk to the server built from server/."
+  explain_failures: true   # one-line probable cause for failing tests (built-in backend only)
+  explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
 
@@ -180,19 +191,106 @@ agent:
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--dry-run` |
-| `smates select` | selection only: `--format text\|files\|json\|github` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
+| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
+| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
+| `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
 
+**Flaky tests** are detected by proof, not by heuristics. smates knows the content hash of
+every input of every test, so when a test's outcome flips between pass and fail while none
+of those inputs changed (a failing test that passes when re-run, a full run on the default
+branch that fails a test nothing touched), the test is flaky — or it depends on something
+smates cannot see (time, network, environment variables, files outside the repository).
+`smates run` reports such tests in its log, in `--report` (`flaky`), in the job summary and
+in the `flaky` / `flaky-tests` outputs, and remembers the evidence (number of flips, last
+commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure still
+fails the run and is still selected next time. With `flaky: {retry: 1}`, a failing test
+that is *already known* to be flaky is re-run once, and if it then passes the run does not
+fail (only when every failure of that suite run is such a test; the flip is reported).
+
+## Failure hints
+
+When a test fails, smates already knows every file it used and which of them changed, so
+`smates run` lists, for each failing test, **the changed files among its inputs** — usually
+a handful, often one:
+
+```
+smates: failure hints for 1 failing test unit(s):
+  web: src/cart.test.ts — 2 of its 37 known inputs changed since its last recorded run (3f2a1c9, passed)
+      src/price.ts  (source, direct import, modified)
+      fixtures/prices.json  (data, traced, modified)
+    → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
+```
+
+- "Changed" is measured against the content recorded when that test last ran (or, for a
+  test with no record, against the files this run's selection found changed). Candidates
+  are ranked: code the test imports directly, other code it uses, the test file itself,
+  data, configuration, directory listings; then by modification time.
+- **None of its inputs changed** points at a flaky test or the environment (time, network,
+  ordering, something tracing cannot see); if it did not pass last time either, the cause
+  predates that run. Changed files no test is known to depend on are listed instead when
+  there are some.
+- Shown in the run log, the step summary (`--summary` / `$GITHUB_STEP_SUMMARY`) and the
+  JSON report (`failure_hints`, with the runner's failure output when it reports one:
+  vitest, jest, pytest, `go test`, JUnit). Runs with `--no-record` have no per-test
+  results and no hints.
+- **With the agent** (an API key, not `--no-agent`, `agent.explain_failures` not false),
+  up to `agent.explain_max` failures get a one-line probable cause (file, line, reason,
+  confidence). It is one tool-less request per failure with the failure output and the
+  diffs of the top candidates (bounded in size; git-ignored files are never sent), made in
+  the background while later suites run, with a 30 s cap; answers are cached by content in
+  the state, and errors only print a note.
+
+## Watch mode
+
+`smates watch` reruns only the tests a change can affect, every time you save. Unlike a
+runner's own watch mode it works for every supported runner (go test, pytest, vitest,
+jest, node --test, bun, custom) and across languages, because it uses the same traced
+dependencies as `smates run`: editing `testdata/orders.json` reruns the Go package whose
+test reads it, editing a YAML file a pytest test loads reruns that test file.
+
+```text
+$ smates watch
+smates: watching ~/src/shop for changes (go, pytest); orphan policy: agent (...)
+
+── 10:42:07 ── 1 changed: internal/store/testdata/orders.json
+smates: selected 1 of 16 test unit(s) across 2 suite(s) (94% skipped)
+    + internal/store  [changed: internal/store/testdata/orders.json]
+ok  	example.com/shop/internal/store	0.170s
+── ✓ PASS · 1 passed · 600ms
+   watching for changes (a: run all · f: rerun failed · enter: rerun · q: quit)
+```
+
+- Every cycle is a `smates run` (recording included), so the state stays fresh and
+  tests that failed are retried until they pass. It starts with one run of the current
+  selection. Flags before `--` are the usual `-C`, `--config`, `--state`, `--suite`, `-v`;
+  arguments after `--` go to the runner.
+- Changes are found by polling `git status` (no file system watcher, no dependency;
+  `.gitignore` is respected, git's own locks are never taken). Bursts — atomic saves,
+  formatters, checkouts — are debounced into one run, and files saved while tests run
+  start exactly one follow-up run. smates' state, `node_modules`, Python and Vite caches,
+  coverage, JUnit reports and editor temp files never start a run; a file that every run
+  rewrites stops retriggering after three runs in a row. On very large repositories,
+  `git config core.fsmonitor true` and `core.untrackedCache true` make each poll cheap.
+- Keys (when stdin is a terminal): `a` runs every test, `f` reruns the tests that have not
+  passed, `Enter` reruns the last selection, `q` quits. Ctrl-C stops the running tests
+  (their whole process tree) and exits.
+- Unattributed changes follow the orphan policy, but only for files changed while
+  watching, and the agent is not called unless you pass `--agent`: with `orphans: agent`,
+  an unattributed change runs the suites it can affect in full instead, as with
+  `smates run --no-agent`.
+
 ## The agent
 
-- Called only for orphans, so most pull requests make no LLM call at all.
+- Called only for orphans (and, after a failing run, to explain a few failures), so most
+  pull requests make no LLM call at all.
 - Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`,
   low effort, prompt caching. Typical cost is well under $0.01 per call and a few seconds.
 - Read-only tools confined to the repository (`list_files`, `grep`, `read_file`,

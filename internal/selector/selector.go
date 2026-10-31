@@ -4,6 +4,7 @@ package selector
 import (
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,25 @@ const (
 	ReasonAgent      = "agent"      // the agent asked for it
 	ReasonDiff       = "diff"       // diff mode: static deps changed since base
 	ReasonUnaffected = "unaffected" // skipped
+)
+
+// How a changed dependency reached a test (Test.Via).
+const (
+	ViaTest      = "test"      // the test's own file
+	ViaInput     = "input"     // a suite or global input, or a rule in smates.yml
+	ViaImport    = "import"    // the static import graph
+	ViaTraced    = "traced"    // recorded by tracing a previous run (reads, listings, commands)
+	ViaReference = "reference" // the test names an orphan file
+	ViaOrphan    = "orphan"    // orphan policy "all"
+)
+
+// How an orphan (a change no test depends on) was handled (Result.OrphanHandling).
+const (
+	OrphanReference = "reference" // tests that name it were selected
+	OrphanAgent     = "agent"     // the agent decided
+	OrphanNoImpact  = "no-impact" // the agent judged it irrelevant to every test
+	OrphanPolicy    = "policy"    // orphan policy "all": the suites it may affect run in full
+	OrphanIgnored   = "ignored"   // orphan policy "ignore"
 )
 
 // Input is everything selection needs.
@@ -55,7 +75,11 @@ type Test struct {
 	Reason   string   `json:"reason"`
 	Detail   string   `json:"detail,omitempty"`
 	Changed  []string `json:"changed,omitempty"`
-	Duration int64    `json:"duration_ms,omitempty"`
+	// Via says, for each entry of Changed, how it reached the test (Via* constants).
+	Via      map[string]string `json:"via,omitempty"`
+	Duration int64             `json:"duration_ms,omitempty"`
+	// Shard is the shard owning the test when the selection is sharded (1-based).
+	Shard int `json:"shard,omitempty"`
 }
 
 // Suite is the decision for one suite.
@@ -81,7 +105,21 @@ type Result struct {
 	Suites  []*Suite `json:"suites"`
 	Changed []string `json:"changed"`
 	Orphans []string `json:"orphans"`
-	Notes   []string `json:"notes,omitempty"`
+	// OrphanHandling says how each orphan was handled (Orphan* constants).
+	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
+	Notes          []string          `json:"notes,omitempty"`
+}
+
+// HandleOrphans records how orphans were handled; earlier records win.
+func (r *Result) HandleOrphans(files []string, how string) {
+	if r.OrphanHandling == nil {
+		r.OrphanHandling = map[string]string{}
+	}
+	for _, f := range files {
+		if _, ok := r.OrphanHandling[f]; !ok {
+			r.OrphanHandling[f] = how
+		}
+	}
 }
 
 // Selected returns the selected test IDs of a suite.
@@ -195,19 +233,20 @@ func Select(in *Input) (*Result, error) {
 
 		for _, u := range units {
 			deps := map[string]bool{}
-			for _, f := range unitFiles[u] {
-				deps[f] = true
-			}
+			via := map[string]string{} // known deps by strongest explanation
 			if config.Bool(su.Static, true) && in.Graph != nil {
 				for _, f := range in.Graph.Closure(unitFiles[u]...) {
-					deps[f] = true
+					deps[f], via[f] = true, ViaImport
 				}
 			}
 			for _, f := range suiteInputs {
-				deps[f] = true
+				deps[f], via[f] = true, ViaInput
 			}
 			for _, f := range ruleDeps(su, u, files) {
-				deps[f] = true
+				deps[f], via[f] = true, ViaInput
+			}
+			for _, f := range unitFiles[u] {
+				deps[f], via[f] = true, ViaTest
 			}
 			known := make([]string, 0, len(deps))
 			for f := range deps {
@@ -240,6 +279,15 @@ func Select(in *Input) (*Result, error) {
 				decide(t, "diff", nil, dl, hasher, baseChanged)
 			} else {
 				decide(t, res.Mode, entry, dl, hasher, changedSet)
+			}
+			for _, c := range t.Changed {
+				if t.Via == nil {
+					t.Via = map[string]string{}
+				}
+				t.Via[c] = via[c]
+				if t.Via[c] == "" {
+					t.Via[c] = ViaTraced
+				}
 			}
 			sr.Tests = append(sr.Tests, t)
 		}
@@ -438,6 +486,8 @@ type Addition struct {
 	Test   string // "" = every test of the suite
 	Reason string
 	Detail string
+	// Files are the changed files that caused the addition (orphans), if known.
+	Files []string `json:",omitempty"`
 }
 
 // Apply marks additional tests as selected. Unknown tests are ignored and returned.
@@ -453,7 +503,14 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 			if a.Test == "" || t.ID == a.Test {
 				found = true
 				if !t.Selected {
-					t.Selected, t.Reason, t.Detail, t.Changed = true, a.Reason, a.Detail, nil
+					t.Selected, t.Reason, t.Detail, t.Changed, t.Via = true, a.Reason, a.Detail, nil, nil
+					for _, f := range a.Files {
+						if t.Via == nil {
+							t.Via = map[string]string{}
+						}
+						t.Changed = append(t.Changed, f)
+						t.Via[f] = map[string]string{ReasonReference: ViaReference, ReasonOrphan: ViaOrphan}[a.Reason]
+					}
 				}
 			}
 		}
@@ -469,37 +526,26 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 // suites whose root contains the orphan (a suite rooted at the repository root contains
 // every file), or all suites for orphans outside any non-root suite.
 func (r *Result) OrphanAll(orphans []string) []Addition {
-	pick := map[string]string{}
+	pick := map[string][]string{} // suite -> orphans that pull it in
 	for _, o := range orphans {
 		matched := false
 		for _, s := range r.Suites {
 			if s.Suite.Root != "." && pathutil.Under(o, s.Suite.Root) {
-				if _, ok := pick[s.Name]; !ok {
-					pick[s.Name] = o
-				}
+				pick[s.Name] = append(pick[s.Name], o)
 				matched = true
 			}
 		}
-		if matched {
-			for _, s := range r.Suites {
-				if pathutil.Under(o, s.Suite.Root) { // root suites ("." or "")
-					if _, ok := pick[s.Name]; !ok {
-						pick[s.Name] = o
-					}
-				}
-			}
-		} else {
-			for _, s := range r.Suites {
-				if _, ok := pick[s.Name]; !ok {
-					pick[s.Name] = o
-				}
+		for _, s := range r.Suites {
+			// With a match, also the root suites ("." or ""), which contain every file.
+			if (!matched || pathutil.Under(o, s.Suite.Root)) && !slices.Contains(pick[s.Name], o) {
+				pick[s.Name] = append(pick[s.Name], o)
 			}
 		}
 	}
 	var adds []Addition
 	for _, s := range r.Suites {
-		if o, ok := pick[s.Name]; ok {
-			adds = append(adds, Addition{Suite: s.Name, Reason: ReasonOrphan, Detail: "unattributed change: " + o})
+		if files, ok := pick[s.Name]; ok {
+			adds = append(adds, Addition{Suite: s.Name, Reason: ReasonOrphan, Detail: "unattributed change: " + files[0], Files: files})
 		}
 	}
 	return adds
@@ -550,7 +596,7 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 	for tier := 0; tier < 2; tier++ {
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
-				var why []string
+				var why, named []string
 				for _, d := range s.Deps[t.ID] {
 					if s.Inputs[d] != (tier == 1) {
 						continue
@@ -573,6 +619,9 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 							continue
 						}
 						why = append(why, o+" (in "+d+")")
+						if !slices.Contains(named, o) {
+							named = append(named, o)
+						}
 						if qualified {
 							explained[o] = true
 						}
@@ -580,7 +629,8 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 				}
 				if len(why) > 0 && !t.Selected {
 					sort.Strings(why)
-					adds = append(adds, Addition{Suite: s.Name, Test: t.ID, Reason: ReasonReference, Detail: "references " + strings.Join(why, ", ")})
+					sort.Strings(named)
+					adds = append(adds, Addition{Suite: s.Name, Test: t.ID, Reason: ReasonReference, Detail: "references " + strings.Join(why, ", "), Files: named})
 				}
 			}
 		}

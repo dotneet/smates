@@ -21,6 +21,8 @@ smates は実際のテスト実行をトレースして、各テストが *本�
   サブプロセスとして起動されるスクリプト、共有 pytest fixture。
 - **安全側に倒れる設計**: 内容ハッシュによる指紋、失敗したテストは必ず再実行、新しい
   テストは必ず実行、不確かなものはすべて「多めに実行する」側に倒れます。
+- **失敗の原因を指し示す**: 失敗したテストごとに、その入力のうち変更されたファイルを
+  提示します。エージェントがあれば原因を 1 行で説明します([失敗ヒント](#失敗ヒント))。
 - **どこでも動く**: GitHub Action 同梱。他の CI でも同じ CLI と 1 ファイルの状態だけで動作。
 
 ## 判定方法
@@ -74,10 +76,109 @@ smates deps src/cart.test.ts  # このテストは何に依存している?
 [docs/ci/github-actions.md](docs/ci/github-actions.md)、他の CI は
 [docs/ci/other-ci.md](docs/ci/other-ci.md) を参照してください。
 
+### プルリクエストのサマリ
+
+`comment: true`(ジョブに `permissions: pull-requests: write` が必要)を指定すると、
+選択結果のサマリをプルリクエストのコメントとして投稿し、push のたびに同じコメントを
+更新します。変更が影響するテスト数とスイート、変更ファイルごとに選ばれたテストとその
+依存の種類(静的 import、前回実行時に追跡した読み込み、スイート入力など)、どのテストも
+依存していない変更の扱い(参照スキャン・エージェント・`orphans` ポリシー)、スキップした
+テストの記録済み実行時間を表示します。フォークからのプルリクエストや権限不足の場合は
+notice を出してスキップし、ジョブは失敗させません。シャード実行では各シャードが担当分の
+コメントを個別に持ちます。他の CI では `smates run --markdown <file>` や
+`smates select --format markdown` で同じ Markdown を出力できます。
+
 ## シャドーモード
 
 `smates run --shadow` は全テストを実行しつつ選択結果を評価し、「選択していれば
 見逃していた失敗テスト」を報告します。新しいリポジトリで選択結果を信頼する前の試用や、
 夜間ジョブでの継続的な検証に使えます。
+
+## flaky テストの検出
+
+smates は各テストの全入力の内容ハッシュを知っているので、**入力が何ひとつ変わって
+いないのにテスト結果が pass と fail の間で反転した** 場合、そのテストは flaky である
+(または smates から見えないもの — 時刻、ネットワーク、環境変数、リポジトリ外のファイル —
+に依存している)と、ヒューリスティックではなく証拠に基づいて判定できます。たとえば
+失敗したテストが再実行で成功した場合や、デフォルトブランチの全件実行で、何も触れて
+いないテストが失敗した場合です。
+
+`smates run` はこれを実行ログ、`--report` の `flaky`、ジョブサマリ、GitHub の出力
+(`flaky` / `flaky-tests`)で報告し、証拠(反転回数、最後のコミット、直近の結果)を
+状態ファイルに記録します。`smates flaky`(`--format json`、`--clear [テスト...]`)で
+一覧できます。flaky な失敗も通常どおり実行を失敗させ、次回も必ず選択されます。
+
+`smates.yml` に `flaky: {retry: 1}` を書くと、*既に flaky と分かっている* テストが失敗
+したときに 1 回だけ再実行し、成功すれば実行全体を失敗にしません(そのスイート実行の
+失敗がすべてそうしたテストである場合に限ります。反転は報告されます)。既定値は 0 で、
+失敗を隠すことはありません。
+
+## 失敗ヒント
+
+テストが失敗したとき、smates はそのテストが使ったファイルと、そのうち変更されたものを
+既に知っています。そこで `smates run` は失敗したテストごとに **入力のうち変更された
+ファイル** を一覧にします。たいていは数個、多くの場合 1 つです。
+
+```
+smates: failure hints for 1 failing test unit(s):
+  web: src/cart.test.ts — 2 of its 37 known inputs changed since its last recorded run (3f2a1c9, passed)
+      src/price.ts  (source, direct import, modified)
+      fixtures/prices.json  (data, traced, modified)
+    → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
+```
+
+- 「変更」は、そのテストを最後に実行したときに記録した内容との比較です(記録のない
+  テストは、今回の選択で変更と判定されたファイルとの比較)。候補は、テストが直接
+  import するコード、その他のコード、テストファイル自身、データ、設定、ディレクトリ
+  列挙の順に並べ、同じ種類の中では更新時刻の新しい順にします。
+- **入力が何も変わっていない** 場合は、flaky なテストか環境要因(時刻、ネットワーク、
+  実行順、トレースで見えないもの)を示唆します。前回も成功していなければ、原因はその
+  実行より前にあります。どのテストにも紐付かない変更ファイルがあれば、それを候補として
+  示します。
+- 実行ログ、ステップサマリー(`--summary` / `$GITHUB_STEP_SUMMARY`)、JSON レポート
+  (`failure_hints`。vitest、jest、pytest、`go test`、JUnit ではランナーの失敗出力も含む)
+  に出力されます。`--no-record` での実行にはテストごとの結果がないため、ヒントは出ません。
+- **エージェントがある場合**(API キーあり、`--no-agent` なし、`agent.explain_failures` が
+  false でない)、最大 `agent.explain_max` 件(既定 3)の失敗について、推定原因を 1 行
+  (ファイル、行、理由、確信度)で示します。失敗ごとにツールなしの 1 リクエストで、失敗
+  出力と上位候補の diff(サイズ上限あり。git-ignore されたファイルは送りません)を送ります。
+  後続のスイートの実行中にバックグラウンドで行い、上限 30 秒。結果は内容をキーに状態へ
+  キャッシュされ、エラーは注記を表示するだけで実行を失敗させません。
+
+## ウォッチモード
+
+`smates watch` はファイルを保存するたびに、その変更が影響しうるテストだけを再実行します。
+`smates run` と同じトレース済みの依存関係を使うため、ランナー固有のウォッチモードと違って
+対応するすべてのランナー(go test、pytest、vitest、jest、node --test、bun、custom)で、
+言語をまたいで動きます。たとえば `testdata/orders.json` を編集すればそれを読む Go パッケージの
+テストが、pytest のテストが読む YAML を編集すればそのテストファイルが再実行されます。
+
+```text
+$ smates watch
+── 10:42:07 ── 1 changed: internal/store/testdata/orders.json
+smates: selected 1 of 16 test unit(s) across 2 suite(s) (94% skipped)
+    + internal/store  [changed: internal/store/testdata/orders.json]
+ok  	example.com/shop/internal/store	0.170s
+── ✓ PASS · 1 passed · 600ms
+   watching for changes (a: run all · f: rerun failed · enter: rerun · q: quit)
+```
+
+- 各サイクルは記録付きの `smates run` そのものなので、状態は常に最新に保たれ、失敗した
+  テストは成功するまで再実行されます。起動時に現在の選択結果を一度実行します。`--` より前は
+  いつもの `-C`、`--config`、`--state`、`--suite`、`-v`、`--` 以降はランナーに渡されます。
+- 変更検出は `git status` のポーリングです(ファイルシステム監視なし・追加依存なし、
+  `.gitignore` を尊重し、git のロックは取りません)。アトミック保存・フォーマッタ・checkout
+  などの連続した変更はデバウンスして 1 回にまとめ、テスト実行中に保存されたファイルは
+  終了後にちょうど 1 回の追加実行を起こします。smates の状態ファイル、`node_modules`、
+  Python や Vite のキャッシュ、カバレッジ、JUnit レポート、エディタの一時ファイルでは
+  起動しません。毎回の実行で書き換わるファイルは 3 回連続した時点で再実行のきっかけから
+  外れます。巨大なリポジトリでは `git config core.fsmonitor true` と
+  `core.untrackedCache true` でポーリングが軽くなります。
+- キー操作(標準入力が端末のとき): `a` 全テスト実行、`f` 成功していないテストを再実行、
+  `Enter` 直前の選択を再実行、`q` 終了。Ctrl-C は実行中のテスト(子プロセスのツリー全体)を
+  止めて終了します。
+- どのテストにも紐付かない変更はオーファンポリシーに従いますが、対象はウォッチ中に変更された
+  ファイルだけで、`--agent` を付けない限りエージェントは呼びません。`orphans: agent` の場合は
+  `smates run --no-agent` と同じく、影響しうるスイートを丸ごと実行します。
 
 設定・コマンド・制限事項の詳細は [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を参照してください。

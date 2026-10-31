@@ -32,6 +32,8 @@ state: tmp/state.json
 ignore: ["*.png"]
 inputs: [".tool-versions"]
 full_run_branches: [main, release]
+flaky:
+  retry: 2
 agent:
   enabled: never
   model: m
@@ -63,7 +65,7 @@ suites:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Orphans != "all" || c.State != "tmp/state.json" || c.Agent.Timeout != 5*time.Second || c.Agent.MaxTurns != 3 || c.Agent.Enabled != "never" {
+	if c.Orphans != "all" || c.State != "tmp/state.json" || c.Flaky.Retry != 2 || c.Agent.Timeout != 5*time.Second || c.Agent.MaxTurns != 3 || c.Agent.Enabled != "never" {
 		t.Errorf("top-level: %+v", c)
 	}
 	if len(c.Suites) != 3 {
@@ -100,6 +102,9 @@ func TestParseErrors(t *testing.T) {
 		{"absolute root", "suites:\n  - runner: go\n    root: /abs\n", "inside the repository"},
 		{"custom needs command", "suites:\n  - runner: custom\n", "needs a command"},
 		{"bad timeout", "agent:\n  timeout: soon\n", ""},
+		{"negative flaky retry", "flaky:\n  retry: -1\n", "flaky.retry"},
+		{"too many flaky retries", "flaky:\n  retry: 9\n", "flaky.retry"},
+		{"unknown flaky field", "flaky:\n  retries: 1\n", "field retries not found"},
 		{"wrong type", "suites: 3\n", ""},
 	}
 	for _, c := range cases {

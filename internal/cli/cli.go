@@ -34,9 +34,11 @@ const usage = `smates - run only the tests a change can affect
 Usage:
   smates run [flags] [-- runner args]   select tests, run them with tracing, update state
   smates select [flags]                 print the selection without running anything
+  smates watch [flags] [-- runner args] rerun the affected tests on every change
   smates init                           write smates.yml for this repository
   smates why <file>                     tests that depend on a file
   smates deps <test>                    files a test depends on
+  smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
   smates list                           list suites and test units
   smates state show|path|pull|push|merge|clear
   smates doctor                         check setup
@@ -59,6 +61,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "run":
 		code, err = cmdRun(ctx, rest, stdout, stderr)
+	case "watch":
+		code, err = cmdWatch(ctx, rest, os.Stdin, stdout, stderr)
 	case "select":
 		code, err = cmdSelect(ctx, rest, stdout, stderr)
 	case "init":
@@ -67,6 +71,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdWhy(rest, stdout, stderr)
 	case "deps":
 		err = cmdDeps(rest, stdout, stderr)
+	case "flaky":
+		err = cmdFlaky(rest, stdout, stderr)
 	case "list", "ls":
 		err = cmdList(rest, stdout, stderr)
 	case "state":
@@ -255,6 +261,9 @@ type selectOptions struct {
 	all     bool
 	base    string
 	noAgent bool
+	// orphanScope, when non-nil, limits the orphan policy to these files (`smates
+	// watch`: files changed since the previous cycle).
+	orphanScope map[string]bool
 }
 
 // selection runs deterministic selection and the orphan policy.
@@ -295,7 +304,20 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	// 1. Deterministic: tests that mention an orphan by name.
 	refs, explained := res.References(p.graph, res.Orphans)
 	res.Apply(refs)
+	res.HandleOrphans(explained, selector.OrphanReference)
 	remaining := subtract(res.Orphans, explained)
+	if opt.orphanScope != nil {
+		var in []string
+		for _, o := range remaining {
+			if opt.orphanScope[o] {
+				in = append(in, o)
+			}
+		}
+		if n := len(remaining) - len(in); n > 0 {
+			p.debugf("%d unattributed change(s) predate this cycle: orphan policy not applied to them", n)
+		}
+		remaining = in
+	}
 	if len(remaining) == 0 {
 		return sel, nil
 	}
@@ -304,6 +326,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	policy := p.cfg.Orphans
 	if policy == "ignore" {
 		res.Notes = append(res.Notes, fmt.Sprintf("ignored %d unattributed change(s) (orphans: ignore)", len(remaining)))
+		res.HandleOrphans(remaining, selector.OrphanIgnored)
 		return sel, nil
 	}
 	if policy == "agent" && !opt.noAgent && p.cfg.Agent.Enabled != "never" {
@@ -313,6 +336,10 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 			if err == nil {
 				sel.agentDec, sel.agentCache = dec, cached
 				applyDecision(res, dec)
+				if !dec.RunAll {
+					res.HandleOrphans(subtract(remaining, subtract(remaining, dec.NoImpact)), selector.OrphanNoImpact)
+				}
+				res.HandleOrphans(remaining, selector.OrphanAgent)
 				return sel, nil
 			}
 			sel.agentNote = "agent failed (" + err.Error() + "); running affected suites in full"
@@ -321,6 +348,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		}
 	}
 	res.Apply(res.OrphanAll(remaining))
+	res.HandleOrphans(remaining, selector.OrphanPolicy)
 	return sel, nil
 }
 
@@ -431,6 +459,7 @@ func applyShard(res *selector.Result, i, n int) {
 			h := fnv.New32a()
 			h.Write([]byte(s.Name + "\x00" + t.ID))
 			owner := int(h.Sum32()%uint32(n)) + 1
+			t.Shard = owner
 			if t.Selected && owner != i {
 				t.Selected = false
 				t.Detail = fmt.Sprintf("in shard %d/%d", owner, n)
