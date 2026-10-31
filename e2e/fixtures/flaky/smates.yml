@@ -1,0 +1,6 @@
+version: 1
+orphans: ignore
+suites:
+  - name: node
+    runner: node
+    tests: ["test/**/*.test.js"]

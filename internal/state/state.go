@@ -4,6 +4,8 @@ package state
 
 import (
 	"compress/gzip"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +55,48 @@ type Entry struct {
 	DurationMs int64
 	Commit     string
 	At         time.Time
+	// History holds the most recent outcomes, oldest first (at most HistoryLen).
+	History []Outcome
+	// Flaky is set once the unit changed outcome while its inputs stayed the same.
+	Flaky *Flake
+}
+
+// HistoryLen bounds Entry.History.
+const HistoryLen = 8
+
+// Outcome is one recorded run of a unit.
+type Outcome struct {
+	Status string
+	// Fingerprint identifies the dependency hashes the run saw (see Fingerprint).
+	Fingerprint string
+	At          time.Time
+	// Inferred: the status was derived from a shared exit code, not reported for the
+	// unit; such outcomes never count as evidence of flakiness.
+	Inferred bool
+}
+
+// Flake is the evidence that a unit is flaky: its outcome flipped between pass and
+// fail although every input smates tracks for it was identical.
+type Flake struct {
+	Count  int       // flips observed
+	First  time.Time // first flip
+	Last   time.Time // most recent flip
+	Commit string    // commit of the most recent flip
+	Flip   string    // most recent flip, e.g. "pass->fail"
+}
+
+// Fingerprint hashes a dependency map: equal fingerprints mean equal inputs.
+func Fingerprint(deps map[string]string) string {
+	keys := make([]string, 0, len(deps))
+	for k := range deps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha1.New()
+	for _, k := range keys {
+		h.Write([]byte(k + "\x00" + deps[k] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // New returns an empty state.
@@ -99,11 +143,51 @@ type diskSuite struct {
 }
 
 type diskEntry struct {
-	Deps       [][2]int  `json:"deps"`
-	Status     string    `json:"status"`
-	DurationMs int64     `json:"duration_ms,omitempty"`
-	Commit     string    `json:"commit,omitempty"`
-	At         time.Time `json:"at"`
+	Deps       [][2]int      `json:"deps"`
+	Status     string        `json:"status"`
+	DurationMs int64         `json:"duration_ms,omitempty"`
+	Commit     string        `json:"commit,omitempty"`
+	At         time.Time     `json:"at"`
+	History    []diskOutcome `json:"history,omitempty"`
+	Flaky      *diskFlake    `json:"flaky,omitempty"`
+}
+
+// diskOutcome is kept short: there is one per recent run of every unit.
+type diskOutcome struct {
+	Status      string `json:"s"`
+	Fingerprint string `json:"f,omitempty"`
+	At          int64  `json:"t"` // unix seconds
+	Inferred    bool   `json:"i,omitempty"`
+}
+
+type diskFlake struct {
+	Count  int       `json:"count"`
+	First  time.Time `json:"first"`
+	Last   time.Time `json:"last"`
+	Commit string    `json:"commit,omitempty"`
+	Flip   string    `json:"flip,omitempty"`
+}
+
+func historyToDisk(h []Outcome) []diskOutcome {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make([]diskOutcome, len(h))
+	for i, o := range h {
+		out[i] = diskOutcome{Status: o.Status, Fingerprint: o.Fingerprint, At: o.At.Unix(), Inferred: o.Inferred}
+	}
+	return out
+}
+
+func historyFromDisk(h []diskOutcome) []Outcome {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make([]Outcome, len(h))
+	for i, o := range h {
+		out[i] = Outcome{Status: o.Status, Fingerprint: o.Fingerprint, At: time.Unix(o.At, 0).UTC(), Inferred: o.Inferred}
+	}
+	return out
 }
 
 type interner struct {
@@ -144,7 +228,11 @@ func (s *State) toDisk() *diskState {
 	for name, su := range s.Suites {
 		ds := diskSuite{Tests: map[string]diskEntry{}}
 		for id, e := range su.Tests {
-			ds.Tests[id] = diskEntry{Deps: encodeMap(e.Deps, &paths, &blobs), Status: e.Status, DurationMs: e.DurationMs, Commit: e.Commit, At: e.At}
+			de := diskEntry{Deps: encodeMap(e.Deps, &paths, &blobs), Status: e.Status, DurationMs: e.DurationMs, Commit: e.Commit, At: e.At, History: historyToDisk(e.History)}
+			if f := e.Flaky; f != nil {
+				de.Flaky = &diskFlake{Count: f.Count, First: f.First, Last: f.Last, Commit: f.Commit, Flip: f.Flip}
+			}
+			ds.Tests[id] = de
 		}
 		d.Suites[name] = ds
 	}
@@ -185,7 +273,11 @@ func fromDisk(d *diskState) (*State, error) {
 			if err != nil {
 				return nil, err
 			}
-			su.Tests[id] = &Entry{Deps: deps, Status: de.Status, DurationMs: de.DurationMs, Commit: de.Commit, At: de.At}
+			e := &Entry{Deps: deps, Status: de.Status, DurationMs: de.DurationMs, Commit: de.Commit, At: de.At, History: historyFromDisk(de.History)}
+			if f := de.Flaky; f != nil {
+				e.Flaky = &Flake{Count: f.Count, First: f.First, Last: f.Last, Commit: f.Commit, Flip: f.Flip}
+			}
+			su.Tests[id] = e
 		}
 	}
 	if d.AgentCache != nil {
@@ -261,7 +353,9 @@ func (s *State) Write(w io.Writer, gz bool) error {
 }
 
 // Merge copies entries from other that are newer than ours (by At). The snapshot and
-// commit are taken from whichever state has the newer Created time.
+// commit are taken from whichever state has the newer Created time. Outcome histories
+// and flake evidence of a unit known to both are combined, so a flake seen on one
+// branch or shard is not forgotten.
 func (s *State) Merge(other *State) {
 	if other.Created.After(s.Created) {
 		s.Files, s.Commit, s.Created = other.Files, other.Commit, other.Created
@@ -269,12 +363,73 @@ func (s *State) Merge(other *State) {
 	for name, osu := range other.Suites {
 		su := s.Suite(name)
 		for id, e := range osu.Tests {
-			if cur, ok := su.Tests[id]; !ok || e.At.After(cur.At) {
+			cur, ok := su.Tests[id]
+			if !ok {
 				su.Tests[id] = e
+				continue
 			}
+			newer, older := cur, e
+			if e.At.After(cur.At) {
+				newer, older = e, cur
+			}
+			merged := *newer
+			merged.History = mergeHistory(newer.History, older.History)
+			merged.Flaky = mergeFlake(newer.Flaky, older.Flaky)
+			su.Tests[id] = &merged
 		}
 	}
 	for k, v := range other.AgentCache {
 		s.AgentCache[k] = v
 	}
+}
+
+// mergeHistory unions two outcome histories (both usually share a common past),
+// ordered by time and bounded to HistoryLen.
+func mergeHistory(a, b []Outcome) []Outcome {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	// Outcomes are stored with second precision; compare them the same way.
+	type key struct {
+		status, fp string
+		at         int64
+		inferred   bool
+	}
+	seen := map[key]bool{}
+	var out []Outcome
+	for _, o := range append(append([]Outcome{}, a...), b...) {
+		k := key{o.Status, o.Fingerprint, o.At.Unix(), o.Inferred}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, o)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	if len(out) > HistoryLen {
+		out = out[len(out)-HistoryLen:]
+	}
+	return out
+}
+
+// mergeFlake combines flake evidence. Counts are not added up: both states usually
+// descend from the same recorded run and would count its flips twice.
+func mergeFlake(a, b *Flake) *Flake {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	m := *a
+	m.Count = max(a.Count, b.Count)
+	if b.First.Before(m.First) {
+		m.First = b.First
+	}
+	if b.Last.After(m.Last) {
+		m.Last, m.Commit, m.Flip = b.Last, b.Commit, b.Flip
+	}
+	return &m
 }

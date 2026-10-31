@@ -123,6 +123,29 @@ not reported as definite misses. Units that ran but left no trace in a failing r
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+### Flaky tests
+
+Because every entry stores the content hash of every input, a flaky test can be detected
+by proof: if a unit's outcome flips between pass and fail while its inputs are the same,
+something nondeterministic or invisible to smates decided it. "The same inputs" means one
+of:
+
+- every dependency recorded by the previous run still has the same hash, and every file
+  the unit depends on now but did not record then is unchanged since the recorded
+  snapshot (so a dependency the previous trace missed cannot hide a real change);
+- an earlier outcome in the unit's history has the same *fingerprint* (a hash of its whole
+  dependency map);
+- both outcomes come from the same run (a failed attempt and its retry).
+
+Only outcomes reported for the unit itself count: inferred statuses, `unknown`, runs with
+runner arguments passed through (`smates run -- ...`), and entries written before outcome
+histories existed are never evidence. Each entry keeps its last 8
+outcomes (status, fingerprint, time) and, once flaky, the evidence (flip count, first and
+last flip, commit). Detection never changes selection: a failure is re-run next time as
+always. The opt-in `flaky.retry` re-runs a failing unit that is already known to be flaky
+(only when every failure of the suite run is such a unit) and lets the run pass if the
+retry passes; the flip is recorded and reported like any other.
+
 ### Failure hints
 
 The same data explains failures. For a failing unit `T`, the candidates are the keys of
@@ -164,7 +187,10 @@ run rewrites the snapshot and all entries; a selective run updates the entries o
 it ran. Moving the state between CI runs is a thin layer: the GitHub Action uses
 `actions/cache` (branch, falling back to the default branch); other CIs can use their cache
 or `smates state push/pull` (a git ref, `refs/smates/state/<branch>`); shards are combined
-with `smates state merge`.
+with `smates state merge`, which keeps the newer entry of each test but unions outcome
+histories and flake evidence (flip counts take the maximum, since both sides usually share
+a past). Outcome histories and flake evidence are optional fields, so state files from
+before them still load and the format version is unchanged.
 
 ## 5. Agent
 
@@ -233,7 +259,8 @@ not available).
   `TestScenarios` checks expected selections and shadow-mode escapes per scenario, and that
   every test a scenario breaks gets a failure hint naming the edited file;
   `TestMutations` breaks every source, data and script file in turn and requires that every
-  test failing because of it was selected.
+  test failing because of it was selected. `TestFlaky` flips a test through a file outside
+  the repository and checks detection, reselection, `smates flaky` and `flaky.retry`.
   `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while
   it runs and checks each cycle's selection and result, that runs do not retrigger it, and
   that SIGINT stops it.

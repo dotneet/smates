@@ -38,6 +38,7 @@ Usage:
   smates init                           write smates.yml for this repository
   smates why <file>                     tests that depend on a file
   smates deps <test>                    files a test depends on
+  smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
   smates list                           list suites and test units
   smates state show|path|pull|push|merge|clear
   smates doctor                         check setup
@@ -70,6 +71,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdWhy(rest, stdout, stderr)
 	case "deps":
 		err = cmdDeps(rest, stdout, stderr)
+	case "flaky":
+		err = cmdFlaky(rest, stdout, stderr)
 	case "list", "ls":
 		err = cmdList(rest, stdout, stderr)
 	case "state":
