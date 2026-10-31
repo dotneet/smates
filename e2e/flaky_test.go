@@ -15,12 +15,12 @@ import (
 // reports it as flaky, keeps selecting the failure, lists it in `smates flaky`, and
 // with flaky.retry retries it instead of failing the run.
 func TestFlaky(t *testing.T) {
-	if only := os.Getenv("SMATES_E2E_FIXTURE"); only != "" && only != "flaky" {
+	if !fixtureSelected("flaky") {
 		t.Skip("SMATES_E2E_FIXTURE excludes flaky")
 	}
+	t.Parallel()
 	coin := filepath.Join(t.TempDir(), "coin")
-	t.Setenv("SMATES_E2E_COIN", coin)
-	r := prepare(t, "flaky")
+	r := prepare(t, "flaky", map[string]string{"SMATES_E2E_COIN": coin})
 	const unit = "test/coin.test.js"
 	type flake struct {
 		Suite   string `json:"suite"`

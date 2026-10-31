@@ -38,8 +38,29 @@ jobs:
       - run: go test -race ./...
 
   e2e:
-    # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects.
+    # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects, in
+    # shards of about equal run time. The last one runs every fixture not named before it,
+    # so a new fixture runs there until it gets a shard of its own.
+    name: e2e (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: polyglot scenarios
+            fixtures: polyglot
+            args: -run TestScenarios
+          - name: polyglot others
+            fixtures: polyglot
+            args: -skip TestScenarios
+          - name: jest-npm, node-test
+            fixtures: jest-npm,node-test
+          - name: vitest-npm, python-uv
+            fixtures: vitest-npm,python-uv
+          - name: others
+            fixtures: -polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv
     runs-on: ubuntu-latest
+    env:
+      SMATES_E2E_FIXTURE: ${{ matrix.fixtures }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -53,7 +74,7 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
-      - run: go test -tags e2e -timeout 40m ./e2e/...
+      - run: go test -tags e2e -timeout 20m ${{ matrix.args }} ./e2e/...
 
   action:
     # Smoke-tests action.yml itself on every runner OS, building smates from this checkout.

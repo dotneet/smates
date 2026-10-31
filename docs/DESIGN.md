@@ -278,4 +278,6 @@ not available).
   the repository and checks detection, reselection, `smates flaky` and `flaky.retry`.
   `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while
   it runs and checks each cycle's selection and result, that runs do not retrigger it, and
-  that SIGINT stops it.
+  that SIGINT stops it. Fixtures, scenarios and mutations run in parallel on a pool of
+  prepared repositories per fixture; CI splits them into shards of about equal run time
+  (`SMATES_E2E_FIXTURE` takes a list of fixtures, or of `-fixture` exclusions).

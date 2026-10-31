@@ -15,13 +15,20 @@
 //     a compile error, corrupted data) and checks that every test that fails because of
 //     it was selected. It reports the selection rate for each mutation.
 //
+// Fixtures, scenarios and mutations run in parallel (bounded by go test -parallel). The
+// prepared repositories of a fixture are shared by all its tests: one is prepared per
+// test of the fixture running at the same time (at most SMATES_E2E_REPOS, which defaults
+// to -parallel up to 4).
+//
 // Run with: go test -tags e2e ./e2e/ (needs node 20+, npm, pnpm, bun, go, uv on PATH;
-// fixtures whose tools are missing are skipped). Set SMATES_E2E_FIXTURE to run one.
+// fixtures whose tools are missing are skipped). Set SMATES_E2E_FIXTURE to a fixture
+// name, or a comma-separated list of them, to run only those; "-name" excludes one.
 package e2e
 
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -30,17 +37,27 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
-var smatesBin string
+var (
+	smatesBin string
+	// reposDir holds the shared prepared repositories (they outlive the test preparing them).
+	reposDir string
+)
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "smates-e2e-bin-")
+	dir, err := os.MkdirTemp("", "smates-e2e-")
 	if err != nil {
 		panic(err)
 	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	reposDir = filepath.Join(dir, "repos")
 	smatesBin = filepath.Join(dir, "smates")
 	if runtime.GOOS == "windows" {
 		smatesBin += ".exe"
@@ -193,14 +210,33 @@ func fixtures(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	only := os.Getenv("SMATES_E2E_FIXTURE")
 	var out []string
 	for _, e := range entries {
-		if e.IsDir() && (only == "" || only == e.Name()) {
+		if e.IsDir() && fixtureSelected(e.Name()) {
 			out = append(out, e.Name())
 		}
 	}
 	return out
+}
+
+// fixtureSelected reports whether SMATES_E2E_FIXTURE includes the fixture. It is a
+// comma-separated list of fixtures to run; a "-" prefix excludes one instead (a list of
+// exclusions alone runs every other fixture). Empty runs them all.
+func fixtureSelected(name string) bool {
+	only := os.Getenv("SMATES_E2E_FIXTURE")
+	if only == "" {
+		return true
+	}
+	included, excluded, onlyExclusions := false, false, true
+	for _, f := range strings.Split(only, ",") {
+		if x, ok := strings.CutPrefix(f, "-"); ok {
+			excluded = excluded || x == name
+		} else {
+			onlyExclusions = false
+			included = included || f == name
+		}
+	}
+	return !excluded && (included || onlyExclusions)
 }
 
 // repo is a prepared fixture repository with a recorded baseline.
@@ -212,25 +248,50 @@ type repo struct {
 	baseline []byte // state file content after the baseline run
 }
 
-func prepare(t *testing.T, name string) *repo {
+func readSpec(t *testing.T, name string) fixtureSpec {
 	t.Helper()
-	src := filepath.Join("fixtures", name)
 	var spec fixtureSpec
-	if data, err := os.ReadFile(filepath.Join(src, "fixture.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join("fixtures", name, "fixture.json")); err == nil {
 		if err := json.Unmarshal(data, &spec); err != nil {
 			t.Fatalf("fixture.json: %v", err)
 		}
 	}
+	return spec
+}
+
+// skipUnlessRunnable skips the test when a command the fixture requires is missing.
+func skipUnlessRunnable(t *testing.T, spec fixtureSpec) {
+	t.Helper()
 	for _, r := range spec.Requires {
 		if _, err := exec.LookPath(r); err != nil {
 			t.Skipf("%s not on PATH", r)
 		}
 	}
+}
+
+// prepare prepares a repository of the fixture of its own for t, with extra env added to
+// every command run in it.
+func prepare(t *testing.T, name string, env map[string]string) *repo {
+	t.Helper()
+	spec := readSpec(t, name)
+	skipUnlessRunnable(t, spec)
+	for k, v := range env {
+		if spec.Env == nil {
+			spec.Env = map[string]string{}
+		}
+		spec.Env[k] = v
+	}
 	dir := t.TempDir()
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real
 	}
-	if err := copyTree(src, dir); err != nil {
+	return prepareIn(t, dir, name, spec)
+}
+
+// prepareIn copies the fixture to dir, installs its dependencies and records a baseline.
+func prepareIn(t *testing.T, dir, name string, spec fixtureSpec) *repo {
+	t.Helper()
+	if err := copyTree(filepath.Join("fixtures", name), dir); err != nil {
 		t.Fatal(err)
 	}
 	r := &repo{t: t, name: name, dir: dir, spec: spec}
@@ -254,6 +315,115 @@ func prepare(t *testing.T, name string) *repo {
 	}
 	r.baseline = state
 	return r
+}
+
+// pool hands out the prepared repositories of one fixture, each to one test at a time.
+// Preparing is the costly part (dependency installation and a full baseline run), so the
+// repositories are shared by every test of the fixture, and a new one is prepared only
+// when all are in use (up to maxRepos).
+type pool struct {
+	name string
+	cond *sync.Cond
+	free []*repo
+	n    int    // repositories prepared or being prepared
+	err  string // why the first repository could not be prepared
+}
+
+var (
+	poolsMu sync.Mutex
+	pools   = map[string]*pool{}
+)
+
+func fixturePool(name string) *pool {
+	poolsMu.Lock()
+	defer poolsMu.Unlock()
+	p := pools[name]
+	if p == nil {
+		p = &pool{name: name, cond: sync.NewCond(&sync.Mutex{})}
+		pools[name] = p
+	}
+	return p
+}
+
+// maxRepos is the most repositories prepared per fixture: SMATES_E2E_REPOS, by default
+// go test -parallel up to 4. Each one costs a dependency installation and a full run,
+// which is more than the parallelism beyond that gains.
+func maxRepos() int {
+	if n, err := strconv.Atoi(os.Getenv("SMATES_E2E_REPOS")); err == nil && n > 0 {
+		return n
+	}
+	n := runtime.GOMAXPROCS(0)
+	if f := flag.Lookup("test.parallel"); f != nil {
+		if p, err := strconv.Atoi(f.Value.String()); err == nil && p > 0 {
+			n = p
+		}
+	}
+	return min(n, 4)
+}
+
+// acquire returns a repository for t's exclusive use (in an unknown state: call reset),
+// preparing one if none is free. Release it with release.
+func (p *pool) acquire(t *testing.T) *repo {
+	t.Helper()
+	spec := readSpec(t, p.name)
+	skipUnlessRunnable(t, spec)
+	p.cond.L.Lock()
+	for len(p.free) == 0 && p.n >= maxRepos() && p.err == "" {
+		p.cond.Wait()
+	}
+	if p.err != "" {
+		p.cond.L.Unlock()
+		t.Fatalf("fixture could not be prepared: %s", p.err)
+	}
+	if n := len(p.free); n > 0 {
+		r := p.free[n-1]
+		p.free = p.free[:n-1]
+		p.cond.L.Unlock()
+		r.t = t
+		return r
+	}
+	p.n++
+	first := p.n == 1
+	p.cond.L.Unlock()
+	ok := false
+	defer func() {
+		if ok {
+			return
+		}
+		// prepareIn failed (t.Fatal): free the slot for another attempt, unless the
+		// fixture itself is broken.
+		p.cond.L.Lock()
+		p.n--
+		if first {
+			p.err = "see the test that prepared it first (" + t.Name() + ")"
+		}
+		p.cond.L.Unlock()
+		p.cond.Broadcast()
+	}()
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(reposDir, p.name+"-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := prepareIn(t, dir, p.name, spec)
+	ok = true
+	return r
+}
+
+func (p *pool) release(r *repo) {
+	p.cond.L.Lock()
+	p.free = append(p.free, r)
+	p.cond.L.Unlock()
+	p.cond.Signal()
+}
+
+// warm makes sure the fixture can be prepared, failing or skipping t otherwise, so that a
+// broken fixture is reported once instead of by each of its tests.
+func (p *pool) warm(t *testing.T) {
+	t.Helper()
+	p.release(p.acquire(t))
 }
 
 func (r *repo) reportPath() string { return filepath.Join(r.dir, ".smates", "e2e-report.json") }
@@ -377,8 +547,10 @@ func (r *repo) apply(e edit) {
 }
 
 func TestScenarios(t *testing.T) {
+	t.Parallel()
 	for _, name := range fixtures(t) {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			data, err := os.ReadFile(filepath.Join("fixtures", name, "scenarios.json"))
 			if err != nil {
 				t.Skip("no scenarios.json")
@@ -387,13 +559,16 @@ func TestScenarios(t *testing.T) {
 			if err := json.Unmarshal(data, &scenarios); err != nil {
 				t.Fatalf("scenarios.json: %v", err)
 			}
-			r := prepare(t, name)
+			p := fixturePool(name)
+			p.warm(t)
 			for _, sc := range scenarios {
 				t.Run(sc.Name, func(t *testing.T) {
-					r.t = t
+					t.Parallel()
 					if sc.Agent && os.Getenv("ANTHROPIC_API_KEY") == "" {
 						t.Skip("needs ANTHROPIC_API_KEY")
 					}
+					r := p.acquire(t)
+					defer p.release(r)
 					r.reset()
 					for _, e := range sc.Edits {
 						r.apply(e)
@@ -523,19 +698,31 @@ func checkHints(t *testing.T, sc scenario, rep *report, failing []string) []stri
 }
 
 func TestMutations(t *testing.T) {
+	t.Parallel()
 	for _, name := range fixtures(t) {
 		t.Run(name, func(t *testing.T) {
-			r := prepare(t, name)
+			t.Parallel()
+			p := fixturePool(name)
+			r := p.acquire(t)
 			files := strings.Fields(r.must("git", "ls-files"))
+			p.release(r)
+			var mu sync.Mutex
 			var stats []string
 			escapes, totalSel, totalFail := 0, 0, 0
+			// The subtests run in parallel, after this function returns.
+			t.Cleanup(func() {
+				sort.Strings(stats)
+				t.Logf("mutation sweep for %s (%d escapes; %d selections for %d failing tests in total):\n%s", name, escapes, totalSel, totalFail, strings.Join(stats, "\n"))
+			})
 			for _, f := range files {
 				m, ok := mutation(f)
 				if !ok || r.skipMutation(f) {
 					continue
 				}
 				t.Run(strings.ReplaceAll(f, "/", "|"), func(t *testing.T) {
-					r.t = t
+					t.Parallel()
+					r := p.acquire(t)
+					defer p.release(r)
 					r.reset()
 					p := filepath.Join(r.dir, filepath.FromSlash(f))
 					orig, err := os.ReadFile(p)
@@ -548,17 +735,19 @@ func TestMutations(t *testing.T) {
 					out, _ := r.smates("run", "--shadow", "--no-agent", "--report", r.reportPath())
 					rep := r.readReport()
 					failing := rep.failing()
+					mu.Lock()
 					stats = append(stats, fmt.Sprintf("%-50s selected %3d/%-3d failing %3d  orphans %d", f, rep.Sel, rep.Total, len(failing), len(rep.Orphans)))
 					totalSel += rep.Sel
 					totalFail += len(failing)
 					if len(rep.Escapes) > 0 {
 						escapes++
+					}
+					mu.Unlock()
+					if len(rep.Escapes) > 0 {
 						t.Errorf("mutating %s: failing tests not selected: %v\n%s", f, rep.Escapes, tail(out, 60))
 					}
 				})
 			}
-			r.t = t
-			t.Logf("mutation sweep for %s (%d escapes; %d selections for %d failing tests in total):\n%s", name, escapes, totalSel, totalFail, strings.Join(stats, "\n"))
 		})
 	}
 }
