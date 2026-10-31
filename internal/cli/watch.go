@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
@@ -127,7 +128,7 @@ func cmdWatch(ctx context.Context, args []string, stdin *os.File, stdout, stderr
 }
 
 func agentNote(p *project, agent bool) string {
-	if p.cfg.Orphans != "agent" {
+	if p.cfg.Orphans != config.OrphansAgent {
 		return ""
 	}
 	if agent {
@@ -442,7 +443,7 @@ func (c *watchCycles) run(ctx context.Context, req cycleReq) {
 		fmt.Fprint(c.stderr, "\033[H\033[2J")
 	}
 	c.header(req)
-	args := c.runArgs(req)
+	f := c.runFlags(req)
 	hooks := &runHooks{}
 	switch req.kind {
 	case cycleChange:
@@ -462,16 +463,16 @@ func (c *watchCycles) run(ctx context.Context, req cycleReq) {
 			narrow(s.res, func(su *selector.Suite, t *selector.Test) bool {
 				e := pp.state.Suite(su.Name).Tests[t.ID]
 				return e != nil && e.Status != state.Pass
-			}, "failed", "rerun of failed tests")
+			}, selector.ReasonFailed, "rerun of failed tests")
 		case cycleRerun:
 			last := c.last
 			narrow(s.res, func(su *selector.Suite, t *selector.Test) bool {
 				return slices.Contains(last[su.Name], t.ID)
-			}, "rerun", "rerun")
+			}, selector.ReasonRerun, "rerun")
 		}
 	}
 	start := time.Now()
-	code, err := runCycle(ctx, args, c.stdout, c.stderr, hooks)
+	code, err := runCycle(ctx, f, c.stdout, c.stderr, hooks)
 	switch {
 	case ctx.Err() != nil:
 		c.logf("run stopped")
@@ -513,34 +514,12 @@ func (c *watchCycles) header(req cycleReq) {
 	fmt.Fprintf(c.stderr, "\n── %s ── %s\n", ts, what)
 }
 
-func (c *watchCycles) runArgs(req cycleReq) []string {
-	f := c.f
-	args := []string{"--select", "--explain"}
-	if f.dir != "" {
-		args = append(args, "-C", f.dir)
+// runFlags are the `smates run` options of a cycle.
+func (c *watchCycles) runFlags(req cycleReq) *runFlags {
+	return &runFlags{
+		commonFlags: c.f.commonFlags, selectOn: true, explain: true, noAgent: !c.f.agent,
+		all: req.kind == cycleAll, extra: c.extra,
 	}
-	if f.config != "" {
-		args = append(args, "--config", f.config)
-	}
-	if f.state != "" {
-		args = append(args, "--state", f.state)
-	}
-	for _, s := range f.suites {
-		args = append(args, "--suite", s)
-	}
-	if f.verbose {
-		args = append(args, "-v")
-	}
-	if !f.agent {
-		args = append(args, "--no-agent")
-	}
-	if req.kind == cycleAll {
-		args = append(args, "--all")
-	}
-	if len(c.extra) > 0 {
-		args = append(append(args, "--"), c.extra...)
-	}
-	return args
 }
 
 // footer prints the outcome of a cycle from the recorded statuses.
@@ -599,7 +578,7 @@ func ranUnits(res *selector.Result) map[string][]string {
 	out := map[string][]string{}
 	for _, s := range res.Suites {
 		var units []string
-		if res.Mode == "all" {
+		if res.Mode == selector.ModeAll {
 			for _, t := range s.Tests {
 				units = append(units, t.ID)
 			}
@@ -615,7 +594,7 @@ func ranUnits(res *selector.Result) map[string][]string {
 
 // narrow replaces the selection with the tests keep accepts.
 func narrow(res *selector.Result, keep func(*selector.Suite, *selector.Test) bool, reason, detail string) {
-	res.Mode = "state"
+	res.Mode = selector.ModeState
 	for _, s := range res.Suites {
 		s.All = false
 		for _, t := range s.Tests {

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
@@ -127,17 +128,19 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			res.Observations[unit] = o
 		}
 		for _, f := range r.Files {
-			suffix := ""
+			// CollectGo returns absolute paths: a directory (listed) ends in a separator,
+			// an existence check in "?".
+			kind := depkey.KindContent
 			switch {
 			case strings.HasSuffix(f, string(filepath.Separator)):
-				suffix, f = "/", strings.TrimSuffix(f, string(filepath.Separator))
+				kind, f = depkey.KindListing, strings.TrimSuffix(f, string(filepath.Separator))
 			case strings.HasSuffix(f, "?"):
-				suffix, f = "?", strings.TrimSuffix(f, "?")
+				kind, f = depkey.KindExistence, strings.TrimSuffix(f, "?")
 			}
 			if rel, ok := pathutil.Rel(rc.Repo.Root, f); ok && !pathutil.IsVendored(rel) {
-				o.AddFile(rel + suffix)
-			} else if suffix == "/" && filepath.Clean(f) == rc.Repo.Root {
-				o.AddFile("./")
+				o.AddFile(depkey.Make(kind, rel))
+			} else if kind == depkey.KindListing && filepath.Clean(f) == rc.Repo.Root {
+				o.AddFile(depkey.Listing("."))
 			}
 		}
 		for f := range children[r.Dir] {
@@ -145,18 +148,15 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		}
 		o.DurationMs += r.Ms
 		st := overallStatus("", r.Exit)
-		if o.Status == "" || st == "fail" {
+		if o.Status == "" || st == state.Fail {
 			o.Status = st
 		}
 	}
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
-		mod := modulePath(filepath.Join(rc.Dir(), "go.mod"))
+		modDir, mod := findModule(rc.Repo.Root, rc.Dir())
 		for _, u := range rc.Units {
-			ip := mod
-			if r := relToSuite(rc.Suite, u); r != "." {
-				ip = mod + "/" + r
-			}
-			if mod == "" {
+			ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+			if ip == "" {
 				continue
 			}
 			if failed.paths[ip] {
@@ -233,6 +233,35 @@ func (b *buildFailures) Write(p []byte) (int, error) {
 		b.buf = b.buf[i+1:]
 	}
 	return len(p), nil
+}
+
+// findModule finds the go.mod governing dir (searching up to root) and returns its
+// directory and module path ("" if there is none).
+func findModule(root, dir string) (string, string) {
+	for d := dir; ; d = filepath.Dir(d) {
+		if mod := modulePath(filepath.Join(d, "go.mod")); mod != "" {
+			return d, mod
+		}
+		if d == root || len(d) <= len(root) {
+			return "", ""
+		}
+	}
+}
+
+// importPath is the import path of package directory pkgDir in the module rooted at
+// modDir ("" if it is not in the module).
+func importPath(modDir, mod, pkgDir string) string {
+	if mod == "" {
+		return ""
+	}
+	r, err := filepath.Rel(modDir, pkgDir)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	if r == "." {
+		return mod
+	}
+	return mod + "/" + filepath.ToSlash(r)
 }
 
 // modulePath reads the module path from a go.mod file ("" if unknown).

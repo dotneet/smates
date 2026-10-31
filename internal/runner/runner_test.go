@@ -608,3 +608,49 @@ func mustJSON(v any) string {
 	}
 	return string(b)
 }
+
+// In an isolated run each unit's status is its own process's exit code: a failing
+// sibling must not leave the other units marked inferred (flake detection skips those).
+func TestIsolatedRunStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	repo := tempRepo(t, "a.test.js", "b.test.js")
+	var out bytes.Buffer
+	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Command: `sh -c 'case $1 in b*) exit 1;; esac' sh`}}, Stdout: &out, Stderr: &out}
+	units := []string{"a.test.js", "b.test.js"}
+	codes, err := isolatedRun(context.Background(), rc, units, 2, func(u string, _ int) ([]string, []string, error) {
+		argv, err := rc.CommandLine(nil, []string{u})
+		return argv, nil, err
+	})
+	if err != nil || worstCode(codes) != 1 {
+		t.Fatalf("codes %v %v", codes, err)
+	}
+	for _, u := range units {
+		// observe infers every status from the worst exit code of the run.
+		o := &Observation{Status: overallStatus("", worstCode(codes)), Inferred: true}
+		setUnitExit(o, codes[u])
+		want := state.Pass
+		if u == "b.test.js" {
+			want = state.Fail
+		}
+		if o.Status != want || o.Inferred {
+			t.Errorf("%s: %+v", u, o)
+		}
+	}
+
+	// A command line that cannot be built starts nothing.
+	marker := filepath.Join(repo.Root, "ran")
+	_, err = isolatedRun(context.Background(), rc, units, 1, func(u string, i int) ([]string, []string, error) {
+		if i == 1 {
+			return nil, nil, fmt.Errorf("bad command")
+		}
+		return []string{"sh", "-c", "touch " + marker}, nil, nil
+	})
+	if err == nil {
+		t.Error("want the command line error")
+	}
+	if _, serr := os.Stat(marker); serr == nil {
+		t.Error("a unit ran although a command line failed")
+	}
+}

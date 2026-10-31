@@ -6,12 +6,14 @@ package summary
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/dotneet/smates/internal/agent"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/selector"
 )
 
@@ -97,7 +99,7 @@ func Markdown(in *Input) string {
 	v.header(&b)
 	v.table(&b)
 	v.run(&b)
-	if v.res.Mode != "all" {
+	if v.res.Mode != selector.ModeAll {
 		v.why(&b)
 	}
 	v.orphans(&b)
@@ -161,7 +163,7 @@ func (v *view) header(b *strings.Builder) {
 	fmt.Fprintf(b, "### %s: %d of %d test units selected\n\n", title, c.selected, c.total)
 	skipped := c.total - c.selected
 	switch {
-	case v.res.Mode == "all":
+	case v.res.Mode == selector.ModeAll:
 		b.WriteString("**Full run:** every test unit runs (default branch refresh, `--all`, or no recorded state).\n")
 	case c.selected == 0:
 		fmt.Fprintf(b, "**No test is affected by this change**%s.\n", saved(c))
@@ -169,7 +171,7 @@ func (v *view) header(b *strings.Builder) {
 		fmt.Fprintf(b, "This change affects **%s in %s**; %d skipped%s.\n",
 			plural(c.selected, "test unit"), ofSuites(affected, len(v.suites)), skipped, saved(c))
 	}
-	if v.res.Mode == "diff" {
+	if v.res.Mode == selector.ModeDiff {
 		b.WriteString("\n_No recorded state yet: selected by static analysis against the base revision._\n")
 	}
 	if v.in.Shards > 1 {
@@ -267,7 +269,7 @@ func (v *view) why(b *strings.Builder) {
 			}
 			// Files themselves first: a file both read and listed was read.
 			changed := slices.Clone(t.Changed)
-			sort.SliceStable(changed, func(i, j int) bool { return !pseudo(changed[i]) && pseudo(changed[j]) })
+			sort.SliceStable(changed, func(i, j int) bool { return !depkey.IsPseudo(changed[i]) && depkey.IsPseudo(changed[j]) })
 			for _, c := range changed {
 				for _, f := range v.expand(c) {
 					if !slices.ContainsFunc(byFile[f], func(h hit) bool { return h.test == t && h.suite == si }) {
@@ -280,8 +282,8 @@ func (v *view) why(b *strings.Builder) {
 	if selected == 0 {
 		return
 	}
-	files := sortedKeys(byFile)
-	reasons := sortedKeys(byReason)
+	files := slices.Sorted(maps.Keys(byFile))
+	reasons := slices.Sorted(maps.Keys(byReason))
 	sort.SliceStable(reasons, func(i, j int) bool { return reasonRank(reasons[i]) < reasonRank(reasons[j]) })
 
 	open := ""
@@ -316,7 +318,7 @@ func (v *view) why(b *strings.Builder) {
 			break
 		}
 		title := code(f)
-		if strings.HasSuffix(f, "/") {
+		if depkey.KindOf(f) == depkey.KindListing {
 			title += " (files added or removed)"
 		}
 		v.group(b, title, byFile[f], perFile)
@@ -401,24 +403,19 @@ func commonVia(hs []hit) string {
 	return hs[0].via
 }
 
-// pseudo reports whether a dependency key is a directory listing ("dir/"), an
-// existence check ("file?") or a command run below a directory ("dir/**").
-func pseudo(key string) bool {
-	return strings.HasSuffix(key, "/") || strings.HasSuffix(key, "?") || strings.HasSuffix(key, "/**")
-}
-
 // expand maps a dependency key to the changed files it stands for: an existence check
 // to the file, a command run below a directory to the changed files under it. A
 // directory listing stays as it is (it changed because files were added or removed,
 // which the changed files alone do not tell apart from edits).
 func (v *view) expand(key string) []string {
-	switch {
-	case strings.HasSuffix(key, "?"):
-		return []string{strings.TrimSuffix(key, "?")}
-	case !strings.HasSuffix(key, "/**"):
+	kind, p := depkey.Parse(key)
+	switch kind {
+	case depkey.KindExistence:
+		return []string{p}
+	case depkey.KindContent, depkey.KindListing:
 		return []string{key}
 	}
-	prefix := strings.TrimSuffix(key, "**")
+	prefix := p + "/"
 	var out []string
 	for _, f := range v.res.Changed {
 		if strings.HasPrefix(f, prefix) {
@@ -434,12 +431,12 @@ func (v *view) expand(key string) []string {
 const orphanVia = "orphan policy: suite runs in full"
 
 func viaLabel(via, key string) string {
-	switch {
-	case strings.HasSuffix(key, "/**"):
-		return "an untraced command ran under " + code(strings.TrimSuffix(key, "**"))
-	case strings.HasSuffix(key, "/"):
+	switch kind, p := depkey.Parse(key); kind {
+	case depkey.KindTree:
+		return "an untraced command ran under " + code(p+"/")
+	case depkey.KindListing:
 		return "lists the directory"
-	case strings.HasSuffix(key, "?"):
+	case depkey.KindExistence:
 		return "checks whether it exists"
 	}
 	switch via {
@@ -632,13 +629,4 @@ func oneLine(s string) string {
 		s = string(r[:297]) + "..."
 	}
 	return s
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

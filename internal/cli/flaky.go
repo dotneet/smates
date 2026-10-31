@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -224,12 +226,12 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	list := []flakyUnit{}
-	for _, name := range sortedKeys(p.state.Suites) {
+	for _, name := range slices.Sorted(maps.Keys(p.state.Suites)) {
 		if !suites[name] {
 			continue
 		}
 		su := p.state.Suites[name]
-		for _, id := range sortedKeys(su.Tests) {
+		for _, id := range slices.Sorted(maps.Keys(su.Tests)) {
 			e := su.Tests[id]
 			if e.Flaky == nil {
 				continue

@@ -55,11 +55,16 @@ func (c *commandBackend) Decide(ctx context.Context, req *Request) (*Decision, e
 	tb := newToolbox(req)
 	prompt := systemPrompt(cfg, true) + "\n\n" + buildBrief(ctx, req, tb, commandBrief) + "\n" + answerFormat
 
+	// Run the command of the effective configuration, which CacheKey also uses.
+	command := cfg.Command
+	if strings.TrimSpace(command) == "" {
+		command = c.cfg.Command
+	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/c", c.cfg.Command)
+		cmd = exec.CommandContext(ctx, "cmd", "/c", command)
 	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", c.cfg.Command)
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
 	cmd.Dir = req.Repo.Root
 	cmd.Stdin = strings.NewReader(prompt)
@@ -68,7 +73,7 @@ func (c *commandBackend) Decide(ctx context.Context, req *Request) (*Decision, e
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = 2 * time.Second // do not hang on grandchildren holding the pipes
 
-	logf(log, "running %s", c.cfg.Command)
+	logf(log, "running %s", command)
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("agent command: %w after %s", ctx.Err(), time.Since(started).Round(time.Millisecond))

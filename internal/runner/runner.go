@@ -364,9 +364,3 @@ func SplitWords(s string) ([]string, error) {
 	}
 	return words, nil
 }
-
-// Exists reports whether a path relative to the repo root exists.
-func Exists(repo *gitx.Repo, rel string) bool {
-	_, err := os.Stat(filepath.Join(repo.Root, filepath.FromSlash(rel)))
-	return err == nil
-}

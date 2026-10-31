@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
@@ -65,11 +66,12 @@ func (h *Hasher) file(p string) string {
 
 // Hash returns the hash of a dependency key, "" when absent.
 func (h *Hasher) Hash(key string) string {
-	if dir, ok := strings.CutSuffix(key, "/**"); ok {
-		return h.tree(dir)
-	}
-	if p, ok := strings.CutSuffix(key, "?"); ok {
-		if _, isFile := h.snap[p]; isFile || h.Hash(p+"/") != "" || p == "." {
+	kind, p := depkey.Parse(key)
+	switch kind {
+	case depkey.KindTree:
+		return h.tree(p)
+	case depkey.KindExistence:
+		if _, isFile := h.snap[p]; isFile || h.Hash(depkey.Listing(p)) != "" || p == "." {
 			return "exists"
 		}
 		if h.root != "" {
@@ -78,8 +80,7 @@ func (h *Hasher) Hash(key string) string {
 			}
 		}
 		return "absent"
-	}
-	if !strings.HasSuffix(key, "/") {
+	case depkey.KindContent:
 		return h.file(key)
 	}
 	if h.dirs == nil {
@@ -320,7 +321,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 	}
 	for k, v := range deps {
-		if _, ok := prev.Deps[k]; ok || strings.HasSuffix(k, "/") || strings.HasSuffix(k, "?") || strings.HasSuffix(k, "/**") {
+		if _, ok := prev.Deps[k]; ok || depkey.IsPseudo(k) {
 			continue
 		}
 		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && was != v) {

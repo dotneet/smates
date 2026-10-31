@@ -34,7 +34,7 @@ const (
 // The external command backend only needs cfg.Command; the built-in backend needs
 // ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN.
 func Available(cfg config.AgentConfig) (bool, string) {
-	if cfg.Enabled == "never" {
+	if cfg.Enabled == config.AgentNever {
 		return false, "agent disabled (agent.enabled: never)"
 	}
 	if strings.TrimSpace(cfg.Command) != "" {

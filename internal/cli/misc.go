@@ -7,9 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -562,7 +564,7 @@ func showState(st *state.State, path string, asJSON bool, w io.Writer) error {
 		return nil
 	}
 	fmt.Fprintf(w, "state:    %s\nrecorded: %s (commit %.12s, %s)\nsnapshot: %d files\n", path, st.Created.Format(time.RFC3339), st.Commit, st.Tool, len(st.Files))
-	for _, name := range sortedKeys(info.Suites) {
+	for _, name := range slices.Sorted(maps.Keys(info.Suites)) {
 		si := info.Suites[name]
 		fmt.Fprintf(w, "suite %s: %d tests (pass %d, fail %d, unknown %d), ~%d deps each\n", name, si.Tests, si.Status["pass"], si.Status["fail"], si.Status["unknown"], si.Deps)
 	}
@@ -725,7 +727,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if okA, why := agent.Available(p.cfg.Agent); okA {
 		ok("agent: %s available for unattributed changes (orphans: %s)", first(p.cfg.Agent.Command, p.cfg.Agent.Model), p.cfg.Orphans)
-	} else if p.cfg.Orphans == "agent" {
+	} else if p.cfg.Orphans == config.OrphansAgent {
 		warn("agent unavailable (%s): unattributed changes run the affected suites in full", why)
 	}
 	if ci := detectCI(); ci.Name != "" {

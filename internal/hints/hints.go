@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -46,6 +47,16 @@ const (
 	KindListing = "listing" // a directory listing, existence check or opaque tree
 )
 
+// How a test reaches a candidate file (Candidate.Link).
+const (
+	LinkTestFile     = "test file"
+	LinkDirect       = "direct import"
+	LinkStatic       = "static import"
+	LinkInput        = "suite input"
+	LinkTraced       = "traced"       // observed at runtime only
+	LinkUnattributed = "unattributed" // a changed file no test is known to depend on
+)
+
 // MaxCandidates bounds the candidates kept per hint.
 const MaxCandidates = 10
 
@@ -53,9 +64,7 @@ const MaxCandidates = 10
 type Candidate struct {
 	Path string `json:"path"`
 	Kind string `json:"kind"`
-	// Link says how the test reaches the file: "test file", "direct import", "static
-	// import", "traced" (observed at runtime only), "suite input", or "unattributed"
-	// (a changed file no test is known to depend on).
+	// Link says how the test reaches the file (Link* constants).
 	Link string `json:"link"`
 	// Change: "modified", "added" or "deleted".
 	Change string `json:"change"`
@@ -186,7 +195,7 @@ func Compute(in Input) *Hint {
 				c.Change = "deleted"
 			}
 			classify(&c, in, own, direct)
-			c.Link = "unattributed"
+			c.Link = LinkUnattributed
 			cands = append(cands, c)
 		}
 	}
@@ -246,7 +255,7 @@ func changed(in Input, key string) (Candidate, bool) {
 func classify(c *Candidate, in Input, own, direct map[string]bool) {
 	p := c.Path
 	switch {
-	case strings.HasSuffix(p, "/") || strings.HasSuffix(p, "?") || strings.HasSuffix(p, "/**"):
+	case depkey.IsPseudo(p):
 		c.Kind, c.tier = KindListing, 5
 	case own[p]:
 		c.Kind, c.tier = KindTest, 2
@@ -261,15 +270,15 @@ func classify(c *Candidate, in Input, own, direct map[string]bool) {
 	}
 	switch {
 	case own[p]:
-		c.Link = "test file"
+		c.Link = LinkTestFile
 	case direct[p]:
-		c.Link = "direct import"
+		c.Link = LinkDirect
 	case in.Static[p]:
-		c.Link = "static import"
+		c.Link = LinkStatic
 	case in.Inputs[p]:
-		c.Link = "suite input"
+		c.Link = LinkInput
 	default:
-		c.Link = "traced"
+		c.Link = LinkTraced
 	}
 }
 

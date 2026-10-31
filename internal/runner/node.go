@@ -298,10 +298,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 		argv, err := rc.CommandLine(nil, args(u))
 		return argv, env, err
 	})
-	worst := 0
-	for _, c := range codes {
-		worst = max(worst, c)
-	}
+	worst := worstCode(codes)
 	res := &RunResult{ExitCode: worst, Duration: time.Since(start)}
 	if err != nil {
 		return res, err
@@ -309,7 +306,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 	obs, warns, err := observe(rc, worst, opt)
 	for u, o := range obs {
 		if c, ok := codes[u]; ok {
-			o.Status = overallStatus("", c)
+			setUnitExit(o, c)
 		}
 	}
 	res.Observations, res.Warnings = obs, warns

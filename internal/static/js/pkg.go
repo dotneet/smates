@@ -249,12 +249,12 @@ func subpathTargets(field any, key string) []target {
 	m, ok := field.(map[string]any)
 	if !ok || !isSubpathMap(m) {
 		if key == "." {
-			return collectTargets(field, "", false, nil)
+			return collectTargets(field, "", false)
 		}
 		return nil
 	}
 	if v, ok := m[key]; ok {
-		return collectTargets(v, "", false, nil)
+		return collectTargets(v, "", false)
 	}
 	bestKey, bestPre, bestStar, bestFolder := "", "", "", false
 	for k := range m {
@@ -279,16 +279,13 @@ func subpathTargets(field any, key string) []target {
 	if bestKey == "" {
 		return nil
 	}
-	if bestFolder {
-		return collectTargets(m[bestKey], bestStar, true, nil)
-	}
-	return collectTargets(m[bestKey], bestStar, false, nil)
+	return collectTargets(m[bestKey], bestStar, bestFolder)
 }
 
 // collectTargets flattens a target value (string, condition object, fallback array)
 // substituting star for "*" (or appending it for folder mappings).
-func collectTargets(v any, star string, folder bool, out []target) []target {
-	return collectTargetsTyped(v, star, folder, false, out)
+func collectTargets(v any, star string, folder bool) []target {
+	return collectTargetsTyped(v, star, folder, false, nil)
 }
 
 func collectTargetsTyped(v any, star string, folder, typesOnly bool, out []target) []target {

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/dotneet/smates/internal/state"
 )
 
 // Results reads per-test-file results written by runner reporters
@@ -39,8 +41,8 @@ func Results(traceDir, repoRoot string) map[string]Result {
 
 func addResult(m map[string]Result, file, status string, ms int64, msg string) {
 	prev, seen := m[file]
-	if seen && prev.Status == "fail" {
-		status = "fail"
+	if seen && prev.Status == state.Fail {
+		status = state.Fail
 	}
 	m[file] = Result{Status: status, Ms: prev.Ms + ms, Message: JoinMessage(prev.Message, msg)}
 }
@@ -103,9 +105,9 @@ func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 			if !ok {
 				continue
 			}
-			st, msg := "pass", ""
+			st, msg := state.Pass, ""
 			for _, pr := range append(c.Failures, c.Errors...) {
-				st = "fail"
+				st = state.Fail
 				text := strings.TrimSpace(pr.Text)
 				if text == "" || !strings.Contains(text, pr.Message) {
 					text = strings.TrimSpace(pr.Message + "\n" + text)

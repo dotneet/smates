@@ -93,12 +93,11 @@ type resolver struct {
 }
 
 // add records p if it exists, is not the file itself and is not under node_modules.
-func (r *resolver) add(p string) bool {
+func (r *resolver) add(p string) {
 	if p == r.self || inNodeModules(p) || !r.h.Has(p) {
-		return false
+		return
 	}
 	r.out[p] = true
-	return true
 }
 
 func (r *resolver) result() []string {
@@ -207,8 +206,7 @@ func (r *resolver) relative(m modRef) {
 	if !ok {
 		return
 	}
-	r.add(join(base, "__init__.py"))
-	r.add(join(base, "__init__.pyi"))
+	r.pkgInit(base)
 	var parts []string
 	if m.name != "" {
 		parts = strings.Split(m.name, ".")
@@ -245,11 +243,16 @@ func (r *resolver) chain(root string, parts []string) (string, bool) {
 		if !r.idx.dirs[next] {
 			return "", false
 		}
-		r.add(next + "/__init__.py")
-		r.add(next + "/__init__.pyi")
+		r.pkgInit(next)
 		dir = next
 	}
 	return dir, true
+}
+
+// pkgInit adds the __init__ (module or stub) of package directory dir.
+func (r *resolver) pkgInit(dir string) {
+	r.add(join(dir, "__init__.py"))
+	r.add(join(dir, "__init__.pyi"))
 }
 
 // leaf adds the files that can implement the module at base (path without extension).
@@ -257,8 +260,7 @@ func (r *resolver) leaf(base string) {
 	r.add(base + ".py")
 	r.add(base + ".pyi")
 	if r.idx.dirs[base] {
-		r.add(base + "/__init__.py")
-		r.add(base + "/__init__.pyi")
+		r.pkgInit(base)
 	}
 }
 
@@ -288,7 +290,7 @@ func (r *resolver) prefix(m modRef) {
 		if !ok {
 			return
 		}
-		r.add(join(base, "__init__.py"))
+		r.pkgInit(base)
 		if dir, ok := r.chain(base, parts); ok {
 			r.under(dir, namePrefix)
 		}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/dotneet/smates/internal/depkey"
 )
 
 // Child processes a test starts are traced directly when they are Node or Python
@@ -77,7 +79,7 @@ func (a *execAnalysis) add(p string) {
 // line, which are recorded separately.
 func (a *execAnalysis) opaque(dir string) {
 	if r, ok := a.rel(dir); ok {
-		a.out = append(a.out, r+"/**")
+		a.out = append(a.out, depkey.Tree(r))
 		return
 	}
 	if rel, err := filepath.Rel(a.root, dir); err == nil && rel == "." {
@@ -317,7 +319,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 				a.opaque(m)
 			case fi.IsDir():
 				if r, ok := a.rel(m); ok {
-					a.out = append(a.out, r+"/")
+					a.out = append(a.out, depkey.Listing(r))
 				}
 			default:
 				a.add(m)
