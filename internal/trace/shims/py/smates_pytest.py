@@ -68,22 +68,48 @@ if _tracer is not None:
             _tracer.pop()
 
     _failed_nodeids = set()
+    # Failure output per test file (bounded: it only feeds smates' failure hints).
+    _messages = {}
+    _MAX_MSG = 4000
+
+    def _note_failure(report):
+        f = report.nodeid.split("::", 1)[0]
+        _failed_nodeids.add(f)
+        prev = _messages.get(f, "")
+        if len(prev) >= _MAX_MSG:
+            return
+        try:
+            text = report.longreprtext or ""
+        except Exception:
+            text = ""
+        if len(text) > 1500:
+            text = text[:200] + "\n[…]\n" + text[-1300:]  # the assertion is at the end
+        msg = (prev + "\n\n" if prev else "") + report.nodeid + ": " + text
+        _messages[f] = msg[:_MAX_MSG]
 
     def pytest_runtest_logreport(report):
         if report.failed:
-            _failed_nodeids.add(report.nodeid.split("::", 1)[0])
+            _note_failure(report)
 
     def pytest_collectreport(report):
         if report.failed:
-            _failed_nodeids.add(report.nodeid.split("::", 1)[0])
+            _note_failure(report)
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(session, exitstatus):
         rootdir = str(session.config.rootpath)
-        failed = {os.path.realpath(os.path.join(rootdir, n)) for n in _failed_nodeids if n}
+        failed = {}
+        for n in _failed_nodeids:
+            if n:
+                failed[os.path.realpath(os.path.join(rootdir, n))] = _messages.get(n, "")
         for f, r in _results.items():
-            status = "fail" if f in failed else "pass"
-            _tracer.write({"k": "result", "id": f, "status": status, "ms": r["ms"]})
-        for f in failed:
+            ev = {"k": "result", "id": f, "status": "fail" if f in failed else "pass", "ms": r["ms"]}
+            if failed.get(f):
+                ev["msg"] = failed[f]
+            _tracer.write(ev)
+        for f, msg in failed.items():
             if f not in _results:
-                _tracer.write({"k": "result", "id": f, "status": "fail", "ms": 0})
+                ev = {"k": "result", "id": f, "status": "fail", "ms": 0}
+                if msg:
+                    ev["msg"] = msg
+                _tracer.write(ev)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/hints"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
@@ -124,6 +125,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	}
 
 	hasher := selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
+	failures := newFailureHints(ctx, p, res, hasher, f.base, f.noAgent)
 	now := time.Now().UTC()
 	worst := 0
 	start := time.Now()
@@ -215,6 +217,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 			inferred[u] = o.Inferred
 		}
 		ran[sr.Name] = statuses
+		failures.add(sr, r.Observations) // before recording: compares with the previous entries
 		if record {
 			if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 				p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
@@ -238,6 +241,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	if f.dryRun {
 		return 0, nil
 	}
+	failures.wait()
 	if record {
 		if p.filtered {
 			// Only some suites ran: the repository-wide snapshot stays as it was.
@@ -263,6 +267,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 			return 1, fmt.Errorf("saving state: %w", err)
 		}
 	}
+	failures.print(stderr)
 	sel2, total := res.Counts()
 	elapsed := time.Since(start).Round(time.Millisecond)
 	if f.shadow {
@@ -281,6 +286,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, sel2, total, worst)
 	}
 	writeRunSummary(p, sel, f.summary, worst, elapsed, escapes)
+	failures.writeSummary(f.summary)
 	if os.Getenv("GITHUB_OUTPUT") != "" {
 		if err := writeGitHubOutputs(sel, fmt.Sprintf("exit-code=%d", worst)); err != nil {
 			p.logf("could not write GitHub outputs: %v", err)
@@ -294,7 +300,8 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 			Possible []string                     `json:"possible_escapes"`
 			ExitCode int                          `json:"exit_code"`
 			Shadow   bool                         `json:"shadow"`
-		}{jsonSelection(sel), ran, escapes, possible, worst, f.shadow}
+			Failures []*hints.Hint                `json:"failure_hints"`
+		}{jsonSelection(sel), ran, escapes, possible, worst, f.shadow, failures.all()}
 		if rep.Escapes == nil {
 			rep.Escapes = []string{}
 		}

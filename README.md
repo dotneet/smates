@@ -27,6 +27,9 @@ smates: done in 6.2s: ran 7 of 412 test unit(s), exit code 0
   iterates over, scripts started as subprocesses, shared pytest fixtures.
 - **Safe by construction**: content-hash fingerprints, failed tests always re-run, new
   tests always run, and every uncertainty resolves to running *more*.
+- **Points at the cause of a failure**: a failing test comes with the changed files among
+  its inputs, and optionally a one-line explanation from the agent
+  ([failure hints](#failure-hints)).
 - **Works anywhere**: GitHub Action included; any other CI uses the same CLI and a plain
   state file.
 
@@ -173,6 +176,8 @@ agent:
   max_turns: 12
   timeout: 120s
   instructions: "e2e/ tests talk to the server built from server/."
+  explain_failures: true   # one-line probable cause for failing tests (built-in backend only)
+  explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
 
@@ -190,6 +195,39 @@ agent:
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
+
+## Failure hints
+
+When a test fails, smates already knows every file it used and which of them changed, so
+`smates run` lists, for each failing test, **the changed files among its inputs** — usually
+a handful, often one:
+
+```
+smates: failure hints for 1 failing test unit(s):
+  web: src/cart.test.ts — 2 of its 37 known inputs changed since its last recorded run (3f2a1c9, passed)
+      src/price.ts  (source, direct import, modified)
+      fixtures/prices.json  (data, traced, modified)
+    → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
+```
+
+- "Changed" is measured against the content recorded when that test last ran (or, for a
+  test with no record, against the files this run's selection found changed). Candidates
+  are ranked: code the test imports directly, other code it uses, the test file itself,
+  data, configuration, directory listings; then by modification time.
+- **None of its inputs changed** points at a flaky test or the environment (time, network,
+  ordering, something tracing cannot see); if it did not pass last time either, the cause
+  predates that run. Changed files no test is known to depend on are listed instead when
+  there are some.
+- Shown in the run log, the step summary (`--summary` / `$GITHUB_STEP_SUMMARY`) and the
+  JSON report (`failure_hints`, with the runner's failure output when it reports one:
+  vitest, jest, pytest, `go test`, JUnit). Runs with `--no-record` have no per-test
+  results and no hints.
+- **With the agent** (an API key, not `--no-agent`, `agent.explain_failures` not false),
+  up to `agent.explain_max` failures get a one-line probable cause (file, line, reason,
+  confidence). It is one tool-less request per failure with the failure output and the
+  diffs of the top candidates (bounded in size; git-ignored files are never sent), made in
+  the background while later suites run, with a 30 s cap; answers are cached by content in
+  the state, and errors only print a note.
 
 ## Watch mode
 
@@ -232,7 +270,8 @@ ok  	example.com/shop/internal/store	0.170s
 
 ## The agent
 
-- Called only for orphans, so most pull requests make no LLM call at all.
+- Called only for orphans (and, after a failing run, to explain a few failures), so most
+  pull requests make no LLM call at all.
 - Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`,
   low effort, prompt caching. Typical cost is well under $0.01 per call and a few seconds.
 - Read-only tools confined to the repository (`list_files`, `grep`, `read_file`,

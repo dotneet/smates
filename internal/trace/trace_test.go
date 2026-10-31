@@ -274,7 +274,7 @@ func TestCollectPythonContexts(t *testing.T) {
 	if !reflect.DeepEqual(p.Uses, map[string][]string{"tests/test_a.py": {"fixture:db@tests"}}) {
 		t.Errorf("uses %v", p.Uses)
 	}
-	if p.Results["tests/test_a.py"] != (Result{"pass", 5}) || p.Results["tests/test_b.py"] != (Result{"fail", 3}) {
+	if p.Results["tests/test_a.py"] != (Result{Status: "pass", Ms: 5}) || p.Results["tests/test_b.py"] != (Result{Status: "fail", Ms: 3}) {
 		t.Errorf("results %v (a failure is sticky, durations add up)", p.Results)
 	}
 	if n := len(p.CtxSpans); n != 7 || p.CtxSpans[6].ID != "test:/outside/x.py" {
@@ -348,7 +348,7 @@ func TestResults(t *testing.T) {
 	a, b := filepath.Join(root, "a.test.ts"), filepath.Join(root, "b.test.ts")
 	os.WriteFile(filepath.Join(td, "results-vitest-1.jsonl"), []byte(
 		`{"k":"result","id":"`+a+`","status":"pass","ms":5}`+"\n"+
-			`{"k":"result","id":"`+b+`","status":"fail","ms":1}`+"\n"+
+			`{"k":"result","id":"`+b+`","status":"fail","ms":1,"msg":"AssertionError: boom"}`+"\n"+
 			`{"k":"read","id":"`+a+`","status":"fail"}`+"\n"+
 			`not json`+"\n"+
 			`{"k":"result","id":"/outside/x.test.ts","status":"fail"}`+"\n"), 0o644)
@@ -356,7 +356,7 @@ func TestResults(t *testing.T) {
 		`{"k":"result","id":"`+b+`","status":"pass","ms":2}`+"\n"+
 			`{"k":"result","id":"`+a+`","status":"pass","ms":1}`+"\n"), 0o644)
 	got := Results(td, root)
-	want := map[string]Result{"a.test.ts": {"pass", 6}, "b.test.ts": {"fail", 3}}
+	want := map[string]Result{"a.test.ts": {Status: "pass", Ms: 6}, "b.test.ts": {Status: "fail", Ms: 3, Message: "AssertionError: boom"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -390,7 +390,11 @@ func TestJUnitVitest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]Result{"web/src/a.test.ts": {"fail", 200}, "web/src/b.test.ts": {"pass", 250}, "web/src/c.test.ts": {"fail", 0}}
+	want := map[string]Result{
+		"web/src/a.test.ts": {Status: "fail", Ms: 200, Message: "fails: expected 1 to be 2\ntrace"},
+		"web/src/b.test.ts": {Status: "pass", Ms: 250},
+		"web/src/c.test.ts": {Status: "fail", Ms: 0, Message: "boom: x"},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -424,7 +428,7 @@ func TestJUnitJestStyle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]Result{"app/__tests__/sum.test.js": {"fail", 500}, "app/lib/util.test.js": {"pass", 150}}
+	want := map[string]Result{"app/__tests__/sum.test.js": {Status: "fail", Ms: 500, Message: "sum breaks: Error: nope"}, "app/lib/util.test.js": {Status: "pass", Ms: 150}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v want %v", got, want)
 	}
@@ -433,7 +437,7 @@ func TestJUnitJestStyle(t *testing.T) {
 	single := filepath.Join(base, "single.xml")
 	os.WriteFile(single, []byte(`<testsuite name="x.test.js" tests="1"><testcase classname="x.test.js" name="a" time="0.001"/></testsuite>`), 0o644)
 	got, err = JUnit(single, base, root)
-	if err != nil || !reflect.DeepEqual(got, map[string]Result{"app/x.test.js": {"pass", 1}}) {
+	if err != nil || !reflect.DeepEqual(got, map[string]Result{"app/x.test.js": {Status: "pass", Ms: 1}}) {
 		t.Errorf("single root: %v %v", got, err)
 	}
 	if _, err := JUnit(filepath.Join(base, "missing.xml"), base, root); err == nil {

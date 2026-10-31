@@ -123,6 +123,40 @@ not reported as definite misses. Units that ran but left no trace in a failing r
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+### Failure hints
+
+The same data explains failures. For a failing unit `T`, the candidates are the keys of
+`D(T)` (plus what the failing run itself traced) whose hash differs from the one recorded
+in `T`'s previous entry — "changed since this test last ran". Without an entry, they are
+`D(T)` ∩ the selection's changed files (snapshot or base revision); in a full run with
+neither, there is no basis and the hint says so. The hints are computed per suite right
+after it runs and before its results are recorded, since recording overwrites the entry.
+
+Ranking is by tier, then most recent modification, then directory proximity to the test
+file: code the test imports directly (static graph), other code, the test file itself,
+data, configuration (suite inputs, manifests, lockfiles), then directory listings,
+existence checks and opaque trees. A failure with no changed input is reported as such
+(flaky, environmental, or untraceable), or as "already failing" when the previous entry
+did not pass; orphans of the run are offered as candidates in that case, since they are
+exactly the changes smates cannot attribute. A failure inferred from a shared exit code is
+marked, as it may belong to another unit.
+
+Reporters also return a bounded failure message per file (vitest and jest reporters, the
+pytest plugin, JUnit `<failure>` text, and the per-package block of `go test` output);
+runners that only give exit codes (node:test, bun, custom) have none.
+
+The optional explanation is one request per failure without tools: system prompt (fixed,
+cacheable), the candidate list, the failure output (≤ 6 KB, ANSI stripped) and the diffs of
+the top three candidates (≤ 8 KB, produced like the orphan agent's `git_diff`: recorded blob,
+else the base revision or HEAD; ignored files and paths outside the repository are never
+read), answered with structured outputs (`file`, `line`, `reason`, `confidence`). At most
+`agent.explain_max` (3) per run, non-inferred failures first; requests start as soon as
+their suite has finished and run in parallel with later suites, each capped at 30 s; the
+run only waits for them before saving the state. Answers are cached in the state's agent
+cache under a key of the test, its candidates' hashes and its failure output with
+durations, addresses and timestamps masked. Errors are reported in one line and never
+change the exit code. The external `agent.command` backend is not used for explanations.
+
 ## 4. State
 
 `.smates/state.json.gz` (gitignored), interned JSON (paths and hashes stored once). A full
@@ -196,7 +230,8 @@ not available).
 - Unit tests for every package (`go test -race ./...`).
 - End-to-end fixtures per ecosystem (`e2e/fixtures/*`: vitest, pnpm monorepo, jest, node:test,
   bun, pytest/uv, Go, polyglot) full of dependencies static analysis misses.
-  `TestScenarios` checks expected selections and shadow-mode escapes per scenario;
+  `TestScenarios` checks expected selections and shadow-mode escapes per scenario, and that
+  every test a scenario breaks gets a failure hint naming the edited file;
   `TestMutations` breaks every source, data and script file in turn and requires that every
   test failing because of it was selected.
   `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while

@@ -207,8 +207,8 @@ func TestAttributePythonContexts(t *testing.T) {
 		ctx(50, "")
 	py.p.Uses["tests/test_a.py"] = []string{"fixture:db@tests"}
 	py.p.Uses["not_a_test.py"] = []string{"fixture:db@tests"}
-	py.p.Results["tests/test_a.py"] = Result{"pass", 7}
-	py.p.Results["tests/test_b.py"] = Result{"fail", 3}
+	py.p.Results["tests/test_a.py"] = Result{Status: "pass", Ms: 7}
+	py.p.Results["tests/test_b.py"] = Result{Status: "fail", Ms: 3}
 	py.exit(1)
 	server := mkProc(200, 100, 0).times(17, 0).code("server.py").read("server.cfg") // started during test_b
 	early := mkProc(201, 100, 0).times(5, 0).code("bootstrap.py")                   // started before any context
