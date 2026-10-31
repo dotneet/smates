@@ -91,6 +91,8 @@ type Observation struct {
 	// Inferred is set when Status was not reported for this unit but derived from the
 	// exit code of a run covering several units (a failure may belong to another unit).
 	Inferred bool
+	// Failure is the failure output a runner plugin reported for the unit (bounded).
+	Failure string
 }
 
 // AddFile adds a repo-relative file.

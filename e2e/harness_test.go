@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -82,10 +83,24 @@ type scenario struct {
 	Fails []string `json:"fails"`
 	// Agent runs the scenario with the agent enabled (skipped without ANTHROPIC_API_KEY).
 	Agent bool `json:"agent"`
+	// Hints checks the failure hints of failing tests (test ID -> expectation). Every
+	// test in Fails is also checked to have one of the edited files among its hint's
+	// candidates.
+	Hints map[string]hintSpec `json:"hints"`
 	// Args are extra smates run flags.
 	Args []string `json:"args"`
 	// Note documents the scenario (ignored).
 	Note string `json:"note"`
+}
+
+// hintSpec is the expected failure hint of one failing test.
+type hintSpec struct {
+	// Top lists the expected leading candidates, in order.
+	Top []string `json:"top"`
+	// Verdict is the expected verdict ("" = any).
+	Verdict string `json:"verdict"`
+	// Output is a substring expected in the failure output the runner reported.
+	Output string `json:"output"`
 }
 
 type edit struct {
@@ -107,6 +122,47 @@ type report struct {
 	Exit    int                          `json:"exit_code"`
 	Total   int                          `json:"total"`
 	Sel     int                          `json:"selected"`
+	Hints   []reportHint                 `json:"failure_hints"`
+}
+
+// reportHint mirrors hints.Hint.
+type reportHint struct {
+	Suite      string `json:"suite"`
+	Test       string `json:"test"`
+	Verdict    string `json:"verdict"`
+	Candidates []struct {
+		Path string `json:"path"`
+		Kind string `json:"kind"`
+		Link string `json:"link"`
+	} `json:"candidates"`
+	Output string `json:"output"`
+}
+
+func (r *report) hint(test string) *reportHint {
+	for i := range r.Hints {
+		if r.Hints[i].Test == test {
+			return &r.Hints[i]
+		}
+	}
+	return nil
+}
+
+// editRank returns the 1-based position of the first candidate explained by one of the
+// edits (the file itself, its directory listing, an existence check of it, or a tree
+// containing it), 0 when none is.
+func (h *reportHint) editRank(edits []edit) int {
+	for i, c := range h.Candidates {
+		for _, e := range edits {
+			f := e.File
+			switch {
+			case c.Path == f, c.Path == f+"?", c.Path == path.Dir(f)+"/":
+				return i + 1
+			case strings.HasSuffix(c.Path, "/**") && strings.HasPrefix(f, strings.TrimSuffix(c.Path, "**")):
+				return i + 1
+			}
+		}
+	}
+	return 0
 }
 
 func (r *report) selected() map[string]bool {
@@ -380,6 +436,7 @@ func TestScenarios(t *testing.T) {
 						data, _ := os.ReadFile(md)
 						os.WriteFile(filepath.Join(dir, name+"--"+strings.NewReplacer("/", "_", " ", "_").Replace(sc.Name)+".md"), data, 0o644)
 					}
+					problems = append(problems, checkHints(t, sc, rep, failing)...)
 					t.Logf("selected %d/%d, failing %v, orphans %v", rep.Sel, rep.Total, failing, rep.Orphans)
 					if len(problems) > 0 {
 						t.Errorf("%s\n--- smates output ---\n%s", strings.Join(problems, "\n"), tail(out, 80))
@@ -417,6 +474,50 @@ func checkMarkdown(path string, rep *report) []string {
 	}
 	if strings.Contains(md, "would **not** have been selected") != (len(rep.Escapes) > 0) {
 		problems = append(problems, "markdown and report disagree on escapes")
+	}
+	return problems
+}
+
+// checkHints verifies the failure hints: every expected failure points at an edited
+// file, and the scenario's explicit expectations hold.
+func checkHints(t *testing.T, sc scenario, rep *report, failing []string) []string {
+	var problems, ranks []string
+	for _, id := range sc.Fails {
+		if !contains(failing, id) {
+			continue
+		}
+		h := rep.hint(id)
+		if h == nil {
+			problems = append(problems, "no failure hint for "+id)
+			continue
+		}
+		rank := h.editRank(sc.Edits)
+		ranks = append(ranks, fmt.Sprintf("%s: edit at %d/%d (%s)", id, rank, len(h.Candidates), h.Verdict))
+		if rank == 0 {
+			problems = append(problems, fmt.Sprintf("hint for %s does not name an edited file: %s %+v", id, h.Verdict, h.Candidates))
+		}
+	}
+	for id, want := range sc.Hints {
+		h := rep.hint(id)
+		if h == nil {
+			problems = append(problems, "no failure hint for "+id)
+			continue
+		}
+		if want.Verdict != "" && h.Verdict != want.Verdict {
+			problems = append(problems, fmt.Sprintf("hint verdict for %s: got %s, want %s", id, h.Verdict, want.Verdict))
+		}
+		for i, p := range want.Top {
+			if i >= len(h.Candidates) || h.Candidates[i].Path != p {
+				problems = append(problems, fmt.Sprintf("hint candidates for %s: got %+v, want %v first", id, h.Candidates, want.Top))
+				break
+			}
+		}
+		if want.Output != "" && !strings.Contains(h.Output, want.Output) {
+			problems = append(problems, fmt.Sprintf("hint output for %s lacks %q: %q", id, want.Output, h.Output))
+		}
+	}
+	if len(ranks) > 0 {
+		t.Logf("hints: %s", strings.Join(ranks, "; "))
 	}
 	return problems
 }

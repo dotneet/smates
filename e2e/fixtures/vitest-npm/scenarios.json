@@ -77,7 +77,16 @@
     "fails": [
       "test/slug.test.ts"
     ],
-    "orphans": []
+    "orphans": [],
+    "hints": {
+      "test/slug.test.ts": {
+        "top": [
+          "src/slug.ts"
+        ],
+        "verdict": "changed-inputs",
+        "output": "creme_brulee_co"
+      }
+    }
   },
   {
     "name": "yaml-data-read-via-computed-path",

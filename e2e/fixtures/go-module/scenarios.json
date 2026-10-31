@@ -57,7 +57,16 @@
     "orphans": [],
     "fails": [
       "pkg/calc"
-    ]
+    ],
+    "hints": {
+      "pkg/calc": {
+        "top": [
+          "pkg/calc/calc.go"
+        ],
+        "verdict": "changed-inputs",
+        "output": "--- FAIL: TestTax"
+      }
+    }
   },
   {
     "name": "external-test-package-edit",

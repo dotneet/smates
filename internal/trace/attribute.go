@@ -12,6 +12,8 @@ type Unit struct {
 	// Status: "pass", "fail" or "" (unknown) from runner plugins or process exit codes.
 	Status string
 	Ms     int64
+	// Message is the failure output a runner plugin reported for the unit.
+	Message string
 	// Shared is set when the unit ran in a process together with other units, so its
 	// dependencies are the union of all of them (correct but less precise).
 	Shared bool
@@ -262,6 +264,7 @@ func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *U
 		touched[id] = u
 		u.Status = worse(u.Status, r.Status)
 		u.Ms += r.Ms
+		u.Message = JoinMessage(u.Message, r.Message)
 	}
 
 	// Activity no test context claims is shared by every unit of the process, like

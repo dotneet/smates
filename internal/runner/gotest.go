@@ -149,15 +149,21 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.Status = st
 		}
 	}
-	if len(failed.paths) > 0 {
+	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		mod := modulePath(filepath.Join(rc.Dir(), "go.mod"))
 		for _, u := range rc.Units {
 			ip := mod
 			if r := relToSuite(rc.Suite, u); r != "." {
 				ip = mod + "/" + r
 			}
-			if mod != "" && failed.paths[ip] {
+			if mod == "" {
+				continue
+			}
+			if failed.paths[ip] {
 				res.Observations[u] = &Observation{Files: map[string]bool{}, Status: state.Fail}
+			}
+			if o := res.Observations[u]; o != nil && o.Status == state.Fail {
+				o.Failure = failed.output[ip]
 			}
 		}
 	}
@@ -167,11 +173,45 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
 var buildFailedRe = regexp.MustCompile(`FAIL(?:\\t|\s)+([^\s\\]+)\s+\[(?:build|setup) failed\]`)
 
-// buildFailures collects import paths of packages go test could not build.
+// goSummaryRe matches the line go test prints when a package finishes.
+var goSummaryRe = regexp.MustCompile(`^(ok|FAIL|\?)\s+(\S+)(\s|$)`)
+
+// maxGoPending bounds the output kept for the package currently printing.
+const maxGoPending = 16 << 10
+
+// buildFailures collects import paths of packages go test could not build, and the
+// output of failing packages (go test prints each package's output in one block,
+// followed by its summary line).
 type buildFailures struct {
-	mu    sync.Mutex
-	buf   []byte
-	paths map[string]bool
+	mu      sync.Mutex
+	buf     []byte
+	paths   map[string]bool
+	pending []byte
+	output  map[string]string // import path -> failure output (bounded)
+}
+
+// collect accumulates one output line, attributing it to the package whose summary
+// line follows.
+func (b *buildFailures) collect(line []byte) {
+	if m := goSummaryRe.FindSubmatch(line); m != nil {
+		if string(m[1]) == "FAIL" && len(bytes.TrimSpace(b.pending)) > 0 {
+			if b.output == nil {
+				b.output = map[string]string{}
+			}
+			out := b.pending
+			if len(out) > trace.MaxMessage {
+				out = out[len(out)-trace.MaxMessage:] // the failures and panics are at the end
+			}
+			b.output[string(m[2])] = trace.JoinMessage(b.output[string(m[2])], string(out))
+		}
+		b.pending = b.pending[:0]
+		return
+	}
+	b.pending = append(b.pending, line...)
+	b.pending = append(b.pending, '\n')
+	if extra := len(b.pending) - maxGoPending; extra > 0 {
+		b.pending = append(b.pending[:0], b.pending[extra:]...)
+	}
 }
 
 func (b *buildFailures) Write(p []byte) (int, error) {
@@ -189,6 +229,7 @@ func (b *buildFailures) Write(p []byte) (int, error) {
 			}
 			b.paths[string(m[1])] = true
 		}
+		b.collect(bytes.TrimRight(b.buf[:i], "\r"))
 		b.buf = b.buf[i+1:]
 	}
 	return len(p), nil
