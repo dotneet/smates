@@ -143,8 +143,10 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		}
 		o.Status = overallStatus(u.Status, exitCode)
 		o.Inferred = u.Status == "" && exitCode != 0
+		o.Failure = u.Message
 		if r, ok := results[id]; ok {
 			o.Status, o.Inferred = r.Status, false
+			o.Failure = trace.JoinMessage(o.Failure, r.Message)
 			if r.Ms > 0 {
 				o.DurationMs = r.Ms
 			}
@@ -161,7 +163,7 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		if id == "" || obs[id] != nil {
 			continue
 		}
-		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms}
+		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms, Failure: r.Message}
 		if o.Status != state.Fail {
 			o.Status = state.Unknown
 			untraced++
