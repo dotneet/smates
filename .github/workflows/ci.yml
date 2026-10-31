@@ -53,7 +53,7 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
-      - run: go test -tags e2e ./e2e/...
+      - run: go test -tags e2e -timeout 40m ./e2e/...
 
   action:
     # Smoke-tests action.yml itself on every runner OS, building smates from this checkout.

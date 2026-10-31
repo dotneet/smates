@@ -229,8 +229,9 @@ func (r *repo) env() []string {
 	for k, v := range r.spec.Env {
 		env = append(env, k+"="+v)
 	}
-	// Keep smates' own CI detection out of the way: runs are explicit.
-	return append(env, "CI=", "GITHUB_ACTIONS=", "GITHUB_OUTPUT=", "GITHUB_STEP_SUMMARY=")
+	// Keep smates' own CI detection out of the way: runs are explicit. Scenario edits
+	// can keep a file's size within the same second, which a cached .pyc would miss.
+	return append(env, "CI=", "GITHUB_ACTIONS=", "GITHUB_OUTPUT=", "GITHUB_STEP_SUMMARY=", "PYTHONDONTWRITEBYTECODE=1")
 }
 
 func (r *repo) smates(args ...string) (string, int) {

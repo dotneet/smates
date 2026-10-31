@@ -1,0 +1,36 @@
+# TEMPORARY: diagnoses a Linux-only vitest attribution gap; delete before merging.
+name: debug-vitest
+on:
+  push:
+    branches: [claude/ci-test-optimization-37da9c]
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Record the vitest fixture
+        run: |
+          go build -o "$RUNNER_TEMP/smates" ./cmd/smates
+          W="$RUNNER_TEMP/vt"; cp -R e2e/fixtures/vitest-npm "$W"; cd "$W"
+          git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm x
+          npm ci --no-audit --no-fund >/dev/null
+          echo "nproc=$(nproc)"
+          SMATES_KEEP_TRACE=1 CI= GITHUB_ACTIONS= "$RUNNER_TEMP/smates" run --all --no-agent 2>&1 | tee "$RUNNER_TEMP/run.log"
+          T=$(sed -n 's/.*keeping trace files in //p' "$RUNNER_TEMP/run.log"); echo "T=$T" >> "$GITHUB_ENV"
+          echo "::group::deps report-cli"; "$RUNNER_TEMP/smates" deps test/report-cli.test.ts; echo "::endgroup::"
+          echo "::group::deps money"; "$RUNNER_TEMP/smates" deps test/money.test.ts; echo "::endgroup::"
+          echo "::group::starts"; for f in "$T"/suite-0/proc-*.jsonl; do echo "== $f"; head -1 "$f" | cut -c1-600; grep -c . "$f"; tail -1 "$f" | cut -c1-300; done; echo "::endgroup::"
+          echo "::group::v8 files"; ls -la "$T"/suite-0/v8; echo "::endgroup::"
+          echo "::group::v8 urls"; for f in "$T"/suite-0/v8/*.json; do echo "== $f"; grep -o '"url":"[^"]*"' "$f" | grep -v node_modules | grep -v '"url":"node:' | sort -u | head -30; done; echo "::endgroup::"
+          tar czf "$RUNNER_TEMP/trace.tgz" -C "$T" .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vitest-trace
+          path: ${{ runner.temp }}/trace.tgz

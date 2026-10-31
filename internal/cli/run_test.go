@@ -26,6 +26,9 @@ func TestRunSelectEndToEnd(t *testing.T) {
 	t.Setenv("GITHUB_OUTPUT", "")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	// Edits below swap same-size contents within one second, which a cached .pyc
+	// (validated by mtime and size) would not notice.
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
 	g := newGitRepo(t)
 	write := func(rel, content string) {
 		p := filepath.Join(g.dir, filepath.FromSlash(rel))
