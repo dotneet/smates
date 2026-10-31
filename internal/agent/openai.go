@@ -128,10 +128,20 @@ func openAIError(status int, data []byte) *APIError {
 	return e
 }
 
-// effortRejectedByOpenAI: models without reasoning reject reasoning parameters.
+// effortRejectedByOpenAI: models without reasoning reject the effort parameter. Errors
+// about the reasoning items echoed back between turns do not count.
 func effortRejectedByOpenAI(e *APIError) bool {
-	return e.Status == http.StatusBadRequest &&
-		(strings.HasPrefix(e.Param, "reasoning") || strings.Contains(strings.ToLower(e.Message), "reasoning"))
+	if e.Status != http.StatusBadRequest {
+		return false
+	}
+	switch e.Param {
+	case "reasoning.effort", "reasoning_effort", "reasoning":
+		return true
+	case "":
+		msg := strings.ToLower(e.Message)
+		return strings.Contains(msg, "reasoning.effort") || strings.Contains(msg, "reasoning_effort")
+	}
+	return false
 }
 
 // responsesDialect speaks the OpenAI Responses API, statelessly: nothing is stored

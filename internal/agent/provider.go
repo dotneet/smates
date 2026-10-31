@@ -90,15 +90,18 @@ func ModelOf(cfg config.AgentConfig) string {
 	return providerOf(cfg).model
 }
 
-// CredentialEnv lists the environment variables holding the credentials of the
-// provider selected by cfg. They are smates' own secrets: test processes do not get
-// them. Other providers' variables are left alone, since tests may use them.
-func CredentialEnv(cfg config.AgentConfig) []string {
-	p := providerOf(cfg)
-	if p.tokenEnv != "" {
-		return []string{p.keyEnv, p.tokenEnv}
+// credentialEnv lists the environment variables holding the credentials of every
+// provider. runner.AgentSecrets must list the same variables, so that test processes
+// never get them.
+func credentialEnv() []string {
+	var out []string
+	for _, p := range providers {
+		out = append(out, p.keyEnv)
+		if p.tokenEnv != "" {
+			out = append(out, p.tokenEnv)
+		}
 	}
-	return []string{p.keyEnv}
+	return out
 }
 
 // missingCredentials explains why the built-in backend cannot run with cfg.

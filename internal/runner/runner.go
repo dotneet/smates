@@ -69,9 +69,6 @@ type RunContext struct {
 	IsTest func(string) bool
 	// UnitOf maps a test file to its unit ID ("" if not a test).
 	UnitOf func(string) string
-	// HideEnv are smates' own credentials: tests do not get them (a suite that needs
-	// them can set them in env:).
-	HideEnv []string
 }
 
 // RunResult is the outcome of running a suite.
@@ -249,7 +246,7 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = MergeEnv(baseEnv(rc.HideEnv), suiteEnv(rc.Suite), env)
+	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), env)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
 	err := runCmd(ctx, cmd)
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -265,12 +262,17 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 	return 0, nil
 }
 
-// baseEnv is smates' environment without the variables in hide.
-func baseEnv(hide []string) []string {
+// AgentSecrets are the credentials of every agent provider (see package agent): tests
+// do not get them, whichever provider smates uses (a suite that needs them can set them
+// in env:).
+var AgentSecrets = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENROUTER_API_KEY"}
+
+// baseEnv is smates' environment without AgentSecrets.
+func baseEnv() []string {
 	var out []string
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if !slices.Contains(hide, k) {
+		if !slices.Contains(AgentSecrets, k) {
 			out = append(out, kv)
 		}
 	}

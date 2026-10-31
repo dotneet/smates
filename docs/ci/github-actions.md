@@ -232,10 +232,9 @@ depends on was handled (named by a test, the agent, the `orphans` policy); and, 
   orphan. Ignored files (such as `.env`) are never readable by its tools, including
   through symlinks. Untracked but not ignored files may be sent to the model as part of
   a diff.
-- **Credentials stay with smates.** The API key of the agent's provider
-  (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `OPENROUTER_API_KEY`)
-  is removed from the environment of test processes; other providers' keys are left for
-  tests that need them.
+- **Credentials stay with smates.** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`,
+  `OPENAI_API_KEY` and `OPENROUTER_API_KEY` are removed from the environment of test
+  processes, whichever provider the agent uses.
 - **State is input.** The state decides what is skipped, so whoever can write the cache
   a job restores can make it skip tests. In a pull request that is the pull request
   itself, whose author can equally change the workflow or the tests; the guarantee

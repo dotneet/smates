@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
@@ -43,8 +42,15 @@ type apiBackend struct {
 	retryBase   time.Duration // first backoff delay
 	retryMax    time.Duration // backoff cap
 	budget      int           // estimated prompt tokens per request
-	// noEffort is set once the model rejected the effort setting.
-	noEffort atomic.Bool
+}
+
+// effortRejected remembers, for the life of the process, the models (per provider and
+// base URL) that rejected the effort setting, so later requests and explanations do
+// not fail on it first.
+var effortRejected sync.Map
+
+func (b *apiBackend) effortKey(model string) string {
+	return b.provider.name + "\x00" + b.baseURL + "\x00" + model
 }
 
 // newAPIBackend returns an Anthropic Messages API backend.
@@ -197,20 +203,20 @@ func (b *apiBackend) modelFor(cfg config.AgentConfig) string {
 
 func (b *apiBackend) params(model, system string, cfg config.AgentConfig, maxTokens int) requestParams {
 	p := requestParams{model: model, system: system, effort: cfg.Effort, maxTokens: maxTokens}
-	if b.noEffort.Load() {
+	if _, rejected := effortRejected.Load(b.effortKey(model)); rejected {
 		p.effort = ""
 	}
 	return p
 }
 
 // dropEffort reports whether err rejected the effort sent with p; the effort is then
-// left out of this backend's later requests.
+// left out of later requests for the same model.
 func (b *apiBackend) dropEffort(err error, p requestParams) bool {
 	var apiErr *APIError
 	if p.effort == "" || !errors.As(err, &apiErr) || !b.provider.dialect.effortRejected(apiErr) {
 		return false
 	}
-	b.noEffort.Store(true)
+	effortRejected.Store(b.effortKey(p.model), true)
 	return true
 }
 

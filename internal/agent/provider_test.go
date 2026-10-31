@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/runner"
 )
 
 func TestProviderSelection(t *testing.T) {
@@ -66,12 +67,9 @@ func TestModelOverrideAndDescribe(t *testing.T) {
 	if Describe(config.AgentConfig{Command: "fx ask"}) != "fx ask" {
 		t.Error("command description")
 	}
-	if got := CredentialEnv(cfg); !slices.Equal(got, []string{"OPENAI_API_KEY"}) {
-		t.Errorf("CredentialEnv = %v", got)
-	}
-	t.Setenv("OPENAI_API_KEY", "")
-	if got := CredentialEnv(cfg); !slices.Equal(got, []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}) {
-		t.Errorf("CredentialEnv without keys = %v", got)
+	// Every provider's credentials are hidden from tests, not only the selected one's.
+	if got := credentialEnv(); !slices.Equal(got, runner.AgentSecrets) {
+		t.Errorf("credentialEnv = %v, runner hides %v", got, runner.AgentSecrets)
 	}
 }
 
@@ -377,5 +375,56 @@ func TestExplainDialects(t *testing.T) {
 				t.Errorf("explanation %+v, usage %+v", ex, usage)
 			}
 		})
+	}
+}
+
+func TestEffortRejectedByOpenAI(t *testing.T) {
+	tests := []struct {
+		name string
+		err  APIError
+		want bool
+	}{
+		{"responses param", APIError{Status: 400, Param: "reasoning.effort", Message: "Unsupported parameter: 'reasoning.effort' is not supported with this model."}, true},
+		{"chat argument", APIError{Status: 400, Message: "Unrecognized request argument supplied: reasoning_effort"}, true},
+		{"reasoning item", APIError{Status: 400, Param: "input", Message: "Item 'rs_1' of type 'reasoning' was provided without its required following item."}, false},
+		{"thinking signature", APIError{Status: 400, Message: "Invalid reasoning_details: thought signature is missing"}, false},
+		{"other status", APIError{Status: 500, Param: "reasoning.effort"}, false},
+	}
+	for _, tt := range tests {
+		if got := effortRejectedByOpenAI(&tt.err); got != tt.want {
+			t.Errorf("%s: %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// A rejected effort is remembered across backends, so each explanation does not first
+// fail on it.
+func TestEffortRejectionRemembered(t *testing.T) {
+	f := newFixture(t)
+	answer, _ := json.Marshal(`{"file":"scripts/seed.sh","line":4,"reason":"r","confidence":"high"}`)
+	ok := responsesReply("completed", `{"type":"message","id":"m","role":"assistant","status":"completed","content":[{"type":"output_text","text":`+string(answer)+`}]}`)
+	second := ok
+	second.inspect = func(t *testing.T, r recordedRequest) {
+		if _, sent := r.body["reasoning"]; sent {
+			t.Error("effort sent again after the model rejected it")
+		}
+	}
+	fake := &fakeAPI{t: t, path: "/v1/responses", replies: []fakeReply{
+		{status: 400, body: `{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_parameter"}}`},
+		ok, second,
+	}}
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	p, _ := lookupProvider(ProviderOpenAI)
+	req := f.explainRequest()
+	req.Config.Model = "no-reasoning-" + t.Name()
+	for i := 0; i < 2; i++ {
+		b := newProviderBackend(req.Config, p, srv.URL+"/v1", "k", "")
+		if _, _, err := b.explain(context.Background(), req); err != nil {
+			t.Fatalf("explanation %d: %v", i+1, err)
+		}
+	}
+	if n := len(fake.requests()); n != 3 {
+		t.Errorf("%d requests, want 3", n)
 	}
 }
