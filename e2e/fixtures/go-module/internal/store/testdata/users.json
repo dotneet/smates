@@ -1,0 +1,5 @@
+[
+  {"id": 1, "name": "Ada", "tier": "gold"},
+  {"id": 2, "name": "Linus", "tier": "silver"},
+  {"id": 3, "name": "Grace", "tier": "gold"}
+]

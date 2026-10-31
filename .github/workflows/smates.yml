@@ -1,0 +1,84 @@
+# Example: running a project's tests with smates on pull requests and on main.
+#
+# In this repository the workflow only runs on manual dispatch, and dogfoods the
+# action from this checkout (`uses: ./` + `version: source`). To use it in your own
+# project, copy it to .github/workflows/test.yml and:
+#   1. replace the `on:` block with the commented one below;
+#   2. replace `uses: ./` with `uses: dotneet/smates@vX.Y.Z` (a release tag; the
+#      action then installs that exact binary) and drop `version: source` and the
+#      setup-go step if your project does not need Go;
+#   3. add the toolchain setup your tests need (node, bun, python/uv, ...).
+#
+# What happens:
+#   - pull_request: the state saved by earlier runs of the PR (or, the first time, by
+#     the default branch) is restored, only the tests whose recorded inputs changed run,
+#     and the updated state is saved for the next push to the PR.
+#   - push to main: smates runs everything (default on the default branch) and saves a
+#     fresh state that every new PR starts from.
+#   - The step's exit code is the tests' exit code, so failures fail the job as usual,
+#     and failed tests are recorded so they are re-selected next time.
+#
+# See docs/ci/github-actions.md for all inputs, outputs and patterns.
+name: smates example
+
+on:
+  workflow_dispatch:
+  # pull_request:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # A shallow clone is enough once state exists. With no state at all (first
+        # run), `fetch-depth: 0` lets smates diff against the base branch instead of
+        # running everything.
+
+      # Toolchains your tests use:
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 22
+      #     cache: npm
+      # - run: npm ci
+      # - uses: astral-sh/setup-uv@v6
+      # - run: uv sync
+
+      - name: Run affected tests
+        uses: ./ # in your project: dotneet/smates@vX.Y.Z
+        with:
+          version: source # in your project: remove
+          # Optional: lets an agent pick tests for changed files no test is known to
+          # read (Dockerfiles, SQL, scripts). Without it the `orphans` policy applies.
+          # Secrets are not available to pull requests from forks; smates then falls
+          # back to the policy as well.
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Extra arguments; everything after `--` goes to the test runners:
+          # args: --explain -- --reporter=dot
+
+  # Sharded variant: split the selected tests across N jobs. Each shard keeps its own
+  # state through `cache-key`, so shards never overwrite each other's results.
+  #
+  # test-sharded:
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       shard: [1, 2, 3, 4]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dotneet/smates@vX.Y.Z
+  #       with:
+  #         args: --shard ${{ matrix.shard }}/4
+  #         cache-key: shard-${{ matrix.shard }}

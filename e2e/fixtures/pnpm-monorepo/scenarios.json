@@ -1,0 +1,646 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "core-slug-edit-selects-core-and-api-users-via-barrel",
+    "edits": [
+      {
+        "file": "packages/core/src/slug.ts",
+        "op": "replace",
+        "old": ".toLowerCase()",
+        "new": ".toUpperCase()"
+      }
+    ],
+    "selected": [
+      "packages/core/test/slug.test.ts",
+      "packages/api/test/users.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/slug.test.ts",
+      "packages/api/test/users.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "core-money-edit-selects-subpath-importers-not-web",
+    "edits": [
+      {
+        "file": "packages/core/src/money.ts",
+        "op": "replace",
+        "old": "toFixed(c.decimals)",
+        "new": "toFixed(c.decimals + 1)"
+      }
+    ],
+    "selected": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "core-data-json-tax-rates",
+    "edits": [
+      {
+        "file": "packages/core/data/tax-rates.json",
+        "op": "replace",
+        "old": "\"DE\": 0.19",
+        "new": "\"DE\": 0.2"
+      }
+    ],
+    "selected": [
+      "packages/core/test/tax.test.ts",
+      "packages/api/test/orders.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/tax.test.ts",
+      "packages/api/test/orders.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "core-data-json-currencies",
+    "edits": [
+      {
+        "file": "packages/core/data/currencies.json",
+        "op": "replace",
+        "old": "\"symbol\": \"€\"",
+        "new": "\"symbol\": \"EUR\""
+      }
+    ],
+    "selected": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "api-only-edit",
+    "edits": [
+      {
+        "file": "packages/api/src/users.ts",
+        "op": "replace",
+        "old": "}-${id}",
+        "new": "}_${id}"
+      }
+    ],
+    "selected": [
+      "packages/api/test/users.test.ts"
+    ],
+    "not_selected": [
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/api/test/users.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamic-import-computed-path-locale",
+    "edits": [
+      {
+        "file": "packages/core/src/locales/ja.ts",
+        "op": "replace",
+        "old": "お会計",
+        "new": "レジ"
+      }
+    ],
+    "selected": [
+      "packages/core/test/i18n.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/i18n.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-new-route-file",
+    "edits": [
+      {
+        "file": "packages/api/src/routes/version.ts",
+        "op": "write",
+        "content": "export default function version() {\n  return { version: '0.4.0' };\n}\n"
+      }
+    ],
+    "selected": [
+      "packages/api/test/router.test.ts"
+    ],
+    "not_selected": [
+      "packages/api/test/users.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/api/test/router.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "pnpm-symlinked-dep-package-json-read-at-runtime",
+    "edits": [
+      {
+        "file": "packages/core/package.json",
+        "op": "replace",
+        "old": "\"version\": \"1.2.0\"",
+        "new": "\"version\": \"1.3.0\""
+      }
+    ],
+    "selected": [
+      "packages/api/test/router.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/api/test/router.test.ts"
+    ]
+  },
+  {
+    "name": "workspace-dep-exports-map-change",
+    "edits": [
+      {
+        "file": "packages/core/package.json",
+        "op": "replace",
+        "old": "\"./*\": \"./src/*.ts\"",
+        "new": "\"./*\": \"./lib/*.js\""
+      }
+    ],
+    "selected": [
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "args": [
+      "--",
+      "--no-fsModuleCache"
+    ]
+  },
+  {
+    "name": "subprocess-reads-markdown-content",
+    "edits": [
+      {
+        "file": "packages/web/content/pricing.md",
+        "op": "replace",
+        "old": "# Pricing",
+        "new": "# Prices"
+      }
+    ],
+    "selected": [
+      "packages/web/test/sitemap.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/core/test/money.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/sitemap.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "subprocess-directory-listing-new-content-page",
+    "edits": [
+      {
+        "file": "packages/web/content/faq.md",
+        "op": "write",
+        "content": "# FAQ\n\nAsk us anything.\n"
+      }
+    ],
+    "selected": [
+      "packages/web/test/sitemap.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/api/test/router.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/sitemap.test.ts"
+    ]
+  },
+  {
+    "name": "content-edit-also-read-by-untraced-shell-script",
+    "edits": [
+      {
+        "file": "packages/web/content/about.md",
+        "op": "replace",
+        "old": "simple things",
+        "new": "cheap things"
+      }
+    ],
+    "selected": [
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/api/test/router.test.ts",
+      "packages/core/test/money.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/copy.test.ts"
+    ]
+  },
+  {
+    "name": "vitest-setup-fixture-file",
+    "edits": [
+      {
+        "file": "packages/web/test/fixtures/session.json",
+        "op": "write",
+        "content": "{ \"user\": \"ada\", \"roles\": [] }\n"
+      }
+    ],
+    "selected": [
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/api/test/users.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/nav.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web-vitest-config-change",
+    "edits": [
+      {
+        "file": "packages/web/vitest.config.ts",
+        "op": "replace",
+        "old": "setupFiles: ['./test/setup.ts'],",
+        "new": "setupFiles: ['./test/setup.ts'],\n    testTimeout: 10000,"
+      }
+    ],
+    "selected": [
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/api/test/users.test.ts",
+      "packages/core/test/money.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-test-file",
+    "edits": [
+      {
+        "file": "packages/web/test/link.test.ts",
+        "op": "write",
+        "content": "import { expect, it } from 'vitest';\nimport { link } from '../src/render.ts';\n\nit('links', () => {\n  expect(link('/x', 'X')).toBe('<a href=\"/x\">X</a>');\n});\n"
+      }
+    ],
+    "selected": [
+      "packages/web/test/link.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/core/test/money.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-core-module",
+    "edits": [
+      {
+        "file": "packages/core/src/tax.ts",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "packages/core/test/tax.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/users.test.ts"
+    ],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "fails": [
+      "packages/core/test/tax.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/users.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "lockfile-change-runs-everything",
+    "edits": [
+      {
+        "file": "pnpm-lock.yaml",
+        "op": "append",
+        "content": "\n# touched\n"
+      }
+    ],
+    "selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "workspace-manifest-change-runs-everything",
+    "edits": [
+      {
+        "file": "pnpm-workspace.yaml",
+        "op": "append",
+        "content": "# comment\n"
+      }
+    ],
+    "selected": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "docs-only",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nMore words.\n"
+      },
+      {
+        "file": "docs/architecture.md",
+        "op": "append",
+        "content": "\nAnd a diagram.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "packages/core/test/money.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/web/test/render.test.ts",
+      "packages/web/test/sitemap.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "orphan-root-dockerfile-runs-all-suites",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "node:22-alpine",
+        "new": "node:24-alpine"
+      }
+    ],
+    "selected": [
+      "packages/core/test/money.test.ts",
+      "packages/core/test/i18n.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/web/test/render.test.ts"
+    ],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "orphan-root-script-runs-all-suites",
+    "edits": [
+      {
+        "file": "scripts/release.sh",
+        "op": "append",
+        "content": "pnpm -r publish\n"
+      }
+    ],
+    "selected": [
+      "packages/core/test/slug.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/web/test/nav.test.ts"
+    ],
+    "orphans": [
+      "scripts/release.sh"
+    ]
+  },
+  {
+    "name": "shell-script-input-traced-through-script-analysis",
+    "edits": [
+      {
+        "file": "packages/web/content/banned-words.txt",
+        "op": "append",
+        "content": "simple\n"
+      }
+    ],
+    "selected": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/web/test/sitemap.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "agent-orphan-read-by-shell-script",
+    "agent": true,
+    "edits": [
+      {
+        "file": "packages/web/content/banned-words.txt",
+        "op": "append",
+        "content": "simple\n"
+      }
+    ],
+    "selected": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/api/test/router.test.ts",
+      "packages/api/test/orders.test.ts",
+      "packages/core/test/money.test.ts",
+      "packages/core/test/tax.test.ts",
+      "packages/core/test/slug.test.ts",
+      "packages/core/test/i18n.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": [],
+    "note": "Originally an orphan for the agent; smates now traces the shell script deterministically (command-line and script analysis), so the change is attributed without the agent."
+  },
+  {
+    "name": "agent-orphan-shell-script-edit",
+    "agent": true,
+    "edits": [
+      {
+        "file": "packages/web/scripts/lint-copy.sh",
+        "op": "replace",
+        "old": "echo \"copy ok\"",
+        "new": "echo \"copy fine\""
+      }
+    ],
+    "selected": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "not_selected": [
+      "packages/web/test/render.test.ts",
+      "packages/web/test/nav.test.ts",
+      "packages/api/test/users.test.ts",
+      "packages/core/test/money.test.ts"
+    ],
+    "fails": [
+      "packages/web/test/copy.test.ts"
+    ],
+    "orphans": [],
+    "note": "Originally an orphan for the agent; smates now traces the shell script deterministically (command-line and script analysis), so the change is attributed without the agent."
+  }
+]

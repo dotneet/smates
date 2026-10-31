@@ -1,0 +1,5 @@
+[
+  { "id": 1, "name": "ACME GmbH", "email": "billing@acme.example", "region": "DE" },
+  { "id": 2, "name": "Kaisha KK", "email": "keiri@kaisha.example", "region": "JP" },
+  { "id": 3, "name": "Globex Inc", "email": "ap@globex.example", "region": "US" }
+]

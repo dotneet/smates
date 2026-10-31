@@ -1,0 +1,5 @@
+{
+  "cart.total": "Total: {amount}",
+  "cart.items": "{count} items",
+  "shipping.none": "We do not ship to {country}"
+}

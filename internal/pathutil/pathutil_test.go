@@ -1,0 +1,112 @@
+package pathutil
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+func TestRel(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(root, "src", "sub"), 0o755)
+	os.WriteFile(filepath.Join(root, "src", "a.ts"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(root, "src", "q?x.ts"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(root, "my file.ts"), []byte("x"), 0o644)
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{filepath.Join(root, "src", "a.ts"), "src/a.ts", true},
+		{filepath.Join(root, "src", "..", "src", "a.ts"), "src/a.ts", true},
+		{"file://" + filepath.ToSlash(filepath.Join(root, "src", "a.ts")), "src/a.ts", true},
+		{"file://" + filepath.ToSlash(filepath.Join(root, "my%20file.ts")), "my file.ts", true},
+		{filepath.Join(root, "src", "a.ts") + "?v=3", "src/a.ts", true},
+		{filepath.Join(root, "src", "a.ts") + "#frag", "src/a.ts", true},
+		{filepath.Join(root, "src", "q?x.ts"), "src/q?x.ts", true}, // an existing name with "?"
+		{filepath.Join(root, "missing", "x.ts"), "missing/x.ts", true},
+		{filepath.Join(root, "src", "sub"), "src/sub", true},
+		{root, "", false},
+		{filepath.Dir(root), "", false},
+		{filepath.Join(root, "..", "elsewhere"), "", false},
+		{"relative/path", "", false},
+		{"file://%zz", "", false},
+	}
+	for _, c := range cases {
+		got, ok := Rel(root, c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("Rel(%q) = %q %v, want %q %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestRelThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	os.MkdirAll(filepath.Join(root, "pkg"), 0o755)
+	os.WriteFile(filepath.Join(root, "pkg", "a.go"), []byte("x"), 0o644)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	for in, want := range map[string]string{
+		filepath.Join(link, "pkg", "a.go"):           "pkg/a.go",
+		filepath.Join(link, "pkg", "missing.json"):   "pkg/missing.json", // probe of a file that does not exist yet
+		filepath.Join(link, "newdir", "deep", "x.y"): "newdir/deep/x.y",
+	} {
+		if got, ok := Rel(root, in); !ok || got != want {
+			t.Errorf("Rel(%q) = %q %v, want %q", in, got, ok, want)
+		}
+	}
+	// A symlink inside the repository pointing outside of it is outside.
+	out := t.TempDir()
+	os.WriteFile(filepath.Join(out, "secret"), []byte("x"), 0o644)
+	os.Symlink(out, filepath.Join(root, "ext"))
+	if got, ok := Rel(root, filepath.Join(root, "ext", "secret")); ok {
+		t.Errorf("symlink to outside resolved to %q", got)
+	}
+}
+
+func TestUnderRelToJoin(t *testing.T) {
+	under := []struct {
+		p, dir string
+		want   bool
+	}{
+		{"a/b", ".", true}, {"a/b", "", true}, {"a/b", "a", true}, {"a", "a", true}, {"ab/c", "a", false}, {"a", "a/b", false},
+	}
+	for _, c := range under {
+		if Under(c.p, c.dir) != c.want {
+			t.Errorf("Under(%q,%q)", c.p, c.dir)
+		}
+	}
+	for _, c := range [][3]string{{"a/b", ".", "a/b"}, {"a/b", "", "a/b"}, {"a/b", "a", "b"}, {"a", "a", "."}, {"a/b/c", "a/b", "c"}} {
+		if got := RelTo(c[0], c[1]); got != c[2] {
+			t.Errorf("RelTo(%q,%q) = %q", c[0], c[1], got)
+		}
+	}
+	if Join("a", "../b", "c/") != "b/c" || Join(".", ".") != "." || Join("a", "..") != "." {
+		t.Error("Join")
+	}
+}
+
+func TestMatchAndVendored(t *testing.T) {
+	if !Match([]string{"x", "**/*.md"}, "docs/a/b.md") || Match([]string{"*.md"}, "docs/b.md") || Match(nil, "a") || Match([]string{"[bad"}, "a") {
+		t.Error("Match")
+	}
+	vendored := map[string]bool{
+		"node_modules/x/i.js": true, "a/node_modules/b": true, ".git/config": true, "src/__pycache__/m.pyc": true,
+		"x.pyc": true, ".venv/lib/a.py": true, ".smates/state.json.gz": true, "a/.pytest_cache/v": true, ".tox/x": true,
+		"src/node_modules_extra/x": false, "src/a.py": false, "venv/lib/a.py": false, "my.git/x": false,
+	}
+	for p, want := range vendored {
+		if IsVendored(p) != want {
+			t.Errorf("IsVendored(%q) != %v", p, want)
+		}
+	}
+}

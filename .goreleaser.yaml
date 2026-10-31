@@ -1,0 +1,61 @@
+# GoReleaser configuration (https://goreleaser.com). Releases are cut by
+# .github/workflows/release.yml when a v* tag is pushed.
+#
+# Archive names (smates_<os>_<arch>.tar.gz, .zip on Windows) and checksums.txt are
+# relied on by action.yml and install.sh: keep them in sync when changing them.
+version: 2
+
+project_name: smates
+
+builds:
+  - id: smates
+    main: ./cmd/smates
+    binary: smates
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: file times come from the commit, not the build machine.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: smates
+    ids:
+      - smates
+    name_template: smates_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  prerelease: auto

@@ -1,0 +1,647 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-inventory",
+    "edits": [
+      {
+        "file": "src/shop/inventory.py",
+        "op": "replace",
+        "old": "self.levels[sku] = have - qty",
+        "new": "self.levels[sku] = have - qty - 1"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_inventory.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_inventory.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-formatting-used-in-process-and-by-subprocesses",
+    "edits": [
+      {
+        "file": "src/shop/formatting.py",
+        "op": "replace",
+        "old": "\"USD\": \"$\"",
+        "new": "\"USD\": \"US$\""
+      }
+    ],
+    "selected": [
+      "tests/unit/test_formatting.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_reports.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_orders.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_formatting.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_reports.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "config-constant-RATE",
+    "edits": [
+      {
+        "file": "src/shop/config.py",
+        "op": "replace",
+        "old": "RATE = 0.05",
+        "new": "RATE = 0.1"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_loyalty.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_loyalty.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "session-fixture-data-catalog-json",
+    "edits": [
+      {
+        "file": "tests/data/catalog.json",
+        "op": "replace",
+        "old": "\"sample_cart_total\": 565",
+        "new": "\"sample_cart_total\": 566"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_catalog.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/integration/test_checkout.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "csv-read-at-module-import",
+    "edits": [
+      {
+        "file": "src/shop/data/products.csv",
+        "op": "replace",
+        "old": "BAN-002,Banana,45,fruit",
+        "new": "BAN-002,Banana,50,fruit"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_catalog.py",
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_reports.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_orders.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_catalog.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "plugin-name-in-settings-toml",
+    "edits": [
+      {
+        "file": "src/shop/settings.toml",
+        "op": "replace",
+        "old": "shop.plugins.bulk",
+        "new": "shop.plugins.seasonal"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_discounts.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_discounts.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamically-imported-plugin-module",
+    "edits": [
+      {
+        "file": "src/shop/plugins/bulk.py",
+        "op": "replace",
+        "old": "THRESHOLD = 3",
+        "new": "THRESHOLD = 2"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_discounts.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_discounts.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-dynamically-loaded-plugin",
+    "edits": [
+      {
+        "file": "src/shop/plugins/seasonal.py",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_discounts.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_discounts.py"
+    ],
+    "orphans": [],
+    "note": "discounts.py imports plugins dynamically; smates attributes what a module reads or imports to every test depending on that module (module granularity), so test_checkout may be selected too."
+  },
+  {
+    "name": "parametrize-cases-yaml-read-at-collection",
+    "edits": [
+      {
+        "file": "tests/data/tax_cases.yaml",
+        "op": "append",
+        "content": "  - {name: wrong, cents: 100, expected: 999}\n"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py"
+    ],
+    "fails": [
+      "tests/unit/test_pricing.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "tax-constant-monkeypatched-by-string",
+    "edits": [
+      {
+        "file": "src/shop/pricing.py",
+        "op": "replace",
+        "old": "TAX = 0.08",
+        "new": "TAX = 0.1"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_pricing.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py"
+    ],
+    "fails": [
+      "tests/unit/test_pricing.py",
+      "tests/integration/test_checkout.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "subprocess-reads-template",
+    "edits": [
+      {
+        "file": "src/shop/templates/receipt.txt",
+        "op": "replace",
+        "old": "TOTAL $total",
+        "new": "Total: $total"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_cli.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_orders.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/integration/test_cli.py"
+    ],
+    "orphans": [],
+    "note": "cli.py reads the template; test_reports also runs shop.cli (summary), and reads are attributed at module granularity."
+  },
+  {
+    "name": "directory-listing-new-fixture-file",
+    "edits": [
+      {
+        "file": "tests/fixtures/orders/order_004.json",
+        "op": "write",
+        "content": "{\"id\": \"o-004\", \"customer\": \"c-4\", \"lines\": [{\"sku\": \"APL-001\", \"qty\": 0}]}\n"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_orders.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/integration/test_orders.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-removed-fixture-files",
+    "edits": [
+      {
+        "file": "tests/fixtures/orders/order_002.json",
+        "op": "delete"
+      },
+      {
+        "file": "tests/fixtures/orders/order_003.json",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_orders.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/integration/test_orders.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-test-file",
+    "edits": [
+      {
+        "file": "tests/unit/test_receipt_math.py",
+        "op": "write",
+        "content": "from shop.pricing import with_tax\n\n\ndef test_rounding():\n    assert with_tax(1) == 1\n"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_receipt_math.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-module-used-by-test",
+    "edits": [
+      {
+        "file": "src/shop/inventory.py",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "tests/unit/test_inventory.py"
+    ],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/unit/test_inventory.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "conftest-edit-selects-all-tests-under-it",
+    "edits": [
+      {
+        "file": "tests/conftest.py",
+        "op": "append",
+        "content": "\n\n@pytest.fixture\ndef unused():\n    return 1\n"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": [],
+    "orphans": []
+  },
+  {
+    "name": "pyproject-change-runs-whole-suite",
+    "edits": [
+      {
+        "file": "pyproject.toml",
+        "op": "replace",
+        "old": "addopts = [\"--import-mode=importlib\", \"-ra\"]",
+        "new": "addopts = [\"--import-mode=importlib\", \"-ra\"]\nmarkers = [\"slow: slow tests\"]"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": []
+  },
+  {
+    "name": "lockfile-change-runs-whole-suite",
+    "edits": [
+      {
+        "file": "uv.lock",
+        "op": "append",
+        "content": "\n"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": []
+  },
+  {
+    "name": "readme-change-selects-nothing",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nMore docs.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "orphan-dockerfile-no-agent-runs-all",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "python:3.13-slim",
+        "new": "python:3.13-bookworm"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "orphan-deploy-script-no-agent-runs-all",
+    "edits": [
+      {
+        "file": "scripts/deploy.sh",
+        "op": "append",
+        "content": "echo deployed\n"
+      }
+    ],
+    "selected": [
+      "tests/integration/test_checkout.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_orders.py",
+      "tests/integration/test_reports.py",
+      "tests/unit/test_catalog.py",
+      "tests/unit/test_discounts.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "scripts/deploy.sh"
+    ]
+  },
+  {
+    "name": "agent-shell-script-run-by-test",
+    "edits": [
+      {
+        "file": "scripts/sales_report.sh",
+        "op": "replace",
+        "old": "echo \"# sales report\"",
+        "new": "echo \"# Sales Report\""
+      }
+    ],
+    "selected": [
+      "tests/integration/test_reports.py"
+    ],
+    "not_selected": [
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_loyalty.py",
+      "tests/unit/test_pricing.py"
+    ],
+    "fails": [
+      "tests/integration/test_reports.py"
+    ],
+    "orphans": [],
+    "agent": true,
+    "note": "Originally an orphan for the agent; smates now traces the shell script deterministically (command-line and script analysis), so the change is attributed without the agent."
+  },
+  {
+    "name": "agent-deploy-script-no-impact",
+    "edits": [
+      {
+        "file": "scripts/deploy.sh",
+        "op": "append",
+        "content": "echo deployed\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "tests/unit/test_inventory.py",
+      "tests/unit/test_formatting.py",
+      "tests/unit/test_loyalty.py"
+    ],
+    "orphans": [
+      "scripts/deploy.sh"
+    ],
+    "agent": true
+  }
+]

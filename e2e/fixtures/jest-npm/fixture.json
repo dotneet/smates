@@ -1,0 +1,17 @@
+{
+  "requires": [
+    "node",
+    "npm"
+  ],
+  "setup": [
+    [
+      "npm",
+      "ci",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "mutation_skip": [
+    "smates.yml"
+  ]
+}

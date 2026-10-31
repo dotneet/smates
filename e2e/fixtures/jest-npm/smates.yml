@@ -1,0 +1,7 @@
+# Exact per-file attribution while recording (one jest process per test file). Without
+# it, jest workers occasionally run two files back to back and their dependencies merge.
+version: 1
+suites:
+  - name: jest
+    runner: jest
+    isolate: true

@@ -1,0 +1,5 @@
+# Business limits. pkg/limits mirrors these values; its tests keep them in sync.
+max_items: 50
+max_discount_pct: 30
+tax_permille: 100
+currency: USD

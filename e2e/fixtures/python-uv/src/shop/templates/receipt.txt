@@ -1,0 +1,4 @@
+RECEIPT
+$name x $qty @ $unit
+TOTAL $total
+Thank you for shopping with us!

@@ -1,0 +1,7 @@
+{
+  "requires": ["go", "node", "npm", "uv", "make"],
+  "setup": [
+    ["npm", "ci", "--prefix", "web", "--no-audit", "--no-fund"],
+    ["uv", "sync", "--frozen", "--project", "tools"]
+  ]
+}

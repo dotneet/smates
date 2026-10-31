@@ -1,0 +1,4 @@
+{
+  "requires": ["node", "npm", "git", "sh"],
+  "setup": [["npm", "ci", "--no-audit", "--no-fund"]]
+}

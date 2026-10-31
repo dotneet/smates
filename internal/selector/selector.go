@@ -1,0 +1,614 @@
+// Package selector decides which tests must run.
+package selector
+
+import (
+	"fmt"
+	"path"
+	"sort"
+	"strings"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static"
+)
+
+// Reason codes.
+const (
+	ReasonAll        = "all"        // forced full run
+	ReasonNoState    = "no-state"   // nothing recorded and no base to diff against
+	ReasonNew        = "new"        // no recorded entry for this test
+	ReasonChanged    = "changed"    // an input changed since the test last passed
+	ReasonFailed     = "failed"     // the test did not pass last time
+	ReasonOrphan     = "orphan"     // orphan policy "all" pulled the suite in
+	ReasonReference  = "reference"  // a test references an orphan file by name
+	ReasonAgent      = "agent"      // the agent asked for it
+	ReasonDiff       = "diff"       // diff mode: static deps changed since base
+	ReasonUnaffected = "unaffected" // skipped
+)
+
+// Input is everything selection needs.
+type Input struct {
+	Repo   *gitx.Repo
+	Config *config.Config
+	Suites []*runner.Suite
+	State  *state.State
+	Snap   gitx.Snapshot
+	Graph  *static.Graph
+	// Base is an optional git revision for diff mode (used for tests with no entry and
+	// for orphan detection when the state has no snapshot).
+	Base string
+	// All forces every test.
+	All bool
+	// DiffUnrecorded decides tests that have no recorded entry by static analysis
+	// against Base instead of selecting them as new (local use, where the state only
+	// covers the tests that ran on this machine).
+	DiffUnrecorded bool
+}
+
+// Test is the decision for one test unit.
+type Test struct {
+	ID       string   `json:"id"`
+	Selected bool     `json:"selected"`
+	Reason   string   `json:"reason"`
+	Detail   string   `json:"detail,omitempty"`
+	Changed  []string `json:"changed,omitempty"`
+	Duration int64    `json:"duration_ms,omitempty"`
+}
+
+// Suite is the decision for one suite.
+type Suite struct {
+	Suite *runner.Suite `json:"-"`
+	Name  string        `json:"name"`
+	Tests []*Test       `json:"tests"`
+	// All is true when every test of the suite is selected (the runner may then use its
+	// own discovery instead of an explicit file list).
+	All bool `json:"all"`
+	// Deps holds D(T) for each test (repo-relative paths), used for explain and refscan.
+	Deps map[string][]string `json:"-"`
+	// Known holds D(T) without the previously recorded dependencies (static closure,
+	// inputs and rules); recording unions it with what the new run observed.
+	Known map[string][]string `json:"-"`
+	// Inputs are the files every test of the suite depends on (suite and global inputs).
+	Inputs map[string]bool `json:"-"`
+}
+
+// Result is the full selection.
+type Result struct {
+	Mode    string   `json:"mode"` // "state", "diff", "all"
+	Suites  []*Suite `json:"suites"`
+	Changed []string `json:"changed"`
+	Orphans []string `json:"orphans"`
+	Notes   []string `json:"notes,omitempty"`
+}
+
+// Selected returns the selected test IDs of a suite.
+func (s *Suite) Selected() []string {
+	var out []string
+	for _, t := range s.Tests {
+		if t.Selected {
+			out = append(out, t.ID)
+		}
+	}
+	return out
+}
+
+// Counts returns selected and total test counts.
+func (r *Result) Counts() (sel, total int) {
+	for _, s := range r.Suites {
+		for _, t := range s.Tests {
+			total++
+			if t.Selected {
+				sel++
+			}
+		}
+	}
+	return
+}
+
+// SuiteByName finds a suite.
+func (r *Result) SuiteByName(name string) *Suite {
+	for _, s := range r.Suites {
+		if s.Name == name {
+			return s
+		}
+	}
+	return nil
+}
+
+// Select computes the selection. Orphans are reported but not acted upon; callers apply
+// the orphan policy with ApplyOrphans (after an optional agent call).
+func Select(in *Input) (*Result, error) {
+	res := &Result{Mode: "state"}
+	switch {
+	case in.All:
+		res.Mode = "all"
+	case in.State.Empty() && in.Base == "":
+		res.Mode = "all"
+		res.Notes = append(res.Notes, "no recorded state and no base revision: running everything (run `smates run` once on the default branch to record)")
+	case in.State.Empty():
+		res.Mode = "diff"
+	}
+
+	files := make([]string, 0, len(in.Snap))
+	for f := range in.Snap {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+
+	// Changed files: against the recorded snapshot, or the base revision.
+	var changedSet map[string]bool
+	if res.Mode != "all" {
+		var err error
+		changedSet, err = changedFiles(in)
+		if err != nil {
+			return nil, err
+		}
+		for f := range changedSet {
+			res.Changed = append(res.Changed, f)
+		}
+		sort.Strings(res.Changed)
+	}
+
+	globalInputs := expandInputs(in.Config.Inputs, files)
+	if in.Config.Path != "" {
+		globalInputs = append(globalInputs, in.Config.Path)
+	}
+
+	var baseChanged map[string]bool
+	if in.DiffUnrecorded && in.Base != "" && res.Mode == "state" {
+		list, err := in.Repo.ChangedSince(in.Base)
+		if err != nil {
+			return nil, fmt.Errorf("diff against %s: %w", in.Base, err)
+		}
+		baseChanged = map[string]bool{}
+		for _, f := range list {
+			baseChanged[f] = true
+		}
+	}
+	covered := map[string]bool{} // union of all D(T)
+	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...)
+	if in.Repo != nil {
+		hasher.WithRoot(in.Repo.Root)
+	}
+	for _, su := range in.Suites {
+		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
+		res.Suites = append(res.Suites, sr)
+		tests := su.TestFiles(files)
+		units := su.Adapter.Units(su, tests)
+		unitFiles := groupUnitFiles(su, tests)
+		suiteInputs := append(append([]string{}, globalInputs...), suiteInputFiles(su, files)...)
+		for _, f := range suiteInputs {
+			sr.Inputs[f] = true
+		}
+		st := in.State.Suites[su.Name]
+
+		var staticStarts []string
+		for _, u := range units {
+			staticStarts = append(staticStarts, unitFiles[u]...)
+		}
+		if config.Bool(su.Static, true) && in.Graph != nil {
+			in.Graph.Warm(staticStarts)
+		}
+
+		for _, u := range units {
+			deps := map[string]bool{}
+			for _, f := range unitFiles[u] {
+				deps[f] = true
+			}
+			if config.Bool(su.Static, true) && in.Graph != nil {
+				for _, f := range in.Graph.Closure(unitFiles[u]...) {
+					deps[f] = true
+				}
+			}
+			for _, f := range suiteInputs {
+				deps[f] = true
+			}
+			for _, f := range ruleDeps(su, u, files) {
+				deps[f] = true
+			}
+			known := make([]string, 0, len(deps))
+			for f := range deps {
+				known = append(known, f)
+			}
+			sort.Strings(known)
+			sr.Known[u] = known
+			var entry *state.Entry
+			if st != nil {
+				entry = st.Tests[u]
+			}
+			if entry != nil {
+				for f := range entry.Deps {
+					deps[f] = true
+				}
+			}
+			dl := make([]string, 0, len(deps))
+			for f := range deps {
+				dl = append(dl, f)
+				covered[f] = true
+			}
+			sort.Strings(dl)
+			sr.Deps[u] = dl
+
+			t := &Test{ID: u}
+			if entry != nil {
+				t.Duration = entry.DurationMs
+			}
+			if entry == nil && res.Mode == "state" && baseChanged != nil {
+				decide(t, "diff", nil, dl, hasher, baseChanged)
+			} else {
+				decide(t, res.Mode, entry, dl, hasher, changedSet)
+			}
+			sr.Tests = append(sr.Tests, t)
+		}
+		sr.All = allSelected(sr)
+	}
+
+	if res.Mode != "all" {
+		for _, f := range res.Changed {
+			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
+				continue
+			}
+			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
+			if Covers(covered, f, existenceChanged) == "" {
+				res.Orphans = append(res.Orphans, f)
+			}
+		}
+	}
+	return res, nil
+}
+
+// IgnoreGlobs are the changes that never need tests unless a test reads them.
+func IgnoreGlobs(c *config.Config) []string {
+	return append(append([]string{}, c.Ignore...), config.DefaultIgnore...)
+}
+
+// Covers reports how a dependency set explains a change to f ("" when it does not):
+// "content" (f itself), "listing" or "existence" (a directory listing or an existence
+// check, which explain f appearing or disappearing but not edits: an edited file only
+// listed or probed may still be read by something tracing cannot see), or "tree" (a
+// command smates cannot see into ran below a directory containing f). A tree at the
+// repository root explains nothing: it would hide every change from the orphan check.
+func Covers(deps map[string]bool, f string, existenceChanged bool) string {
+	switch {
+	case deps[f]:
+		return "content"
+	case existenceChanged && deps[path.Dir(f)+"/"]:
+		return "listing"
+	case existenceChanged && deps[f+"?"]:
+		return "existence"
+	}
+	for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
+		if deps[d+"/**"] {
+			return "tree"
+		}
+	}
+	// A submodule (recorded as one entry for its commit) is explained by tests that
+	// read files inside it.
+	prefix := f + "/"
+	for d := range deps {
+		if strings.HasPrefix(d, prefix) {
+			return "content"
+		}
+	}
+	return ""
+}
+
+// existedBefore reports whether f existed when the state was recorded (or at the base
+// revision in diff mode; unknown counts as existing, which keeps f an orphan).
+func existedBefore(in *Input, f string) bool {
+	if len(in.State.Files) > 0 {
+		_, ok := in.State.Files[f]
+		return ok
+	}
+	return true
+}
+
+func decide(t *Test, mode string, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
+	switch mode {
+	case "all":
+		t.Selected, t.Reason = true, ReasonAll
+		return
+	case "diff":
+		for _, d := range deps {
+			if changed[d] {
+				t.Changed = append(t.Changed, d)
+			}
+		}
+		if len(t.Changed) > 0 {
+			t.Selected, t.Reason = true, ReasonDiff
+		} else {
+			t.Reason = ReasonUnaffected
+		}
+		return
+	}
+	if entry == nil {
+		t.Selected, t.Reason, t.Detail = true, ReasonNew, "no recorded run"
+		return
+	}
+	for _, d := range deps {
+		recorded, ok := entry.Deps[d]
+		if !ok || h.Hash(d) != recorded {
+			t.Changed = append(t.Changed, d)
+		}
+	}
+	switch {
+	case len(t.Changed) > 0:
+		t.Selected, t.Reason = true, ReasonChanged
+	case entry.Status != state.Pass:
+		t.Selected, t.Reason, t.Detail = true, ReasonFailed, "last run: "+entry.Status
+	default:
+		t.Reason = ReasonUnaffected
+	}
+}
+
+func changedFiles(in *Input) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(in.State.Files) > 0 {
+		for f, h := range in.Snap {
+			if in.State.Files[f] != h {
+				out[f] = true
+			}
+		}
+		for f := range in.State.Files {
+			if _, ok := in.Snap[f]; !ok {
+				out[f] = true // deleted
+			}
+		}
+		return out, nil
+	}
+	if in.Base == "" {
+		return out, nil
+	}
+	list, err := in.Repo.ChangedSince(in.Base)
+	if err != nil {
+		return nil, fmt.Errorf("diff against %s: %w", in.Base, err)
+	}
+	for _, f := range list {
+		out[f] = true
+	}
+	return out, nil
+}
+
+func allSelected(s *Suite) bool {
+	if len(s.Tests) == 0 {
+		return false
+	}
+	for _, t := range s.Tests {
+		if !t.Selected {
+			return false
+		}
+	}
+	return true
+}
+
+// groupUnitFiles maps unit IDs to their test files.
+func groupUnitFiles(su *runner.Suite, tests []string) map[string][]string {
+	out := map[string][]string{}
+	for _, f := range tests {
+		for _, u := range su.Adapter.Units(su, []string{f}) {
+			out[u] = append(out[u], f)
+		}
+	}
+	return out
+}
+
+func expandInputs(globs []string, files []string) []string {
+	if len(globs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		if pathutil.Match(globs, f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func suiteInputFiles(su *runner.Suite, files []string) []string {
+	var out []string
+	for _, f := range files {
+		if su.InputMatch(f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func ruleDeps(su *runner.Suite, unit string, files []string) []string {
+	var out []string
+	rel := pathutil.RelTo(unit, su.Root)
+	for _, r := range su.Rules {
+		if !pathutil.Match(r.Tests, rel) {
+			continue
+		}
+		out = append(out, expandInputs(r.Deps, files)...)
+	}
+	return out
+}
+
+// ---- orphan handling ----
+
+// Addition is a test (or a whole suite) added on top of the deterministic selection.
+type Addition struct {
+	Suite  string
+	Test   string // "" = every test of the suite
+	Reason string
+	Detail string
+}
+
+// Apply marks additional tests as selected. Unknown tests are ignored and returned.
+func (r *Result) Apply(adds []Addition) (unknown []Addition) {
+	for _, a := range adds {
+		s := r.SuiteByName(a.Suite)
+		if s == nil {
+			unknown = append(unknown, a)
+			continue
+		}
+		found := false
+		for _, t := range s.Tests {
+			if a.Test == "" || t.ID == a.Test {
+				found = true
+				if !t.Selected {
+					t.Selected, t.Reason, t.Detail, t.Changed = true, a.Reason, a.Detail, nil
+				}
+			}
+		}
+		if !found {
+			unknown = append(unknown, a)
+		}
+		s.All = allSelected(s)
+	}
+	return unknown
+}
+
+// OrphanAll returns additions that run, for each orphan, every suite it may affect:
+// suites whose root contains the orphan (a suite rooted at the repository root contains
+// every file), or all suites for orphans outside any non-root suite.
+func (r *Result) OrphanAll(orphans []string) []Addition {
+	pick := map[string]string{}
+	for _, o := range orphans {
+		matched := false
+		for _, s := range r.Suites {
+			if s.Suite.Root != "." && pathutil.Under(o, s.Suite.Root) {
+				if _, ok := pick[s.Name]; !ok {
+					pick[s.Name] = o
+				}
+				matched = true
+			}
+		}
+		if matched {
+			for _, s := range r.Suites {
+				if pathutil.Under(o, s.Suite.Root) { // root suites ("." or "")
+					if _, ok := pick[s.Name]; !ok {
+						pick[s.Name] = o
+					}
+				}
+			}
+		} else {
+			for _, s := range r.Suites {
+				if _, ok := pick[s.Name]; !ok {
+					pick[s.Name] = o
+				}
+			}
+		}
+	}
+	var adds []Addition
+	for _, s := range r.Suites {
+		if o, ok := pick[s.Name]; ok {
+			adds = append(adds, Addition{Suite: s.Name, Reason: ReasonOrphan, Detail: "unattributed change: " + o})
+		}
+	}
+	return adds
+}
+
+// References finds tests that mention an orphan file by name in their own sources or
+// dependencies (fixtures, migrations, schemas, scripts referenced as strings). It returns
+// the additions and the orphans that were explained this way.
+func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []string) {
+	if g == nil || len(orphans) == 0 {
+		return nil, nil
+	}
+	// A match on the file name selects the test; only a match that also names the
+	// file's directory (or its full path) counts as explaining the orphan, so that a
+	// same-named file elsewhere does not hide the change from the agent or the policy.
+	type needle struct{ orphan, name, qualified string }
+	var needles []needle
+	for _, o := range orphans {
+		base := path.Base(o)
+		stem := strings.TrimSuffix(base, path.Ext(base))
+		// Names that are too generic would match everything.
+		if len(stem) < 4 || genericNames[strings.ToLower(stem)] {
+			continue
+		}
+		q := o
+		if d := path.Dir(o); d != "." {
+			q = path.Base(d) + "/" + base
+		}
+		needles = append(needles, needle{o, base, q})
+	}
+	if len(needles) == 0 {
+		return nil, nil
+	}
+	// Search each distinct source file once.
+	hits := map[string]map[string]bool{} // file -> orphans referenced
+	explainedTier0 := map[string]bool{}
+	content := func(f string) string {
+		if !isSourceLike(f) {
+			return ""
+		}
+		return string(g.Read(f))
+	}
+	var adds []Addition
+	explained := map[string]bool{}
+	// Files every test of a suite depends on (package.json, lockfiles, runner config)
+	// mention scripts and setup files: a match there would select the whole suite, so
+	// they only count for orphans no test-specific file mentions.
+	for tier := 0; tier < 2; tier++ {
+		for _, s := range r.Suites {
+			for _, t := range s.Tests {
+				var why []string
+				for _, d := range s.Deps[t.ID] {
+					if s.Inputs[d] != (tier == 1) {
+						continue
+					}
+					h, ok := hits[d]
+					if !ok {
+						h = map[string]bool{}
+						c := content(d)
+						if c != "" {
+							for _, n := range needles {
+								if strings.Contains(c, n.name) {
+									h[n.orphan] = strings.Contains(c, n.qualified)
+								}
+							}
+						}
+						hits[d] = h
+					}
+					for o, qualified := range h {
+						if tier == 1 && explainedTier0[o] {
+							continue
+						}
+						why = append(why, o+" (in "+d+")")
+						if qualified {
+							explained[o] = true
+						}
+					}
+				}
+				if len(why) > 0 && !t.Selected {
+					sort.Strings(why)
+					adds = append(adds, Addition{Suite: s.Name, Test: t.ID, Reason: ReasonReference, Detail: "references " + strings.Join(why, ", ")})
+				}
+			}
+		}
+		if tier == 0 {
+			for o := range explained {
+				explainedTier0[o] = true
+			}
+		}
+	}
+	var ex []string
+	for o := range explained {
+		ex = append(ex, o)
+	}
+	sort.Strings(ex)
+	return adds, ex
+}
+
+var genericNames = map[string]bool{
+	"index": true, "main": true, "init": true, "test": true, "tests": true, "util": true, "utils": true,
+	"config": true, "readme": true, "package": true, "setup": true, "types": true, "data": true, "base": true,
+	"common": true, "helpers": true, "helper": true, "default": true, "__init__": true, "conftest": true,
+	"makefile": true, "dockerfile": true, "license": true, "schema": true, "constants": true,
+}
+
+func isSourceLike(f string) bool {
+	switch strings.ToLower(path.Ext(f)) {
+	case ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".py", ".go", ".json", ".yaml", ".yml", ".toml", ".sh", ".sql", ".vue", ".svelte":
+		return true
+	}
+	return false
+}

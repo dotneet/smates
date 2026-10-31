@@ -1,0 +1,2 @@
+Welcome aboard, {{name}}!
+Your first invoice will arrive at the start of next month.

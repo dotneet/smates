@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  e2e:
+    # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - run: go test -tags e2e ./e2e/...
+
+  action:
+    # Smoke-tests action.yml itself on every runner OS, building smates from this checkout.
+    name: action (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - id: smates
+        uses: ./
+        with:
+          version: source
+          command: version
+          cache: 'false'
+      - name: Check outputs and PATH
+        shell: bash
+        env:
+          EXIT_CODE: ${{ steps.smates.outputs.exit-code }}
+          VERSION: ${{ steps.smates.outputs.version }}
+        run: |
+          test "$EXIT_CODE" = 0
+          test "$VERSION" = source
+          smates version

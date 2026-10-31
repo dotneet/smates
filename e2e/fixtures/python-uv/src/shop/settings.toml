@@ -1,0 +1,2 @@
+[discounts]
+plugin = "shop.plugins.bulk"

@@ -1,0 +1,677 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-text-only-plugins",
+    "edits": [
+      {
+        "file": "src/text.js",
+        "op": "replace",
+        "old": "w.charAt(0).toUpperCase()",
+        "new": "w.charAt(0)"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/plugins.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-money-dependents-only",
+    "edits": [
+      {
+        "file": "src/money.js",
+        "op": "replace",
+        "old": "'$'",
+        "new": "'US$'"
+      }
+    ],
+    "selected": [
+      "test/money.test.js",
+      "test/cart.test.js",
+      "test/report.test.js",
+      "test/orders.test.js"
+    ],
+    "not_selected": [
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/plugins.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/money.test.js",
+      "test/cart.test.js",
+      "test/report.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "data-file-read-via-runtime-path",
+    "edits": [
+      {
+        "file": "data/tax-rates.json",
+        "op": "replace",
+        "old": "\"default\": 0.1",
+        "new": "\"default\": 0.2"
+      }
+    ],
+    "selected": [
+      "test/cart.test.js",
+      "test/orders.test.js"
+    ],
+    "not_selected": [
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/cart.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamic-import-computed-specifier",
+    "edits": [
+      {
+        "file": "src/plugins/exclaim.js",
+        "op": "replace",
+        "old": "s + '!'",
+        "new": "s + '?!'"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/plugins.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-new-plugin-file",
+    "edits": [
+      {
+        "file": "src/plugins/shout.js",
+        "op": "write",
+        "content": "export default function shout(s) {\n  return s.toUpperCase();\n}\n"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/plugins.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "child-process-execfile-node-script-lib",
+    "edits": [
+      {
+        "file": "src/report-format.js",
+        "op": "replace",
+        "old": "'SKU          PRICE'",
+        "new": "'SKU        PRICE'"
+      }
+    ],
+    "selected": [
+      "test/report.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/report.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "child-process-script-itself",
+    "edits": [
+      {
+        "file": "scripts/report.js",
+        "op": "replace",
+        "old": "cents: 99",
+        "new": "cents: 199"
+      }
+    ],
+    "selected": [
+      "test/report.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/report.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "shell-pipeline-child-node-lib",
+    "edits": [
+      {
+        "file": "src/stats.js",
+        "op": "replace",
+        "old": "max=${Math.max(...values)}",
+        "new": "max=${Math.min(...values)}"
+      }
+    ],
+    "selected": [
+      "test/stats.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js"
+    ],
+    "fails": [
+      "test/stats.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "createRequire-json",
+    "edits": [
+      {
+        "file": "config/defaults.json",
+        "op": "replace",
+        "old": "\"retries\": 3",
+        "new": "\"retries\": 5"
+      }
+    ],
+    "selected": [
+      "test/config.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/config.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "test-fixture-json-via-helper",
+    "edits": [
+      {
+        "file": "test/fixtures/big-order.json",
+        "op": "replace",
+        "old": "\"qty\": 2",
+        "new": "\"qty\": 3"
+      }
+    ],
+    "selected": [
+      "test/orders.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/orders.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "test-helper-edit",
+    "edits": [
+      {
+        "file": "test/helpers/orders.js",
+        "op": "replace",
+        "old": "cart.add(line.name, line.cents, line.qty)",
+        "new": "cart.add(line.name, line.cents, 1)"
+      }
+    ],
+    "selected": [
+      "test/orders.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/orders.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "existence-probe-new-locale-file",
+    "edits": [
+      {
+        "file": "locales/fr.json",
+        "op": "write",
+        "content": "{\n  \"greeting\": \"Bonjour, {name}\",\n  \"bye\": \"Au revoir\"\n}\n"
+      }
+    ],
+    "selected": [
+      "test/i18n.test.js",
+      "test/greeting.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/i18n.test.js",
+      "test/greeting.test.js"
+    ]
+  },
+  {
+    "name": "new-test-file",
+    "edits": [
+      {
+        "file": "test/tax.test.js",
+        "op": "write",
+        "content": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { makeCart } from '../src/cart.js';\n\ntest('jp tax', () => {\n  assert.equal(makeCart('jp').add('x', 1000).tax(), 100);\n});\n"
+      }
+    ],
+    "selected": [
+      "test/tax.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-module-used-via-subprocess",
+    "edits": [
+      {
+        "file": "src/report-format.js",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "test/report.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/report.test.js"
+    ]
+  },
+  {
+    "name": "delete-dynamically-imported-plugin",
+    "edits": [
+      {
+        "file": "src/plugins/title.js",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/plugins.test.js"
+    ]
+  },
+  {
+    "name": "package-json-manifest-runs-all",
+    "edits": [
+      {
+        "file": "package.json",
+        "op": "replace",
+        "old": "\"version\": \"1.0.0\"",
+        "new": "\"version\": \"1.0.1\""
+      }
+    ],
+    "selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ]
+  },
+  {
+    "name": "lockfile-runs-all",
+    "edits": [
+      {
+        "file": "package-lock.json",
+        "op": "replace",
+        "old": "\"version\": \"1.0.0\"",
+        "new": "\"version\": \"1.0.1\""
+      }
+    ],
+    "selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ]
+  },
+  {
+    "name": "readme-nothing",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nMore docs.\n"
+      },
+      {
+        "file": "docs/architecture.md",
+        "op": "append",
+        "content": "\nSee also src/i18n.js.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dockerfile-orphan-runs-all",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "node:22-alpine",
+        "new": "node:24-alpine"
+      }
+    ],
+    "selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/manifest.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "shell-script-input-traced-through-script-analysis",
+    "edits": [
+      {
+        "file": "templates/header.txt",
+        "op": "write",
+        "content": "MANIFEST v2\n"
+      }
+    ],
+    "selected": [
+      "test/manifest.test.js"
+    ],
+    "fails": [
+      "test/manifest.test.js"
+    ],
+    "orphans": [],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ]
+  },
+  {
+    "name": "shell-script-referenced-by-name",
+    "edits": [
+      {
+        "file": "scripts/build-manifest.sh",
+        "op": "replace",
+        "old": "cat templates/header.txt",
+        "new": "echo MANIFEST v0"
+      }
+    ],
+    "selected": [
+      "test/manifest.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/manifest.test.js"
+    ]
+  },
+  {
+    "name": "agent-untraced-shell-input",
+    "agent": true,
+    "edits": [
+      {
+        "file": "templates/header.txt",
+        "op": "write",
+        "content": "MANIFEST v2\n"
+      }
+    ],
+    "selected": [
+      "test/manifest.test.js"
+    ],
+    "not_selected": [
+      "test/cart.test.js",
+      "test/config.test.js",
+      "test/duration.test.js",
+      "test/greeting.test.js",
+      "test/i18n.test.js",
+      "test/money.test.js",
+      "test/orders.test.js",
+      "test/plugins.test.js",
+      "test/report.test.js",
+      "test/stats.test.js"
+    ],
+    "fails": [
+      "test/manifest.test.js"
+    ],
+    "orphans": [],
+    "note": "Originally an orphan for the agent; smates now traces the shell script deterministically (command-line and script analysis), so the change is attributed without the agent."
+  },
+  {
+    "name": "agent-dockerfile-irrelevant",
+    "agent": true,
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "node:22-alpine",
+        "new": "node:24-alpine"
+      }
+    ],
+    "not_selected": [
+      "test/money.test.js",
+      "test/plugins.test.js",
+      "test/i18n.test.js",
+      "test/config.test.js"
+    ],
+    "orphans": [
+      "Dockerfile"
+    ]
+  }
+]

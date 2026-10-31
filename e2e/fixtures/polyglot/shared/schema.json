@@ -1,0 +1,13 @@
+{
+  "$id": "https://example.com/polyglot/order.json",
+  "title": "Order",
+  "version": 3,
+  "required": ["id", "sku", "quantity", "unit_cents"],
+  "properties": {
+    "id": {"type": "string"},
+    "sku": {"type": "string", "pattern": "^[A-Z]{3}-[0-9]{3}$"},
+    "quantity": {"type": "integer", "minimum": 1},
+    "unit_cents": {"type": "integer", "minimum": 0},
+    "note": {"type": "string"}
+  }
+}
