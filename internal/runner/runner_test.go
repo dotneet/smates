@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -611,37 +612,75 @@ func mustJSON(v any) string {
 
 // In an isolated run each unit's status is its own process's exit code: a failing
 // sibling must not leave the other units marked inferred (flake detection skips those).
+// Both isolated paths (runIsolatedNode and bun.Run) run here with a stub runner that
+// fails b.test.js; the traces name each unit on the command line of its process.
 func TestIsolatedRunStatus(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("needs sh")
 	}
-	repo := tempRepo(t, "a.test.js", "b.test.js")
-	var out bytes.Buffer
-	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Command: `sh -c 'case $1 in b*) exit 1;; esac' sh`}}, Stdout: &out, Stderr: &out}
 	units := []string{"a.test.js", "b.test.js"}
-	codes, err := isolatedRun(context.Background(), rc, units, 2, func(u string, _ int) ([]string, []string, error) {
-		argv, err := rc.CommandLine(nil, []string{u})
-		return argv, nil, err
-	})
-	if err != nil || worstCode(codes) != 1 {
-		t.Fatalf("codes %v %v", codes, err)
-	}
-	for _, u := range units {
-		// observe infers every status from the worst exit code of the run.
-		o := &Observation{Status: overallStatus("", worstCode(codes)), Inferred: true}
-		setUnitExit(o, codes[u])
-		want := state.Pass
-		if u == "b.test.js" {
-			want = state.Fail
+	setup := func(t *testing.T, command string) *RunContext {
+		repo := tempRepo(t, units...)
+		td := t.TempDir()
+		os.MkdirAll(trace.V8Dir(td), 0o755)
+		start := func(pid, ppid int, argv ...string) {
+			ev := map[string]any{"k": "start", "pid": pid, "ppid": ppid, "t": 1, "argv": argv, "cwd": repo.Root}
+			os.WriteFile(filepath.Join(td, fmt.Sprintf("proc-%d-0.jsonl", pid)), []byte(mustJSON(ev)+"\n"), 0o644)
 		}
-		if o.Status != want || o.Inferred {
-			t.Errorf("%s: %+v", u, o)
+		start(10, 1)
+		for i, u := range units {
+			start(11+i, 10, "runner", filepath.Join(repo.Root, u))
+		}
+		var out bytes.Buffer
+		return &RunContext{
+			Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Command: command}}, Units: units, Record: true,
+			TraceDir: td, Stdout: &out, Stderr: &out, UnitOf: func(f string) string {
+				if slices.Contains(units, f) {
+					return f
+				}
+				return ""
+			},
+		}
+	}
+	check := func(t *testing.T, res *RunResult, err error) {
+		t.Helper()
+		if err != nil || res.ExitCode != 1 {
+			t.Fatalf("run: %+v %v", res, err)
+		}
+		for u, want := range map[string]string{"a.test.js": state.Pass, "b.test.js": state.Fail} {
+			if o := res.Observations[u]; o == nil || o.Status != want || o.Inferred {
+				t.Errorf("%s: %+v", u, o)
+			}
 		}
 	}
 
-	// A command line that cannot be built starts nothing.
+	t.Run("node", func(t *testing.T) {
+		rc := setup(t, `sh -c 'case $1 in *b.test*) exit 1;; esac' sh`)
+		res, err := runIsolatedNode(context.Background(), rc, func(u string) []string { return []string{u} }, traceOptions{unitsFromArgv: true})
+		check(t, res, err)
+	})
+	t.Run("bun", func(t *testing.T) {
+		// Like bun test --coverage: write lcov to --coverage-dir; the test file comes last.
+		rc := setup(t, `sh -c 'for a; do case $a in --coverage-dir=*) d=${a#--coverage-dir=};; esac; last=$a; done
+mkdir -p "$d" && printf "SF:%s\\nend_of_record\\n" "$last" > "$d/lcov.info"
+case $last in *b.test*) exit 1;; esac' sh`)
+		res, err := bun{}.Run(context.Background(), rc)
+		check(t, res, err)
+	})
+
+}
+
+// A command line that cannot be built starts nothing.
+func TestIsolatedRunCommandLineError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	repo := tempRepo(t)
+	var out bytes.Buffer
+	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: "."}}, Stdout: &out, Stderr: &out}
+	units := []string{"a.test.js", "b.test.js"}
 	marker := filepath.Join(repo.Root, "ran")
-	_, err = isolatedRun(context.Background(), rc, units, 1, func(u string, i int) ([]string, []string, error) {
+	_, err := isolatedRun(context.Background(), rc, units, 1, func(u string, i int) ([]string, []string, error) {
 		if i == 1 {
 			return nil, nil, fmt.Errorf("bad command")
 		}
