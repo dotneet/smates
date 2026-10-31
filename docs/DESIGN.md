@@ -217,7 +217,56 @@ budget; answers are validated against the test inventory and cached per change. 
 failure falls back to the orphan policy. An external agent CLI can be plugged in instead
 (`agent.command`).
 
-## 6. Verification
+## 6. Watch mode
+
+`smates watch` is a loop around `smates run`: every cycle loads the project, selects
+against the current state and runs with recording, so a watch session leaves the same
+state behind as the equivalent `smates run` calls, and later commands (or CI) see it.
+
+**Change detection** polls instead of subscribing to file system events. A watcher would
+be a dependency (fsnotify), needs one watch per directory (inotify limits) or per file
+(kqueue on macOS, which also misses edits inside watched directories), and still has to
+reimplement `.gitignore`. A poll is one `git --no-optional-locks status --porcelain=v2
+--branch --untracked-files=all` (cheap with git's stat cache, and with `core.fsmonitor`
+on huge trees; it takes no locks, so it never races the user's own git commands) plus an
+`lstat` of each listed file. A tree state is HEAD plus the metadata (size, mtime, mode)
+of every dirty file. Two states differ in a file when:
+
+- it is dirty in either and its metadata differs (an edit or a revert; staging and
+  committing keep the metadata, so they are no change), or
+- it is clean in both but HEAD moved and the two commits differ in it (checkout, pull,
+  reset), from `git diff --name-only old new`.
+
+Files modified within 2 seconds of a scan are "racy" (coarse file system clocks, e.g. a
+Linux tick, can give a quick same-size rewrite the same mtime): their content hash is
+recorded too, and the next scan hashes them again. The poll interval backs off to twice
+the cost of a scan on trees where `git status` is slow.
+
+**Cycles.** A change starts settling: the tree is polled until nothing changed for the
+debounce period (capped at 10× that, at least 5 s, for endless writers), and the net
+change since the last cycle starts one; a burst that nets out (a temp file come and
+gone) starts none. Changes made while a cycle runs are compared against the tree it
+started from once it ends, so they start exactly one follow-up. Changes never start a
+cycle when they are smates' state (and its temp file), vendored and cache directories,
+coverage and JUnit reports, or editor temp files; anything else does, including files the
+orphan check ignores (a test may read them). As a guard against tests that write
+non-ignored files, a change set seen during three runs in a row is taken for test
+output: it stops starting runs (until it changes while idle).
+
+**Orphans.** Every cycle after the first applies the orphan policy only to orphans among
+the files that changed since the previous cycle (the rest were handled at start, or are
+branch changes that a state without a full-run snapshot reports on every run). The agent
+is called only with `--agent`, so a burst of saves never turns into a burst of LLM calls;
+without it `orphans: agent` behaves like `smates run --no-agent`.
+
+**Stopping.** Watch runs test commands in their own process group; cancelling a cycle
+(`q`, Ctrl-C, SIGTERM, SIGHUP) sends SIGINT to the whole group and SIGKILL after 5 s, and
+kills stragglers that outlive the runner. (Tests get no stdin; one that opened the terminal itself would
+be stopped by job control, as a background job.) Keys are read in non-canonical, no-echo
+terminal mode with signals left on, so Ctrl-C keeps working (line mode where termios is
+not available).
+
+## 7. Verification
 
 - Unit tests for every package (`go test -race ./...`).
 - End-to-end fixtures per ecosystem (`e2e/fixtures/*`: vitest, pnpm monorepo, jest, node:test,
@@ -227,3 +276,6 @@ failure falls back to the orphan policy. An external agent CLI can be plugged in
   `TestMutations` breaks every source, data and script file in turn and requires that every
   test failing because of it was selected. `TestFlaky` flips a test through a file outside
   the repository and checks detection, reselection, `smates flaky` and `flaky.retry`.
+  `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while
+  it runs and checks each cycle's selection and result, that runs do not retrigger it, and
+  that SIGINT stops it.

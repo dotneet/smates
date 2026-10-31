@@ -247,7 +247,7 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 	cmd.Dir = dir
 	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), env)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
-	err := cmd.Run()
+	err := runCmd(ctx, cmd)
 	if ee, ok := err.(*exec.ExitError); ok {
 		code := ee.ExitCode()
 		if code < 0 {

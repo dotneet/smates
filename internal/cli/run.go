@@ -40,6 +40,11 @@ type runFlags struct {
 }
 
 func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
+	return runCycle(ctx, args, stdout, stderr, nil)
+}
+
+// runCycle is `smates run`; hooks (nil for `smates run`) let `smates watch` drive it.
+func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hooks *runHooks) (int, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f runFlags
@@ -83,10 +88,11 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 			all = true
 		}
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent})
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope()})
 	if err != nil {
 		return 1, err
 	}
+	hooks.onSelected(p, sel)
 	res := sel.res
 	applyShard(res, shardI, shardN)
 	printSelection(p, sel, stderr, f.explain)
