@@ -67,6 +67,9 @@ func TestApplyShard(t *testing.T) {
 					t.Errorf("n=%d: All must be cleared when sharding", n)
 				}
 				for _, tt := range s.Tests {
+					if tt.Shard < 1 || tt.Shard > n || tt.Selected && tt.Shard != i {
+						t.Errorf("n=%d i=%d: %s owned by shard %d", n, i, tt.ID, tt.Shard)
+					}
 					if tt.Selected {
 						seen[tt.ID]++
 						ms := tt.Duration

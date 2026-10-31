@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/summary"
 )
 
 // Bounds of failure hints.
@@ -269,20 +269,12 @@ func (fh *failureHints) print(w io.Writer) {
 	}
 }
 
-// writeSummary appends the hints to the markdown summary (same destination as
-// writeRunSummary).
-func (fh *failureHints) writeSummary(path string) {
+// section is the hints' part of the Markdown summary (ok is false without hints).
+func (fh *failureHints) section() (sec summary.Section, ok bool) {
 	if len(fh.list) == 0 {
-		return
-	}
-	if path == "" {
-		path = os.Getenv("GITHUB_STEP_SUMMARY")
-	}
-	if path == "" {
-		return
+		return sec, false
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n#### Failure hints (%d failing test unit(s))\n\n", len(fh.list)+fh.omitted)
 	for i, h := range fh.list {
 		if i == maxHintsShown {
 			fmt.Fprintf(&b, "- … %d more (see the JSON report)\n", len(fh.list)+fh.omitted-i)
@@ -300,12 +292,7 @@ func (fh *failureHints) writeSummary(path string) {
 			fmt.Fprintf(&b, "  - :robot: %s\n", mdEscape(explanationLine(ex)))
 		}
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	io.WriteString(f, b.String())
+	return summary.Section{Title: fmt.Sprintf("Failure hints (%d failing test unit(s))", len(fh.list)+fh.omitted), Body: b.String()}, true
 }
 
 // hintSummary is the one-line verdict of a hint.

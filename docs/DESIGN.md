@@ -192,6 +192,21 @@ histories and flake evidence (flip counts take the maximum, since both sides usu
 a past). Outcome histories and flake evidence are optional fields, so state files from
 before them still load and the format version is unchanged.
 
+### Summaries for reviewers
+
+`internal/summary` renders a selection (and, for `run`, its result) as Markdown for the
+job summary and for pull request comments (`--markdown`, `select --format markdown`,
+the action's `comment` input). The selection carries the "why" it needs: for each
+changed dependency of a selected test, `Test.Via` says how it reached the test (the test
+file itself, a suite input or rule, the static import graph, or only the traced reads of
+its last run), additions for orphans carry the orphan files (`Addition.Files`), and
+`Result.OrphanHandling` records whether each orphan was explained by a reference scan,
+the agent (or judged irrelevant by it), the `orphans` policy, or ignored. Time saved is
+the sum of the recorded durations of the skipped tests. A sharded summary covers only
+the tests its shard owns, because each shard's state only knows those. The output is
+deterministic and bounded (per-file and per-list truncation with counts, collapsible
+sections); other features append their own sections (`summary.Section`).
+
 ## 5. Agent
 
 Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`, low

@@ -16,6 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/summary"
 	"github.com/dotneet/smates/internal/trace"
 )
 
@@ -34,6 +35,7 @@ type runFlags struct {
 	dryRun   bool
 	explain  bool
 	summary  string
+	markdown string
 	report   string
 }
 
@@ -53,6 +55,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
 	fs.StringVar(&f.summary, "summary", "", "append a markdown summary to `file` (default: $GITHUB_STEP_SUMMARY on GitHub Actions)")
 	fs.StringVar(&f.report, "report", "", "write a JSON report (selection, per-test results, shadow escapes) to `file`")
+	fs.StringVar(&f.markdown, "markdown", "", "write the summary as Markdown to `file`, e.g. for a pull request comment")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -287,10 +290,24 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, sel2, total, worst)
 	}
+	sum := summaryInput(sel, shardI, shardN)
+	sum.Run = &summary.Run{ExitCode: worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: escapes, Possible: possible}
+	for _, sr := range res.Suites {
+		for _, t := range sr.Tests {
+			if ran[sr.Name][t.ID] == state.Fail {
+				sum.Run.Failed = append(sum.Run.Failed, sr.Name+": "+t.ID)
+			}
+		}
+	}
 	logFlakes(p, stderr, flakes)
-	writeRunSummary(p, sel, f.summary, worst, elapsed, escapes)
-	writeFlakySummary(f.summary, flakes)
-	failures.writeSummary(f.summary)
+	if sec, ok := flakySection(flakes); ok {
+		sum.Sections = append(sum.Sections, sec)
+	}
+	if sec, ok := failures.section(); ok {
+		sum.Sections = append(sum.Sections, sec)
+	}
+	writeRunSummary(p, f.summary, sum)
+	writeMarkdown(p, f.markdown, sum)
 	if os.Getenv("GITHUB_OUTPUT") != "" {
 		if err := writeGitHubOutputs(sel, append([]string{fmt.Sprintf("exit-code=%d", worst)}, flakyOutputs(flakes)...)...); err != nil {
 			p.logf("could not write GitHub outputs: %v", err)
@@ -355,12 +372,13 @@ func unitFiles(sr *selector.Suite, unit string) []string {
 
 type selectFlags struct {
 	commonFlags
-	all     bool
-	base    string
-	noAgent bool
-	format  string
-	shard   string
-	explain bool
+	all      bool
+	base     string
+	noAgent  bool
+	format   string
+	shard    string
+	explain  bool
+	markdown string
 }
 
 func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -371,9 +389,10 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs.BoolVar(&f.all, "all", false, "select everything")
 	fs.StringVar(&f.base, "base", "", "git revision to diff against when nothing is recorded yet")
 	fs.BoolVar(&f.noAgent, "no-agent", false, "do not call the agent for unattributed changes")
-	fs.StringVar(&f.format, "format", "text", "output: text, json, files, github")
+	fs.StringVar(&f.format, "format", "text", "output: text, json, files, github, markdown")
 	fs.StringVar(&f.shard, "shard", "", "only shard `I/N` of the selection")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
+	fs.StringVar(&f.markdown, "markdown", "", "also write the summary as Markdown to `file`, e.g. for a pull request comment")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -396,7 +415,13 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 			p.logf("could not save agent cache: %v", err)
 		}
 	}
+	sum := summaryInput(sel, shardI, shardN)
+	writeMarkdown(p, f.markdown, sum)
 	switch f.format {
+	case "markdown":
+		printSelection(p, sel, stderr, f.explain)
+		_, err := io.WriteString(stdout, summary.Markdown(sum))
+		return 0, err
 	case "text":
 		printSelection(p, sel, stderr, f.explain)
 		for _, s := range sel.res.Suites {
@@ -416,7 +441,10 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 0, enc.Encode(jsonSelection(sel))
 	case "github":
 		printSelection(p, sel, stderr, f.explain)
-		return 0, writeGitHub(p, sel)
+		if err := writeGitHubOutputs(sel); err != nil {
+			return 0, err
+		}
+		writeRunSummary(p, "", sum)
 	default:
 		return 2, usageError{fmt.Errorf("unknown format %q", f.format)}
 	}
@@ -486,14 +514,6 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 }
 
-func writeGitHub(p *project, sel *selection) error {
-	if err := writeGitHubOutputs(sel); err != nil {
-		return err
-	}
-	writeRunSummary(p, sel, "", -1, 0, nil)
-	return nil
-}
-
 // writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
 func writeGitHubOutputs(sel *selection, extra ...string) error {
 	s, t := sel.res.Counts()
@@ -528,71 +548,36 @@ func writeGitHubOutputs(sel *selection, extra ...string) error {
 	return nil
 }
 
-// writeRunSummary appends a markdown summary (GitHub step summary by default).
-func writeRunSummary(p *project, sel *selection, path string, exitCode int, elapsed time.Duration, escapes []string) {
+// summaryInput is the Markdown summary of a selection (summary.Input.Run is set by run).
+func summaryInput(sel *selection, shardI, shardN int) *summary.Input {
+	return &summary.Input{Result: sel.res, Agent: sel.agentDec, AgentNote: sel.agentNote, Shard: shardI, Shards: shardN}
+}
+
+// writeRunSummary appends the Markdown summary to path ($GITHUB_STEP_SUMMARY by default).
+func writeRunSummary(p *project, path string, in *summary.Input) {
 	if path == "" {
 		path = os.Getenv("GITHUB_STEP_SUMMARY")
 	}
 	if path == "" {
 		return
 	}
-	var b strings.Builder
-	s, t := sel.res.Counts()
-	fmt.Fprintf(&b, "### smates: %d of %d test units selected\n\n", s, t)
-	if sel.res.Mode == "all" {
-		b.WriteString("Full run (state refresh or no recorded state).\n\n")
-	}
-	b.WriteString("| suite | runner | selected | total |\n|---|---|---:|---:|\n")
-	for _, su := range sel.res.Suites {
-		fmt.Fprintf(&b, "| %s | %s | %d | %d |\n", su.Name, su.Suite.Runner, len(su.Selected()), len(su.Tests))
-	}
-	if len(sel.res.Orphans) > 0 {
-		fmt.Fprintf(&b, "\n**Unattributed changes:** %s\n", "`"+strings.Join(limit(sel.res.Orphans, 20), "`, `")+"`")
-	}
-	if sel.agentDec != nil {
-		fmt.Fprintf(&b, "\n**Agent (%s):** %s\n", sel.agentDec.Model, sel.agentDec.Summary)
-	}
-	if sel.agentNote != "" {
-		fmt.Fprintf(&b, "\n%s\n", sel.agentNote)
-	}
-	if len(escapes) > 0 {
-		fmt.Fprintf(&b, "\n:warning: **Shadow mode: %d failing test(s) would have been skipped:**\n", len(escapes))
-		for _, e := range escapes {
-			fmt.Fprintf(&b, "- `%s`\n", e)
-		}
-	}
-	if exitCode >= 0 {
-		fmt.Fprintf(&b, "\nExit code %d after %s.\n", exitCode, elapsed)
-	}
-	var sb strings.Builder
-	any := false
-	for _, su := range sel.res.Suites {
-		for _, tt := range su.Tests {
-			if tt.Selected && sel.res.Mode != "all" {
-				if !any {
-					sb.WriteString("\n<details><summary>Selected tests</summary>\n\n")
-					any = true
-				}
-				why := tt.Reason
-				if len(tt.Changed) > 0 {
-					why += ": " + strings.Join(limit(tt.Changed, 3), ", ")
-				} else if tt.Detail != "" {
-					why += ": " + oneLine(tt.Detail)
-				}
-				fmt.Fprintf(&sb, "- `%s` — %s\n", tt.ID, why)
-			}
-		}
-	}
-	if any {
-		sb.WriteString("\n</details>\n")
-	}
-	b.WriteString(sb.String())
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		p.logf("could not write summary: %v", err)
 		return
 	}
 	defer f.Close()
-	io.WriteString(f, b.String())
+	io.WriteString(f, summary.Markdown(in)+"\n")
+}
+
+// writeMarkdown writes (replaces) the Markdown summary at path, for a pull request comment.
+func writeMarkdown(p *project, path string, in *summary.Input) {
+	if path == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte(summary.Markdown(in)), 0o644); err != nil {
+		p.logf("could not write %s: %v", path, err)
+	}
 }
 
 // sortedKeys returns the sorted keys of a map.
