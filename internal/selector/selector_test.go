@@ -283,6 +283,35 @@ func TestSelectChangedListAndDetail(t *testing.T) {
 	}
 }
 
+func TestSelectVia(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"web/fixtures/users.json"}}, nil)
+	f.write("web/src/a.ts", "changed")
+	f.write("web/src/b.test.ts", "changed")
+	f.write("web/fixtures/users.json", "[1]")
+	f.write("migrations/001.sql", "changed")
+	res := f.sel(st, nil)
+	got := map[string]map[string]string{}
+	for _, tt := range res.Suites[0].Tests {
+		got[tt.ID] = tt.Via
+	}
+	want := map[string]map[string]string{
+		"web/src/a.test.ts": {"web/src/a.ts": ViaImport},
+		"web/src/b.test.ts": {"web/src/b.test.ts": ViaTest},
+		"web/src/c.test.ts": {"web/fixtures/users.json": ViaTraced},
+		"web/db/q.test.ts":  {"migrations/001.sql": ViaInput},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("via %v, want %v", got, want)
+	}
+	f.write("web/vitest.config.ts", "changed")
+	for _, tt := range f.sel(st, nil).Suites[0].Tests {
+		if tt.Via["web/vitest.config.ts"] != ViaInput {
+			t.Errorf("%s: suite input via %v", tt.ID, tt.Via)
+		}
+	}
+}
+
 func TestSelectFailedTest(t *testing.T) {
 	f := webFixture(t)
 	st := f.record(nil, map[string]string{"web/src/b.test.ts": state.Fail, "web/src/c.test.ts": state.Unknown})
@@ -608,6 +637,34 @@ func TestOrphanAll(t *testing.T) {
 	}
 }
 
+func TestOrphanFiles(t *testing.T) {
+	r := twoSuiteResult()
+	r.Suites[0].Tests[0].Selected, r.Suites[0].Tests[0].Reason = true, ReasonChanged
+	adds := r.OrphanAll([]string{"web/one", "web/two", "other"})
+	files := map[string][]string{}
+	for _, a := range adds {
+		files[a.Suite] = a.Files
+	}
+	want := map[string][]string{"web": {"web/one", "web/two", "other"}, "api": {"other"}, "root": {"web/one", "web/two", "other"}}
+	if !reflect.DeepEqual(files, want) {
+		t.Errorf("files %v, want %v", files, want)
+	}
+	r.Apply(adds)
+	a, b := r.Suites[0].Tests[0], r.Suites[0].Tests[1]
+	if a.Reason != ReasonChanged || a.Via != nil {
+		t.Errorf("an already selected test keeps its reason: %+v", a)
+	}
+	if !reflect.DeepEqual(b.Changed, want["web"]) || b.Via["other"] != ViaOrphan {
+		t.Errorf("added test: %+v", b)
+	}
+
+	r.HandleOrphans([]string{"web/one"}, OrphanReference)
+	r.HandleOrphans([]string{"web/one", "other"}, OrphanPolicy)
+	if !reflect.DeepEqual(r.OrphanHandling, map[string]string{"web/one": OrphanReference, "other": OrphanPolicy}) {
+		t.Errorf("the first handling wins: %v", r.OrphanHandling)
+	}
+}
+
 func TestOrphanAllRootSuiteOnly(t *testing.T) {
 	r := &Result{Suites: []*Suite{
 		{Name: "a", Suite: &runner.Suite{Suite: config.Suite{Root: "a"}}},
@@ -660,6 +717,9 @@ func TestReferences(t *testing.T) {
 			t.Errorf("addition %+v", a)
 		}
 		got[a.Test] = a.Detail
+		if a.Test == "t/test_users.py" && !reflect.DeepEqual(a.Files, []string{"db/users_seed.sql"}) {
+			t.Errorf("files %v", a.Files)
+		}
 	}
 	if len(got) != 2 || !strings.Contains(got["t/test_users.py"], "db/users_seed.sql (in t/test_users.py)") || !strings.Contains(got["t/test_other.py"], "conf/routes.yaml (in t/helper.py)") {
 		t.Errorf("additions %v", got)

@@ -9,6 +9,8 @@
 //     working tree) and runs `smates run --shadow`, which runs every test while evaluating
 //     the selection. A scenario passes when no failing test was left unselected
 //     (no escapes) and the expected selected / not-selected tests match.
+//     The Markdown summary of each scenario (`--markdown`) must name the selection, the
+//     orphans and every selected test (set SMATES_E2E_MARKDOWN_DIR to keep them).
 //   - TestMutations breaks every source and data file in turn (a top-level throw/raise,
 //     a compile error, corrupted data) and checks that every test that fails because of
 //     it was selected. It reports the selection rate for each mutation.
@@ -340,7 +342,9 @@ func TestScenarios(t *testing.T) {
 					for _, e := range sc.Edits {
 						r.apply(e)
 					}
-					args := []string{"run", "--shadow", "--report", r.reportPath()}
+					md := filepath.Join(r.dir, ".smates", "e2e-summary.md")
+					os.Remove(md)
+					args := []string{"run", "--shadow", "--report", r.reportPath(), "--markdown", md}
 					if !sc.Agent {
 						args = append(args, "--no-agent")
 					}
@@ -371,6 +375,11 @@ func TestScenarios(t *testing.T) {
 							problems = append(problems, "expected to fail (scenario sanity): "+id)
 						}
 					}
+					problems = append(problems, checkMarkdown(md, rep)...)
+					if dir := os.Getenv("SMATES_E2E_MARKDOWN_DIR"); dir != "" {
+						data, _ := os.ReadFile(md)
+						os.WriteFile(filepath.Join(dir, name+"--"+strings.NewReplacer("/", "_", " ", "_").Replace(sc.Name)+".md"), data, 0o644)
+					}
 					t.Logf("selected %d/%d, failing %v, orphans %v", rep.Sel, rep.Total, failing, rep.Orphans)
 					if len(problems) > 0 {
 						t.Errorf("%s\n--- smates output ---\n%s", strings.Join(problems, "\n"), tail(out, 80))
@@ -379,6 +388,37 @@ func TestScenarios(t *testing.T) {
 			}
 		})
 	}
+}
+
+// checkMarkdown checks the run's Markdown summary against its JSON report.
+func checkMarkdown(path string, rep *report) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return []string{"no markdown summary: " + err.Error()}
+	}
+	md := string(data)
+	var problems []string
+	head := fmt.Sprintf("### smates (shadow mode): %d of %d test units selected\n", rep.Sel, rep.Total)
+	if !strings.HasPrefix(md, head) {
+		problems = append(problems, fmt.Sprintf("markdown starts with %q, want %q", strings.SplitN(md, "\n", 2)[0], head))
+	}
+	for _, o := range rep.Orphans {
+		if !strings.Contains(md, "- `"+o+"` — ") {
+			problems = append(problems, "markdown does not list orphan "+o)
+		}
+	}
+	// Selected tests are named, unless a file selects a whole suite (shown as the suite).
+	if !strings.Contains(md, " test units of `") && !strings.Contains(md, "all of `") && rep.Sel <= 10 {
+		for id := range rep.selected() {
+			if !strings.Contains(md, "`"+id+"`") {
+				problems = append(problems, "markdown does not name selected test "+id)
+			}
+		}
+	}
+	if strings.Contains(md, "would **not** have been selected") != (len(rep.Escapes) > 0) {
+		problems = append(problems, "markdown and report disagree on escapes")
+	}
+	return problems
 }
 
 func TestMutations(t *testing.T) {

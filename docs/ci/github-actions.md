@@ -37,8 +37,11 @@ A complete, commented workflow is in
    branch, else the newest state of the default branch, else none (cold start).
 3. **Run** `smates <command> <args>` in `working-directory`. The step's exit code is
    the tests' exit code.
-4. **Save state**, also when tests failed (failed tests are then re-selected next
+4. **Comment** (with `comment: true`) the selection summary on the pull request.
+5. **Save state**, also when tests failed (failed tests are then re-selected next
    time), and only if the state file actually changed.
+
+Every run also writes the summary to the job page (`$GITHUB_STEP_SUMMARY`).
 
 On the default branch `smates run` runs every test and writes a complete state; every
 new pull request starts from it. On other branches it selects. Override with
@@ -66,6 +69,9 @@ branch's state.
 | `cache` | `true` | Restore/save state with the Actions cache. `false` if you store it yourself. |
 | `cache-key` | | Extra cache key component, for jobs that run different tests on the same OS (matrix entries, shards). |
 | `state-path` | `.smates` | State directory, relative to `working-directory`. Must match `state` in `smates.yml`. |
+| `comment` | `false` | `true` posts the summary as a pull request comment, updated in place ([below](#pull-request-comment)). |
+| `comment-key` | | Separates the comments of several smates jobs in one pull request. |
+| `github-token` | `github.token` | Token used for the comment. |
 
 Cache key: `smates-state-<runner.os>-[<cache-key>-]<branch>-<run_id>-<run_attempt>`,
 restored by prefix `...-<branch>-`, then `...-<default branch>-`.
@@ -80,6 +86,7 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 | `skip` | `true` when nothing was selected. |
 | `exit-code` | Exit code of the smates command. |
 | `version` | Installed smates version (`source` for source builds). |
+| `comment-url` | URL of the pull request comment, when one was posted or updated. |
 
 ## Patterns
 
@@ -150,6 +157,48 @@ at the repository root lists them). If you split suites across jobs, use `args: 
 
 **Shadow mode.** `args: --shadow` runs the full suite and reports what selection would
 have done, to build confidence before trusting it.
+
+<a id="pull-request-comment"></a>
+**Pull request comment.** `comment: true` tells reviewers what the change affects and
+why, in one comment that every push updates:
+
+```yaml
+jobs:
+  test:
+    permissions:
+      contents: read
+      pull-requests: write   # for the comment
+    steps:
+      # ...
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          comment: true
+```
+
+The comment says how many test units in which suites are affected, and how much
+recorded test time the skipped ones would have taken; for each changed file, which
+tests it selected and how they depend on it (static import, a read traced in their last
+run, a suite input, a directory listing, ...); tests selected for other reasons
+(failing last time, never recorded, picked by the agent); how each change no test
+depends on was handled (named by a test, the agent, the `orphans` policy); and, for
+`run`, the result and, in shadow mode, any escapes. Long lists are cut with counts.
+
+- It works with `command: run` and `command: select`. The comment is found again by a
+  hidden marker (`<!-- smates-summary -->`), so there is one per pull request.
+- Several smates jobs in one pull request (matrix entries, suites split across jobs)
+  overwrite each other's comment unless each sets its own `comment-key`.
+- **Shards** each post their own comment (the key gets `shard-I-of-N`), covering the
+  tests that shard owns: with a `cache-key` per shard, each shard's state only knows
+  its own tests, so one shard cannot speak for the others. If one comment matters
+  more than per-shard detail, add a separate unsharded `command: select` job with
+  `comment: true` (it has no recorded state of its own and selects by static analysis
+  against the base branch, so give it `fetch-depth: 0`).
+- The comment never fails the job. It is skipped with a notice on pull requests from
+  forks (their token is read-only; the summary is still on the job page), when the
+  token lacks `pull-requests: write`, outside `pull_request` / `pull_request_target`
+  events, and when the runner has no `gh` CLI (GitHub-hosted runners have it).
+- Outside the action, `smates run --markdown file` and `smates select --format
+  markdown` produce the same text.
 
 **Your own storage.** `cache: false` and manage `.smates/` yourself, e.g. with
 `smates state pull` / `smates state push` (see [other CI systems](other-ci.md)).

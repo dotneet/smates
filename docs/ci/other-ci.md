@@ -73,6 +73,38 @@ branches cannot read the cache of a protected `main`. Either turn off **Settings
 CI/CD > General pipelines > Use separate caches for protected branches** (only if all
 branches are trusted), or use the git-ref approach below for the fallback.
 
+### Merge request comment
+
+`smates run --markdown <file>` (or `smates select --format markdown`) writes a
+Markdown summary for reviewers: what the change affects, why each test was selected,
+how unattributed changes were handled and how much test time was skipped (see
+[the GitHub Actions comment](github-actions.md#pull-request-comment)). Write it outside
+the checkout, where it cannot count as a change. Posting it is up to the CI; on GitLab,
+with a project access token (`api` scope) in `SMATES_GITLAB_TOKEN`, this keeps one note
+per merge request up to date:
+
+```yaml
+  script:
+    - summary=$(mktemp)
+    - status=0; smates run --markdown "$summary" || status=$?
+    - |
+      if [ -n "${CI_MERGE_REQUEST_IID:-}" ] && [ -s "$summary" ]; then
+        marker='<!-- smates-summary -->'
+        api="$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes"
+        auth="PRIVATE-TOKEN: $SMATES_GITLAB_TOKEN"
+        body=$({ echo "$marker"; cat "$summary"; } | jq -Rs '{body: .}')
+        id=$(curl -fsS -H "$auth" "$api?per_page=100" |
+          jq -r --arg m "$marker" '[.[] | select(.body | startswith($m))][0].id // empty')
+        if [ -n "$id" ]; then method=PUT url="$api/$id"; else method=POST url="$api"; fi
+        curl -fsS -X "$method" -H "$auth" -H 'Content-Type: application/json' -d "$body" "$url" >/dev/null ||
+          echo "could not comment on the merge request"
+      fi
+    - exit "$status"
+```
+
+The same works on any CI with an API for pull request comments; run it only for
+merge requests from the same project (forks should not get the token).
+
 ## CircleCI
 
 ```yaml

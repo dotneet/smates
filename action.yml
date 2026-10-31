@@ -55,6 +55,25 @@ inputs:
       working-directory unless absolute. Must match the "state" setting in smates.yml.
     required: false
     default: .smates
+  comment:
+    description: >-
+      "true" to post the selection summary as a pull request comment, updated in place on
+      every run ("run" and "select" only). The job needs `pull-requests: write`. Skipped
+      with a notice on pull requests from forks, without permission, or outside
+      pull_request events; never fails the job. With --shard, each shard keeps its own
+      comment about the tests it owns.
+    required: false
+    default: 'false'
+  comment-key:
+    description: >-
+      Distinguishes the comments of several smates jobs in one pull request (matrix
+      entries, suites split across jobs). Jobs with the same key share one comment.
+    required: false
+    default: ''
+  github-token:
+    description: Token used to post the comment.
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   selected:
@@ -75,6 +94,9 @@ outputs:
   version:
     description: The smates version that was installed ("source" for source builds).
     value: ${{ steps.install.outputs.version }}
+  comment-url:
+    description: URL of the pull request comment, when one was posted or updated.
+    value: ${{ steps.comment.outputs.url }}
 
 runs:
   using: composite
@@ -368,6 +390,7 @@ runs:
         SMATES_ARGS: ${{ inputs.args }}
         SMATES_STATE_DIR: ${{ steps.resolve.outputs.state-dir }}
         SMATES_WORKDIR: ${{ inputs.working-directory }}
+        SMATES_COMMENT: ${{ inputs.comment }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key || env.ANTHROPIC_API_KEY }}
       run: |
         # No errexit: the command's exit code must be captured and reported.
@@ -395,6 +418,15 @@ runs:
             *) args="--format github $args" ;;
           esac
         fi
+        # The pull request comment's body (the next step posts it).
+        markdown=
+        if [ "$SMATES_COMMENT" = true ] && { [ "$SMATES_COMMAND" = run ] || [ "$SMATES_COMMAND" = select ]; }; then
+          markdown="$RUNNER_TEMP/smates-comment-$GITHUB_RUN_ID-$GITHUB_JOB-$RANDOM.md"
+          if command -v cygpath >/dev/null 2>&1; then
+            markdown=$(cygpath -m "$markdown")
+          fi
+          args="--markdown '$markdown' $args"
+        fi
 
         before=$(fingerprint)
         # Word-split the command and args like a shell command line (quotes allowed).
@@ -409,8 +441,81 @@ runs:
         {
           echo "exit-code=$code"
           echo "state-changed=$changed"
+          echo "markdown=$markdown"
         } >>"$GITHUB_OUTPUT"
         exit "$code"
+
+    - name: Comment on the pull request
+      id: comment
+      # always(): failing tests are worth a comment too. The comment never fails the job.
+      if: always() && inputs.comment == 'true' && steps.smates.outputs.markdown != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SMATES_MARKDOWN: ${{ steps.smates.outputs.markdown }}
+        SMATES_PR: ${{ github.event.pull_request.number }}
+        SMATES_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        SMATES_ARGS: ${{ inputs.args }}
+        SMATES_COMMENT_KEY: ${{ inputs.comment-key }}
+      run: |
+        set -uo pipefail
+        skip() {
+          echo "::notice title=smates comment::$*"
+          exit 0
+        }
+        if [ -z "$SMATES_PR" ]; then
+          echo "smates: not a pull request event ($GITHUB_EVENT_NAME): no comment"
+          exit 0
+        fi
+        if [ "$SMATES_HEAD_REPO" != "$GITHUB_REPOSITORY" ] && [ "$GITHUB_EVENT_NAME" != pull_request_target ]; then
+          skip "pull request from a fork: its token cannot comment, skipped (the summary is on the job page)"
+        fi
+        if [ ! -s "$SMATES_MARKDOWN" ]; then
+          skip "smates wrote no summary (it failed before selecting), no comment"
+        fi
+        if ! command -v gh >/dev/null 2>&1; then
+          skip "the gh CLI is not installed on this runner, no comment"
+        fi
+
+        # One comment per key and shard, found again by a hidden marker.
+        key=${SMATES_COMMENT_KEY//[^A-Za-z0-9._-]/_}
+        if [[ " $SMATES_ARGS " =~ [[:space:]]--?shard[=[:space:]]+([0-9]+)/([0-9]+) ]]; then
+          key="$key${key:+-}shard-${BASH_REMATCH[1]}-of-${BASH_REMATCH[2]}"
+        fi
+        marker="<!-- smates-summary${key:+:$key} -->"
+        tmp="$RUNNER_TEMP/smates-comment-body-$RANDOM"
+        if command -v cygpath >/dev/null 2>&1; then
+          tmp=$(cygpath -m "$tmp")
+        fi
+        body="$tmp.md"
+        err="$tmp.err"
+        {
+          echo "$marker"
+          # GitHub rejects comments over 65536 characters; smates keeps summaries far
+          # below that, but sections can grow.
+          head -c 60000 "$SMATES_MARKDOWN"
+          if [ "$(wc -c <"$SMATES_MARKDOWN")" -gt 60000 ]; then
+            printf '\n\n_(truncated: see the job summary)_\n'
+          fi
+        } >"$body"
+
+        api="repos/$GITHUB_REPOSITORY/issues"
+        if ! ids=$(gh api --paginate "$api/$SMATES_PR/comments" \
+          --jq ".[] | select(.body | startswith(\"$marker\")) | .id" 2>"$err"); then
+          skip "could not list the pull request's comments: $(head -c 300 "$err")"
+        fi
+        id=${ids%%$'\n'*}
+        if [ -n "$id" ]; then
+          method=PATCH endpoint="$api/comments/$id"
+        else
+          method=POST endpoint="$api/$SMATES_PR/comments"
+        fi
+        if ! url=$(gh api -X "$method" "$endpoint" -F "body=@$body" --jq .html_url 2>"$err"); then
+          skip "could not post the comment (the job needs 'permissions: pull-requests: write'): $(head -c 300 "$err")"
+        fi
+        echo "smates: summary comment $url"
+        echo "url=$url" >>"$GITHUB_OUTPUT"
 
     - name: Save smates state
       # always(): failed runs must be recorded too, so failing tests are re-selected.
