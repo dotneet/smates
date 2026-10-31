@@ -66,6 +66,8 @@ branch's state.
 | `args` | | Extra arguments, shell-parsed: `--shard 1/4 -- --reporter=dot`. Do not interpolate untrusted values (PR titles, branch names). |
 | `working-directory` | `.` | Where smates runs. |
 | `anthropic-api-key` | | Key for the orphan-file agent, passed only to the smates step. Falls back to `ANTHROPIC_API_KEY` in the job env. |
+| `openai-api-key` | | Same, for OpenAI (`OPENAI_API_KEY`). |
+| `openrouter-api-key` | | Same, for OpenRouter (`OPENROUTER_API_KEY`). With several keys, `agent.provider` in `smates.yml` picks one (default: Anthropic, then OpenAI, then OpenRouter). |
 | `cache` | `true` | Restore/save state with the Actions cache. `false` if you store it yourself. |
 | `cache-key` | | Extra cache key component, for jobs that run different tests on the same OS (matrix entries, shards). |
 | `state-path` | `.smates` | State directory, relative to `working-directory`. Must match `state` in `smates.yml`. |
@@ -230,8 +232,10 @@ depends on was handled (named by a test, the agent, the `orphans` policy); and, 
   orphan. Ignored files (such as `.env`) are never readable by its tools, including
   through symlinks. Untracked but not ignored files may be sent to the model as part of
   a diff.
-- **Credentials stay with smates.** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are
-  removed from the environment of test processes.
+- **Credentials stay with smates.** The API key of the agent's provider
+  (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `OPENROUTER_API_KEY`)
+  is removed from the environment of test processes; other providers' keys are left for
+  tests that need them.
 - **State is input.** The state decides what is skipped, so whoever can write the cache
   a job restores can make it skip tests. In a pull request that is the pull request
   itself, whose author can equally change the workflow or the tests; the guarantee

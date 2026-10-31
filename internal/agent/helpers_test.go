@@ -179,3 +179,15 @@ func testConfig() config.AgentConfig {
 }
 
 type configT = config.AgentConfig
+
+// clearCredentials unsets the credentials of every provider.
+func clearCredentials(t *testing.T) {
+	t.Helper()
+	for _, p := range providers {
+		t.Setenv(p.keyEnv, "")
+		if p.tokenEnv != "" {
+			t.Setenv(p.tokenEnv, "")
+		}
+		t.Setenv(p.baseURLEnv, "")
+	}
+}

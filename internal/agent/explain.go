@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -82,7 +80,7 @@ func ExplainCacheKey(req *ExplainRequest) string {
 		}
 		h.Write([]byte{'\n'})
 	}
-	field("explain", ExplainVersion, modelOf(req.Config), req.Config.Effort)
+	field("explain", ExplainVersion, ProviderOf(req.Config), ModelOf(req.Config), req.Config.Effort)
 	field("test", req.Hint.Suite, req.Hint.Test)
 	field("output", maskVolatile(cleanOutput(req.Output)))
 	for _, c := range req.Hint.Candidates {
@@ -109,77 +107,49 @@ func Explain(ctx context.Context, req *ExplainRequest) (*hints.Explanation, Usag
 	if req == nil || req.Repo == nil || req.Hint == nil {
 		return nil, Usage{}, errors.New("agent: incomplete explain request")
 	}
-	b := newAPIBackend(req.Config, os.Getenv(envBaseURL), os.Getenv(envAPIKey), os.Getenv(envAuthToken))
-	return b.explain(ctx, req)
-}
-
-type explainBody struct {
-	Model        string            `json:"model"`
-	MaxTokens    int               `json:"max_tokens"`
-	CacheControl cacheControl      `json:"cache_control"`
-	System       string            `json:"system"`
-	OutputConfig explainOutputConf `json:"output_config"`
-	Messages     []apiMessage      `json:"messages"`
-}
-
-type explainOutputConf struct {
-	Effort string        `json:"effort,omitempty"`
-	Format explainFormat `json:"format"`
-}
-
-type explainFormat struct {
-	Type   string          `json:"type"`
-	Schema json.RawMessage `json:"schema"`
+	return builtinBackend(req.Config).explain(ctx, req)
 }
 
 func (b *apiBackend) explain(ctx context.Context, req *ExplainRequest) (*hints.Explanation, Usage, error) {
 	var usage Usage
-	if b.apiKey == "" && b.authToken == "" {
-		return nil, usage, errors.New("agent: " + envAPIKey + " (or " + envAuthToken + ") is not set")
+	if !b.hasCredentials() {
+		return nil, usage, errors.New("agent: " + b.provider.credentialHint() + " is not set")
 	}
-	model := modelOf(req.Config)
-	body := explainBody{
-		Model:        model,
-		MaxTokens:    maxExplainTokens,
-		CacheControl: cacheControl{Type: "ephemeral"},
-		System:       explainSystem,
-		OutputConfig: explainOutputConf{Effort: req.Config.Effort, Format: explainFormat{Type: "json_schema", Schema: explainSchema}},
-		Messages:     []apiMessage{{Role: "user", Content: []json.RawMessage{mustJSON(textBlock{"text", explainBrief(ctx, req)})}}},
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(body); err != nil {
-		return nil, usage, fmt.Errorf("agent: encode request: %w", err)
-	}
-	data := bytes.TrimRight(buf.Bytes(), "\n")
+	model := b.modelFor(req.Config)
+	brief := explainBrief(ctx, req)
+	p := b.params(model, explainSystem, req.Config, maxExplainTokens)
 	started := time.Now()
-	resp, err := b.send(ctx, data)
+	resp, err := b.sendExplain(ctx, p, brief)
+	if err != nil && b.dropEffort(err, p) {
+		p.effort = ""
+		resp, err = b.sendExplain(ctx, p, brief)
+	}
 	if err != nil {
 		return nil, usage, fmt.Errorf("agent: %w", err)
 	}
-	usage = Usage{Turns: 1, InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
-		CacheReadTokens: resp.Usage.CacheReadInputTokens, CacheWriteTokens: resp.Usage.CacheCreationInputTokens}
-	switch resp.StopReason {
-	case "refusal":
+	usage = resp.usage
+	usage.Turns = 1
+	switch resp.stop {
+	case stopRefusal:
 		return nil, usage, errors.New("agent: model refused the request")
-	case "max_tokens":
+	case stopMaxTokens:
 		return nil, usage, errors.New("agent: explanation hit max_tokens")
 	}
-	var text strings.Builder
-	for _, raw := range resp.Content {
-		var h blockHeader
-		if json.Unmarshal(raw, &h) == nil && h.Type == "text" {
-			text.WriteString(h.Text)
-		}
-	}
-	ex, err := parseExplanation(text.String(), req)
+	ex, err := parseExplanation(resp.text, req)
 	if err != nil {
 		return nil, usage, err
 	}
 	ex.Model = model
 	logf(logWriterOf(req.Log), "explained %s %s in %s (%s)", req.Hint.Suite, req.Hint.Test, time.Since(started).Round(time.Millisecond), usageLine(usage))
 	return ex, usage, nil
+}
+
+func (b *apiBackend) sendExplain(ctx context.Context, p requestParams, brief string) (*modelReply, error) {
+	body, err := encodeBody(b.provider.dialect.explainRequest(p, brief, explainSchema))
+	if err != nil {
+		return nil, err
+	}
+	return b.send(ctx, body)
 }
 
 func logWriterOf(w io.Writer) io.Writer {
@@ -197,7 +167,7 @@ func parseExplanation(text string, req *ExplainRequest) (*hints.Explanation, err
 		Reason     string `json:"reason"`
 		Confidence string `json:"confidence"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &a); err != nil {
+	if err := json.Unmarshal([]byte(unfence(text)), &a); err != nil {
 		return nil, fmt.Errorf("agent: invalid explanation: %w", err)
 	}
 	ex := &hints.Explanation{Reason: clip(strings.Join(strings.Fields(a.Reason), " "), maxExplainReason)}
@@ -220,6 +190,18 @@ func parseExplanation(text string, req *ExplainRequest) (*hints.Explanation, err
 		}
 	}
 	return ex, nil
+}
+
+// unfence strips a Markdown code fence around a JSON answer, which models without
+// structured outputs sometimes add.
+func unfence(text string) string {
+	t := strings.TrimSpace(text)
+	if !strings.HasPrefix(t, "```") {
+		return t
+	}
+	t = strings.TrimSuffix(strings.TrimSpace(strings.TrimLeft(t, "`")), "```")
+	t = strings.TrimPrefix(t, "json")
+	return strings.TrimSpace(t)
 }
 
 // explainBrief renders the failure, the candidates and their diffs.

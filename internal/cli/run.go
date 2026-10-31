@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/hints"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
@@ -151,7 +152,7 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		rc := &runner.RunContext{
 			Repo: p.repo, Suite: sr.Suite, Units: units, All: full && shardN <= 1, Record: record, ExtraArgs: extra,
 			ShimDir: shimDir, Self: self, Stdout: stdout, Stderr: stderr,
-			IsTest: sr.Suite.IsTestFile,
+			IsTest: sr.Suite.IsTestFile, HideEnv: agent.CredentialEnv(p.cfg.Agent),
 		}
 		unitOf := unitIndex(sr)
 		rc.UnitOf = func(f string) string { return unitOf[f] }

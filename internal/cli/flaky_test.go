@@ -22,7 +22,7 @@ func TestRunFlaky(t *testing.T) {
 		t.Skip("python3 not on PATH")
 	}
 	clearCI(t)
-	t.Setenv("ANTHROPIC_API_KEY", "")
+	noAgentCredentials(t)
 	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
 	tmp := t.TempDir()
 	coin := filepath.Join(tmp, "coin")

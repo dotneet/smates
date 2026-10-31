@@ -24,6 +24,7 @@ func TestAvailable(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			clearCredentials(t)
 			t.Setenv(envAPIKey, tt.key)
 			t.Setenv(envAuthToken, tt.token)
 			got, reason := Available(tt.cfg)
@@ -41,6 +42,7 @@ func TestAvailable(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
+	clearCredentials(t)
 	t.Setenv(envAPIKey, "k")
 	t.Setenv(envBaseURL, "https://proxy.example.com/")
 	if _, ok := New(config.AgentConfig{Command: "fx ask --json"}).(*commandBackend); !ok {
@@ -60,6 +62,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestCacheKey(t *testing.T) {
+	clearCredentials(t)
 	base := func() *Request {
 		return &Request{
 			Config: config.AgentConfig{Model: "claude-haiku-5-5", Effort: "low"},
@@ -103,6 +106,7 @@ func TestCacheKey(t *testing.T) {
 		{"status", func(r *Request) { r.Orphans[1].Status = "modified" }},
 		{"extra orphan", func(r *Request) { r.Orphans = append(r.Orphans, Orphan{Path: "c.sh"}) }},
 		{"model", func(r *Request) { r.Config.Model = "claude-sonnet-5-5" }},
+		{"provider", func(r *Request) { r.Config.Provider = ProviderOpenRouter }},
 		{"effort", func(r *Request) { r.Config.Effort = "high" }},
 		{"instructions", func(r *Request) { r.Config.Instructions = "hint" }},
 		{"command", func(r *Request) { r.Config.Command = "claude -p" }},

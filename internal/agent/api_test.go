@@ -17,6 +17,7 @@ import (
 // fakeAPI emulates POST /v1/messages with a scripted sequence of replies.
 type fakeAPI struct {
 	t       *testing.T
+	path    string // expected request path (default /v1/messages)
 	mu      sync.Mutex
 	replies []fakeReply
 	reqs    []recordedRequest
@@ -41,7 +42,11 @@ type recordedRequest struct {
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+	path := f.path
+	if path == "" {
+		path = "/v1/messages"
+	}
+	if r.Method != http.MethodPost || r.URL.Path != path {
 		f.t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 		return
@@ -363,7 +368,7 @@ func TestAPIRunAllAndBearerToken(t *testing.T) {
 	fake := &fakeAPI{t: t, replies: []fakeReply{reply("tool_use", toolUse("s", "submit_selection", `{"decision":"run_all","tests":[],"no_impact":[],"summary":"CI runner image changed"}`))}}
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
-	t.Setenv(envAPIKey, "")
+	clearCredentials(t)
 	t.Setenv(envAuthToken, "tok")
 	t.Setenv(envBaseURL, srv.URL)
 	cfg := testConfig()

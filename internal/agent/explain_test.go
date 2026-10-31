@@ -154,6 +154,7 @@ func TestExplainBriefBounds(t *testing.T) {
 }
 
 func TestExplainSupported(t *testing.T) {
+	clearCredentials(t)
 	t.Setenv(envAPIKey, "k")
 	cfg := testConfig()
 	if ok, _ := ExplainSupported(cfg); !ok {

@@ -18,7 +18,7 @@ func TestParseDefaults(t *testing.T) {
 			t.Errorf("%q: defaults %+v", doc, c)
 		}
 		a := c.Agent
-		if a.Enabled != "auto" || a.Model != "claude-haiku-5-5" || a.MaxTurns != 12 || a.Timeout != 120*time.Second || a.Effort != "low" {
+		if a.Enabled != "auto" || a.Provider != "auto" || a.Model != "" || a.MaxTurns != 12 || a.Timeout != 120*time.Second || a.Effort != "low" {
 			t.Errorf("%q: agent defaults %+v", doc, a)
 		}
 	}
@@ -36,6 +36,7 @@ flaky:
   retry: 2
 agent:
   enabled: never
+  provider: openrouter
   model: m
   max_turns: 3
   timeout: 5s
@@ -65,7 +66,7 @@ suites:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Orphans != "all" || c.State != "tmp/state.json" || c.Flaky.Retry != 2 || c.Agent.Timeout != 5*time.Second || c.Agent.MaxTurns != 3 || c.Agent.Enabled != "never" {
+	if c.Orphans != "all" || c.State != "tmp/state.json" || c.Flaky.Retry != 2 || c.Agent.Timeout != 5*time.Second || c.Agent.MaxTurns != 3 || c.Agent.Enabled != "never" || c.Agent.Provider != "openrouter" || c.Agent.Model != "m" {
 		t.Errorf("top-level: %+v", c)
 	}
 	if len(c.Suites) != 3 {
@@ -94,6 +95,7 @@ func TestParseErrors(t *testing.T) {
 		{"bad version", "version: 2\n", "unsupported config version 2"},
 		{"bad orphans", "orphans: some\n", "orphans must be"},
 		{"bad agent enabled", "agent:\n  enabled: yes\n", "agent.enabled"},
+		{"bad agent provider", "agent:\n  provider: gemini\n", "agent.provider"},
 		{"missing runner", "suites:\n  - name: x\n", "runner is required"},
 		{"duplicate names", "suites:\n  - runner: go\n  - runner: go\n", "duplicate suite name"},
 		{"duplicate explicit names", "suites:\n  - {name: a, runner: go}\n  - {name: a, runner: pytest}\n", "duplicate suite name"},
