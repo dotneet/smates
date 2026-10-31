@@ -182,6 +182,7 @@ agent:
 |---|---|
 | `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--dry-run` |
 | `smates select` | selection only: `--format text\|files\|json\|github` |
+| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
@@ -189,6 +190,45 @@ agent:
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
+
+## Watch mode
+
+`smates watch` reruns only the tests a change can affect, every time you save. Unlike a
+runner's own watch mode it works for every supported runner (go test, pytest, vitest,
+jest, node --test, bun, custom) and across languages, because it uses the same traced
+dependencies as `smates run`: editing `testdata/orders.json` reruns the Go package whose
+test reads it, editing a YAML file a pytest test loads reruns that test file.
+
+```text
+$ smates watch
+smates: watching ~/src/shop for changes (go, pytest); orphan policy: agent (...)
+
+── 10:42:07 ── 1 changed: internal/store/testdata/orders.json
+smates: selected 1 of 16 test unit(s) across 2 suite(s) (94% skipped)
+    + internal/store  [changed: internal/store/testdata/orders.json]
+ok  	example.com/shop/internal/store	0.170s
+── ✓ PASS · 1 passed · 600ms
+   watching for changes (a: run all · f: rerun failed · enter: rerun · q: quit)
+```
+
+- Every cycle is a `smates run` (recording included), so the state stays fresh and
+  tests that failed are retried until they pass. It starts with one run of the current
+  selection. Flags before `--` are the usual `-C`, `--config`, `--state`, `--suite`, `-v`;
+  arguments after `--` go to the runner.
+- Changes are found by polling `git status` (no file system watcher, no dependency;
+  `.gitignore` is respected, git's own locks are never taken). Bursts — atomic saves,
+  formatters, checkouts — are debounced into one run, and files saved while tests run
+  start exactly one follow-up run. smates' state, `node_modules`, Python and Vite caches,
+  coverage, JUnit reports and editor temp files never start a run; a file that every run
+  rewrites stops retriggering after three runs in a row. On very large repositories,
+  `git config core.fsmonitor true` and `core.untrackedCache true` make each poll cheap.
+- Keys (when stdin is a terminal): `a` runs every test, `f` reruns the tests that have not
+  passed, `Enter` reruns the last selection, `q` quits. Ctrl-C stops the running tests
+  (their whole process tree) and exits.
+- Unattributed changes follow the orphan policy, but only for files changed while
+  watching, and the agent is not called unless you pass `--agent`: with `orphans: agent`,
+  an unattributed change runs the suites it can affect in full instead, as with
+  `smates run --no-agent`.
 
 ## The agent
 

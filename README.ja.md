@@ -80,4 +80,40 @@ smates deps src/cart.test.ts  # このテストは何に依存している?
 見逃していた失敗テスト」を報告します。新しいリポジトリで選択結果を信頼する前の試用や、
 夜間ジョブでの継続的な検証に使えます。
 
+## ウォッチモード
+
+`smates watch` はファイルを保存するたびに、その変更が影響しうるテストだけを再実行します。
+`smates run` と同じトレース済みの依存関係を使うため、ランナー固有のウォッチモードと違って
+対応するすべてのランナー(go test、pytest、vitest、jest、node --test、bun、custom)で、
+言語をまたいで動きます。たとえば `testdata/orders.json` を編集すればそれを読む Go パッケージの
+テストが、pytest のテストが読む YAML を編集すればそのテストファイルが再実行されます。
+
+```text
+$ smates watch
+── 10:42:07 ── 1 changed: internal/store/testdata/orders.json
+smates: selected 1 of 16 test unit(s) across 2 suite(s) (94% skipped)
+    + internal/store  [changed: internal/store/testdata/orders.json]
+ok  	example.com/shop/internal/store	0.170s
+── ✓ PASS · 1 passed · 600ms
+   watching for changes (a: run all · f: rerun failed · enter: rerun · q: quit)
+```
+
+- 各サイクルは記録付きの `smates run` そのものなので、状態は常に最新に保たれ、失敗した
+  テストは成功するまで再実行されます。起動時に現在の選択結果を一度実行します。`--` より前は
+  いつもの `-C`、`--config`、`--state`、`--suite`、`-v`、`--` 以降はランナーに渡されます。
+- 変更検出は `git status` のポーリングです(ファイルシステム監視なし・追加依存なし、
+  `.gitignore` を尊重し、git のロックは取りません)。アトミック保存・フォーマッタ・checkout
+  などの連続した変更はデバウンスして 1 回にまとめ、テスト実行中に保存されたファイルは
+  終了後にちょうど 1 回の追加実行を起こします。smates の状態ファイル、`node_modules`、
+  Python や Vite のキャッシュ、カバレッジ、JUnit レポート、エディタの一時ファイルでは
+  起動しません。毎回の実行で書き換わるファイルは 3 回連続した時点で再実行のきっかけから
+  外れます。巨大なリポジトリでは `git config core.fsmonitor true` と
+  `core.untrackedCache true` でポーリングが軽くなります。
+- キー操作(標準入力が端末のとき): `a` 全テスト実行、`f` 成功していないテストを再実行、
+  `Enter` 直前の選択を再実行、`q` 終了。Ctrl-C は実行中のテスト(子プロセスのツリー全体)を
+  止めて終了します。
+- どのテストにも紐付かない変更はオーファンポリシーに従いますが、対象はウォッチ中に変更された
+  ファイルだけで、`--agent` を付けない限りエージェントは呼びません。`orphans: agent` の場合は
+  `smates run --no-agent` と同じく、影響しうるスイートを丸ごと実行します。
+
 設定・コマンド・制限事項の詳細は [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を参照してください。

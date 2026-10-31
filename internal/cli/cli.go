@@ -34,6 +34,7 @@ const usage = `smates - run only the tests a change can affect
 Usage:
   smates run [flags] [-- runner args]   select tests, run them with tracing, update state
   smates select [flags]                 print the selection without running anything
+  smates watch [flags] [-- runner args] rerun the affected tests on every change
   smates init                           write smates.yml for this repository
   smates why <file>                     tests that depend on a file
   smates deps <test>                    files a test depends on
@@ -59,6 +60,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "run":
 		code, err = cmdRun(ctx, rest, stdout, stderr)
+	case "watch":
+		code, err = cmdWatch(ctx, rest, os.Stdin, stdout, stderr)
 	case "select":
 		code, err = cmdSelect(ctx, rest, stdout, stderr)
 	case "init":
@@ -255,6 +258,9 @@ type selectOptions struct {
 	all     bool
 	base    string
 	noAgent bool
+	// orphanScope, when non-nil, limits the orphan policy to these files (`smates
+	// watch`: files changed since the previous cycle).
+	orphanScope map[string]bool
 }
 
 // selection runs deterministic selection and the orphan policy.
@@ -296,6 +302,18 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	refs, explained := res.References(p.graph, res.Orphans)
 	res.Apply(refs)
 	remaining := subtract(res.Orphans, explained)
+	if opt.orphanScope != nil {
+		var in []string
+		for _, o := range remaining {
+			if opt.orphanScope[o] {
+				in = append(in, o)
+			}
+		}
+		if n := len(remaining) - len(in); n > 0 {
+			p.debugf("%d unattributed change(s) predate this cycle: orphan policy not applied to them", n)
+		}
+		remaining = in
+	}
 	if len(remaining) == 0 {
 		return sel, nil
 	}
