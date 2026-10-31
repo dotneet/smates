@@ -1,0 +1,152 @@
+# smates design
+
+smates ("smart test selection") selects the tests a change can actually affect, for
+TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go and
+Python (pytest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
+with no runtime dependencies; language shims (a Node preload, a Python `sitecustomize` and
+pytest plugin, reporters for vitest and jest) are embedded and extracted at run time.
+
+## 1. Core idea: per-test content fingerprints over observed inputs
+
+For every test unit `T` (a test file; a package directory for Go) smates stores the
+inputs it was observed to depend on, with the content hash (git blob SHA-1) each had when
+`T` last ran, and whether `T` passed:
+
+    T -> { deps: {key: hash}, status: pass|fail|unknown, duration_ms, commit }
+
+A test is **skipped** iff it last passed and every input it depends on hashes the same
+today. Otherwise it is selected, with the reason. This is the rule of Go's test cache and
+Bazel, but with inputs *discovered* by tracing real runs, across languages, and with
+content hashes rather than mtimes (so fresh CI checkouts do not invalidate everything).
+
+The dependency set used at selection time is
+
+    D(T) = recorded(T)        traced during T's last run (code, data, listings, probes, subprocesses)
+         ∪ static(T) at HEAD  import-graph closure computed now
+         ∪ suite inputs       lockfiles and manifests (up to the repo root), runner config,
+                              smates.yml, configured globs
+         ∪ rule deps          declared in smates.yml
+
+A key present in `D(T)` but absent from the recorded hashes counts as changed, so a newly
+added import, conftest.py, Go file in an imported package or rule target triggers the test
+without having been recorded. Hashes are compared by content, not by git diff: no history
+is needed (`fetch-depth: 1`), dirty working trees work, rebases do not matter.
+
+Dependency keys:
+
+| key | hash | recorded when |
+|---|---|---|
+| `path` | blob SHA-1 (`""` = absent) | a file is executed or read |
+| `dir/` | hash of the entry names | a directory is listed (readdir, os.listdir, Bun.Glob) |
+| `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
+| `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
+
+Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
+no input differs between that state and now, the test sees the same inputs and its outcome
+is the same — modulo nondeterminism and inputs outside the repository (services, network),
+which are handled by global inputs, rules, and the orphan path below.
+
+### Orphans: the part TIA cannot explain
+
+A changed file (relative to the state's full-tree snapshot) that no test's `D(T)` explains
+and that is not ignored is an **orphan**: a Dockerfile, a CI script, an SQL migration
+applied by a service. `Covers` defines "explains": the file itself is a dependency; or a
+listing or existence check of it, but only when the file appeared or disappeared (an
+edited file that tests merely list may still be read by something untraced); or a
+`dir/**` tree other than the repository root.
+
+Orphans go through, in order:
+
+1. **Name references**: tests whose own dependencies mention the orphan's file name
+   (fixtures, scripts, schemas referenced as strings) are selected. Files every test of a
+   suite depends on (package.json, lockfiles, runner config) only count when no
+   test-specific file mentions the orphan.
+2. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
+   adds tests or requests a full run. It can never remove deterministic selections, so a
+   wrong or manipulated answer can at worst fail to add tests for the orphan.
+3. **The orphan policy** (default without agent: run the suites the orphan can affect, by
+   suite root).
+
+Orphans handled by a run are written into the snapshot so later runs on the same branch do
+not ask again (and the agent's answers are cached per change).
+
+## 2. Tracing per ecosystem
+
+| Runner | Unit | Code deps | Data deps | Attribution |
+|---|---|---|---|---|
+| vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
+| node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly) |
+| jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
+| bun | test file | `bun test --coverage` lcov + `require.cache` per process | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
+| pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
+| go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
+
+Processes are linked to their test even through untraced intermediaries: every traced
+process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
+so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
+without a test of its own belongs to its nearest traced ancestor that has one; processes
+under a Go test binary belong to that package. Helpers of the runner itself that execute
+repository code (a server from global setup) are global dependencies; helpers that only
+read files (crawlers, transformers) are ignored.
+
+**Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
+analyzed from their command line when the child starts (`child_process.*` in Node,
+`subprocess.Popen`/`os.system` audit events in Python):
+
+- read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name;
+- shell scripts are read and analyzed the same way, following `cd`, `source`, variables,
+  for-loops, functions, `$(dirname "$0")` and read-only command substitutions;
+- anything else may read anything below its working directory: the test depends on
+  `cwd/**` (commands running outside the repository only on the paths they name).
+
+**Python module-level state.** pytest imports a module once per process, and caches
+(`functools.cache`) run once: a read made then belongs to the module that made it
+(`by` in the trace), and is given to every test that depends on that module (`ReadsBy`,
+transitively). Granularity is the module: a test that imports a module depends on the data
+that module reads.
+
+Static analysis (fast Go scanners, no toolchain): JS/TS imports, requires, dynamic imports
+with literal or template prefixes, `new URL(…, import.meta.url)`, mocks; tsconfig paths and
+workspace packages (falling back to the whole package when unresolvable). Python imports
+including relative, dynamic with literal prefixes, conftest chains. Go imports, embeds, and
+package directories named in test string literals (`go run ../../cmd/tool`).
+
+## 3. Status and shadow mode
+
+Per-file status comes from reporters (vitest, jest — injected only when the user configures
+none), the pytest plugin, process exit codes (node:test, bun, go), or a JUnit file. When only
+the run's exit code is known, failures are *inferred*: such units are re-run next time but
+not reported as definite misses. Units that ran but left no trace in a failing run are
+`unknown` (re-run next time). Go packages that fail to build are failures.
+
+`smates run --shadow` runs everything while evaluating the selection and reports
+*escapes*: tests that failed but would have been skipped (and, separately, unselected
+tests whose failure was only inferred).
+
+## 4. State
+
+`.smates/state.json.gz` (gitignored), interned JSON (paths and hashes stored once). A full
+run rewrites the snapshot and all entries; a selective run updates the entries of the tests
+it ran. Moving the state between CI runs is a thin layer: the GitHub Action uses
+`actions/cache` (branch, falling back to the default branch); other CIs can use their cache
+or `smates state push/pull` (a git ref, `refs/smates/state/<branch>`); shards are combined
+with `smates state merge`.
+
+## 5. Agent
+
+Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`, low
+effort, prompt caching, read-only tools confined to the repository and to files git does
+not ignore (`list_files`, `grep`, `read_file`, `git_diff`, `tests_for_file`, `test_deps`,
+`search_tests`, `submit_selection`). Bounded by turns, wall-clock time and an input-token
+budget; answers are validated against the test inventory and cached per change. Any
+failure falls back to the orphan policy. An external agent CLI can be plugged in instead
+(`agent.command`).
+
+## 6. Verification
+
+- Unit tests for every package (`go test -race ./...`).
+- End-to-end fixtures per ecosystem (`e2e/fixtures/*`: vitest, pnpm monorepo, jest, node:test,
+  bun, pytest/uv, Go, polyglot) full of dependencies static analysis misses.
+  `TestScenarios` checks expected selections and shadow-mode escapes per scenario;
+  `TestMutations` breaks every source, data and script file in turn and requires that every
+  test failing because of it was selected.

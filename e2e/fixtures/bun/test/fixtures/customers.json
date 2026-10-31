@@ -1,0 +1,5 @@
+[
+  { "id": "c-ada", "name": "Ada", "points": 6200, "country": "DE" },
+  { "id": "c-bob", "name": "Bob", "points": 1500, "country": "US" },
+  { "id": "c-cyd", "name": "Cyd", "points": 40, "country": "JP" }
+]

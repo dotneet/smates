@@ -1,0 +1,23 @@
+[project]
+name = "shop"
+version = "0.1.0"
+description = "A tiny shop domain: catalog, pricing, carts, discounts and receipts."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+shop = "shop.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pyyaml>=6.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "-ra"]

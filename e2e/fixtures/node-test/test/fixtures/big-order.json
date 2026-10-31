@@ -1,0 +1,7 @@
+{
+  "region": "jp",
+  "lines": [
+    { "name": "tea", "cents": 500, "qty": 2 },
+    { "name": "cup", "cents": 1500, "qty": 1 }
+  ]
+}

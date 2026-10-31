@@ -1,0 +1,610 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-calc-refactor",
+    "edits": [
+      {
+        "file": "pkg/calc/calc.go",
+        "op": "append",
+        "content": "\n// Round rounds cents to the nearest multiple of step.\nfunc Round(cents, step int) int { return (cents + step/2) / step * step }\n"
+      }
+    ],
+    "selected": [
+      "pkg/calc",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-calc-break-rounding",
+    "edits": [
+      {
+        "file": "pkg/calc/calc.go",
+        "op": "replace",
+        "old": "(cents*permille + 500) / 1000",
+        "new": "cents * permille / 1000"
+      }
+    ],
+    "selected": [
+      "pkg/calc",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/calc"
+    ]
+  },
+  {
+    "name": "external-test-package-edit",
+    "edits": [
+      {
+        "file": "pkg/api/checkout_ext_test.go",
+        "op": "replace",
+        "old": "\"INVOICE for Ada\"",
+        "new": "\"INVOICE for Bob\""
+      }
+    ],
+    "selected": [
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "render-go-edit",
+    "edits": [
+      {
+        "file": "pkg/render/render.go",
+        "op": "replace",
+        "old": "\"%d.%02d\"",
+        "new": "\"%d,%02d\""
+      }
+    ],
+    "selected": [
+      "pkg/render",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/render",
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "data-file-testdata-users",
+    "edits": [
+      {
+        "file": "internal/store/testdata/users.json",
+        "op": "replace",
+        "old": "\"Grace\", \"tier\": \"gold\"",
+        "new": "\"Grace\", \"tier\": \"bronze\""
+      }
+    ],
+    "selected": [
+      "internal/store"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "internal/store"
+    ]
+  },
+  {
+    "name": "go-embed-greeting-template",
+    "edits": [
+      {
+        "file": "pkg/render/templates/greeting.tmpl",
+        "op": "replace",
+        "old": "Hello,",
+        "new": "Hi,"
+      }
+    ],
+    "selected": [
+      "pkg/render",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/render"
+    ]
+  },
+  {
+    "name": "go-embed-invoice-template",
+    "edits": [
+      {
+        "file": "pkg/render/templates/invoice.tmpl",
+        "op": "replace",
+        "old": "total    {{money .Total}}",
+        "new": "TOTAL {{money .Total}}"
+      }
+    ],
+    "selected": [
+      "pkg/render",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/render",
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "go-embed-new-template-file",
+    "edits": [
+      {
+        "file": "pkg/render/templates/footer.tmpl",
+        "op": "write",
+        "content": "Thank you!\n"
+      }
+    ],
+    "selected": [
+      "pkg/render",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go-embed-golden-in-test-file",
+    "edits": [
+      {
+        "file": "pkg/render/testdata/invoice.golden",
+        "op": "replace",
+        "old": "INVOICE for Ada",
+        "new": "Invoice for Ada"
+      }
+    ],
+    "selected": [
+      "pkg/render"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/render"
+    ]
+  },
+  {
+    "name": "shared-config-outside-package",
+    "edits": [
+      {
+        "file": "config/settings.yaml",
+        "op": "replace",
+        "old": "max_items: 50",
+        "new": "max_items: 60"
+      }
+    ],
+    "selected": [
+      "pkg/limits",
+      "internal/configlint"
+    ],
+    "not_selected": [
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/limits"
+    ]
+  },
+  {
+    "name": "readdir-new-broken-fixture",
+    "edits": [
+      {
+        "file": "internal/store/testdata/broken.json",
+        "op": "write",
+        "content": "{not json\n"
+      }
+    ],
+    "selected": [
+      "internal/store"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "internal/store"
+    ]
+  },
+  {
+    "name": "readdir-new-valid-fixture",
+    "edits": [
+      {
+        "file": "internal/store/testdata/products.json",
+        "op": "write",
+        "content": "[{\"sku\": \"A1\", \"unit_cents\": 250}]\n"
+      }
+    ],
+    "selected": [
+      "internal/store"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "optional-override-file-created (negative lookup in a listed dir)",
+    "edits": [
+      {
+        "file": "config/settings.local.yaml",
+        "op": "write",
+        "content": "# local developer override\nmax_items: 70\n"
+      }
+    ],
+    "selected": [
+      "pkg/limits",
+      "internal/configlint"
+    ],
+    "not_selected": [
+      "pkg/api",
+      "pkg/calc",
+      "pkg/render",
+      "internal/store"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/limits"
+    ]
+  },
+  {
+    "name": "subprocess-cmd-tool-static-package-literal",
+    "edits": [
+      {
+        "file": "cmd/tool/main.go",
+        "op": "replace",
+        "old": "quote %s x%d: total=%d",
+        "new": "quote %s x%d total=%d"
+      }
+    ],
+    "selected": [
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "subprocess-cmd-tool-agent",
+    "edits": [
+      {
+        "file": "cmd/tool/main.go",
+        "op": "replace",
+        "old": "quote %s x%d: total=%d",
+        "new": "quote %s x%d total=%d"
+      }
+    ],
+    "selected": [
+      "pkg/api"
+    ],
+    "not_selected": [
+      "pkg/calc",
+      "internal/store",
+      "internal/configlint"
+    ],
+    "fails": [
+      "pkg/api"
+    ],
+    "agent": true
+  },
+  {
+    "name": "subprocess-binary-transitive-dep (cmd/tool imports pkg/limits)",
+    "edits": [
+      {
+        "file": "pkg/limits/limits.go",
+        "op": "replace",
+        "old": "MaxDiscountPct = 30",
+        "new": "MaxDiscountPct = 5"
+      },
+      {
+        "file": "config/settings.yaml",
+        "op": "replace",
+        "old": "max_discount_pct: 30",
+        "new": "max_discount_pct: 5"
+      }
+    ],
+    "selected": [
+      "pkg/limits",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "pkg/calc",
+      "pkg/render",
+      "internal/store"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "new-test-file-existing-package",
+    "edits": [
+      {
+        "file": "pkg/calc/round_test.go",
+        "op": "write",
+        "content": "package calc\n\nimport \"testing\"\n\nfunc TestTaxZero(t *testing.T) {\n\tif Tax(0, 100) != 0 {\n\t\tt.Fatal(\"Tax(0)\")\n\t}\n}\n"
+      }
+    ],
+    "selected": [
+      "pkg/calc"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-package-with-test",
+    "edits": [
+      {
+        "file": "pkg/money/money.go",
+        "op": "write",
+        "content": "package money\n\n// Cents converts whole units to cents.\nfunc Cents(units int) int { return units * 100 }\n"
+      },
+      {
+        "file": "pkg/money/money_test.go",
+        "op": "write",
+        "content": "package money\n\nimport \"testing\"\n\nfunc TestCents(t *testing.T) {\n\tif Cents(3) != 300 {\n\t\tt.Fatal(\"Cents\")\n\t}\n}\n"
+      }
+    ],
+    "selected": [
+      "pkg/money"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-source-file",
+    "edits": [
+      {
+        "file": "pkg/calc/discount.go",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "pkg/calc",
+      "pkg/api"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "pkg/calc",
+      "pkg/api"
+    ]
+  },
+  {
+    "name": "delete-testdata-file",
+    "edits": [
+      {
+        "file": "internal/store/testdata/orders.json",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "internal/store"
+    ],
+    "not_selected": [
+      "internal/configlint",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": [],
+    "fails": [
+      "internal/store"
+    ]
+  },
+  {
+    "name": "go-mod-change-runs-all",
+    "edits": [
+      {
+        "file": "go.mod",
+        "op": "append",
+        "content": "\n// pinned for reproducible builds\n"
+      }
+    ],
+    "selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "not_selected": []
+  },
+  {
+    "name": "new-go-sum-runs-all",
+    "edits": [
+      {
+        "file": "go.sum",
+        "op": "write",
+        "content": ""
+      }
+    ],
+    "selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "not_selected": []
+  },
+  {
+    "name": "docs-readme-only",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nMore docs.\n"
+      },
+      {
+        "file": "docs/usage.md",
+        "op": "append",
+        "content": "\nSee also the Dockerfile.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "orphan-dockerfile-no-agent",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "alpine:3.20",
+        "new": "alpine:3.21"
+      }
+    ],
+    "selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "orphan-script-no-agent",
+    "edits": [
+      {
+        "file": "scripts/release.sh",
+        "op": "append",
+        "content": "echo done\n"
+      }
+    ],
+    "selected": [
+      "internal/configlint",
+      "internal/store",
+      "pkg/api",
+      "pkg/calc",
+      "pkg/limits",
+      "pkg/render"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "scripts/release.sh"
+    ]
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "name": "@fx/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "sitemap": "node scripts/build-sitemap.mjs"
+  },
+  "devDependencies": {
+    "vitest": "5.0.5"
+  }
+}

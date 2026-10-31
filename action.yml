@@ -1,0 +1,423 @@
+name: smates
+description: >-
+  Run only the tests a change can affect (TypeScript/JavaScript, Go, Python), with
+  per-branch state cached between runs.
+author: dotneet
+branding:
+  icon: filter
+  color: green
+
+inputs:
+  version:
+    description: >-
+      smates release to install ("v1.2.3" or "1.2.3"), "latest", or "source" to build
+      from the action's own checkout with Go. Default: the action's ref when it is a
+      release tag (e.g. dotneet/smates@v1.2.3), otherwise "latest".
+    required: false
+    default: ''
+  command:
+    description: >-
+      smates subcommand to run: "run" (select, run and record), "select" (only compute
+      the selection; defaults to --format github), or any other subcommand.
+    required: false
+    default: run
+  args:
+    description: >-
+      Extra arguments appended to the command, parsed by the shell, e.g.
+      "--shard 1/4 -- --reporter=dot". Do not interpolate untrusted values here.
+    required: false
+    default: ''
+  working-directory:
+    description: Directory smates runs in (the repository or project root).
+    required: false
+    default: .
+  anthropic-api-key:
+    description: >-
+      Anthropic API key for the orphan-file agent. Passed as ANTHROPIC_API_KEY to the
+      smates step only. When empty, an ANTHROPIC_API_KEY already in the job env is used.
+    required: false
+    default: ''
+  cache:
+    description: >-
+      Restore and save the smates state with the Actions cache (per branch, falling back
+      to the default branch). Set to "false" to manage the state yourself.
+    required: false
+    default: 'true'
+  cache-key:
+    description: >-
+      Extra component for the state cache key. Set it when several jobs of one workflow
+      run smates on the same OS with different tests (matrix entries, shards).
+    required: false
+    default: ''
+  state-path:
+    description: >-
+      Directory holding the smates state (.smates/state.json.gz by default), relative to
+      working-directory unless absolute. Must match the "state" setting in smates.yml.
+    required: false
+    default: .smates
+
+outputs:
+  selected:
+    description: Number of selected test units.
+    value: ${{ steps.smates.outputs.selected }}
+  total:
+    description: Total number of test units known to smates.
+    value: ${{ steps.smates.outputs.total }}
+  run-all:
+    description: '"true" when every test was selected (full run, cold start or orphan policy).'
+    value: ${{ steps.smates.outputs.run-all }}
+  skip:
+    description: '"true" when nothing was selected; use it to skip downstream test jobs.'
+    value: ${{ steps.smates.outputs.skip }}
+  exit-code:
+    description: Exit code of the smates command (the tests' exit code for "run").
+    value: ${{ steps.smates.outputs.exit-code }}
+  version:
+    description: The smates version that was installed ("source" for source builds).
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve smates version and paths
+      id: resolve
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_WORKDIR: ${{ inputs.working-directory }}
+        INPUT_STATE_PATH: ${{ inputs.state-path }}
+        INPUT_CACHE_KEY: ${{ inputs.cache-key }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        SMATES_ACTION_REF: ${{ github.action_ref }}
+        SMATES_ACTION_PATH: ${{ github.action_path }}
+        SMATES_BRANCH: ${{ github.head_ref || github.ref_name }}
+        SMATES_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        repo=dotneet/smates
+
+        # Paths: use forward slashes everywhere so bash, Node-based actions and
+        # GITHUB_PATH all agree on Windows.
+        to_path() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+        }
+
+        case "$RUNNER_OS" in
+          Linux) os=linux exe='' archive_ext=tar.gz ;;
+          macOS) os=darwin exe='' archive_ext=tar.gz ;;
+          Windows) os=windows exe=.exe archive_ext=zip ;;
+          *) echo "::error::smates: unsupported runner OS '$RUNNER_OS'"; exit 1 ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) arch='' ;;
+        esac
+
+        # Version: explicit input, else the action ref when it is a release tag.
+        # github.action_ref is empty inside composite actions on some runners, so the
+        # ref is also recovered from the action path (.../_actions/<owner>/<repo>/<ref>).
+        version=$INPUT_VERSION
+        if [ -z "$version" ]; then
+          ref=${SMATES_ACTION_REF:-$(basename "$SMATES_ACTION_PATH")}
+          if [[ $ref =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$ ]]; then
+            version=$ref
+          elif [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+            # Pinned to a commit: build exactly that commit.
+            version=source
+          elif [[ $ref =~ ^v[0-9]+(\.[0-9]+)?$ ]]; then
+            # A moving major/minor tag: the newest release of that line (from the
+            # releases feed, which needs no API token).
+            version=$(curl -fsSL --retry 3 --connect-timeout 20 "https://github.com/$repo/releases.atom" 2>/dev/null |
+              grep -o "releases/tag/$ref\.[0-9][0-9.]*\"" | head -n1 | sed 's|releases/tag/||; s|"$||' || true)
+            if [ -z "$version" ]; then
+              echo "::warning::smates: no release found for $ref; building from source"
+              version=source
+            fi
+          else
+            echo "::warning::smates: action ref '$ref' is not a release tag; installing the latest release (set 'version' to pin one)"
+            version=latest
+          fi
+        fi
+        if [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          version=v$version
+        fi
+        if [ "$version" = latest ]; then
+          # The releases/latest page redirects to releases/tag/<tag>; no API token needed.
+          url=$(curl -fsSLI --retry 3 --connect-timeout 20 -o /dev/null -w '%{url_effective}' \
+            "https://github.com/$repo/releases/latest" 2>/dev/null || true)
+          tag=${url##*/releases/tag/}
+          if [ -n "$url" ] && [ "$tag" != "$url" ] && [ -n "$tag" ]; then
+            version=$tag
+          else
+            echo "::warning::smates: could not resolve the latest release; building from source"
+            version=source
+          fi
+        fi
+        if [ -z "$arch" ] && [ "$version" != source ]; then
+          echo "::warning::smates: no release binary for runner arch '$RUNNER_ARCH'; building from source"
+          version=source
+        fi
+
+        tool_root=${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}
+        if [ "$version" = source ]; then
+          bin_dir=$(to_path "$RUNNER_TEMP/smates-source/bin")
+        else
+          bin_dir=$(to_path "$tool_root/smates/$version/${os}-${arch}")
+        fi
+        present=false
+        if [ -x "$bin_dir/smates$exe" ] && [ "$version" != source ]; then
+          present=true # persistent tool cache on self-hosted runners
+        fi
+
+        # State cache key parts. Cache keys may not contain commas.
+        branch=${SMATES_BRANCH//,/_}
+        default_branch=$SMATES_DEFAULT_BRANCH
+        if [ -z "$default_branch" ]; then
+          default_branch=$(git -C "$INPUT_WORKDIR" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
+          default_branch=${default_branch#origin/}
+        fi
+        default_branch=${default_branch:-main}
+        default_branch=${default_branch//,/_}
+        prefix="smates-state-$RUNNER_OS-"
+        if [ -n "$INPUT_CACHE_KEY" ]; then
+          prefix="$prefix${INPUT_CACHE_KEY//,/_}-"
+        fi
+
+        # smates keeps its state relative to the repository root (where smates.yml
+        # lives), whatever directory it runs in.
+        top=$(git -C "$INPUT_WORKDIR" rev-parse --show-toplevel 2>/dev/null || true)
+        top=${top:-$INPUT_WORKDIR}
+        case "$INPUT_STATE_PATH" in
+          /* | [A-Za-z]:[\\/]*) state_dir=$INPUT_STATE_PATH ;;
+          *) state_dir="$top/$INPUT_STATE_PATH" ;;
+        esac
+
+        {
+          echo "repo=$repo"
+          echo "version=$version"
+          echo "os=$os"
+          echo "arch=$arch"
+          echo "exe=$exe"
+          echo "archive=smates_${os}_${arch}.$archive_ext"
+          echo "bin-dir=$bin_dir"
+          echo "present=$present"
+          echo "state-dir=$(to_path "$state_dir")"
+          # Unique per invocation, so two smates steps in one run (select, then run)
+          # both save; restores pick the newest entry by prefix.
+          echo "state-key=$prefix$branch-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${GITHUB_JOB}-${INPUT_COMMAND//[^A-Za-z0-9]/_}-$RANDOM"
+          echo "state-restore-branch=$prefix$branch-"
+          echo "state-restore-default=$prefix$default_branch-"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Restore smates binary
+      id: bin-cache
+      if: steps.resolve.outputs.version != 'source' && steps.resolve.outputs.present != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.resolve.outputs.bin-dir }}
+        key: smates-bin-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
+
+    - name: Install smates
+      id: install
+      shell: bash
+      env:
+        SMATES_REPO: ${{ steps.resolve.outputs.repo }}
+        SMATES_VERSION: ${{ steps.resolve.outputs.version }}
+        SMATES_ARCHIVE: ${{ steps.resolve.outputs.archive }}
+        SMATES_EXE: ${{ steps.resolve.outputs.exe }}
+        SMATES_BIN_DIR: ${{ steps.resolve.outputs.bin-dir }}
+        SMATES_CACHED: ${{ steps.resolve.outputs.present == 'true' || steps.bin-cache.outputs.cache-hit == 'true' }}
+        SMATES_ACTION_PATH: ${{ github.action_path }}
+        SMATES_ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        bin_dir=$SMATES_BIN_DIR
+        bin="$bin_dir/smates$SMATES_EXE"
+
+        sha256() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | awk '{print $1}'
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1" | awk '{print $1}'
+          else
+            openssl dgst -sha256 -r "$1" | awk '{print $1}'
+          fi
+        }
+
+        fetch() {
+          curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"
+        }
+
+        unpack() { # archive destdir
+          case "$1" in
+            *.tar.gz) tar -xzf "$1" -C "$2" "smates$SMATES_EXE" ;;
+            *.zip)
+              if command -v unzip >/dev/null 2>&1; then
+                unzip -oq "$1" "smates$SMATES_EXE" -d "$2"
+              elif command -v 7z >/dev/null 2>&1; then
+                7z e -y -bd -o"$2" "$1" "smates$SMATES_EXE" >/dev/null
+              else
+                pwsh -NoProfile -Command \
+                  "Expand-Archive -Force -LiteralPath '$(cygpath -w "$1")' -DestinationPath '$(cygpath -w "$2")'"
+              fi
+              ;;
+          esac
+        }
+
+        download() {
+          local base tmp expected actual
+          base="https://github.com/$SMATES_REPO/releases/download/$SMATES_VERSION"
+          tmp=$(mktemp -d)
+          echo "Downloading $base/$SMATES_ARCHIVE"
+          fetch "$base/$SMATES_ARCHIVE" "$tmp/$SMATES_ARCHIVE" || return 1
+          fetch "$base/checksums.txt" "$tmp/checksums.txt" || return 1
+          expected=$(awk -v f="$SMATES_ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/checksums.txt")
+          actual=$(sha256 "$tmp/$SMATES_ARCHIVE")
+          if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+            echo "::error::smates: checksum mismatch for $SMATES_ARCHIVE (expected '${expected:-<missing>}', got '$actual')"
+            return 2
+          fi
+          mkdir -p "$SMATES_BIN_DIR"
+          unpack "$tmp/$SMATES_ARCHIVE" "$SMATES_BIN_DIR" || return 1
+          chmod +x "$bin"
+          rm -rf "$tmp"
+        }
+
+        build_from_source() {
+          local label=source
+          # Never put a source build where a release binary is expected: tool cache
+          # directories persist on self-hosted runners.
+          if [ "$SMATES_VERSION" != source ]; then
+            bin_dir="${RUNNER_TEMP:-$(dirname "$SMATES_BIN_DIR")}/smates-source/bin"
+            bin="$bin_dir/smates$SMATES_EXE"
+          fi
+          if ! command -v go >/dev/null 2>&1; then
+            echo "::error::smates: Go is required to build from source; add actions/setup-go before this action or pin a released version"
+            return 1
+          fi
+          if [ -n "${SMATES_ACTION_REF:-}" ]; then
+            label="source-$SMATES_ACTION_REF"
+          fi
+          mkdir -p "$bin_dir"
+          echo "Building smates from $SMATES_ACTION_PATH with $(go version)"
+          (
+            cd "$SMATES_ACTION_PATH"
+            CGO_ENABLED=0 GOWORK=off GOFLAGS='' \
+              go build -trimpath -ldflags "-s -w -X main.version=$label" -o "$bin" ./cmd/smates
+          )
+        }
+
+        method=cached
+        version=$SMATES_VERSION
+        if [ "$SMATES_VERSION" = source ]; then
+          build_from_source
+          method=source
+        elif [ "$SMATES_CACHED" != true ] || [ ! -x "$bin" ]; then
+          status=0
+          download || status=$?
+          if [ "$status" -eq 0 ]; then
+            method=download
+          elif [ "$status" -eq 2 ]; then
+            exit 1 # never fall back on a checksum mismatch
+          elif command -v go >/dev/null 2>&1; then
+            echo "::warning::smates: downloading $SMATES_VERSION failed; building from source instead"
+            build_from_source
+            method=source
+            version=source
+          else
+            echo "::error::smates: could not download $SMATES_VERSION ($SMATES_ARCHIVE) and Go is not available to build from source"
+            exit 1
+          fi
+        fi
+
+        path_entry=$bin_dir
+        if command -v cygpath >/dev/null 2>&1; then
+          path_entry=$(cygpath -w "$path_entry")
+        fi
+        echo "$path_entry" >>"$GITHUB_PATH"
+        "$bin" version
+        {
+          echo "method=$method"
+          echo "version=$version"
+        } >>"$GITHUB_OUTPUT"
+
+    - name: Save smates binary
+      if: steps.install.outputs.method == 'download'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.resolve.outputs.bin-dir }}
+        key: smates-bin-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
+
+    - name: Restore smates state
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.resolve.outputs.state-dir }}
+        key: ${{ steps.resolve.outputs.state-key }}
+        restore-keys: |
+          ${{ steps.resolve.outputs.state-restore-branch }}
+          ${{ steps.resolve.outputs.state-restore-default }}
+
+    - name: smates ${{ inputs.command }}
+      id: smates
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SMATES_COMMAND: ${{ inputs.command }}
+        SMATES_ARGS: ${{ inputs.args }}
+        SMATES_STATE_DIR: ${{ steps.resolve.outputs.state-dir }}
+        SMATES_WORKDIR: ${{ inputs.working-directory }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key || env.ANTHROPIC_API_KEY }}
+      run: |
+        # No errexit: the command's exit code must be captured and reported.
+        set +e -uo pipefail
+
+        # The state dir is relative to the workspace, this step runs in working-directory.
+        state_dir=$SMATES_STATE_DIR
+        case "$state_dir" in
+          /* | [A-Za-z]:[\\/]*) ;;
+          *) state_dir="$GITHUB_WORKSPACE/$state_dir" ;;
+        esac
+        if command -v cygpath >/dev/null 2>&1; then
+          state_dir=$(cygpath -u "$state_dir")
+        fi
+        fingerprint() {
+          if [ -d "$state_dir" ]; then
+            find "$state_dir" -type f -exec cksum {} + 2>/dev/null | sort
+          fi
+        }
+
+        args=$SMATES_ARGS
+        if [ "$SMATES_COMMAND" = select ]; then
+          case " $args " in
+            *" --format"*) ;;
+            *) args="--format github $args" ;;
+          esac
+        fi
+
+        before=$(fingerprint)
+        # Word-split the command and args like a shell command line (quotes allowed).
+        eval "smates $SMATES_COMMAND $args"
+        code=$?
+        after=$(fingerprint)
+
+        changed=false
+        if [ "$before" != "$after" ]; then
+          changed=true
+        fi
+        {
+          echo "exit-code=$code"
+          echo "state-changed=$changed"
+        } >>"$GITHUB_OUTPUT"
+        exit "$code"
+
+    - name: Save smates state
+      # always(): failed runs must be recorded too, so failing tests are re-selected.
+      if: >-
+        always() && inputs.cache == 'true' &&
+        steps.smates.outputs.state-changed == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.resolve.outputs.state-dir }}
+        key: ${{ steps.resolve.outputs.state-key }}

@@ -1,0 +1,852 @@
+package selector
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static"
+)
+
+// fixture is a working tree on disk plus helpers to run selection over it.
+type fixture struct {
+	t      *testing.T
+	dir    string
+	files  map[string]string
+	cfg    *config.Config
+	suites []*runner.Suite
+}
+
+func newFixture(t *testing.T, files map[string]string) *fixture {
+	t.Helper()
+	f := &fixture{t: t, dir: t.TempDir(), files: map[string]string{}}
+	for p, c := range files {
+		f.write(p, c)
+	}
+	f.cfg = &config.Config{}
+	if err := f.cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func (f *fixture) write(p, content string) {
+	f.t.Helper()
+	abs := filepath.Join(f.dir, filepath.FromSlash(p))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	f.files[p] = content
+}
+
+func (f *fixture) remove(p string) {
+	os.Remove(filepath.Join(f.dir, filepath.FromSlash(p)))
+	delete(f.files, p)
+}
+
+func (f *fixture) snap() gitx.Snapshot {
+	s := gitx.Snapshot{}
+	for p, c := range f.files {
+		s[p] = gitx.HashBytes([]byte(c))
+	}
+	return s
+}
+
+func (f *fixture) graph() *static.Graph {
+	var files []string
+	for p := range f.files {
+		files = append(files, p)
+	}
+	return static.New(f.dir, files, static.Options{})
+}
+
+func suite(t *testing.T, cs config.Suite) *runner.Suite {
+	t.Helper()
+	a, ok := runner.Get(cs.Runner)
+	if !ok {
+		t.Fatalf("no adapter %q", cs.Runner)
+	}
+	if cs.Name == "" {
+		cs.Name = cs.Runner
+	}
+	if cs.Root == "" {
+		cs.Root = "."
+	}
+	return &runner.Suite{Suite: cs, Adapter: a}
+}
+
+func (f *fixture) sel(st *state.State, mut func(*Input)) *Result {
+	f.t.Helper()
+	in := &Input{Config: f.cfg, Suites: f.suites, State: st, Snap: f.snap(), Graph: f.graph()}
+	if mut != nil {
+		mut(in)
+	}
+	res, err := Select(in)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return res
+}
+
+// record simulates `smates run --all`: every unit runs, observing its known deps plus
+// extra[unit], with the given status (default pass). It returns the new state.
+func (f *fixture) record(extra map[string][]string, status map[string]string) *state.State {
+	f.t.Helper()
+	st := state.New()
+	res := f.sel(st, func(in *Input) { in.All = true })
+	h := NewHasher(f.snap())
+	for _, sr := range res.Suites {
+		obs := map[string]*runner.Observation{}
+		for _, tt := range sr.Tests {
+			o := &runner.Observation{Files: map[string]bool{}, Status: state.Pass, DurationMs: 10}
+			for _, x := range extra[tt.ID] {
+				o.Files[x] = true
+			}
+			if s, ok := status[tt.ID]; ok {
+				o.Status = s
+			}
+			obs[tt.ID] = o
+		}
+		Record(st, sr, obs, h, RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
+	}
+	st.Files = map[string]string(f.snap())
+	return st
+}
+
+func decisions(res *Result) map[string]string {
+	out := map[string]string{}
+	for _, s := range res.Suites {
+		for _, t := range s.Tests {
+			r := t.Reason
+			if !t.Selected {
+				r = "-" + r
+			}
+			out[t.ID] = r
+		}
+	}
+	return out
+}
+
+func webFixture(t *testing.T) *fixture {
+	f := newFixture(t, map[string]string{
+		"web/src/a.ts":            `export const a = 1`,
+		"web/src/a.test.ts":       `import { a } from "./a"`,
+		"web/src/b.ts":            `export const b = 1`,
+		"web/src/b.test.ts":       `import { b } from "./b"`,
+		"web/src/c.test.ts":       `test("c")`,
+		"web/vitest.config.ts":    `export default {}`,
+		"web/fixtures/users.json": `[]`,
+		"web/db/q.test.ts":        `test("db")`,
+		"migrations/001.sql":      `create table t()`,
+		"package-lock.json":       `{}`,
+		"README.md":               `docs`,
+		"Dockerfile":              `FROM x`,
+		"smates.yml":              `version: 1`,
+	})
+	f.cfg.Path = "smates.yml"
+	f.cfg.Inputs = []string{".tool-versions"}
+	f.suites = []*runner.Suite{suite(t, config.Suite{
+		Name: "web", Root: "web", Runner: "vitest",
+		Tests:  []string{"**/*.test.ts"},
+		Inputs: []string{"vitest.config.*", "/package-lock.json"},
+		Rules:  []config.Rule{{Tests: []string{"db/**"}, Deps: []string{"migrations/**"}}},
+	})}
+	return f
+}
+
+func TestSelectStateMode(t *testing.T) {
+	type tc struct {
+		name    string
+		edit    func(f *fixture)
+		want    map[string]string
+		orphans []string
+	}
+	base := map[string]string{
+		"web/src/a.test.ts": "-unaffected", "web/src/b.test.ts": "-unaffected", "web/src/c.test.ts": "-unaffected", "web/db/q.test.ts": "-unaffected",
+	}
+	with := func(over map[string]string) map[string]string {
+		out := map[string]string{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range over {
+			out[k] = v
+		}
+		return out
+	}
+	all := func(r string) map[string]string {
+		out := map[string]string{}
+		for k := range base {
+			out[k] = r
+		}
+		return out
+	}
+	cases := []tc{
+		{name: "nothing changed", edit: func(f *fixture) {}, want: base},
+		{name: "static dep changed", edit: func(f *fixture) { f.write("web/src/a.ts", "export const a = 2") }, want: with(map[string]string{"web/src/a.test.ts": ReasonChanged})},
+		{name: "test file changed", edit: func(f *fixture) { f.write("web/src/c.test.ts", "test('c2')") }, want: with(map[string]string{"web/src/c.test.ts": ReasonChanged})},
+		{name: "traced data file changed", edit: func(f *fixture) { f.write("web/fixtures/users.json", "[1]") }, want: with(map[string]string{"web/src/c.test.ts": ReasonChanged})},
+		{name: "traced data file deleted (also changes a listing)", edit: func(f *fixture) { f.remove("web/fixtures/users.json") }, want: with(map[string]string{"web/src/c.test.ts": ReasonChanged, "web/src/b.test.ts": ReasonChanged})},
+		{name: "new import of a file never recorded", edit: func(f *fixture) {
+			f.write("web/src/new.ts", "export const n = 1")
+			f.write("web/src/b.test.ts", `import { b } from "./b"; import { n } from "./new"`)
+		}, want: with(map[string]string{"web/src/b.test.ts": ReasonChanged})},
+		{name: "existing file newly imported", edit: func(f *fixture) {
+			f.write("web/src/b.ts", `import { a } from "./a"; export const b = a`)
+		}, want: with(map[string]string{"web/src/b.test.ts": ReasonChanged})},
+		{name: "suite input changed", edit: func(f *fixture) { f.write("web/vitest.config.ts", "export default {x:1}") }, want: all(ReasonChanged)},
+		{name: "repo-relative suite input changed", edit: func(f *fixture) { f.write("package-lock.json", `{"x":1}`) }, want: all(ReasonChanged)},
+		{name: "global input added", edit: func(f *fixture) { f.write(".tool-versions", "node 22") }, want: all(ReasonChanged)},
+		{name: "config file changed", edit: func(f *fixture) { f.write("smates.yml", "version: 1\n#") }, want: all(ReasonChanged)},
+		{name: "rule dep changed", edit: func(f *fixture) { f.write("migrations/001.sql", "create table u()") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
+		{name: "rule dep added", edit: func(f *fixture) { f.write("migrations/002.sql", "x") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
+		{name: "new test file", edit: func(f *fixture) { f.write("web/src/d.test.ts", "test('d')") }, want: with(map[string]string{"web/src/d.test.ts": ReasonNew})},
+		{name: "test file in listed directory added", edit: func(f *fixture) { f.write("web/fixtures/more.json", "{}") }, want: with(map[string]string{"web/src/b.test.ts": ReasonChanged})},
+		{name: "unrelated orphan", edit: func(f *fixture) { f.write("Dockerfile", "FROM y") }, want: base, orphans: []string{"Dockerfile"}},
+		{name: "new orphan", edit: func(f *fixture) { f.write("scripts/deploy.sh", "x") }, want: base, orphans: []string{"scripts/deploy.sh"}},
+		{name: "deleted orphan", edit: func(f *fixture) { f.remove("Dockerfile") }, want: base, orphans: []string{"Dockerfile"}},
+		{name: "default-ignored change", edit: func(f *fixture) { f.write("README.md", "more docs") }, want: base},
+		{name: "configured ignore", edit: func(f *fixture) {
+			f.cfg.Ignore = []string{"Dockerfile"}
+			f.write("Dockerfile", "FROM z")
+		}, want: base},
+		{name: "vendored change", edit: func(f *fixture) { f.write("web/node_modules/x/index.js", "x") }, want: base},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := webFixture(t)
+			st := f.record(map[string][]string{
+				"web/src/c.test.ts": {"web/fixtures/users.json"},
+				"web/src/b.test.ts": {"web/fixtures/"},
+			}, nil)
+			c.edit(f)
+			res := f.sel(st, nil)
+			if res.Mode != "state" {
+				t.Fatalf("mode %s", res.Mode)
+			}
+			if got := decisions(res); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("decisions:\n got %v\nwant %v", got, c.want)
+			}
+			if !reflect.DeepEqual(res.Orphans, c.orphans) {
+				t.Errorf("orphans %v, want %v", res.Orphans, c.orphans)
+			}
+		})
+	}
+}
+
+func TestSelectChangedListAndDetail(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	f.write("web/src/a.ts", "changed")
+	f.write("added.txt", "x")
+	f.remove("Dockerfile")
+	res := f.sel(st, nil)
+	want := []string{"Dockerfile", "added.txt", "web/src/a.ts"}
+	if !reflect.DeepEqual(res.Changed, want) {
+		t.Errorf("changed %v, want %v", res.Changed, want)
+	}
+	if !reflect.DeepEqual(res.Orphans, []string{"Dockerfile", "added.txt"}) {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	var a *Test
+	for _, tt := range res.Suites[0].Tests {
+		if tt.ID == "web/src/a.test.ts" {
+			a = tt
+		}
+	}
+	if a == nil || !reflect.DeepEqual(a.Changed, []string{"web/src/a.ts"}) || a.Duration != 10 {
+		t.Errorf("test a: %+v", a)
+	}
+	if sel, total := res.Counts(); sel != 1 || total != 4 {
+		t.Errorf("counts %d/%d", sel, total)
+	}
+	if res.Suites[0].All {
+		t.Error("suite is not fully selected")
+	}
+	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"web/src/a.test.ts"}) {
+		t.Errorf("Selected() %v", got)
+	}
+	if res.SuiteByName("web") != res.Suites[0] || res.SuiteByName("nope") != nil {
+		t.Error("SuiteByName")
+	}
+}
+
+func TestSelectFailedTest(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, map[string]string{"web/src/b.test.ts": state.Fail, "web/src/c.test.ts": state.Unknown})
+	res := f.sel(st, nil)
+	got := decisions(res)
+	if got["web/src/b.test.ts"] != ReasonFailed || got["web/src/c.test.ts"] != ReasonFailed || got["web/src/a.test.ts"] != "-unaffected" {
+		t.Errorf("%v", got)
+	}
+	for _, tt := range res.Suites[0].Tests {
+		if tt.ID == "web/src/b.test.ts" && tt.Detail != "last run: fail" {
+			t.Errorf("detail %q", tt.Detail)
+		}
+	}
+}
+
+func TestSelectStaticDisabled(t *testing.T) {
+	f := webFixture(t)
+	no := false
+	f.suites[0].Static = &no
+	st := f.record(nil, nil)
+	// a.ts is not a dep without the static graph nor a trace.
+	if deps := st.Suites["web"].Tests["web/src/a.test.ts"].Deps; deps["web/src/a.ts"] != "" {
+		t.Fatalf("static deps recorded with static: false: %v", deps)
+	}
+	f.write("web/src/a.ts", "changed")
+	res := f.sel(st, nil)
+	if got := decisions(res)["web/src/a.test.ts"]; got != "-unaffected" {
+		t.Errorf("got %s", got)
+	}
+	if !reflect.DeepEqual(res.Orphans, []string{"web/src/a.ts"}) {
+		t.Errorf("an untracked change must become an orphan: %v", res.Orphans)
+	}
+}
+
+func TestSelectAllModes(t *testing.T) {
+	f := webFixture(t)
+	t.Run("forced", func(t *testing.T) {
+		st := f.record(nil, nil)
+		f.write("Dockerfile", "changed")
+		res := f.sel(st, func(in *Input) { in.All = true })
+		if res.Mode != "all" || len(res.Changed) != 0 || len(res.Orphans) != 0 {
+			t.Fatalf("%+v", res)
+		}
+		for id, r := range decisions(res) {
+			if r != ReasonAll {
+				t.Errorf("%s: %s", id, r)
+			}
+		}
+		if !res.Suites[0].All {
+			t.Error("suite All")
+		}
+	})
+	t.Run("no state, no base", func(t *testing.T) {
+		res := f.sel(state.New(), nil)
+		if res.Mode != "all" || len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "no recorded state") {
+			t.Fatalf("%+v", res)
+		}
+		for id, r := range decisions(res) {
+			if r != ReasonAll {
+				t.Errorf("%s: %s", id, r)
+			}
+		}
+	})
+	t.Run("state with only empty suites counts as empty", func(t *testing.T) {
+		st := state.New()
+		st.Suite("web")
+		if res := f.sel(st, nil); res.Mode != "all" {
+			t.Fatalf("mode %s", res.Mode)
+		}
+	})
+}
+
+func TestSelectNoSnapshotInState(t *testing.T) {
+	// A state without a snapshot (e.g. only partial runs) detects no changed files and
+	// therefore no orphans, but per-test hashes still select changed tests.
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	st.Files = map[string]string{}
+	f.write("web/src/a.ts", "x")
+	f.write("Dockerfile", "y")
+	res := f.sel(st, nil)
+	if got := decisions(res)["web/src/a.test.ts"]; got != ReasonChanged {
+		t.Errorf("got %s", got)
+	}
+	if len(res.Changed) != 0 || len(res.Orphans) != 0 {
+		t.Errorf("changed %v orphans %v", res.Changed, res.Orphans)
+	}
+}
+
+func TestSelectRootDirectoryKey(t *testing.T) {
+	f := newFixture(t, map[string]string{"a_test.py": "", "test_x.py": "", "data.txt": "1"})
+	f.suites = []*runner.Suite{suite(t, config.Suite{Runner: "pytest", Tests: []string{"test_*.py"}})}
+	st := f.record(map[string][]string{"test_x.py": {"./"}}, nil)
+	if st.Suites["pytest"].Tests["test_x.py"].Deps["./"] == "" {
+		t.Fatalf("root directory key not recorded: %v", st.Suites["pytest"].Tests["test_x.py"].Deps)
+	}
+	f.write("new.txt", "")
+	res := f.sel(st, nil)
+	if got := decisions(res)["test_x.py"]; got != ReasonChanged {
+		t.Errorf("root listing changed: %s", got)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("a file covered by the root directory key is not an orphan: %v", res.Orphans)
+	}
+	// Changing content (not the listing) of an unrelated file is an orphan.
+	f2 := newFixture(t, map[string]string{"test_x.py": "", "data.txt": "1"})
+	f2.suites = []*runner.Suite{suite(t, config.Suite{Runner: "pytest", Tests: []string{"test_*.py"}})}
+	st2 := f2.record(nil, nil)
+	f2.write("data.txt", "2")
+	if res := f2.sel(st2, nil); !reflect.DeepEqual(res.Orphans, []string{"data.txt"}) {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+}
+
+func TestSelectGoUnits(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"go.mod":            "module example.com/m\n\ngo 1.22\n",
+		"pkg/a/a.go":        "package a\n",
+		"pkg/a/a_test.go":   "package a\n",
+		"pkg/a/b_test.go":   "package a\n",
+		"pkg/b/b.go":        "package b\nimport _ \"example.com/m/pkg/a\"\n",
+		"pkg/b/b_test.go":   "package b\n",
+		"root_test.go":      "package m\n",
+		"pkg/a/testdata/x":  "data",
+		"pkg/c/c_test.go":   "package c\nimport _ \"example.com/m/pkg/b\"\n",
+		"tools/other/go.mo": "",
+	})
+	f.suites = []*runner.Suite{suite(t, config.Suite{Runner: "go", Tests: []string{"**/*_test.go"}, Inputs: []string{"go.mod"}})}
+	st := f.record(nil, nil)
+	if got := st.Suites["go"].Tests; len(got) != 4 || got["pkg/a"] == nil || got["."] == nil {
+		t.Fatalf("go units: %v", got)
+	}
+	f.write("pkg/a/a.go", "package a\n// changed\n")
+	res := f.sel(st, nil)
+	want := map[string]string{"pkg/a": ReasonChanged, "pkg/b": ReasonChanged, "pkg/c": ReasonChanged, ".": "-unaffected"}
+	if got := decisions(res); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+	// Both test files of pkg/a are known deps of the unit.
+	known := res.Suites[0].Known["pkg/a"]
+	if !contains(known, "pkg/a/a_test.go") || !contains(known, "pkg/a/b_test.go") {
+		t.Errorf("known %v", known)
+	}
+}
+
+func contains(s []string, x string) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSelectMultipleSuitesShareCoverage(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"api/test_api.py": "import shared.util\n",
+		"shared/util.py":  "",
+		"web/a.test.ts":   "",
+	})
+	f.suites = []*runner.Suite{
+		suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}}),
+		suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.ts"}}),
+	}
+	st := f.record(map[string][]string{"api/test_api.py": {"shared/util.py"}}, nil)
+	f.write("shared/util.py", "x = 1")
+	res := f.sel(st, nil)
+	if d := decisions(res); d["api/test_api.py"] != ReasonChanged || d["web/a.test.ts"] != "-unaffected" {
+		t.Errorf("%v", d)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("covered by another suite: %v", res.Orphans)
+	}
+}
+
+// ---- diff mode ----
+
+func gitFixture(t *testing.T, f *fixture) (*gitx.Repo, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = f.dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-q", "-b", "main")
+	run("add", "-A")
+	run("commit", "-q", "-m", "base")
+	repo, err := gitx.Open(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo, run("rev-parse", "HEAD")
+}
+
+func TestSelectDiffMode(t *testing.T) {
+	f := webFixture(t)
+	repo, base := gitFixture(t, f)
+	f.write("web/src/a.ts", "changed")
+	f.write("migrations/002.sql", "new")
+	f.write("Dockerfile", "changed")
+	f.write("README.md", "changed")
+	res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+	if res.Mode != "diff" {
+		t.Fatalf("mode %s", res.Mode)
+	}
+	want := map[string]string{
+		"web/src/a.test.ts": ReasonDiff, "web/db/q.test.ts": ReasonDiff,
+		"web/src/b.test.ts": "-unaffected", "web/src/c.test.ts": "-unaffected",
+	}
+	if got := decisions(res); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+	if !reflect.DeepEqual(res.Orphans, []string{"Dockerfile"}) {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	// Bad base: error, not a silent empty selection.
+	in := &Input{Repo: repo, Config: f.cfg, Suites: f.suites, State: state.New(), Snap: f.snap(), Graph: f.graph(), Base: "no-such-ref"}
+	if _, err := Select(in); err == nil {
+		t.Error("unknown base must fail")
+	}
+}
+
+func TestSelectDiffModeNewTestFile(t *testing.T) {
+	f := webFixture(t)
+	repo, base := gitFixture(t, f)
+	f.write("web/src/z.test.ts", "new test")
+	res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+	if got := decisions(res)["web/src/z.test.ts"]; got != ReasonDiff {
+		t.Errorf("a new (untracked) test file must be selected in diff mode: %s", got)
+	}
+}
+
+// ---- Apply / OrphanAll ----
+
+func twoSuiteResult() *Result {
+	mk := func(name, root string, ids ...string) *Suite {
+		s := &Suite{Suite: &runner.Suite{Suite: config.Suite{Name: name, Root: root}}, Name: name}
+		for _, id := range ids {
+			s.Tests = append(s.Tests, &Test{ID: id, Reason: ReasonUnaffected})
+		}
+		return s
+	}
+	return &Result{Suites: []*Suite{
+		mk("web", "web", "web/a.test.ts", "web/b.test.ts"),
+		mk("api", "api", "api/test_x.py"),
+		mk("root", ".", "test_root.py"),
+	}}
+}
+
+func TestApply(t *testing.T) {
+	r := twoSuiteResult()
+	r.Suites[0].Tests[0].Selected, r.Suites[0].Tests[0].Reason = true, ReasonChanged
+	unknown := r.Apply([]Addition{
+		{Suite: "web", Test: "web/a.test.ts", Reason: ReasonAgent},
+		{Suite: "web", Test: "web/b.test.ts", Reason: ReasonReference, Detail: "d"},
+		{Suite: "web", Test: "web/zzz.test.ts", Reason: ReasonAgent},
+		{Suite: "nope", Reason: ReasonAgent},
+		{Suite: "api", Reason: ReasonOrphan},
+	})
+	if len(unknown) != 2 || unknown[0].Test != "web/zzz.test.ts" || unknown[1].Suite != "nope" {
+		t.Errorf("unknown %v", unknown)
+	}
+	a, b := r.Suites[0].Tests[0], r.Suites[0].Tests[1]
+	if a.Reason != ReasonChanged {
+		t.Errorf("an already selected test keeps its reason: %+v", a)
+	}
+	if !b.Selected || b.Reason != ReasonReference || b.Detail != "d" {
+		t.Errorf("b %+v", b)
+	}
+	if !r.Suites[0].All || !r.Suites[1].All || r.Suites[2].All {
+		t.Errorf("All flags: %v %v %v", r.Suites[0].All, r.Suites[1].All, r.Suites[2].All)
+	}
+	// An empty suite is never "all".
+	empty := &Result{Suites: []*Suite{{Name: "e", Suite: &runner.Suite{}}}}
+	if u := empty.Apply([]Addition{{Suite: "e"}}); len(u) != 1 || empty.Suites[0].All {
+		t.Errorf("empty suite: %v %v", u, empty.Suites[0].All)
+	}
+}
+
+func TestOrphanAll(t *testing.T) {
+	names := func(adds []Addition) []string {
+		var out []string
+		for _, a := range adds {
+			out = append(out, a.Suite)
+			if a.Test != "" || a.Reason != ReasonOrphan {
+				t.Errorf("addition %+v", a)
+			}
+		}
+		return out
+	}
+	cases := []struct {
+		orphans []string
+		want    []string
+	}{
+		{nil, nil},
+		{[]string{"web/Dockerfile"}, []string{"web", "root"}},
+		{[]string{"api/schema.sql"}, []string{"api", "root"}},
+		{[]string{"webby/x"}, []string{"web", "api", "root"}}, // not under web/
+		{[]string{"Dockerfile"}, []string{"web", "api", "root"}},
+		{[]string{"web/x", "api/y"}, []string{"web", "api", "root"}},
+	}
+	for _, c := range cases {
+		got := names(twoSuiteResult().OrphanAll(c.orphans))
+		// The root suite contains everything and is always picked.
+		sort.Strings(got)
+		sort.Strings(c.want)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%v: got %v want %v", c.orphans, got, c.want)
+		}
+	}
+	adds := twoSuiteResult().OrphanAll([]string{"web/one", "web/two"})
+	if adds[0].Detail != "unattributed change: web/one" {
+		t.Errorf("detail names the first orphan: %q", adds[0].Detail)
+	}
+}
+
+func TestOrphanAllRootSuiteOnly(t *testing.T) {
+	r := &Result{Suites: []*Suite{
+		{Name: "a", Suite: &runner.Suite{Suite: config.Suite{Root: "a"}}},
+		{Name: "b", Suite: &runner.Suite{Suite: config.Suite{Root: "b"}}},
+	}}
+	got := r.OrphanAll([]string{"a/x"})
+	if len(got) != 1 || got[0].Suite != "a" {
+		t.Errorf("an orphan inside one suite's root only runs that suite: %v", got)
+	}
+}
+
+// ---- References ----
+
+func TestReferences(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"t/test_users.py":         `open("fixtures/users_seed.sql")`,
+		"t/test_other.py":         `print("nothing")`,
+		"t/test_generic.py":       `import index; load("config.json")`,
+		"t/test_bin.py":           ``,
+		"t/blob.bin":              `users_seed.sql`, // not source-like: never read
+		"t/helper.py":             `ROUTES = "routes.yaml"`,
+		"t/test_sel.py":           `"users_seed.sql"`,
+		"fixtures/users_seed.sql": ``,
+	})
+	g := f.graph()
+	mk := func(id string, sel bool, deps ...string) (*Test, []string) {
+		return &Test{ID: id, Selected: sel}, append([]string{id}, deps...)
+	}
+	s := &Suite{Name: "py", Suite: &runner.Suite{}, Deps: map[string][]string{}}
+	for _, x := range []struct {
+		id   string
+		sel  bool
+		deps []string
+	}{
+		{"t/test_users.py", false, nil},
+		{"t/test_other.py", false, []string{"t/helper.py"}},
+		{"t/test_generic.py", false, nil},
+		{"t/test_bin.py", false, []string{"t/blob.bin"}},
+		{"t/test_sel.py", true, nil},
+	} {
+		tt, deps := mk(x.id, x.sel, x.deps...)
+		s.Tests = append(s.Tests, tt)
+		s.Deps[x.id] = deps
+	}
+	r := &Result{Suites: []*Suite{s}}
+	adds, explained := r.References(g, []string{"db/users_seed.sql", "conf/routes.yaml", "lib/index.ts", "x/config.json", "a/ab.sql", "nothing/refers_to_me.txt"})
+	got := map[string]string{}
+	for _, a := range adds {
+		if a.Reason != ReasonReference || a.Suite != "py" {
+			t.Errorf("addition %+v", a)
+		}
+		got[a.Test] = a.Detail
+	}
+	if len(got) != 2 || !strings.Contains(got["t/test_users.py"], "db/users_seed.sql (in t/test_users.py)") || !strings.Contains(got["t/test_other.py"], "conf/routes.yaml (in t/helper.py)") {
+		t.Errorf("additions %v", got)
+	}
+	// A bare file-name match selects tests but does not explain the orphan (the tests
+	// mention fixtures/users_seed.sql, not db/users_seed.sql): the agent or the orphan
+	// policy still sees it. Generic and short names never match.
+	if len(explained) != 0 {
+		t.Errorf("explained %v", explained)
+	}
+	// A match naming the directory too explains it (also through an already selected test).
+	if _, ex := r.References(g, []string{"fixtures/users_seed.sql"}); !reflect.DeepEqual(ex, []string{"fixtures/users_seed.sql"}) {
+		t.Errorf("qualified match: %v", ex)
+	}
+	if a, e := r.References(nil, []string{"x"}); a != nil || e != nil {
+		t.Error("nil graph")
+	}
+	if a, e := r.References(g, nil); a != nil || e != nil {
+		t.Error("no orphans")
+	}
+	if a, e := r.References(g, []string{"src/index.ts", "Dockerfile", "a.py"}); a != nil || e != nil {
+		t.Errorf("only generic names: %v %v", a, e)
+	}
+}
+
+// ---- Hasher ----
+
+func TestHasher(t *testing.T) {
+	snap := gitx.Snapshot{
+		"a.txt":       "h1",
+		"dir/b.txt":   "h2",
+		"dir/c.txt":   "h3",
+		"dir/sub/d":   "h4",
+		"dir/sub/e/f": "h5",
+		"other/g":     "h6",
+	}
+	h := NewHasher(snap)
+	if h.Hash("a.txt") != "h1" || h.Hash("missing") != "" || h.Hash("dir") != "" {
+		t.Error("file keys")
+	}
+	for _, k := range []string{"./", "dir/", "dir/sub/", "dir/sub/e/", "other/"} {
+		if v := h.Hash(k); !strings.HasPrefix(v, "dir:") {
+			t.Errorf("%s: %q", k, v)
+		}
+	}
+	if h.Hash("nope/") != "" || h.Hash("dir/b.txt/") != "" {
+		t.Error("absent directory keys hash to empty")
+	}
+	same := func(mut func(gitx.Snapshot), key string) bool {
+		s2 := gitx.Snapshot{}
+		for k, v := range snap {
+			s2[k] = v
+		}
+		mut(s2)
+		return NewHasher(s2).Hash(key) == h.Hash(key)
+	}
+	// Content changes do not change listings.
+	if !same(func(s gitx.Snapshot) { s["dir/b.txt"] = "zz" }, "dir/") {
+		t.Error("content change altered dir listing")
+	}
+	// Changes deep below do not change a listing either (only direct entries matter).
+	if !same(func(s gitx.Snapshot) { s["dir/sub/new"] = "x" }, "dir/") {
+		t.Error("nested addition altered parent listing")
+	}
+	if same(func(s gitx.Snapshot) { s["dir/sub/new"] = "x" }, "dir/sub/") {
+		t.Error("addition not seen by its directory")
+	}
+	if same(func(s gitx.Snapshot) { delete(s, "dir/c.txt") }, "dir/") {
+		t.Error("removal not seen")
+	}
+	if same(func(s gitx.Snapshot) { s["dir/new2/x"] = "x" }, "dir/") {
+		t.Error("new subdirectory not seen")
+	}
+	if same(func(s gitx.Snapshot) { s["top.txt"] = "x" }, "./") {
+		t.Error("root addition not seen")
+	}
+	if !same(func(s gitx.Snapshot) { s["dir/zz"] = "x" }, "./") {
+		t.Error("root listing changed by a nested addition")
+	}
+	if same(func(s gitx.Snapshot) { delete(s, "other/g") }, "./") {
+		t.Error("root listing must notice a directory disappearing")
+	}
+	// A directory that only exists through a deeper file is listed with a trailing slash
+	// and distinct from a file of the same name.
+	if same(func(s gitx.Snapshot) { delete(s, "dir/sub/d"); delete(s, "dir/sub/e/f"); s["dir/sub"] = "file" }, "dir/") {
+		t.Error("dir/sub turning from a directory into a file must change the listing")
+	}
+}
+
+// ---- Record ----
+
+func TestRecord(t *testing.T) {
+	snap := gitx.Snapshot{"src/a.ts": "ha", "src/a.test.ts": "ht", "data/x.json": "hx", "static.ts": "hs"}
+	h := NewHasher(snap)
+	sr := &Suite{Name: "web", Known: map[string][]string{"src/a.test.ts": {"src/a.test.ts", "static.ts"}}}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	st := state.New()
+	st.Suite("web").Tests["src/old.test.ts"] = &state.Entry{Status: state.Pass}
+	obs := map[string]*runner.Observation{
+		"src/a.test.ts": {Files: map[string]bool{
+			"src/a.ts": true, "data/": true, "node_modules/x/y.js": true, "src/__pycache__/m.pyc": true, "gone.txt": true,
+		}, Status: state.Pass, DurationMs: 5},
+		"src/b.test.ts": {Files: map[string]bool{}},
+	}
+	Record(st, sr, obs, h, RecordOptions{Commit: "c", Now: now})
+	e := st.Suites["web"].Tests["src/a.test.ts"]
+	want := map[string]string{"src/a.ts": "ha", "src/a.test.ts": "ht", "static.ts": "hs", "data/": h.Hash("data/"), "gone.txt": ""}
+	if !reflect.DeepEqual(e.Deps, want) {
+		t.Errorf("deps\n got %v\nwant %v", e.Deps, want)
+	}
+	if e.Status != state.Pass || e.DurationMs != 5 || e.Commit != "c" || !e.At.Equal(now) {
+		t.Errorf("entry %+v", e)
+	}
+	if b := st.Suites["web"].Tests["src/b.test.ts"]; b == nil || b.Status != state.Unknown {
+		t.Errorf("empty status records unknown: %+v", b)
+	}
+	if st.Suites["web"].Tests["src/old.test.ts"] == nil {
+		t.Error("partial record must keep other entries")
+	}
+	Record(st, sr, map[string]*runner.Observation{"src/a.test.ts": {Status: state.Fail}}, h, RecordOptions{Full: true})
+	if len(st.Suites["web"].Tests) != 1 || st.Suites["web"].Tests["src/a.test.ts"].Status != state.Fail {
+		t.Errorf("full record replaces the suite: %v", st.Suites["web"].Tests)
+	}
+}
+
+// TestRecordAbsentFile: a file a test tried to read that did not exist is recorded as
+// absent, so creating it later selects the test (instead of being an orphan).
+func TestRecordAbsentFile(t *testing.T) {
+	f := newFixture(t, map[string]string{"test_x.py": "", "test_y.py": ""})
+	f.suites = []*runner.Suite{suite(t, config.Suite{Runner: "pytest", Tests: []string{"test_*.py"}})}
+	st := f.record(map[string][]string{"test_x.py": {"settings.local.json"}}, nil)
+	if v, ok := st.Suites["pytest"].Tests["test_x.py"].Deps["settings.local.json"]; !ok || v != "" {
+		t.Fatalf("absent file not recorded: %v", st.Suites["pytest"].Tests["test_x.py"].Deps)
+	}
+	if res := f.sel(st, nil); decisions(res)["test_x.py"] != "-unaffected" {
+		t.Fatalf("still absent: %v", decisions(res))
+	}
+	f.write("settings.local.json", "{}")
+	res := f.sel(st, nil)
+	if d := decisions(res); d["test_x.py"] != ReasonChanged || d["test_y.py"] != "-unaffected" {
+		t.Errorf("%v", d)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+}
+
+func TestHasherExistenceKeys(t *testing.T) {
+	h := NewHasher(gitx.Snapshot{"a.txt": "h", "dir/b": "h", "dir/sub/c": "h"})
+	cases := map[string]string{
+		"a.txt?": "exists", "dir?": "exists", "dir/sub?": "exists", "dir/b?": "exists", ".?": "exists",
+		"nope?": "absent", "dir/nope?": "absent", "a.txt/x?": "absent",
+	}
+	for k, want := range cases {
+		if got := h.Hash(k); got != want {
+			t.Errorf("Hash(%q) = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestExistenceProbe: a test that checked whether a path exists is selected when the
+// path appears or disappears, but not when an existing file's content changes; the
+// probed path is covered (not an orphan).
+func TestExistenceProbe(t *testing.T) {
+	f := newFixture(t, map[string]string{"test_x.py": "", "test_y.py": "", "present.cfg": "1"})
+	f.suites = []*runner.Suite{suite(t, config.Suite{Runner: "pytest", Tests: []string{"test_*.py"}})}
+	st := f.record(map[string][]string{"test_x.py": {"local.cfg?", "present.cfg?"}}, nil)
+	f.write("present.cfg", "2")
+	res := f.sel(st, nil)
+	if d := decisions(res); d["test_x.py"] != "-unaffected" {
+		t.Errorf("content change of a probed file: %v", d)
+	}
+	if !reflect.DeepEqual(res.Orphans, []string{"present.cfg"}) {
+		t.Errorf("a probe does not cover content: %v", res.Orphans)
+	}
+	f.write("local.cfg", "x")
+	res = f.sel(st, nil)
+	if d := decisions(res); d["test_x.py"] != ReasonChanged || d["test_y.py"] != "-unaffected" {
+		t.Errorf("probed file created: %v", d)
+	}
+	if contains(res.Orphans, "local.cfg") {
+		t.Errorf("probed path is covered: %v", res.Orphans)
+	}
+	f.remove("local.cfg")
+	f.remove("present.cfg")
+	if d := decisions(f.sel(st, nil)); d["test_x.py"] != ReasonChanged {
+		t.Errorf("probed file removed: %v", d)
+	}
+}

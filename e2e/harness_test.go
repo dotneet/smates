@@ -1,0 +1,553 @@
+//go:build e2e
+
+// Package e2e runs smates against real projects (fixtures/<name>) with real toolchains.
+//
+// Every fixture is copied to a temp git repository, its dependencies are installed, and a
+// baseline is recorded with `smates run --all`. Then:
+//
+//   - TestScenarios applies each scenario in fixtures/<name>/scenarios.json (edits to the
+//     working tree) and runs `smates run --shadow`, which runs every test while evaluating
+//     the selection. A scenario passes when no failing test was left unselected
+//     (no escapes) and the expected selected / not-selected tests match.
+//   - TestMutations breaks every source and data file in turn (a top-level throw/raise,
+//     a compile error, corrupted data) and checks that every test that fails because of
+//     it was selected. It reports the selection rate for each mutation.
+//
+// Run with: go test -tags e2e ./e2e/ (needs node 20+, npm, pnpm, bun, go, uv on PATH;
+// fixtures whose tools are missing are skipped). Set SMATES_E2E_FIXTURE to run one.
+package e2e
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+)
+
+var smatesBin string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "smates-e2e-bin-")
+	if err != nil {
+		panic(err)
+	}
+	smatesBin = filepath.Join(dir, "smates")
+	if runtime.GOOS == "windows" {
+		smatesBin += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", smatesBin, "./cmd/smates")
+	build.Dir = ".."
+	build.Stdout, build.Stderr = os.Stdout, os.Stderr
+	if err := build.Run(); err != nil {
+		panic("building smates: " + err.Error())
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// fixtureSpec is fixtures/<name>/fixture.json.
+type fixtureSpec struct {
+	// Requires lists commands that must be on PATH (the fixture is skipped otherwise).
+	Requires []string `json:"requires"`
+	// Setup commands run in the repository after copying (dependency installation).
+	Setup [][]string `json:"setup"`
+	// Env is added to every smates invocation.
+	Env map[string]string `json:"env"`
+	// MutationSkip lists repo-relative globs excluded from the mutation sweep.
+	MutationSkip []string `json:"mutation_skip"`
+	// MutationOnly, when set, limits the sweep to these globs.
+	MutationOnly []string `json:"mutation_only"`
+}
+
+// scenario is one entry of fixtures/<name>/scenarios.json.
+type scenario struct {
+	Name  string `json:"name"`
+	Edits []edit `json:"edits"`
+	// Selected / NotSelected list test IDs (repo-relative test files or Go package dirs).
+	Selected    []string `json:"selected"`
+	NotSelected []string `json:"not_selected"`
+	// Orphans, when non-nil, is the exact set of expected unattributed files.
+	Orphans []string `json:"orphans"`
+	// Fails lists tests expected to fail after the edit (sanity check of the scenario).
+	Fails []string `json:"fails"`
+	// Agent runs the scenario with the agent enabled (skipped without ANTHROPIC_API_KEY).
+	Agent bool `json:"agent"`
+	// Args are extra smates run flags.
+	Args []string `json:"args"`
+	// Note documents the scenario (ignored).
+	Note string `json:"note"`
+}
+
+type edit struct {
+	File string `json:"file"`
+	// Op: write (replace content), append, prepend, replace (Old -> New), delete, mkdir.
+	Op      string `json:"op"`
+	Content string `json:"content"`
+	Old     string `json:"old"`
+	New     string `json:"new"`
+}
+
+// report mirrors `smates run --report`.
+type report struct {
+	Mode    string                       `json:"mode"`
+	Orphans []string                     `json:"orphans"`
+	Tests   map[string][]string          `json:"selected_tests"`
+	Results map[string]map[string]string `json:"results"`
+	Escapes []string                     `json:"escapes"`
+	Exit    int                          `json:"exit_code"`
+	Total   int                          `json:"total"`
+	Sel     int                          `json:"selected"`
+}
+
+func (r *report) selected() map[string]bool {
+	out := map[string]bool{}
+	for _, ids := range r.Tests {
+		for _, id := range ids {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func (r *report) failing() []string {
+	var out []string
+	for _, units := range r.Results {
+		for id, st := range units {
+			if st == "fail" {
+				out = append(out, id)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func fixtures(t *testing.T) []string {
+	entries, err := os.ReadDir("fixtures")
+	if err != nil {
+		t.Fatal(err)
+	}
+	only := os.Getenv("SMATES_E2E_FIXTURE")
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && (only == "" || only == e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// repo is a prepared fixture repository with a recorded baseline.
+type repo struct {
+	t        *testing.T
+	name     string
+	dir      string
+	spec     fixtureSpec
+	baseline []byte // state file content after the baseline run
+}
+
+func prepare(t *testing.T, name string) *repo {
+	t.Helper()
+	src := filepath.Join("fixtures", name)
+	var spec fixtureSpec
+	if data, err := os.ReadFile(filepath.Join(src, "fixture.json")); err == nil {
+		if err := json.Unmarshal(data, &spec); err != nil {
+			t.Fatalf("fixture.json: %v", err)
+		}
+	}
+	for _, r := range spec.Requires {
+		if _, err := exec.LookPath(r); err != nil {
+			t.Skipf("%s not on PATH", r)
+		}
+	}
+	dir := t.TempDir()
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	if err := copyTree(src, dir); err != nil {
+		t.Fatal(err)
+	}
+	r := &repo{t: t, name: name, dir: dir, spec: spec}
+	for _, c := range spec.Setup {
+		r.must(c[0], c[1:]...)
+	}
+	r.must("git", "init", "-q")
+	r.must("git", "add", "-A")
+	r.must("git", "-c", "user.email=e2e@example.com", "-c", "user.name=e2e", "commit", "-qm", "fixture")
+	out, code := r.smates("run", "--all", "--no-agent", "--report", r.reportPath())
+	rep := r.readReport()
+	if code != 0 || rep.Exit != 0 {
+		t.Fatalf("baseline run failed (exit %d):\n%s", code, out)
+	}
+	if rep.Total == 0 {
+		t.Fatalf("baseline found no tests:\n%s", out)
+	}
+	state, err := os.ReadFile(filepath.Join(dir, ".smates", "state.json.gz"))
+	if err != nil {
+		t.Fatalf("no state after baseline: %v\n%s", err, out)
+	}
+	r.baseline = state
+	return r
+}
+
+func (r *repo) reportPath() string { return filepath.Join(r.dir, ".smates", "e2e-report.json") }
+
+func (r *repo) readReport() *report {
+	data, err := os.ReadFile(r.reportPath())
+	if err != nil {
+		r.t.Fatalf("reading report (smates failed before writing it?): %v", err)
+	}
+	var rep report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		r.t.Fatalf("report: %v", err)
+	}
+	return &rep
+}
+
+func (r *repo) must(name string, args ...string) string {
+	r.t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = r.dir
+	cmd.Env = r.env()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		r.t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+func (r *repo) env() []string {
+	env := os.Environ()
+	for k, v := range r.spec.Env {
+		env = append(env, k+"="+v)
+	}
+	// Keep smates' own CI detection out of the way: runs are explicit. Scenario edits
+	// can keep a file's size within the same second, which a cached .pyc would miss.
+	return append(env, "CI=", "GITHUB_ACTIONS=", "GITHUB_OUTPUT=", "GITHUB_STEP_SUMMARY=", "PYTHONDONTWRITEBYTECODE=1")
+}
+
+func (r *repo) smates(args ...string) (string, int) {
+	// A stale report from an earlier run must never be mistaken for this run's.
+	os.Remove(r.reportPath())
+	cmd := exec.Command(smatesBin, args...)
+	cmd.Dir = r.dir
+	cmd.Env = r.env()
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	err := cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		r.t.Fatalf("smates %v: %v", args, err)
+	}
+	return buf.String(), code
+}
+
+// reset restores the committed tree and the baseline state.
+func (r *repo) reset() {
+	r.t.Helper()
+	r.must("git", "checkout", "-q", "--", ".")
+	r.must("git", "clean", "-fdq") // keeps ignored files (node_modules, .venv, .smates)
+	// Runner caches outside smates' view (vitest's fsModuleCache) would let scenarios
+	// depend on each other.
+	_ = filepath.WalkDir(r.dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && d.Name() == ".vitest-cache" {
+			os.RemoveAll(p)
+			return filepath.SkipDir
+		}
+		if err == nil && d.IsDir() && (d.Name() == ".git" || d.Name() == ".venv") {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err := os.WriteFile(filepath.Join(r.dir, ".smates", "state.json.gz"), r.baseline, 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func (r *repo) apply(e edit) {
+	r.t.Helper()
+	p := filepath.Join(r.dir, filepath.FromSlash(e.File))
+	read := func() string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			r.t.Fatalf("edit %s: %v", e.File, err)
+		}
+		return string(b)
+	}
+	write := func(s string) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			r.t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	switch e.Op {
+	case "write":
+		write(e.Content)
+	case "append":
+		write(read() + e.Content)
+	case "prepend":
+		write(e.Content + read())
+	case "replace":
+		s := read()
+		if !strings.Contains(s, e.Old) {
+			r.t.Fatalf("edit %s: %q not found", e.File, e.Old)
+		}
+		write(strings.Replace(s, e.Old, e.New, 1))
+	case "delete":
+		if err := os.RemoveAll(p); err != nil {
+			r.t.Fatal(err)
+		}
+	case "mkdir":
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			r.t.Fatal(err)
+		}
+	default:
+		r.t.Fatalf("unknown edit op %q", e.Op)
+	}
+}
+
+func TestScenarios(t *testing.T) {
+	for _, name := range fixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("fixtures", name, "scenarios.json"))
+			if err != nil {
+				t.Skip("no scenarios.json")
+			}
+			var scenarios []scenario
+			if err := json.Unmarshal(data, &scenarios); err != nil {
+				t.Fatalf("scenarios.json: %v", err)
+			}
+			r := prepare(t, name)
+			for _, sc := range scenarios {
+				t.Run(sc.Name, func(t *testing.T) {
+					r.t = t
+					if sc.Agent && os.Getenv("ANTHROPIC_API_KEY") == "" {
+						t.Skip("needs ANTHROPIC_API_KEY")
+					}
+					r.reset()
+					for _, e := range sc.Edits {
+						r.apply(e)
+					}
+					args := []string{"run", "--shadow", "--report", r.reportPath()}
+					if !sc.Agent {
+						args = append(args, "--no-agent")
+					}
+					args = append(args, sc.Args...)
+					out, _ := r.smates(args...)
+					rep := r.readReport()
+					sel := rep.selected()
+					var problems []string
+					if len(rep.Escapes) > 0 {
+						problems = append(problems, fmt.Sprintf("ESCAPES (failing but not selected): %v", rep.Escapes))
+					}
+					for _, id := range sc.Selected {
+						if !sel[id] {
+							problems = append(problems, "expected selected: "+id)
+						}
+					}
+					for _, id := range sc.NotSelected {
+						if sel[id] {
+							problems = append(problems, "expected NOT selected: "+id)
+						}
+					}
+					if sc.Orphans != nil && !sameSet(sc.Orphans, rep.Orphans) {
+						problems = append(problems, fmt.Sprintf("orphans: got %v, want %v", rep.Orphans, sc.Orphans))
+					}
+					failing := rep.failing()
+					for _, id := range sc.Fails {
+						if !contains(failing, id) {
+							problems = append(problems, "expected to fail (scenario sanity): "+id)
+						}
+					}
+					t.Logf("selected %d/%d, failing %v, orphans %v", rep.Sel, rep.Total, failing, rep.Orphans)
+					if len(problems) > 0 {
+						t.Errorf("%s\n--- smates output ---\n%s", strings.Join(problems, "\n"), tail(out, 80))
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMutations(t *testing.T) {
+	for _, name := range fixtures(t) {
+		t.Run(name, func(t *testing.T) {
+			r := prepare(t, name)
+			files := strings.Fields(r.must("git", "ls-files"))
+			var stats []string
+			escapes, totalSel, totalFail := 0, 0, 0
+			for _, f := range files {
+				m, ok := mutation(f)
+				if !ok || r.skipMutation(f) {
+					continue
+				}
+				t.Run(strings.ReplaceAll(f, "/", "|"), func(t *testing.T) {
+					r.t = t
+					r.reset()
+					p := filepath.Join(r.dir, filepath.FromSlash(f))
+					orig, err := os.ReadFile(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(p, m(orig), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					out, _ := r.smates("run", "--shadow", "--no-agent", "--report", r.reportPath())
+					rep := r.readReport()
+					failing := rep.failing()
+					stats = append(stats, fmt.Sprintf("%-50s selected %3d/%-3d failing %3d  orphans %d", f, rep.Sel, rep.Total, len(failing), len(rep.Orphans)))
+					totalSel += rep.Sel
+					totalFail += len(failing)
+					if len(rep.Escapes) > 0 {
+						escapes++
+						t.Errorf("mutating %s: failing tests not selected: %v\n%s", f, rep.Escapes, tail(out, 60))
+					}
+				})
+			}
+			r.t = t
+			t.Logf("mutation sweep for %s (%d escapes; %d selections for %d failing tests in total):\n%s", name, escapes, totalSel, totalFail, strings.Join(stats, "\n"))
+		})
+	}
+}
+
+func (r *repo) skipMutation(f string) bool {
+	if len(r.spec.MutationOnly) > 0 && !matchAny(r.spec.MutationOnly, f) {
+		return true
+	}
+	return matchAny(r.spec.MutationSkip, f)
+}
+
+// mutation returns a function that breaks a file so that anything depending on it fails.
+func mutation(f string) (func([]byte) []byte, bool) {
+	base := filepath.Base(f)
+	if strings.HasPrefix(base, ".") || base == "fixture.json" || base == "scenarios.json" {
+		return nil, false
+	}
+	switch filepath.Ext(f) {
+	case ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx", ".jsx":
+		if isTestName(base) || strings.Contains(base, ".config.") {
+			return nil, false
+		}
+		return func(b []byte) []byte {
+			return append(b, []byte("\n;throw new Error('SMATES_MUTATION');\n")...)
+		}, true
+	case ".py":
+		if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") || base == "conftest.py" {
+			return nil, false
+		}
+		return func(b []byte) []byte { return append(b, []byte("\nraise RuntimeError('SMATES_MUTATION')\n")...) }, true
+	case ".go":
+		if strings.HasSuffix(base, "_test.go") {
+			return nil, false
+		}
+		return func(b []byte) []byte { return append(b, []byte("\nvar _ = smatesMutationUndefined\n")...) }, true
+	case ".sh":
+		return func(b []byte) []byte { return append(b, []byte("\nexit 3\n")...) }, true
+	case ".md":
+		if base == "README.md" || strings.HasPrefix(f, "docs/") || strings.Contains(f, "/docs/") || base == "CHANGELOG.md" {
+			return nil, false
+		}
+		return func(b []byte) []byte { return []byte("SMATES_MUTATION\n") }, true
+	case ".json", ".yaml", ".yml", ".txt", ".csv", ".sql", ".toml", ".html", ".tmpl", ".env":
+		switch base {
+		case "package.json", "package-lock.json", "tsconfig.json", "pyproject.toml", "uv.lock", "go.mod", "go.sum", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock":
+			return nil, false
+		}
+		return func(b []byte) []byte { return []byte("SMATES_MUTATION{{{\n") }, true
+	}
+	return nil, false
+}
+
+func isTestName(base string) bool {
+	for _, s := range []string{".test.", ".spec.", "_test.", "_spec."} {
+		if strings.Contains(base, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchAny(globs []string, f string) bool {
+	for _, g := range globs {
+		if ok, _ := filepath.Match(g, f); ok {
+			return true
+		}
+		if strings.HasSuffix(g, "/**") && strings.HasPrefix(f, strings.TrimSuffix(g, "**")) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]bool{}
+	for _, x := range a {
+		m[x] = true
+	}
+	for _, x := range b {
+		if !m[x] {
+			return false
+		}
+	}
+	return true
+}
+
+func contains(s []string, x string) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func tail(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = append([]string{"..."}, lines[len(lines)-n:]...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".venv" || d.Name() == ".smates") {
+			return filepath.SkipDir
+		}
+		if rel == "fixture.json" || rel == "scenarios.json" {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+}

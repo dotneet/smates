@@ -1,0 +1,8 @@
+{
+  "id": "INV-A",
+  "customer": "ACME GmbH",
+  "currency": "EUR",
+  "region": "DE",
+  "items": [{ "sku": "WIDGET", "qty": 3, "unitCents": 1000 }],
+  "expectedTotalCents": 3570
+}

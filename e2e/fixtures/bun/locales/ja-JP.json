@@ -1,0 +1,5 @@
+{
+  "cart.total": "合計: {amount}",
+  "cart.items": "{count} 点",
+  "shipping.none": "{country} へは配送できません"
+}

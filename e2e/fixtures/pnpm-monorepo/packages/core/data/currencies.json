@@ -1,0 +1,5 @@
+{
+  "USD": { "symbol": "$", "decimals": 2, "position": "prefix" },
+  "EUR": { "symbol": "€", "decimals": 2, "position": "suffix" },
+  "JPY": { "symbol": "¥", "decimals": 0, "position": "prefix" }
+}

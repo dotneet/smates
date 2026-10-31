@@ -1,0 +1,827 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-edit-tax-selects-dependents-only",
+    "edits": [
+      {
+        "file": "src/tax.ts",
+        "op": "append",
+        "content": "\nexport const TAX_TABLE_VERSION = 2;\n"
+      }
+    ],
+    "selected": [
+      "test/tax.test.ts",
+      "test/invoice.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/exporters.test.ts",
+      "test/customers.test.ts"
+    ],
+    "not_selected": [
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-edit-slug-breaking",
+    "edits": [
+      {
+        "file": "src/slug.ts",
+        "op": "replace",
+        "old": ".replace(/[^a-z0-9]+/g, '-')",
+        "new": ".replace(/[^a-z0-9]+/g, '_')"
+      }
+    ],
+    "selected": [
+      "test/slug.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/slug.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "yaml-data-read-via-computed-path",
+    "edits": [
+      {
+        "file": "data/tax-rates.yaml",
+        "op": "replace",
+        "old": "standard: 0.19",
+        "new": "standard: 0.20"
+      }
+    ],
+    "selected": [
+      "test/tax.test.ts",
+      "test/invoice.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/exporters.test.ts",
+      "test/customers.test.ts"
+    ],
+    "not_selected": [
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts"
+    ],
+    "fails": [
+      "test/tax.test.ts",
+      "test/invoice.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/exporters.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "json-data-read-via-import-meta-url",
+    "edits": [
+      {
+        "file": "src/currencies.json",
+        "op": "replace",
+        "old": "\"symbol\": \"€\", \"decimals\": 2, \"position\": \"suffix\"",
+        "new": "\"symbol\": \"€\", \"decimals\": 2, \"position\": \"prefix\""
+      }
+    ],
+    "selected": [
+      "test/money.test.ts",
+      "test/invoice.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/exporters.test.ts",
+      "test/plugins.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/migrations.test.ts",
+      "test/notify.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/money.test.ts",
+      "test/invoice.test.ts",
+      "test/exporters.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamic-import-template-plugin-edit",
+    "edits": [
+      {
+        "file": "src/plugins/builtin/csv.ts",
+        "op": "replace",
+        "old": "contentType: 'text/csv'",
+        "new": "contentType: 'text/csv; charset=utf-8'"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/plugins.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamic-import-template-new-plugin-file",
+    "edits": [
+      {
+        "file": "src/plugins/builtin/xml.ts",
+        "op": "write",
+        "content": "import type { Plugin } from '../index';\n\nconst xml: Plugin = { name: 'xml', contentType: 'application/xml', serialize: (rows) => `<rows count=\"${rows.length}\"/>` };\nexport default xml;\n"
+      }
+    ],
+    "selected": [
+      "test/plugins.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "computed-path-import-exporter-edit",
+    "edits": [
+      {
+        "file": "src/exporters/html.ts",
+        "op": "replace",
+        "old": "<p class=\"total\">",
+        "new": "<p class=\"grand-total\">"
+      }
+    ],
+    "selected": [
+      "test/exporters.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/exporters.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-new-fixture-file",
+    "edits": [
+      {
+        "file": "test/fixtures/invoices/c.json",
+        "op": "write",
+        "content": "{\n  \"id\": \"INV-C\",\n  \"customer\": \"Globex Inc\",\n  \"currency\": \"USD\",\n  \"region\": \"US\",\n  \"items\": [{ \"sku\": \"GADGET\", \"qty\": 1, \"unitCents\": 4200 }],\n  \"expectedTotalCents\": 4300\n}\n"
+      }
+    ],
+    "selected": [
+      "test/invoice-fixtures.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/invoice-fixtures.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-existing-fixture-edit",
+    "edits": [
+      {
+        "file": "test/fixtures/invoices/b.json",
+        "op": "replace",
+        "old": "\"expectedTotalCents\": 8700",
+        "new": "\"expectedTotalCents\": 8800"
+      }
+    ],
+    "selected": [
+      "test/invoice-fixtures.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/invoice-fixtures.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "child-node-process-config-file",
+    "edits": [
+      {
+        "file": "config/report.json",
+        "op": "replace",
+        "old": "\"title\": \"Monthly report\"",
+        "new": "\"title\": \"Monthly statement\""
+      }
+    ],
+    "selected": [
+      "test/report-cli.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/report-cli.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "child-node-process-script-edit",
+    "edits": [
+      {
+        "file": "scripts/report.mjs",
+        "op": "replace",
+        "old": "subtotal=",
+        "new": "net="
+      }
+    ],
+    "selected": [
+      "test/report-cli.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/report-cli.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "vi-mock-mocked-module-edit",
+    "edits": [
+      {
+        "file": "src/mailer.ts",
+        "op": "replace",
+        "old": "net.connect(25, host",
+        "new": "net.connect(587, host"
+      }
+    ],
+    "selected": [
+      "test/notify.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "raw-import-template-edit",
+    "edits": [
+      {
+        "file": "src/templates/welcome.txt",
+        "op": "replace",
+        "old": "Welcome aboard",
+        "new": "Welcome"
+      }
+    ],
+    "selected": [
+      "test/notify.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/notify.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "setup-file-env-defaults-json-selects-everything",
+    "edits": [
+      {
+        "file": "test/env-defaults.json",
+        "op": "replace",
+        "old": "\"APP_CURRENCY\": \"EUR\"",
+        "new": "\"APP_CURRENCY\": \"USD\""
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "fails": [
+      "test/money.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "setup-file-edit-selects-everything",
+    "edits": [
+      {
+        "file": "test/setup.ts",
+        "op": "append",
+        "content": "\nprocess.env.TZ ??= 'UTC';\n"
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "orphans": []
+  },
+  {
+    "name": "global-setup-seed-data-reaches-tests-via-inject",
+    "edits": [
+      {
+        "file": "test/seed/customers.json",
+        "op": "replace",
+        "old": "\"name\": \"ACME GmbH\"",
+        "new": "\"name\": \"ACME AG\""
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/seed-data.test.ts"
+    ],
+    "fails": [
+      "test/customers.test.ts"
+    ],
+    "note": "globalSetup runs once for the whole run; what it reads is a dependency of every test."
+  },
+  {
+    "name": "global-setup-file-edit-runs-all",
+    "edits": [
+      {
+        "file": "test/global-setup.ts",
+        "op": "replace",
+        "old": "project.provide('customers', customers);",
+        "new": "project.provide('customers', customers.reverse());"
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "fails": [
+      "test/customers.test.ts"
+    ],
+    "orphans": [],
+    "note": "The globalSetup window is traced, so the file is a global dependency rather than an orphan."
+  },
+  {
+    "name": "migration-content-edit-used-by-shell-script",
+    "edits": [
+      {
+        "file": "db/migrations/002_add_customer_email.sql",
+        "op": "replace",
+        "old": "ADD COLUMN email TEXT;",
+        "new": "ADD COLUMN email VARCHAR(255);"
+      }
+    ],
+    "selected": [
+      "test/schema.test.ts"
+    ],
+    "not_selected": [
+      "test/money.test.ts",
+      "test/slug.test.ts"
+    ],
+    "fails": [
+      "test/schema.test.ts"
+    ]
+  },
+  {
+    "name": "migration-file-added-with-bad-name",
+    "edits": [
+      {
+        "file": "db/migrations/4_add_invoice_status.sql",
+        "op": "write",
+        "content": "ALTER TABLE invoices ADD COLUMN status TEXT;\n"
+      }
+    ],
+    "selected": [
+      "test/migrations.test.ts"
+    ],
+    "not_selected": [
+      "test/money.test.ts",
+      "test/slug.test.ts"
+    ],
+    "fails": [
+      "test/migrations.test.ts"
+    ]
+  },
+  {
+    "name": "shell-script-referenced-by-name",
+    "edits": [
+      {
+        "file": "scripts/build-schema.sh",
+        "op": "replace",
+        "old": "print_header\n",
+        "new": "echo \"-- schema\"\n"
+      }
+    ],
+    "selected": [
+      "test/schema.test.ts"
+    ],
+    "not_selected": [
+      "test/money.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/schema.test.ts"
+    ]
+  },
+  {
+    "name": "new-test-file-selected",
+    "edits": [
+      {
+        "file": "test/new-feature.test.ts",
+        "op": "write",
+        "content": "import { expect, test } from 'vitest';\nimport { slugify } from '@lib/slug';\n\ntest('new feature', () => {\n  expect(slugify('New Feature')).toBe('new-feature');\n});\n"
+      }
+    ],
+    "selected": [
+      "test/new-feature.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-module-used-by-test",
+    "edits": [
+      {
+        "file": "src/slug.ts",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "test/slug.test.ts"
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/tax.test.ts"
+    ],
+    "fails": [
+      "test/slug.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "lockfile-change-selects-everything",
+    "edits": [
+      {
+        "file": "package-lock.json",
+        "op": "replace",
+        "old": "\"name\": \"vitest-npm-fixture\"",
+        "new": "\"name\": \"vitest-npm-fixture-renamed\""
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "orphans": []
+  },
+  {
+    "name": "tsconfig-change-selects-everything",
+    "edits": [
+      {
+        "file": "tsconfig.json",
+        "op": "replace",
+        "old": "\"strict\": true",
+        "new": "\"strict\": false"
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "orphans": []
+  },
+  {
+    "name": "vitest-config-change-selects-everything",
+    "edits": [
+      {
+        "file": "vitest.config.ts",
+        "op": "replace",
+        "old": "setupFiles: ['./test/setup.ts'],",
+        "new": "setupFiles: ['./test/setup.ts'],\n    testTimeout: 10000,"
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "orphans": []
+  },
+  {
+    "name": "readme-change-selects-nothing",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nMore docs.\n"
+      }
+    ],
+    "not_selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dockerfile-orphan-no-agent-runs-all",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "FROM node:22-slim",
+        "new": "FROM node:24-slim"
+      }
+    ],
+    "selected": [
+      "test/customers.test.ts",
+      "test/exporters.test.ts",
+      "test/invoice-fixtures.test.ts",
+      "test/invoice.test.ts",
+      "test/migrations.test.ts",
+      "test/money.test.ts",
+      "test/notify.test.ts",
+      "test/plugins.test.ts",
+      "test/report-cli.test.ts",
+      "test/schema.test.ts",
+      "test/seed-data.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "agent-sourced-shell-helper-orphan",
+    "edits": [
+      {
+        "file": "scripts/lib/schema-header.sh",
+        "op": "replace",
+        "old": "generated schema (do not edit)",
+        "new": "schema generated by build-schema.sh"
+      }
+    ],
+    "selected": [
+      "test/schema.test.ts"
+    ],
+    "not_selected": [
+      "test/money.test.ts",
+      "test/slug.test.ts",
+      "test/tax.test.ts",
+      "test/plugins.test.ts",
+      "test/notify.test.ts"
+    ],
+    "fails": [
+      "test/schema.test.ts"
+    ],
+    "agent": true
+  }
+]

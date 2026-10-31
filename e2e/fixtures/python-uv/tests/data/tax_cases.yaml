@@ -1,0 +1,5 @@
+with_tax:
+  - {name: zero, cents: 0, expected: 0}
+  - {name: small, cents: 99, expected: 107}
+  - {name: quarter, cents: 250, expected: 270}
+  - {name: ten-dollars, cents: 1000, expected: 1080}

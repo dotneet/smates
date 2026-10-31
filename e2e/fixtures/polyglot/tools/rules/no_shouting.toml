@@ -1,0 +1,2 @@
+description = "No all-caps words longer than three letters"
+forbid = "\\b[A-Z]{4,}\\b"

@@ -1,0 +1,5 @@
+[
+  { "id": "A-1", "lines": [{ "sku": "MUG", "unitCents": 1250, "qty": 2 }], "expectedTotal": 3495 },
+  { "id": "A-2", "lines": [{ "sku": "POSTER", "unitCents": 2500, "qty": 2 }], "expectedTotal": 6000 },
+  { "id": "A-3", "lines": [{ "sku": "PEN", "unitCents": 199, "qty": 1 }, { "sku": "MUG", "unitCents": 1250, "qty": 1 }], "expectedTotal": 2234 }
+]

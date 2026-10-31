@@ -1,0 +1,7 @@
+{
+  "currency": "EUR",
+  "taxRate": 0.2,
+  "freeShippingThreshold": 5000,
+  "shippingFee": 495,
+  "lowStockThreshold": 3
+}

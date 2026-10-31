@@ -1,0 +1,5 @@
+{
+  "domestic": { "countries": ["US"], "baseCents": 499, "perKgCents": 120 },
+  "europe": { "countries": ["DE", "FR", "NL"], "baseCents": 1299, "perKgCents": 450 },
+  "asia": { "countries": ["JP", "KR"], "baseCents": 1499, "perKgCents": 520 }
+}

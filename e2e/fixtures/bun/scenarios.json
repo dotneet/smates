@@ -1,0 +1,658 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-module-loyalty",
+    "edits": [
+      {
+        "file": "src/loyalty.ts",
+        "op": "replace",
+        "old": "[\"gold\", 5000]",
+        "new": "[\"gold\", 7000]"
+      }
+    ],
+    "selected": [
+      "src/loyalty.test.ts"
+    ],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/loyalty.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "data-fs-default-import-tax-rates",
+    "edits": [
+      {
+        "file": "data/tax-rates.json",
+        "op": "replace",
+        "old": "\"reduced\": 8",
+        "new": "\"reduced\": 9"
+      }
+    ],
+    "selected": [
+      "src/tax.test.ts",
+      "src/cart.test.ts",
+      "src/validate-data.test.ts"
+    ],
+    "not_selected": [
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/tax.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "data-fs-named-import-catalog",
+    "edits": [
+      {
+        "file": "data/catalog.csv",
+        "op": "replace",
+        "old": "BK-001,The Pragmatic Programmer,book,4200",
+        "new": "BK-001,The Pragmatic Programmer,book,4300"
+      }
+    ],
+    "selected": [
+      "src/catalog.test.ts",
+      "src/cart.test.ts",
+      "src/validate-data.test.ts"
+    ],
+    "not_selected": [
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/catalog.test.ts",
+      "src/cart.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "data-bun-file-shipping-zones",
+    "edits": [
+      {
+        "file": "data/shipping-zones.json",
+        "op": "replace",
+        "old": "\"baseCents\": 499",
+        "new": "\"baseCents\": 599"
+      }
+    ],
+    "selected": [
+      "src/shipping.test.ts",
+      "src/validate-data.test.ts"
+    ],
+    "not_selected": [
+      "src/money.test.ts",
+      "src/loyalty.test.ts",
+      "src/tax.test.ts"
+    ],
+    "fails": [
+      "src/shipping.test.ts"
+    ]
+  },
+  {
+    "name": "dynamic-import-plugin-edit",
+    "edits": [
+      {
+        "file": "src/discounts/bulk.ts",
+        "op": "replace",
+        "old": "const MIN_QTY = 10;",
+        "new": "const MIN_QTY = 12;"
+      }
+    ],
+    "selected": [
+      "src/discounts.test.ts",
+      "src/cart.test.ts"
+    ],
+    "not_selected": [
+      "src/catalog.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/cart.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dir-listing-new-plugin",
+    "edits": [
+      {
+        "file": "src/discounts/student.ts",
+        "op": "write",
+        "content": "import type { Discount } from \"../types\";\n\nconst student: Discount = {\n  id: \"student\",\n  label: \"student pricing\",\n  applies: () => false,\n  amount: () => 0,\n};\nexport default student;\n"
+      }
+    ],
+    "selected": [
+      "src/discounts.test.ts",
+      "src/cart.test.ts"
+    ],
+    "not_selected": [
+      "src/catalog.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/discounts.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "dynamic-json-import-locale-edit",
+    "edits": [
+      {
+        "file": "locales/ja-JP.json",
+        "op": "replace",
+        "old": "\"{count} 点\"",
+        "new": "\"{count} 個\""
+      }
+    ],
+    "selected": [
+      "src/i18n.test.ts"
+    ],
+    "fails": [
+      "src/i18n.test.ts"
+    ],
+    "orphans": [
+      "locales/ja-JP.json"
+    ]
+  },
+  {
+    "name": "bun-glob-new-locale",
+    "edits": [
+      {
+        "file": "locales/fr-FR.json",
+        "op": "write",
+        "content": "{\n  \"cart.total\": \"Total : {amount}\"\n}\n"
+      }
+    ],
+    "selected": [
+      "src/i18n.test.ts"
+    ],
+    "fails": [
+      "src/i18n.test.ts"
+    ],
+    "orphans": [],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "note": "Bun.Glob scans are traced as directory/tree dependencies."
+  },
+  {
+    "name": "subprocess-script-edit",
+    "edits": [
+      {
+        "file": "scripts/render-receipt.ts",
+        "op": "replace",
+        "old": "`RECEIPT ${order.id}`",
+        "new": "`RECEIPT #${order.id}`"
+      }
+    ],
+    "selected": [
+      "src/receipt.test.ts"
+    ],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/receipt.test.ts"
+    ]
+  },
+  {
+    "name": "subprocess-transitive-module-money",
+    "edits": [
+      {
+        "file": "src/money.ts",
+        "op": "replace",
+        "old": "USD: \"$\"",
+        "new": "USD: \"US$\""
+      }
+    ],
+    "selected": [
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/cart.test.ts",
+      "src/tax.test.ts",
+      "src/discounts.test.ts"
+    ],
+    "not_selected": [
+      "src/loyalty.test.ts",
+      "src/i18n.test.ts",
+      "src/shipping.test.ts",
+      "src/catalog.test.ts"
+    ],
+    "fails": [
+      "src/money.test.ts",
+      "src/receipt.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "bunfig-preload-setup-edit",
+    "edits": [
+      {
+        "file": "test/setup.ts",
+        "op": "append",
+        "content": "\n// fixtures are read-only\n"
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "bunfig-preload-setup-data-read",
+    "edits": [
+      {
+        "file": "test/fixtures/customers.json",
+        "op": "replace",
+        "old": "\"points\": 6200",
+        "new": "\"points\": 4000"
+      }
+    ],
+    "selected": [
+      "src/loyalty.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/loyalty.test.ts"
+    ],
+    "note": "The bunfig preload runs in every test process, so what it reads is a dependency of every test."
+  },
+  {
+    "name": "test-helper-edit",
+    "edits": [
+      {
+        "file": "test/helpers.ts",
+        "op": "append",
+        "content": "\nexport const FIXTURE_IDS = [\"c-ada\", \"c-bob\", \"c-cyd\"];\n"
+      }
+    ],
+    "selected": [
+      "src/loyalty.test.ts"
+    ],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-test-file",
+    "edits": [
+      {
+        "file": "src/money-extra.test.ts",
+        "op": "write",
+        "content": "import { expect, test } from \"bun:test\";\nimport { formatCents } from \"./money\";\n\ntest(\"pounds\", () => {\n  expect(formatCents(250, \"GBP\")).toBe(\"£2.50\");\n});\n"
+      }
+    ],
+    "selected": [
+      "src/money-extra.test.ts"
+    ],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-module-loyalty",
+    "edits": [
+      {
+        "file": "src/loyalty.ts",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "src/loyalty.test.ts"
+    ],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/loyalty.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-plugin-books",
+    "edits": [
+      {
+        "file": "src/discounts/books.ts",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "src/discounts.test.ts",
+      "src/cart.test.ts"
+    ],
+    "not_selected": [
+      "src/catalog.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "fails": [
+      "src/discounts.test.ts",
+      "src/cart.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "lockfile-change",
+    "edits": [
+      {
+        "file": "bun.lock",
+        "op": "append",
+        "content": "\n"
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "manifest-change",
+    "edits": [
+      {
+        "file": "package.json",
+        "op": "replace",
+        "old": "\"version\": \"0.3.0\"",
+        "new": "\"version\": \"0.3.1\""
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "bunfig-change",
+    "edits": [
+      {
+        "file": "bunfig.toml",
+        "op": "append",
+        "content": "\n# keep preload first\n"
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "tsconfig-change",
+    "edits": [
+      {
+        "file": "tsconfig.json",
+        "op": "replace",
+        "old": "\"strict\": true",
+        "new": "\"strict\": false"
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "readme-change",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\n## Development\n\nRun `bun test`.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "orphan-dockerfile-no-agent",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "FROM oven/bun:1.4",
+        "new": "FROM oven/bun:1.4.2"
+      }
+    ],
+    "selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/receipt.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "subprocess-data-traced-in-child-bun",
+    "edits": [
+      {
+        "file": "scripts/receipt-footer.txt",
+        "op": "write",
+        "content": "Thanks for shopping at Bun Shop.\n"
+      }
+    ],
+    "selected": [
+      "src/receipt.test.ts"
+    ],
+    "fails": [
+      "src/receipt.test.ts"
+    ],
+    "orphans": [],
+    "not_selected": [
+      "src/cart.test.ts",
+      "src/catalog.test.ts",
+      "src/discounts.test.ts",
+      "src/i18n.test.ts",
+      "src/loyalty.test.ts",
+      "src/money.test.ts",
+      "src/shipping.test.ts",
+      "src/tax.test.ts",
+      "src/validate-data.test.ts",
+      "test/fixture-data.test.ts"
+    ],
+    "note": "Child bun processes load the shim through BUN_OPTIONS, so their reads are attributed to the test."
+  },
+  {
+    "name": "agent-subprocess-data",
+    "edits": [
+      {
+        "file": "scripts/receipt-footer.txt",
+        "op": "write",
+        "content": "Thanks for shopping at Bun Shop.\n"
+      }
+    ],
+    "agent": true,
+    "selected": [
+      "src/receipt.test.ts"
+    ],
+    "not_selected": [
+      "src/money.test.ts",
+      "src/loyalty.test.ts",
+      "src/tax.test.ts",
+      "src/catalog.test.ts"
+    ],
+    "fails": [
+      "src/receipt.test.ts"
+    ]
+  }
+]

@@ -1,0 +1,11 @@
+# VAT / sales tax rates per region.
+regions:
+  DE:
+    standard: 0.19
+    reduced: 0.07
+  JP:
+    standard: 0.10
+    reduced: 0.08
+  US:
+    standard: 0.0
+    reduced: 0.0

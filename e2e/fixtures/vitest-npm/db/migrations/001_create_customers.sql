@@ -1,0 +1,5 @@
+CREATE TABLE customers (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  region TEXT NOT NULL
+);

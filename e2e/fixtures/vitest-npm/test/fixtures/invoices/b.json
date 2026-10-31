@@ -1,0 +1,11 @@
+{
+  "id": "INV-B",
+  "customer": "Kaisha KK",
+  "currency": "JPY",
+  "region": "JP",
+  "items": [
+    { "sku": "TEA", "qty": 10, "unitCents": 500, "reduced": true },
+    { "sku": "CUP", "qty": 2, "unitCents": 1500 }
+  ],
+  "expectedTotalCents": 8700
+}

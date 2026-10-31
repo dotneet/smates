@@ -1,0 +1,582 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-inventory",
+    "edits": [
+      {
+        "file": "src/inventory.js",
+        "op": "replace",
+        "old": "this.stock[sku] <= threshold",
+        "new": "this.stock[sku] < threshold"
+      }
+    ],
+    "selected": [
+      "__tests__/inventory.test.js",
+      "__tests__/handlers/create-order.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/inventory.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-money-reaches-subprocess",
+    "edits": [
+      {
+        "file": "src/money.js",
+        "op": "replace",
+        "old": "return `${sign}${units}.${rest} ${currency}`;",
+        "new": "return `${sign}${units},${rest} ${currency}`;"
+      }
+    ],
+    "selected": [
+      "__tests__/money.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "src/report.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/templates.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/money.test.js",
+      "__tests__/handlers/refund.test.js",
+      "src/report.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "config-json-read-at-require-time",
+    "edits": [
+      {
+        "file": "config/app.json",
+        "op": "replace",
+        "old": "\"taxRate\": 0.2",
+        "new": "\"taxRate\": 0.25"
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/handlers/create-order.test.js"
+    ],
+    "not_selected": [
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/pricing.test.js",
+      "__tests__/handlers/create-order.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "computed-require-handler",
+    "edits": [
+      {
+        "file": "src/handlers/refund.js",
+        "op": "replace",
+        "old": "status: 'refunded'",
+        "new": "status: 'refund-issued'"
+      }
+    ],
+    "selected": [
+      "__tests__/handlers/refund.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/handlers/refund.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "subprocess-script",
+    "edits": [
+      {
+        "file": "scripts/build-report.js",
+        "op": "replace",
+        "old": "count: orders.length",
+        "new": "count: orders.length + 1"
+      }
+    ],
+    "selected": [
+      "src/report.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "src/report.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "directory-listing-new-file",
+    "edits": [
+      {
+        "file": "templates/order-cancelled.tmpl",
+        "op": "write",
+        "content": "Order {{id}} was cancelled: {{reason\n"
+      }
+    ],
+    "selected": [
+      "__tests__/templates.test.js",
+      "__tests__/notifier.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/pricing.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/templates.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "test-fixture-data",
+    "edits": [
+      {
+        "file": "__tests__/__fixtures__/stock.json",
+        "op": "replace",
+        "old": "\"CAP\": 3",
+        "new": "\"CAP\": 4"
+      }
+    ],
+    "selected": [
+      "__tests__/inventory.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/inventory.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "setup-file",
+    "edits": [
+      {
+        "file": "test-support/setup-env.js",
+        "op": "replace",
+        "old": "Date.UTC(2026, 0, 15, 12, 0, 0)",
+        "new": "Date.UTC(2026, 0, 16, 12, 0, 0)"
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/config.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "manual-mock",
+    "edits": [
+      {
+        "file": "src/__mocks__/mailer.js",
+        "op": "replace",
+        "old": "outbox.push({ to, subject, body });",
+        "new": "outbox.push({ to, subject: subject.toUpperCase(), body });"
+      }
+    ],
+    "selected": [
+      "__tests__/notifier.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/notifier.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "mocked-real-module",
+    "edits": [
+      {
+        "file": "src/mailer.js",
+        "op": "append",
+        "content": "\n// retry on 4xx is handled by the relay\n"
+      }
+    ],
+    "selected": [
+      "__tests__/notifier.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-test-file",
+    "edits": [
+      {
+        "file": "__tests__/money-rounding.test.js",
+        "op": "write",
+        "content": "'use strict';\nconst { toCents } = require('../src/money');\n\ntest('half cents round up', () => {\n  expect(toCents('0.005')).toBe(1);\n});\n"
+      }
+    ],
+    "selected": [
+      "__tests__/money-rounding.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete-dynamically-loaded-module",
+    "edits": [
+      {
+        "file": "src/handlers/cancel-order.js",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "__tests__/handlers/cancel-order.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "__tests__/handlers/cancel-order.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "manifest-change",
+    "edits": [
+      {
+        "file": "package.json",
+        "op": "replace",
+        "old": "\"test\": \"jest\"",
+        "new": "\"test\": \"jest\",\n    \"lint\": \"node --check src/index.js\""
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "lockfile-change",
+    "edits": [
+      {
+        "file": "package-lock.json",
+        "op": "replace",
+        "old": "\"name\": \"order-service\"",
+        "new": "\"name\": \"order-service-api\""
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "jest-config-change",
+    "edits": [
+      {
+        "file": "jest.config.js",
+        "op": "replace",
+        "old": "maxWorkers: 3,",
+        "new": "maxWorkers: 3,\n  testTimeout: 10000,"
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "docs-only",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nSee docs/ for the HTTP API.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "orphan-dockerfile-no-agent",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "FROM node:22-alpine",
+        "new": "FROM node:24-alpine"
+      }
+    ],
+    "selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js",
+      "src/sku.test.js"
+    ],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "shell-script-traced-through-script-analysis",
+    "edits": [
+      {
+        "file": "scripts/normalize-sku.sh",
+        "op": "replace",
+        "old": "tr -s ' _.' '---'",
+        "new": "tr -s ' _' '--'"
+      }
+    ],
+    "selected": [
+      "src/sku.test.js"
+    ],
+    "fails": [
+      "src/sku.test.js"
+    ],
+    "orphans": [],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js"
+    ]
+  },
+  {
+    "name": "agent-shell-script-run-by-sh",
+    "agent": true,
+    "edits": [
+      {
+        "file": "scripts/normalize-sku.sh",
+        "op": "replace",
+        "old": "tr -s ' _.' '---'",
+        "new": "tr -s ' _' '--'"
+      }
+    ],
+    "selected": [
+      "src/sku.test.js"
+    ],
+    "not_selected": [
+      "__tests__/config.test.js",
+      "__tests__/handlers/cancel-order.test.js",
+      "__tests__/handlers/create-order.test.js",
+      "__tests__/handlers/refund.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/money.test.js",
+      "__tests__/notifier.test.js",
+      "__tests__/pricing.test.js",
+      "__tests__/templates.test.js",
+      "src/report.test.js"
+    ],
+    "fails": [
+      "src/sku.test.js"
+    ],
+    "orphans": [],
+    "note": "Originally an orphan for the agent; smates now traces the shell script deterministically (command-line and script analysis), so the change is attributed without the agent."
+  },
+  {
+    "name": "agent-deploy-only-script",
+    "agent": true,
+    "edits": [
+      {
+        "file": "scripts/seed-db.sh",
+        "op": "replace",
+        "old": "'ABC-1'",
+        "new": "'ABC-2'"
+      }
+    ],
+    "not_selected": [
+      "__tests__/money.test.js",
+      "__tests__/inventory.test.js",
+      "__tests__/templates.test.js",
+      "__tests__/handlers/refund.test.js"
+    ],
+    "orphans": [
+      "scripts/seed-db.sh"
+    ]
+  }
+]

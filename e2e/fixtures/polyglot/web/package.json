@@ -1,0 +1,15 @@
+{
+  "name": "polyglot-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "manifest": "node scripts/manifest.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.3",
+    "vitest": "5.0.5"
+  }
+}

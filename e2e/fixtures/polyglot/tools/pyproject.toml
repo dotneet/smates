@@ -1,0 +1,16 @@
+[project]
+name = "polytools"
+version = "0.3.0"
+description = "Data tools for the polyglot store"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

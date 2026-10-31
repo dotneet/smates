@@ -1,0 +1,10 @@
+{
+  "prices": {
+    "APL-001": 120,
+    "BAN-002": 45,
+    "MLK-003": 199,
+    "TEA-004": 850
+  },
+  "sample_cart": {"APL-001": 3, "MLK-003": 1},
+  "sample_cart_total": 565
+}

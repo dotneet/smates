@@ -1,0 +1,6 @@
+.smates/
+/dist/
+/smates
+node_modules/
+.venv/
+__pycache__/

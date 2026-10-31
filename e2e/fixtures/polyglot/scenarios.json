@@ -1,0 +1,1547 @@
+[
+  {
+    "name": "no change selects nothing",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go leaf money.go selects its importers only",
+    "edits": [
+      {
+        "file": "backend/internal/money/money.go",
+        "op": "replace",
+        "old": "\"%s$%d.%02d\"",
+        "new": "\"%sUSD %d.%02d\""
+      }
+    ],
+    "selected": [
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/catalog",
+      "backend/internal/render"
+    ],
+    "not_selected": [
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/money",
+      "backend/internal/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web leaf money.ts selects money and cart tests only",
+    "edits": [
+      {
+        "file": "web/src/money.ts",
+        "op": "replace",
+        "old": "return `${sign}$${",
+        "new": "return `${sign}USD ${"
+      }
+    ],
+    "selected": [
+      "web/src/money.test.ts",
+      "web/src/cart.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/money.test.ts",
+      "web/src/cart.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python leaf slug.py selects slug test and the CLI subprocess test",
+    "edits": [
+      {
+        "file": "tools/polytools/slug.py",
+        "op": "replace",
+        "old": "return \"-\".join(words)",
+        "new": "return \"_\".join(words)"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_slug.py",
+      "tools/tests/test_cli.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_slug.py",
+      "tools/tests/test_cli.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "shared schema.json selects exactly one test per language",
+    "edits": [
+      {
+        "file": "shared/schema.json",
+        "op": "replace",
+        "old": "\"version\": 3",
+        "new": "\"version\": 4"
+      }
+    ],
+    "selected": [
+      "backend/internal/schema",
+      "web/src/schema.test.ts",
+      "tools/tests/test_validate.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py"
+    ],
+    "fails": [
+      "backend/internal/schema",
+      "web/src/schema.test.ts",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web dynamic import with computed path (locales/ja.ts)",
+    "edits": [
+      {
+        "file": "web/src/locales/ja.ts",
+        "op": "replace",
+        "old": "レジに進む",
+        "new": "お会計"
+      }
+    ],
+    "selected": [
+      "web/src/i18n.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/i18n.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web directory listing: new plugin descriptor",
+    "edits": [
+      {
+        "file": "web/src/plugins/italic.json",
+        "op": "write",
+        "content": "{ \"name\": \"italic\", \"op\": \"wrap\", \"arg\": \"_\" }\n"
+      }
+    ],
+    "selected": [
+      "web/src/plugins.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/plugins.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web subprocess script (scripts/manifest.mjs run by a test)",
+    "edits": [
+      {
+        "file": "web/scripts/manifest.mjs",
+        "op": "replace",
+        "old": "display: 'standalone'",
+        "new": "display: 'browser'"
+      }
+    ],
+    "selected": [
+      "web/src/manifest.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/manifest.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web data file read only by the subprocess",
+    "edits": [
+      {
+        "file": "web/public/manifest.base.json",
+        "op": "replace",
+        "old": "\"Polyglot Store\"",
+        "new": "\"Polyglot Shop\""
+      }
+    ],
+    "selected": [
+      "web/src/manifest.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/manifest.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web setup-file fixture selects every web test and nothing else",
+    "edits": [
+      {
+        "file": "web/test/fixtures/user.json",
+        "op": "replace",
+        "old": "\"Ada\"",
+        "new": "\"Grace\""
+      }
+    ],
+    "selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/greeting.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "vitest config change selects the whole web suite",
+    "edits": [
+      {
+        "file": "web/vitest.config.ts",
+        "op": "replace",
+        "old": "setupFiles: ['./test/setup.ts'],",
+        "new": "setupFiles: ['./test/setup.ts'],\n    testTimeout: 20000,"
+      }
+    ],
+    "selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web optional overlay probed with existsSync is created",
+    "edits": [
+      {
+        "file": "web/config/flags.test.json",
+        "op": "write",
+        "content": "{ \"newCheckout\": true }\n"
+      }
+    ],
+    "selected": [
+      "web/src/flags.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/flags.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web flags data file edit",
+    "edits": [
+      {
+        "file": "web/config/flags.json",
+        "op": "replace",
+        "old": "\"giftCards\": true",
+        "new": "\"giftCards\": false"
+      }
+    ],
+    "selected": [
+      "web/src/flags.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/flags.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go testdata file read at runtime",
+    "edits": [
+      {
+        "file": "backend/internal/catalog/testdata/products/pear.json",
+        "op": "replace",
+        "old": "\"unit_cents\": 80",
+        "new": "\"unit_cents\": 90"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog"
+    ],
+    "not_selected": [
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/catalog"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go directory listing: new product file",
+    "edits": [
+      {
+        "file": "backend/internal/catalog/testdata/products/kiwi.json",
+        "op": "write",
+        "content": "{\"sku\": \"FRU-003\", \"name\": \"Kiwi\", \"unit_cents\": 50}\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog"
+    ],
+    "not_selected": [
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/catalog"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go embedded template",
+    "edits": [
+      {
+        "file": "backend/internal/render/templates/receipt.tmpl",
+        "op": "replace",
+        "old": "Receipt for",
+        "new": "Invoice for"
+      }
+    ],
+    "selected": [
+      "backend/internal/render"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/render"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "go optional overlay file probed with os.Stat is created",
+    "edits": [
+      {
+        "file": "backend/internal/settings/testdata/defaults.ci.json",
+        "op": "write",
+        "content": "{\"port\": 9090}\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/settings"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/settings"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python importlib with computed module name",
+    "edits": [
+      {
+        "file": "tools/polytools/formats/markdown_out.py",
+        "op": "replace",
+        "old": ":.2f}",
+        "new": ":.3f}"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_report.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_report.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python directory glob: new rule file",
+    "edits": [
+      {
+        "file": "tools/rules/no_digits.toml",
+        "op": "write",
+        "content": "description = \"No digits\"\nforbid = \"[0-9]\"\n"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_rules.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_rules.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python data file read only by a CLI subprocess",
+    "edits": [
+      {
+        "file": "tools/data/stopwords.txt",
+        "op": "replace",
+        "old": "of\n",
+        "new": ""
+      }
+    ],
+    "selected": [
+      "tools/tests/test_cli.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_cli.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python module executed only in a subprocess",
+    "edits": [
+      {
+        "file": "tools/polytools/cli.py",
+        "op": "replace",
+        "old": "print(slugify(name, sw))",
+        "new": "print(slugify(name, sw).upper())"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_cli.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_cli.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "python conftest fixture data file",
+    "edits": [
+      {
+        "file": "tools/tests/data/sales.csv",
+        "op": "replace",
+        "old": "FRU-002,2,80",
+        "new": "FRU-002,3,80"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_report.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_report.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new web test file",
+    "edits": [
+      {
+        "file": "web/src/cart.extra.test.ts",
+        "op": "write",
+        "content": "import { expect, it } from 'vitest';\nimport { discountPercent } from './cart';\n\nit('has no discount below ten', () => {\n  expect(discountPercent(9)).toBe(0);\n});\n"
+      }
+    ],
+    "selected": [
+      "web/src/cart.extra.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new python test file",
+    "edits": [
+      {
+        "file": "tools/tests/test_extra.py",
+        "op": "write",
+        "content": "from polytools.report import totals\n\n\ndef test_empty():\n    assert totals([]) == {}\n"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_extra.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new go test file in an existing package",
+    "edits": [
+      {
+        "file": "backend/internal/money/extra_test.go",
+        "op": "write",
+        "content": "package money\n\nimport \"testing\"\n\nfunc TestFormatLarge(t *testing.T) {\n\tif got := Format(123456); got != \"$1234.56\" {\n\t\tt.Fatal(got)\n\t}\n}\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/money"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new go package with tests",
+    "edits": [
+      {
+        "file": "backend/internal/tax/tax.go",
+        "op": "write",
+        "content": "package tax\n\nimport \"example.com/polyglot/backend/internal/money\"\n\n// VAT returns 10% tax.\nfunc VAT(c money.Cents) money.Cents { return money.Percent(c, 10) }\n"
+      },
+      {
+        "file": "backend/internal/tax/tax_test.go",
+        "op": "write",
+        "content": "package tax\n\nimport \"testing\"\n\nfunc TestVAT(t *testing.T) {\n\tif VAT(1000) != 100 {\n\t\tt.Fatal(VAT(1000))\n\t}\n}\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/tax"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete web module used by tests",
+    "edits": [
+      {
+        "file": "web/src/money.ts",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "web/src/money.test.ts",
+      "web/src/cart.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "web/src/money.test.ts",
+      "web/src/cart.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete python module used by tests and a subprocess",
+    "edits": [
+      {
+        "file": "tools/polytools/slug.py",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_slug.py",
+      "tools/tests/test_cli.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "tools/tests/test_slug.py",
+      "tools/tests/test_cli.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "delete go file imported by other packages",
+    "edits": [
+      {
+        "file": "backend/internal/pricing/pricing.go",
+        "op": "delete"
+      }
+    ],
+    "selected": [
+      "backend/internal/pricing",
+      "backend/internal/catalog"
+    ],
+    "not_selected": [
+      "backend/internal/money",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/pricing",
+      "backend/internal/catalog"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web/package-lock.json change selects all web tests only",
+    "edits": [
+      {
+        "file": "web/package-lock.json",
+        "op": "replace",
+        "old": "\"name\": \"polyglot-web\",",
+        "new": "\"name\": \"polyglot-web-app\","
+      }
+    ],
+    "selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "web/package.json change selects all web tests only",
+    "edits": [
+      {
+        "file": "web/package.json",
+        "op": "replace",
+        "old": "\"version\": \"1.0.0\"",
+        "new": "\"version\": \"1.0.1\""
+      }
+    ],
+    "selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "tools/uv.lock change selects all python tests only",
+    "edits": [
+      {
+        "file": "tools/uv.lock",
+        "op": "append",
+        "content": "# touched\n"
+      }
+    ],
+    "selected": [
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "tools/pyproject.toml change selects all python tests only",
+    "edits": [
+      {
+        "file": "tools/pyproject.toml",
+        "op": "replace",
+        "old": "version = \"0.3.0\"",
+        "new": "version = \"0.3.1\""
+      }
+    ],
+    "selected": [
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "backend/go.mod change selects all go packages only",
+    "edits": [
+      {
+        "file": "backend/go.mod",
+        "op": "append",
+        "content": "\n// toolchain bump pending\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version"
+    ],
+    "not_selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "backend-only edit selects only backend tests",
+    "edits": [
+      {
+        "file": "backend/internal/pricing/pricing.go",
+        "op": "replace",
+        "old": "return 15",
+        "new": "return 20"
+      }
+    ],
+    "selected": [
+      "backend/internal/pricing",
+      "backend/internal/catalog"
+    ],
+    "not_selected": [
+      "backend/internal/money",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/pricing"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "README change selects nothing",
+    "edits": [
+      {
+        "file": "README.md",
+        "op": "append",
+        "content": "\nSee also the wiki.\n"
+      }
+    ],
+    "selected": [],
+    "not_selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "root Dockerfile orphan runs every suite without agent",
+    "edits": [
+      {
+        "file": "Dockerfile",
+        "op": "replace",
+        "old": "golang:1.25 AS build",
+        "new": "golang:1.25.3 AS build"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "Dockerfile"
+    ]
+  },
+  {
+    "name": "root scripts/ orphan runs every suite without agent",
+    "edits": [
+      {
+        "file": "scripts/release.sh",
+        "op": "append",
+        "content": "echo done\n"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version",
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "not_selected": [],
+    "orphans": [
+      "scripts/release.sh"
+    ]
+  },
+  {
+    "name": "backend/Dockerfile orphan runs only the backend suite without agent",
+    "edits": [
+      {
+        "file": "backend/Dockerfile",
+        "op": "replace",
+        "old": "FROM golang:1.25",
+        "new": "FROM golang:1.25.3"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version"
+    ],
+    "not_selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "orphans": [
+      "backend/Dockerfile"
+    ]
+  },
+  {
+    "name": "script run via make by a go test: no-agent falls back to the backend suite",
+    "edits": [
+      {
+        "file": "backend/scripts/stamp.sh",
+        "op": "replace",
+        "old": "v1.4.2",
+        "new": "v1.5.0"
+      }
+    ],
+    "selected": [
+      "backend/internal/catalog",
+      "backend/internal/money",
+      "backend/internal/pricing",
+      "backend/internal/render",
+      "backend/internal/schema",
+      "backend/internal/settings",
+      "backend/internal/version"
+    ],
+    "not_selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py"
+    ],
+    "fails": [
+      "backend/internal/version"
+    ],
+    "orphans": [
+      "backend/scripts/stamp.sh"
+    ]
+  },
+  {
+    "name": "agent: script run via make by a go test",
+    "edits": [
+      {
+        "file": "backend/scripts/stamp.sh",
+        "op": "replace",
+        "old": "v1.4.2",
+        "new": "v1.5.0"
+      }
+    ],
+    "selected": [
+      "backend/internal/version"
+    ],
+    "not_selected": [
+      "web/src/cart.test.ts",
+      "web/src/flags.test.ts",
+      "web/src/greeting.test.ts",
+      "web/src/i18n.test.ts",
+      "web/src/manifest.test.ts",
+      "web/src/money.test.ts",
+      "web/src/plugins.test.ts",
+      "web/src/schema.test.ts",
+      "tools/tests/test_cli.py",
+      "tools/tests/test_report.py",
+      "tools/tests/test_rules.py",
+      "tools/tests/test_slug.py",
+      "tools/tests/test_validate.py",
+      "backend/internal/money",
+      "backend/internal/schema",
+      "backend/internal/settings"
+    ],
+    "fails": [
+      "backend/internal/version"
+    ],
+    "agent": true
+  }
+]

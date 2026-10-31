@@ -1,0 +1,7 @@
+{
+  "name": "fx-monorepo",
+  "private": true,
+  "scripts": {
+    "test": "pnpm -r test"
+  }
+}
