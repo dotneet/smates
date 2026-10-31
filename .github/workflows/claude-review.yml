@@ -1,0 +1,63 @@
+# Automated pull request review by Claude (anthropics/claude-code-action).
+#
+# Runs when a pull request is opened, updated or marked ready for review, and posts
+# inline comments on specific lines plus one summary comment.
+#
+# Requires the ANTHROPIC_API_KEY repository secret. Secrets are not available to pull
+# requests from forks, so those are skipped.
+name: Claude review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. smates is a Go CLI (plus a composite GitHub
+            Action in action.yml) that selects and runs the tests affected by a change.
+            Focus on:
+            - correctness bugs and edge cases
+            - concurrency and race conditions
+            - error handling and resource cleanup
+            - cross-platform behavior (Linux, macOS, Windows paths and shells)
+            - security issues (command injection, untrusted input in action.yml)
+            - missing or inadequate tests
+
+            Use `gh pr diff` and `gh pr view` to read the change, and read surrounding
+            code where needed. Only report problems you are confident about; skip style
+            nits that gofmt or go vet would catch.
+
+            Post each finding as an inline comment on the relevant line with
+            mcp__github_inline_comment__create_inline_comment, then post one short
+            summary comment with `gh pr comment`. If there is nothing to report, say so
+            in the summary.
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
