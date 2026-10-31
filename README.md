@@ -168,6 +168,8 @@ orphans: agent        # agent | all | ignore
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
+flaky:
+  retry: 0            # re-run a failing, already known flaky test up to N times (default 0: never hide a failure)
 agent:
   model: claude-haiku-5-5
   max_turns: 12
@@ -184,11 +186,24 @@ agent:
 | `smates select` | selection only: `--format text\|files\|json\|github` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
+| `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
+
+**Flaky tests** are detected by proof, not by heuristics. smates knows the content hash of
+every input of every test, so when a test's outcome flips between pass and fail while none
+of those inputs changed (a failing test that passes when re-run, a full run on the default
+branch that fails a test nothing touched), the test is flaky — or it depends on something
+smates cannot see (time, network, environment variables, files outside the repository).
+`smates run` reports such tests in its log, in `--report` (`flaky`), in the job summary and
+in the `flaky` / `flaky-tests` outputs, and remembers the evidence (number of flips, last
+commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure still
+fails the run and is still selected next time. With `flaky: {retry: 1}`, a failing test
+that is *already known* to be flaky is re-run once, and if it then passes the run does not
+fail (only when every failure of that suite run is such a test; the flip is reported).
 
 ## The agent
 

@@ -294,3 +294,80 @@ func TestMerge(t *testing.T) {
 		}
 	})
 }
+
+func TestHistoryAndFlakeRoundTrip(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	in := sample()
+	e := in.Suites["web"].Tests["src/a.test.ts"]
+	e.History = []Outcome{{Status: Pass, Fingerprint: "aaa", At: t0}, {Status: Fail, Fingerprint: "aaa", At: t0.Add(time.Minute), Inferred: true}}
+	e.Flaky = &Flake{Count: 2, First: t0, Last: t0.Add(time.Minute), Commit: "abc", Flip: "pass->fail"}
+	var buf bytes.Buffer
+	if err := in.Write(&buf, true); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Read(&buf, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oe := out.Suites["web"].Tests["src/a.test.ts"]
+	if !reflect.DeepEqual(oe.History, e.History) || !reflect.DeepEqual(oe.Flaky, e.Flaky) {
+		t.Errorf("history %+v flaky %+v", oe.History, oe.Flaky)
+	}
+	if b := out.Suites["web"].Tests["src/b.test.ts"]; b.History != nil || b.Flaky != nil {
+		t.Errorf("entry without history: %+v", b)
+	}
+}
+
+// TestReadStateWithoutHistory: state files written before outcome histories existed
+// still load, and files written now keep the same version (older readers ignore the
+// new fields).
+func TestReadStateWithoutHistory(t *testing.T) {
+	old := `{"version":1,"created":"2026-01-01T00:00:00Z","paths":["a.test.js"],"blobs":["h"],"files":[[0,0]],
+"suites":{"s":{"tests":{"a.test.js":{"deps":[[0,0]],"status":"fail","at":"2026-01-01T00:00:00Z"}}}}}`
+	st, err := Read(strings.NewReader(old), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := st.Suites["s"].Tests["a.test.js"]
+	if e.Status != Fail || e.History != nil || e.Flaky != nil {
+		t.Errorf("entry %+v", e)
+	}
+	var buf bytes.Buffer
+	e.History = []Outcome{{Status: Fail, At: time.Unix(5, 0)}}
+	st.Write(&buf, false)
+	if !strings.Contains(buf.String(), `"version":1`) || !strings.Contains(buf.String(), `"history":[{"s":"fail","t":5}]`) {
+		t.Errorf("written: %s", buf.String())
+	}
+}
+
+func TestMergeHistoryAndFlakes(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(h int) time.Time { return t0.Add(time.Duration(h) * time.Hour) }
+	shared := Outcome{Status: Pass, Fingerprint: "f", At: at(0)}
+	a, b := New(), New()
+	a.Suite("s").Tests["u"] = &Entry{Status: Fail, At: at(2), History: []Outcome{shared, {Status: Fail, Fingerprint: "f", At: at(2)}},
+		Flaky: &Flake{Count: 1, First: at(2), Last: at(2), Commit: "ca", Flip: "pass->fail"}}
+	b.Suite("s").Tests["u"] = &Entry{Status: Pass, At: at(1), History: []Outcome{shared, {Status: Pass, Fingerprint: "g", At: at(1)}}}
+	b.Suite("s").Tests["v"] = &Entry{Status: Pass, At: at(3), Flaky: &Flake{Count: 3, First: at(0), Last: at(1), Commit: "cb", Flip: "fail->pass"}}
+	a.Suite("s").Tests["v"] = &Entry{Status: Fail, At: at(0), Flaky: &Flake{Count: 2, First: at(0), Last: at(2), Commit: "ca", Flip: "pass->fail"}}
+	a.Merge(b)
+	u := a.Suites["s"].Tests["u"]
+	if u.Status != Fail || len(u.History) != 3 || !u.History[1].At.Equal(at(1)) || u.Flaky == nil || u.Flaky.Count != 1 {
+		t.Errorf("u: %+v history %+v", u, u.History)
+	}
+	v := a.Suites["s"].Tests["v"]
+	want := &Flake{Count: 3, First: at(0), Last: at(2), Commit: "ca", Flip: "pass->fail"}
+	if v.Status != Pass || !reflect.DeepEqual(v.Flaky, want) {
+		t.Errorf("v: %+v flaky %+v", v, v.Flaky)
+	}
+	if b.Suites["s"].Tests["v"].Flaky.Count != 3 {
+		t.Error("merge must not modify the other state's entries")
+	}
+}
+
+func TestFingerprint(t *testing.T) {
+	a := Fingerprint(map[string]string{"x": "1", "y": "2"})
+	if a != Fingerprint(map[string]string{"y": "2", "x": "1"}) || a == Fingerprint(map[string]string{"x": "1", "y": "3"}) || a == Fingerprint(map[string]string{"x": "1", "y": ""}) {
+		t.Error("fingerprint must depend on exactly the deps")
+	}
+}
