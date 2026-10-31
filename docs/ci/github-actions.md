@@ -85,6 +85,8 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 | `run-all` | `true` when everything was selected. |
 | `skip` | `true` when nothing was selected. |
 | `exit-code` | Exit code of the smates command. |
+| `flaky` | Number of test units `run` proved flaky (outcome flipped with unchanged inputs). |
+| `flaky-tests` | JSON array of those units (`"suite: unit"`); see `smates flaky`. |
 | `version` | Installed smates version (`source` for source builds). |
 | `comment-url` | URL of the pull request comment, when one was posted or updated. |
 
