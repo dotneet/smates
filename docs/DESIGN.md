@@ -209,8 +209,14 @@ sections); other features append their own sections (`summary.Section`).
 
 ## 5. Agent
 
-Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`, low
-effort, prompt caching, read-only tools confined to the repository and to files git does
+Built-in clients (no SDK) for the Anthropic Messages API (default `claude-haiku-5-5`), the
+OpenAI Responses API (default `gpt-6-luna`, stateless: `store: false`, reasoning carried
+encrypted between turns) and OpenRouter's Chat Completions API (default
+`anthropic/claude-haiku-5.5`). `agent.provider: auto` uses the first provider whose API
+key is set, in that order; `agent.model` overrides the provider's default. One tool loop
+drives all three through a small per-provider `dialect` (request encoding, response
+decoding, errors). Low effort (dropped once a model rejects it), prompt caching,
+read-only tools confined to the repository and to files git does
 not ignore (`list_files`, `grep`, `read_file`, `git_diff`, `tests_for_file`, `test_deps`,
 `search_tests`, `submit_selection`). Bounded by turns, wall-clock time and an input-token
 budget; answers are validated against the test inventory and cached per change. Any
@@ -278,4 +284,6 @@ not available).
   the repository and checks detection, reselection, `smates flaky` and `flaky.retry`.
   `TestWatch` runs `smates watch` on the Go, pytest and vitest fixtures, edits files while
   it runs and checks each cycle's selection and result, that runs do not retrigger it, and
-  that SIGINT stops it.
+  that SIGINT stops it. Fixtures, scenarios and mutations run in parallel on a pool of
+  prepared repositories per fixture; CI splits them into shards of about equal run time
+  (`SMATES_E2E_FIXTURE` takes a list of fixtures, or of `-fixture` exclusions).

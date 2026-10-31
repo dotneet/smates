@@ -130,7 +130,7 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 			return &dec, true, nil
 		}
 	}
-	p.logf("agent: asking %s about %d unattributed change(s): %s", p.cfg.Agent.Model, len(orphans), strings.Join(limit(orphans, 5), ", "))
+	p.logf("agent: asking %s about %d unattributed change(s): %s", agent.Describe(p.cfg.Agent), len(orphans), strings.Join(limit(orphans, 5), ", "))
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Agent.Timeout)
 	defer cancel()
 	start := time.Now()

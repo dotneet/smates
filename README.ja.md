@@ -45,7 +45,8 @@ rebase やマージコミットにも惑わされません。
 
 1. テストのソースや依存ファイルがそのファイル名に言及していれば選択(文字列で参照される
    fixture・マイグレーション・スキーマなど)。
-2. 残りは **エージェント** に問い合わせ(`ANTHROPIC_API_KEY` がある場合)。読み取り専用
+2. 残りは **エージェント** に問い合わせ(`ANTHROPIC_API_KEY`・`OPENAI_API_KEY`・
+   `OPENROUTER_API_KEY` のいずれかがある場合)。読み取り専用
    ツールでリポジトリを調べ、特定のテストを追加するか全実行を求めます。テストを削除する
    ことはできないため、誤答や指示注入があっても「追加し損ねる」以上の害はありません。
 3. それ以外の場合は、そのファイルが影響しうるスイートを丸ごと実行します。
@@ -67,7 +68,7 @@ smates deps src/cart.test.ts  # このテストは何に依存している?
 ```yaml
       - uses: dotneet/smates@v1
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # 任意
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # 任意(openai-api-key / openrouter-api-key も可)
 ```
 
 デフォルトブランチへの push では全テストを実行して状態を更新し、プルリクエストでは

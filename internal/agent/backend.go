@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +15,7 @@ import (
 
 // Defaults applied when the configuration leaves a field empty (config.Normalize
 // normally fills them; these keep the package usable with a zero AgentConfig).
+// DefaultModel is the Anthropic default; each provider has its own (see providers).
 const (
 	DefaultModel    = "claude-haiku-5-5"
 	DefaultMaxTurns = 12
@@ -23,7 +23,8 @@ const (
 	defaultBaseURL  = "https://api.anthropic.com"
 )
 
-// Environment variables read by the built-in backend.
+// Environment variables read by the built-in backend for Anthropic (see providers for
+// the others).
 const (
 	envAPIKey    = "ANTHROPIC_API_KEY"
 	envAuthToken = "ANTHROPIC_AUTH_TOKEN"
@@ -31,8 +32,8 @@ const (
 )
 
 // Available reports whether an agent can run with cfg, and why not when it cannot.
-// The external command backend only needs cfg.Command; the built-in backend needs
-// ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN.
+// The external command backend only needs cfg.Command; the built-in backend needs the
+// API key of its provider (see providerOf).
 func Available(cfg config.AgentConfig) (bool, string) {
 	if cfg.Enabled == config.AgentNever {
 		return false, "agent disabled (agent.enabled: never)"
@@ -40,20 +41,29 @@ func Available(cfg config.AgentConfig) (bool, string) {
 	if strings.TrimSpace(cfg.Command) != "" {
 		return true, ""
 	}
-	if os.Getenv(envAPIKey) != "" || os.Getenv(envAuthToken) != "" {
+	if providerOf(cfg).configured() {
 		return true, ""
 	}
-	return false, "no credentials: set " + envAPIKey + " (or " + envAuthToken + "), or configure agent.command"
+	return false, missingCredentials(cfg)
 }
 
 // New returns the backend selected by cfg: the external command when cfg.Command is
-// set, otherwise the built-in Anthropic Messages API client configured from the
-// environment (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL).
+// set, otherwise the built-in client of the selected provider, configured from the
+// environment (API key and optional base URL, e.g. OPENAI_API_KEY and OPENAI_BASE_URL).
 func New(cfg config.AgentConfig) Backend {
 	if strings.TrimSpace(cfg.Command) != "" {
 		return &commandBackend{cfg: cfg}
 	}
-	return newAPIBackend(cfg, os.Getenv(envBaseURL), os.Getenv(envAPIKey), os.Getenv(envAuthToken))
+	return builtinBackend(cfg)
+}
+
+// Describe names the agent cfg runs, for humans: the external command, or the model
+// and provider of the built-in backend.
+func Describe(cfg config.AgentConfig) string {
+	if c := strings.TrimSpace(cfg.Command); c != "" {
+		return c
+	}
+	return ModelOf(cfg) + " (" + ProviderOf(cfg) + ")"
 }
 
 // CacheKey identifies a request's answer: it changes when the prompt version, the
@@ -73,7 +83,7 @@ func CacheKey(req *Request) string {
 	if c := strings.TrimSpace(req.Config.Command); c != "" {
 		field("command", c)
 	} else {
-		field("model", modelOf(req.Config), "effort", req.Config.Effort)
+		field("provider", ProviderOf(req.Config), "model", ModelOf(req.Config), "effort", req.Config.Effort)
 	}
 	field("instructions", req.Config.Instructions)
 
@@ -102,13 +112,6 @@ func CacheKey(req *Request) string {
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-func modelOf(cfg config.AgentConfig) string {
-	if cfg.Model != "" {
-		return cfg.Model
-	}
-	return DefaultModel
 }
 
 func maxTurnsOf(cfg config.AgentConfig) int {

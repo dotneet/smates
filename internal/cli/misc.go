@@ -83,7 +83,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 			if err := os.WriteFile(wf, []byte(renderWorkflow(repo, suites)), 0o644); err != nil {
 				return err
 			}
-			fmt.Fprintln(stdout, "wrote .github/workflows/smates.yml (add an ANTHROPIC_API_KEY secret to enable the agent)")
+			fmt.Fprintln(stdout, "wrote .github/workflows/smates.yml (add an ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY secret to enable the agent)")
 		}
 	}
 	fmt.Fprintf(stdout, "wrote smates.yml with %d suite(s):\n", len(suites))
@@ -126,7 +126,8 @@ suites:
 	}
 	b.WriteString(`
 # Changed files no test is known to depend on ("orphans"): agent | all | ignore.
-# "agent" asks Claude (needs ANTHROPIC_API_KEY) and falls back to "all".
+# "agent" asks an LLM (needs ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY)
+# and falls back to "all".
 orphans: agent
 
 # Changes that never require tests unless a test reads them (added to built-in defaults
@@ -137,7 +138,8 @@ ignore: []
 inputs: []
 
 agent:
-  model: claude-haiku-5-5
+  # provider: auto      # auto (picked from the API key that is set) | anthropic | openai | openrouter
+  # model: claude-haiku-5-5   # default depends on the provider
   # instructions: "Integration tests in e2e/ talk to the API server built from server/."
 `)
 	return b.String()
@@ -241,7 +243,7 @@ jobs:
       # refreshed; on pull requests only affected tests run.
       - uses: dotneet/smates@v1
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional: narrows unattributed changes
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional: narrows unattributed changes (or openai-api-key / openrouter-api-key)
 `)
 	return b.String()
 }
@@ -726,7 +728,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 		ok("state %s: %d tests recorded, snapshot from commit %.12s (%s ago)", p.statePath, n, p.state.Commit, age)
 	}
 	if okA, why := agent.Available(p.cfg.Agent); okA {
-		ok("agent: %s available for unattributed changes (orphans: %s)", first(p.cfg.Agent.Command, p.cfg.Agent.Model), p.cfg.Orphans)
+		ok("agent: %s available for unattributed changes (orphans: %s)", agent.Describe(p.cfg.Agent), p.cfg.Orphans)
 	} else if p.cfg.Orphans == config.OrphansAgent {
 		warn("agent unavailable (%s): unattributed changes run the affected suites in full", why)
 	}

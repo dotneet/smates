@@ -190,7 +190,7 @@ func (fh *failureHints) start(job *explainJob) {
 	job.req.Base = fh.baseRev()
 	fh.jobs = append(fh.jobs, job)
 	if len(fh.jobs) == 1 {
-		fh.p.logf("agent: asking %s to explain failing tests in the background", fh.p.cfg.Agent.Model)
+		fh.p.logf("agent: asking %s to explain failing tests in the background", agent.Describe(fh.p.cfg.Agent))
 	}
 	fh.wg.Add(1)
 	go func() {

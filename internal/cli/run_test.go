@@ -28,7 +28,7 @@ func TestRunSelectEndToEnd(t *testing.T) {
 	clearCI(t)
 	t.Setenv("GITHUB_OUTPUT", "")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
+	noAgentCredentials(t)
 	// Edits below swap same-size contents within one second, which a cached .pyc
 	// (validated by mtime and size) would not notice.
 	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")

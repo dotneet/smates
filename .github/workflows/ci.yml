@@ -48,7 +48,28 @@ jobs:
     # Selected by smates (suite "e2e"): skipped when a pull request changes nothing
     # under cmd/, internal/, e2e/ or go.mod. Not recorded, so no state is kept and
     # pull requests diff against the base branch.
+    # Sharded by fixture into jobs of about equal run time. The last one runs every
+    # fixture not named before it, so a new fixture runs there until it gets a shard.
+    name: e2e (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: polyglot scenarios
+            fixtures: polyglot
+            args: -- -run TestScenarios
+          - name: polyglot others
+            fixtures: polyglot
+            args: -- -skip TestScenarios
+          - name: jest-npm, node-test
+            fixtures: jest-npm,node-test
+          - name: vitest-npm, python-uv
+            fixtures: vitest-npm,python-uv
+          - name: others
+            fixtures: -polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv
     runs-on: ubuntu-latest
+    env:
+      SMATES_E2E_FIXTURE: ${{ matrix.fixtures }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,7 +89,7 @@ jobs:
         uses: ./
         with:
           version: source
-          args: --suite e2e --no-record --no-agent
+          args: --suite e2e --no-record --no-agent ${{ matrix.args }}
           cache: 'false'
 
   action:

@@ -179,3 +179,22 @@ func testConfig() config.AgentConfig {
 }
 
 type configT = config.AgentConfig
+
+// clearCredentials unsets the credentials of every provider.
+func clearCredentials(t *testing.T) {
+	t.Helper()
+	for _, p := range providers {
+		t.Setenv(p.keyEnv, "")
+		if p.tokenEnv != "" {
+			t.Setenv(p.tokenEnv, "")
+		}
+		t.Setenv(p.baseURLEnv, "")
+	}
+}
+
+// forgetRejectedEfforts clears the process-wide record of rejected efforts when t ends,
+// so a later test whose server reuses the port starts clean.
+func forgetRejectedEfforts(t *testing.T) {
+	t.Helper()
+	t.Cleanup(effortRejected.Clear)
+}

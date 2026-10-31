@@ -63,7 +63,8 @@ config, …) is an *orphan*: deterministic analysis cannot explain it. smates th
 
 1. selects tests whose sources or dependencies mention the file by name (fixtures,
    migrations, schemas referenced as strings);
-2. asks the **agent** about the rest (when `ANTHROPIC_API_KEY` is set): it explores the
+2. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+   `OPENROUTER_API_KEY` is set): it explores the
    repository with read-only tools and adds specific tests or requests a full run.
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
 3. otherwise runs the suites the orphan can affect in full.
@@ -124,7 +125,7 @@ jobs:
       - run: npm ci
       - uses: dotneet/smates@v1
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional (or openai-api-key / openrouter-api-key)
 ```
 
 On pushes to the default branch everything runs and the state is refreshed; on pull
@@ -178,7 +179,8 @@ full_run_branches: [main, release]
 flaky:
   retry: 0            # re-run a failing, already known flaky test up to N times (default 0: never hide a failure)
 agent:
-  model: claude-haiku-5-5
+  provider: auto      # auto (from the API key that is set) | anthropic | openai | openrouter
+  # model: gpt-6-luna   # default depends on the provider (see "The agent")
   max_turns: 12
   timeout: 120s
   instructions: "e2e/ tests talk to the server built from server/."
@@ -291,8 +293,18 @@ ok  	example.com/shop/internal/store	0.170s
 
 - Called only for orphans (and, after a failing run, to explain a few failures), so most
   pull requests make no LLM call at all.
-- Built-in client for the Anthropic Messages API (no SDK), default `claude-haiku-5-5`,
-  low effort, prompt caching. Typical cost is well under $0.01 per call and a few seconds.
+- Built-in clients (no SDK) for three providers. With `provider: auto` (the default) the
+  first one whose API key is set is used; `agent.provider` picks one explicitly and
+  `agent.model` overrides its default model:
+
+  | provider | API key (base URL override) | API | default model |
+  |---|---|---|---|
+  | `anthropic` | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` (`ANTHROPIC_BASE_URL`) | Messages | `claude-haiku-5-5` |
+  | `openai` | `OPENAI_API_KEY` (`OPENAI_BASE_URL`) | Responses | `gpt-6-luna` |
+  | `openrouter` | `OPENROUTER_API_KEY` (`OPENROUTER_BASE_URL`) | Chat Completions | `anthropic/claude-haiku-5.5` |
+
+  Low effort and prompt caching by default (the effort is dropped for models that do not
+  reason). Typical cost is well under $0.01 per call and a few seconds.
 - Read-only tools confined to the repository (`list_files`, `grep`, `read_file`,
   `git_diff`, `tests_for_file`, `test_deps`, `search_tests`); ignored files such as
   `.env` are never readable.
