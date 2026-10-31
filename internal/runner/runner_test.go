@@ -564,6 +564,43 @@ func TestObserve(t *testing.T) {
 	}
 }
 
+// A unit the runner reported but no traced process ran (its worker was killed before
+// writing its coverage, or it failed to import) must not be recorded as a clean pass.
+func TestObserveUntracedResults(t *testing.T) {
+	repo := tempRepo(t, "a.test.ts", "b.test.ts")
+	td := t.TempDir()
+	os.MkdirAll(trace.V8Dir(td), 0o755)
+	abs := func(r string) string { return filepath.Join(repo.Root, filepath.FromSlash(r)) }
+	var lines []string
+	for _, r := range []map[string]any{
+		{"k": "result", "id": abs("a.test.ts"), "status": "pass", "ms": 5},
+		{"k": "result", "id": abs("b.test.ts"), "status": "fail", "ms": 7},
+	} {
+		lines = append(lines, mustJSON(r))
+	}
+	os.WriteFile(filepath.Join(td, "results-vitest-1.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	unitOf := func(f string) string {
+		if strings.HasSuffix(f, ".test.ts") {
+			return f
+		}
+		return ""
+	}
+	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: "."}}, TraceDir: td, UnitOf: unitOf}
+	obs, warns, err := observe(rc, 0, traceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := obs["a.test.ts"]; a == nil || a.Status != state.Unknown {
+		t.Errorf("untraced pass must run again: %+v", a)
+	}
+	if b := obs["b.test.ts"]; b == nil || b.Status != state.Fail {
+		t.Errorf("untraced failure stays a failure: %+v", b)
+	}
+	if len(warns) != 1 {
+		t.Errorf("warnings %v", warns)
+	}
+}
+
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {

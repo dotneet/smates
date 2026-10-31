@@ -152,13 +152,24 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		obs[id] = o
 	}
 	// A test file that failed before executing (an import error during collection)
-	// leaves no trace, but the runner still reported it.
+	// leaves no trace, but the runner still reported it. One that passed without a trace
+	// ran in a process whose trace was lost (a pool worker killed before it wrote its
+	// coverage): what it used is unknown, so it must run again rather than be skipped.
+	untraced := 0
 	for f, r := range results {
 		id := rc.UnitOf(f)
 		if id == "" || obs[id] != nil {
 			continue
 		}
-		obs[id] = &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms}
+		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms}
+		if o.Status != state.Fail {
+			o.Status = state.Unknown
+			untraced++
+		}
+		obs[id] = o
+	}
+	if untraced > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time", untraced))
 	}
 	return obs, warnings, readsBy, nil
 }

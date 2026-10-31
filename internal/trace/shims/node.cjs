@@ -246,6 +246,21 @@
   // Only pool workers (forked with an IPC channel, stopped with SIGTERM) need this; a
   // listener on other processes would change how they react to signals.
   if (isMainThread && process.channel) {
+    // A vitest fork worker reports "stopped" and then exits by itself while the pool
+    // SIGTERMs it and SIGKILLs it 500ms later: on a busy machine Node's exit-time
+    // coverage write loses that race. The pool's timer only starts on "stopped", so
+    // flush coverage just before sending it.
+    if (typeof process.send === 'function') {
+      const send = process.send;
+      process.send = function (msg) {
+        try {
+          if (msg && typeof msg === 'object' && msg.type === 'stopped' && msg.__vitest_worker_response__) {
+            require('v8').takeCoverage();
+          }
+        } catch (_) {}
+        return send.apply(this, arguments);
+      };
+    }
     for (const sig of ['SIGTERM']) {
       const handler = () => {
         try {
