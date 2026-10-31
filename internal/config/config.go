@@ -83,7 +83,11 @@ type Rule struct {
 // AgentConfig configures the LLM agent used for orphan files.
 type AgentConfig struct {
 	// Enabled: "auto" (when credentials are present), "always" or "never".
-	Enabled  string        `yaml:"enabled"`
+	Enabled string `yaml:"enabled"`
+	// Provider of the built-in backend: "auto" (the first of anthropic, openai and
+	// openrouter whose API key is set), "anthropic", "openai" or "openrouter".
+	Provider string `yaml:"provider"`
+	// Model: default depends on the provider.
 	Model    string        `yaml:"model"`
 	MaxTurns int           `yaml:"max_turns"`
 	Timeout  time.Duration `yaml:"timeout"`
@@ -182,8 +186,13 @@ func (c *Config) Normalize() error {
 	default:
 		return fmt.Errorf("agent.enabled must be auto, always or never (got %q)", a.Enabled)
 	}
-	if a.Model == "" {
-		a.Model = "claude-haiku-5-5"
+	if a.Provider == "" {
+		a.Provider = "auto"
+	}
+	switch a.Provider {
+	case "auto", "anthropic", "openai", "openrouter":
+	default:
+		return fmt.Errorf("agent.provider must be auto, anthropic, openai or openrouter (got %q)", a.Provider)
 	}
 	if a.MaxTurns == 0 {
 		a.MaxTurns = 12

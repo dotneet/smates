@@ -37,6 +37,19 @@ inputs:
       smates step only. When empty, an ANTHROPIC_API_KEY already in the job env is used.
     required: false
     default: ''
+  openai-api-key:
+    description: >-
+      OpenAI API key for the orphan-file agent. Passed as OPENAI_API_KEY to the smates
+      step only. When empty, an OPENAI_API_KEY already in the job env is used.
+    required: false
+    default: ''
+  openrouter-api-key:
+    description: >-
+      OpenRouter API key for the orphan-file agent. Passed as OPENROUTER_API_KEY to the
+      smates step only. When empty, an OPENROUTER_API_KEY already in the job env is used.
+      With several keys, agent.provider in smates.yml picks the provider.
+    required: false
+    default: ''
   cache:
     description: >-
       Restore and save the smates state with the Actions cache (per branch, falling back
@@ -398,6 +411,8 @@ runs:
         SMATES_WORKDIR: ${{ inputs.working-directory }}
         SMATES_COMMENT: ${{ inputs.comment }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key || env.ANTHROPIC_API_KEY }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key || env.OPENAI_API_KEY }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key || env.OPENROUTER_API_KEY }}
       run: |
         # No errexit: the command's exit code must be captured and reported.
         set +e -uo pipefail

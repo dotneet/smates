@@ -14,15 +14,17 @@ import (
 	"github.com/dotneet/smates/internal/selector"
 )
 
-// TestLiveAgent calls the real Messages API. It runs only with SMATES_LIVE_AGENT=1
-// and credentials in the environment:
+// TestLiveAgent calls the real API of the selected provider. It runs only with
+// SMATES_LIVE_AGENT=1 and credentials in the environment; SMATES_LIVE_PROVIDER and
+// SMATES_LIVE_MODEL pick the provider and model:
 //
 //	SMATES_LIVE_AGENT=1 ANTHROPIC_API_KEY=... go test -run Live -v ./internal/agent/
+//	SMATES_LIVE_AGENT=1 SMATES_LIVE_PROVIDER=openai OPENAI_API_KEY=... go test -run Live -v ./internal/agent/
 func TestLiveAgent(t *testing.T) {
 	if os.Getenv("SMATES_LIVE_AGENT") != "1" {
 		t.Skip("set SMATES_LIVE_AGENT=1 to call the real API")
 	}
-	cfg := config.AgentConfig{Model: os.Getenv("SMATES_LIVE_MODEL"), MaxTurns: 8, Timeout: 120 * time.Second, Effort: "low"}
+	cfg := config.AgentConfig{Provider: os.Getenv("SMATES_LIVE_PROVIDER"), Model: os.Getenv("SMATES_LIVE_MODEL"), MaxTurns: 8, Timeout: 120 * time.Second, Effort: "low"}
 	if ok, why := Available(cfg); !ok {
 		t.Skip(why)
 	}
@@ -85,8 +87,8 @@ func TestLiveAgent(t *testing.T) {
 	}
 	u := d.Usage
 	cost := (float64(u.InputTokens)*0.10 + float64(u.OutputTokens)*0.50 + float64(u.CacheReadTokens)*0.01 + float64(u.CacheWriteTokens)*0.125) / 1e6
-	t.Logf("model %s: %s in %s, %d turns, tokens in=%d out=%d cache_read=%d cache_write=%d, est. cost $%.5f",
-		d.Model, describe(d), elapsed.Round(time.Millisecond), u.Turns, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, cost)
+	t.Logf("%s model %s: %s in %s, %d turns, tokens in=%d out=%d cache_read=%d cache_write=%d, est. cost $%.5f",
+		ProviderOf(cfg), d.Model, describe(d), elapsed.Round(time.Millisecond), u.Turns, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, cost)
 	t.Logf("summary: %s", d.Summary)
 	for _, a := range d.Add {
 		t.Logf("add %s %s: %s", a.Suite, a.Test, a.Detail)
@@ -105,5 +107,31 @@ func TestLiveAgent(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("decision does not cover tests/users.test.js: %+v", d)
+	}
+}
+
+// TestLiveExplain asks the real API of the selected provider to explain a failure (see
+// TestLiveAgent for the environment).
+func TestLiveExplain(t *testing.T) {
+	if os.Getenv("SMATES_LIVE_AGENT") != "1" {
+		t.Skip("set SMATES_LIVE_AGENT=1 to call the real API")
+	}
+	cfg := config.AgentConfig{Provider: os.Getenv("SMATES_LIVE_PROVIDER"), Model: os.Getenv("SMATES_LIVE_MODEL"), Timeout: 60 * time.Second, Effort: "low"}
+	if ok, why := ExplainSupported(cfg); !ok {
+		t.Skip(why)
+	}
+	f := newFixture(t)
+	req := f.explainRequest()
+	req.Config = cfg
+	var log bytes.Buffer
+	req.Log = &log
+	ex, u, err := Explain(context.Background(), req)
+	t.Logf("log: %s", log.String())
+	if err != nil {
+		t.Fatalf("Explain: %v", err)
+	}
+	t.Logf("%s model %s: %s:%d (%s) %s; tokens in=%d out=%d cache_read=%d", ProviderOf(cfg), ex.Model, ex.File, ex.Line, ex.Confidence, ex.Reason, u.InputTokens, u.OutputTokens, u.CacheReadTokens)
+	if ex.File != "scripts/seed.sh" {
+		t.Errorf("explanation does not point at scripts/seed.sh: %+v", ex)
 	}
 }

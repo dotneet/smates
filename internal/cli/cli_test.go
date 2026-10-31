@@ -144,6 +144,13 @@ func clearCI(t *testing.T) {
 	}
 }
 
+// noAgentCredentials unsets the API keys of every agent provider.
+func noAgentCredentials(t *testing.T) {
+	for _, v := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		t.Setenv(v, "")
+	}
+}
+
 func TestDetectCI(t *testing.T) {
 	event := filepath.Join(t.TempDir(), "event.json")
 	os.WriteFile(event, []byte(`{"repository":{"default_branch":"trunk"}}`), 0o644)

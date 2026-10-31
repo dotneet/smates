@@ -98,7 +98,7 @@ type scenario struct {
 	Orphans []string `json:"orphans"`
 	// Fails lists tests expected to fail after the edit (sanity check of the scenario).
 	Fails []string `json:"fails"`
-	// Agent runs the scenario with the agent enabled (skipped without ANTHROPIC_API_KEY).
+	// Agent runs the scenario with the agent enabled (skipped without an agent API key).
 	Agent bool `json:"agent"`
 	// Hints checks the failure hints of failing tests (test ID -> expectation). Every
 	// test in Fails is also checked to have one of the edited files among its hint's
@@ -564,8 +564,8 @@ func TestScenarios(t *testing.T) {
 			for _, sc := range scenarios {
 				t.Run(sc.Name, func(t *testing.T) {
 					t.Parallel()
-					if sc.Agent && os.Getenv("ANTHROPIC_API_KEY") == "" {
-						t.Skip("needs ANTHROPIC_API_KEY")
+					if sc.Agent && os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("OPENAI_API_KEY") == "" && os.Getenv("OPENROUTER_API_KEY") == "" {
+						t.Skip("needs ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY")
 					}
 					r := p.acquire(t)
 					defer p.release(r)

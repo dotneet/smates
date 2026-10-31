@@ -31,8 +31,7 @@ func TestFailureHints(t *testing.T) {
 	clearCI(t)
 	t.Setenv("GITHUB_OUTPUT", "")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	noAgentCredentials(t)
 	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
 	g := newGitRepo(t)
 	write := func(rel, content string) {
