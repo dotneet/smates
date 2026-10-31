@@ -130,7 +130,11 @@ jobs:
 On pushes to the default branch everything runs and the state is refreshed; on pull
 requests only affected tests run. The state is kept in the Actions cache per branch,
 falling back to the default branch's. Outputs (`selected`, `total`, `skip`, `run-all`)
-let you skip downstream jobs, and a summary is written to the job page. See
+let you skip downstream jobs, and a summary is written to the job page. With
+`comment: true` (and `permissions: pull-requests: write`) the same summary becomes one
+pull request comment, updated on every push: how many tests in which suites the change
+affects, which changed file selected which test and how it depends on it, how changes
+no test depends on were handled, and the recorded test time skipped. See
 [docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices) and
 [docs/ci/other-ci.md](docs/ci/other-ci.md) (GitLab, CircleCI, Buildkite, Jenkins).
 
@@ -187,8 +191,8 @@ agent:
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--dry-run` |
-| `smates select` | selection only: `--format text\|files\|json\|github` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
+| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |

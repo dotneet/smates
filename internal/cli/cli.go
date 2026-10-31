@@ -304,6 +304,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	// 1. Deterministic: tests that mention an orphan by name.
 	refs, explained := res.References(p.graph, res.Orphans)
 	res.Apply(refs)
+	res.HandleOrphans(explained, selector.OrphanReference)
 	remaining := subtract(res.Orphans, explained)
 	if opt.orphanScope != nil {
 		var in []string
@@ -325,6 +326,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	policy := p.cfg.Orphans
 	if policy == "ignore" {
 		res.Notes = append(res.Notes, fmt.Sprintf("ignored %d unattributed change(s) (orphans: ignore)", len(remaining)))
+		res.HandleOrphans(remaining, selector.OrphanIgnored)
 		return sel, nil
 	}
 	if policy == "agent" && !opt.noAgent && p.cfg.Agent.Enabled != "never" {
@@ -334,6 +336,10 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 			if err == nil {
 				sel.agentDec, sel.agentCache = dec, cached
 				applyDecision(res, dec)
+				if !dec.RunAll {
+					res.HandleOrphans(subtract(remaining, subtract(remaining, dec.NoImpact)), selector.OrphanNoImpact)
+				}
+				res.HandleOrphans(remaining, selector.OrphanAgent)
 				return sel, nil
 			}
 			sel.agentNote = "agent failed (" + err.Error() + "); running affected suites in full"
@@ -342,6 +348,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		}
 	}
 	res.Apply(res.OrphanAll(remaining))
+	res.HandleOrphans(remaining, selector.OrphanPolicy)
 	return sel, nil
 }
 
@@ -452,6 +459,7 @@ func applyShard(res *selector.Result, i, n int) {
 			h := fnv.New32a()
 			h.Write([]byte(s.Name + "\x00" + t.ID))
 			owner := int(h.Sum32()%uint32(n)) + 1
+			t.Shard = owner
 			if t.Selected && owner != i {
 				t.Selected = false
 				t.Detail = fmt.Sprintf("in shard %d/%d", owner, n)

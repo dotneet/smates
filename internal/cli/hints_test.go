@@ -118,7 +118,7 @@ suites:
 		t.Errorf("run log:\n%s", errs)
 	}
 	md, _ := os.ReadFile(summary)
-	if !strings.Contains(string(md), "#### Failure hints") || !strings.Contains(string(md), "`src/mod_a.py` (source") {
+	if !strings.Contains(string(md), "**Failure hints (") || !strings.Contains(string(md), "`src/mod_a.py` (source") {
 		t.Errorf("summary:\n%s", md)
 	}
 

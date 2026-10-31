@@ -76,6 +76,18 @@ smates deps src/cart.test.ts  # このテストは何に依存している?
 [docs/ci/github-actions.md](docs/ci/github-actions.md)、他の CI は
 [docs/ci/other-ci.md](docs/ci/other-ci.md) を参照してください。
 
+### プルリクエストのサマリ
+
+`comment: true`(ジョブに `permissions: pull-requests: write` が必要)を指定すると、
+選択結果のサマリをプルリクエストのコメントとして投稿し、push のたびに同じコメントを
+更新します。変更が影響するテスト数とスイート、変更ファイルごとに選ばれたテストとその
+依存の種類(静的 import、前回実行時に追跡した読み込み、スイート入力など)、どのテストも
+依存していない変更の扱い(参照スキャン・エージェント・`orphans` ポリシー)、スキップした
+テストの記録済み実行時間を表示します。フォークからのプルリクエストや権限不足の場合は
+notice を出してスキップし、ジョブは失敗させません。シャード実行では各シャードが担当分の
+コメントを個別に持ちます。他の CI では `smates run --markdown <file>` や
+`smates select --format markdown` で同じ Markdown を出力できます。
+
 ## シャドーモード
 
 `smates run --shadow` は全テストを実行しつつ選択結果を評価し、「選択していれば

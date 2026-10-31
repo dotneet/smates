@@ -14,6 +14,7 @@ import (
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/summary"
 )
 
 // flakeReport is one flip seen in this run (run log, --report, step summary, outputs).
@@ -63,17 +64,14 @@ func flakyOutputs(flakes []flakeReport) []string {
 	return []string{fmt.Sprintf("flaky=%d", len(flakes)), "flaky-tests=" + string(j)}
 }
 
-// writeFlakySummary appends the flakes of this run to the markdown summary (GitHub step
-// summary by default), after writeRunSummary.
-func writeFlakySummary(path string, flakes []flakeReport) {
-	if path == "" {
-		path = os.Getenv("GITHUB_STEP_SUMMARY")
-	}
-	if path == "" || len(flakes) == 0 {
-		return
+// flakySection is the flakes of this run as part of the Markdown summary (ok is false
+// without flakes).
+func flakySection(flakes []flakeReport) (sec summary.Section, ok bool) {
+	if len(flakes) == 0 {
+		return sec, false
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n:game_die: **%d flaky test unit(s):** outcome changed although no tracked input changed\n", len(flakes))
+	b.WriteString("Outcome changed although no tracked input changed:\n")
 	for _, f := range flakes {
 		fmt.Fprintf(&b, "- `%s` — %s", f.Suite+": "+f.Unit, f.Flip)
 		if f.Retried {
@@ -81,12 +79,7 @@ func writeFlakySummary(path string, flakes []flakeReport) {
 		}
 		fmt.Fprintf(&b, ", %d flip(s) recorded\n", f.Count)
 	}
-	fh, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer fh.Close()
-	io.WriteString(fh, b.String())
+	return summary.Section{Title: fmt.Sprintf(":game_die: %d flaky test unit(s)", len(flakes)), Body: b.String()}, true
 }
 
 // retryFlaky re-runs failing units of a suite run that are already known to be flaky
