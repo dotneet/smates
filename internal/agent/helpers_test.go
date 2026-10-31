@@ -191,3 +191,10 @@ func clearCredentials(t *testing.T) {
 		t.Setenv(p.baseURLEnv, "")
 	}
 }
+
+// forgetRejectedEfforts clears the process-wide record of rejected efforts when t ends,
+// so a later test whose server reuses the port starts clean.
+func forgetRejectedEfforts(t *testing.T) {
+	t.Helper()
+	t.Cleanup(effortRejected.Clear)
+}

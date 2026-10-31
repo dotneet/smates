@@ -116,6 +116,7 @@ func newDialectBackend(t *testing.T, name string, replies ...fakeReply) (*apiBac
 	fake := &fakeAPI{t: t, replies: replies, path: "/v1" + p.dialect.path()}
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
+	forgetRejectedEfforts(t)
 	b := newProviderBackend(testConfig(), p, srv.URL+"/v1", "test-key", "")
 	b.retryBase = time.Millisecond
 	b.retryMax = 5 * time.Millisecond
@@ -415,6 +416,7 @@ func TestEffortRejectionRemembered(t *testing.T) {
 	}}
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
+	forgetRejectedEfforts(t)
 	p, _ := lookupProvider(ProviderOpenAI)
 	req := f.explainRequest()
 	req.Config.Model = "no-reasoning-" + t.Name()
