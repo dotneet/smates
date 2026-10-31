@@ -76,7 +76,7 @@ outputs:
     description: Number of test units "run" found flaky (outcome flipped with unchanged inputs).
     value: ${{ steps.smates.outputs.flaky }}
   flaky-tests:
-    description: JSON array of the flaky test units found by "run" ("suite: unit").
+    description: 'JSON array of the flaky test units found by "run" ("suite: unit").'
     value: ${{ steps.smates.outputs.flaky-tests }}
   version:
     description: The smates version that was installed ("source" for source builds).
