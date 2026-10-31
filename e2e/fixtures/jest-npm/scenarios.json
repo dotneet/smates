@@ -46,7 +46,16 @@
     "fails": [
       "__tests__/inventory.test.js"
     ],
-    "orphans": []
+    "orphans": [],
+    "hints": {
+      "__tests__/inventory.test.js": {
+        "top": [
+          "src/inventory.js"
+        ],
+        "verdict": "changed-inputs",
+        "output": "lowStock lists SKUs at or below the threshold"
+      }
+    }
   },
   {
     "name": "leaf-money-reaches-subprocess",

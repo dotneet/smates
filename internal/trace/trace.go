@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dotneet/smates/internal/pathutil"
 )
@@ -150,6 +151,31 @@ type Span struct {
 type Result struct {
 	Status string
 	Ms     int64
+	// Message is the failure output reported for the file (bounded, may be empty).
+	Message string
+}
+
+// MaxMessage bounds the failure message kept per test file.
+const MaxMessage = 4000
+
+// JoinMessage appends a failure message to another, keeping the result within
+// MaxMessage bytes.
+func JoinMessage(a, b string) string {
+	b = strings.TrimSpace(b)
+	switch {
+	case b == "" || len(a) >= MaxMessage:
+		return a
+	case a != "":
+		b = a + "\n\n" + b
+	}
+	if len(b) > MaxMessage {
+		cut := MaxMessage
+		for cut > 0 && !utf8.RuneStart(b[cut]) {
+			cut--
+		}
+		b = b[:cut] + "\n[…]"
+	}
+	return b
 }
 
 // Key identifies a process or thread.
@@ -219,6 +245,7 @@ type event struct {
 	Ctx    []string `json:"ctx"`
 	Status string   `json:"status"`
 	Ms     int64    `json:"ms"`
+	Msg    string   `json:"msg"`
 }
 
 var (
@@ -374,7 +401,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				if seen && prev.Status == "fail" {
 					st = "fail"
 				}
-				p.Results[r] = Result{Status: st, Ms: prev.Ms + ev.Ms}
+				p.Results[r] = Result{Status: st, Ms: prev.Ms + ev.Ms, Message: JoinMessage(prev.Message, ev.Msg)}
 			}
 		case "exit":
 			if ev.Code != nil {

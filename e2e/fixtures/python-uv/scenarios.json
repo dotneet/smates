@@ -44,7 +44,16 @@
     "fails": [
       "tests/unit/test_inventory.py"
     ],
-    "orphans": []
+    "orphans": [],
+    "hints": {
+      "tests/unit/test_inventory.py": {
+        "top": [
+          "src/shop/inventory.py"
+        ],
+        "verdict": "changed-inputs",
+        "output": "tests/unit/test_inventory.py::"
+      }
+    }
   },
   {
     "name": "leaf-formatting-used-in-process-and-by-subprocesses",
