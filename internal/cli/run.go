@@ -125,6 +125,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 	start := time.Now()
 	ran := map[string]map[string]string{} // suite -> unit -> status
 	var escapes, possible []string
+	var flakes []flakeReport
 	for i, sr := range res.Suites {
 		units := sr.Selected()
 		full := runAllNow || (sr.All && shardN <= 1)
@@ -163,6 +164,12 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 		r, err := sr.Suite.Adapter.Run(ctx, rc)
 		if err != nil {
 			return 1, fmt.Errorf("%s: %w", sr.Name, err)
+		}
+		var retried map[string]*runner.Observation
+		if record && len(extra) == 0 {
+			if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
+				return 1, err
+			}
 		}
 		worst = max(worst, r.ExitCode)
 		for _, w := range r.Warnings {
@@ -216,7 +223,8 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 			if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 				p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
 			}
-			selector.Record(p.state, sr, r.Observations, hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: now, Full: full && shardN <= 1, ReadsBy: r.ReadsBy})
+			events := selector.Record(p.state, sr, r.Observations, hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: now, Full: full && shardN <= 1, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(extra) > 0})
+			flakes = append(flakes, flakeReports(sr.Name, events)...)
 		}
 		if f.shadow {
 			for _, t := range sr.Tests {
@@ -279,10 +287,12 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, sel2, total, worst)
 	}
+	logFlakes(p, stderr, flakes)
 	writeRunSummary(p, sel, f.summary, worst, elapsed, escapes)
+	writeFlakySummary(f.summary, flakes)
 	failures.writeSummary(f.summary)
 	if os.Getenv("GITHUB_OUTPUT") != "" {
-		if err := writeGitHubOutputs(sel, fmt.Sprintf("exit-code=%d", worst)); err != nil {
+		if err := writeGitHubOutputs(sel, append([]string{fmt.Sprintf("exit-code=%d", worst)}, flakyOutputs(flakes)...)...); err != nil {
 			p.logf("could not write GitHub outputs: %v", err)
 		}
 	}
@@ -294,8 +304,12 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, 
 			Possible []string                     `json:"possible_escapes"`
 			ExitCode int                          `json:"exit_code"`
 			Shadow   bool                         `json:"shadow"`
+			Flaky    []flakeReport                `json:"flaky"`
 			Failures []*hints.Hint                `json:"failure_hints"`
-		}{jsonSelection(sel), ran, escapes, possible, worst, f.shadow, failures.all()}
+		}{jsonSelection(sel), ran, escapes, possible, worst, f.shadow, flakes, failures.all()}
+		if rep.Flaky == nil {
+			rep.Flaky = []flakeReport{}
+		}
 		if rep.Escapes == nil {
 			rep.Escapes = []string{}
 		}
