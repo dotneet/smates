@@ -75,13 +75,18 @@ func TestWatch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("signals")
 	}
+	t.Parallel()
 	for _, name := range fixtures(t) {
 		steps, ok := watchCases[name]
 		if !ok {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			r := prepare(t, name)
+			t.Parallel()
+			p := fixturePool(name)
+			r := p.acquire(t)
+			defer p.release(r)
+			r.reset()
 			var out syncBuffer
 			cmd := exec.Command(smatesBin, "watch", "--interval", "200ms", "--debounce", "300ms")
 			cmd.Dir = r.dir

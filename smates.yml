@@ -1,0 +1,33 @@
+# smates runs its own tests (dogfooding). See README.md for every option.
+version: 1
+suites:
+  # Unit tests of the smates module.
+  - name: go
+    runner: go
+    root: .
+    command: go test -race
+    # e2e/ has its own suite; e2e/fixtures/ holds the projects the e2e tests run on.
+    exclude: ["e2e/**"]
+
+  # End-to-end tests: build the smates binary and run it against e2e/fixtures/ with
+  # real toolchains. Run them without recording (CI passes --no-record), so the tracing
+  # of this run does not leak into the smates processes the tests start.
+  - name: e2e
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    rules:
+      # The tests build ./cmd/smates and run it on the fixtures. Go units are
+      # packages, so "." is the e2e package itself.
+      - tests: ["."]
+        deps: ["cmd/**", "internal/**", "e2e/**"]
+
+# Release packaging and CI files that no test reads; action.yml is covered by the
+# action job in .github/workflows/ci.yml.
+ignore:
+  - ".goreleaser.yaml"
+  - "install.sh"
+  - "action.yml"
+  - ".github/workflows/**"

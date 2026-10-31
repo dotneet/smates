@@ -35,13 +35,45 @@ jobs:
             exit 1
           fi
       - run: go vet ./...
-      - run: go test -race ./...
+      # Dogfoods smates on its own unit tests (suite "go" in smates.yml): everything on
+      # main, the affected packages on pull requests, with the state cached per OS.
+      - name: Run affected tests
+        uses: ./
+        with:
+          version: source
+          args: --suite go --no-agent
 
   e2e:
     # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects.
+    # Selected by smates (suite "e2e"): skipped when a pull request changes nothing
+    # under cmd/, internal/, e2e/ or go.mod. Not recorded, so no state is kept and
+    # pull requests diff against the base branch.
+    # Sharded by fixture into jobs of about equal run time. The last one runs every
+    # fixture not named before it, so a new fixture runs there until it gets a shard.
+    name: e2e (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: polyglot scenarios
+            fixtures: polyglot
+            args: -- -run TestScenarios
+          - name: polyglot others
+            fixtures: polyglot
+            args: -- -skip TestScenarios
+          - name: jest-npm, node-test
+            fixtures: jest-npm,node-test
+          - name: vitest-npm, python-uv
+            fixtures: vitest-npm,python-uv
+          - name: others
+            fixtures: -polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv
     runs-on: ubuntu-latest
+    env:
+      SMATES_E2E_FIXTURE: ${{ matrix.fixtures }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -53,7 +85,12 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
-      - run: go test -tags e2e -timeout 40m ./e2e/...
+      - name: Run e2e tests if affected
+        uses: ./
+        with:
+          version: source
+          args: --suite e2e --no-record --no-agent ${{ matrix.args }}
+          cache: 'false'
 
   action:
     # Smoke-tests action.yml itself on every runner OS, building smates from this checkout.
@@ -104,7 +141,7 @@ jobs:
         with:
           version: source
           command: select
-          args: --suite go:root --no-agent
+          args: --suite go --no-agent
           cache: 'false'
           comment: 'true'
       - name: Check the comment
