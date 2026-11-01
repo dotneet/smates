@@ -215,11 +215,15 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	hooks.onRan(c.started)
 	c.failures.wait()
 	elapsed := time.Since(start).Round(time.Millisecond)
+	// A state that cannot be saved (e.g. the shared state stays locked by another
+	// worktree's run) is an environment error, reported after the run's summary and
+	// report so that the test results are not lost.
+	var saveErr error
 	if c.record {
 		c.recordSuites() // before runRecord: it counts the flakes recording found
 		p.state.AddRun(c.runRecord(elapsed, hooks != nil))
 		if err := c.saveState(); err != nil {
-			return 1, err
+			saveErr = envError{err}
 		}
 	}
 	if c.quiet {
@@ -237,7 +241,18 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	}
 	// A batch whose tests never started (notStarted) makes the run an environment
 	// error, reported after the usual failure handling and summary.
-	return c.worst, c.envErr
+	if c.envErr != nil {
+		if saveErr != nil {
+			p.logf("%v", saveErr)
+		}
+		return c.worst, c.envErr
+	}
+	if saveErr != nil && c.worst != 0 {
+		// Failing tests matter more: report them (exit 1) and the save error as a note.
+		p.logf("%v", saveErr)
+		return c.worst, nil
+	}
+	return c.worst, saveErr
 }
 
 // cycle is one `smates run` over the selected suites.

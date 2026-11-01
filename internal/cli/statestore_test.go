@@ -512,3 +512,34 @@ func TestSharedFailedSaveKeepsSnapshot(t *testing.T) {
 	}
 	checkSnap("unwritable shared file")
 }
+
+// TestSharedSaveLockedExitCode: a run whose shared state stays locked by another
+// worktree reports its results and exits 4 (environment), or 1 when tests failed.
+func TestSharedSaveLockedExitCode(t *testing.T) {
+	g := worktreeFixture(t, "state_shared: true\n")
+	oldWait := state.LockWait
+	state.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { state.LockWait = oldWait })
+	mustRun(t, "run", "-C", g.dir, "--no-agent", "--all")
+
+	lock := filepath.Join(g.dir, ".git", "smates", "state.json.gz.lock")
+	if err := os.WriteFile(lock, []byte("pid 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(t.TempDir(), "r.json")
+	code, _, errb := smates(t, "run", "-C", g.dir, "--no-agent", "--all", "--output", "failures", "--report", report)
+	if code != ExitEnv || !strings.Contains(errb, "saving state") || !strings.Contains(errb, "is locked") {
+		t.Errorf("passing run, state locked: exit %d\n%s", code, errb)
+	}
+	if _, err := os.Stat(report); err != nil {
+		t.Errorf("no report written: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(g.dir, "t", "b_check.py"), []byte("assert False, 'boom'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errb := smates(t, "run", "-C", g.dir, "--no-agent", "--all", "--output", "failures")
+	if code != ExitFailed || !strings.Contains(errb, "saving state") || !strings.Contains(errb, "FAILED") || !strings.Contains(out+errb, "boom") {
+		t.Errorf("failing run, state locked: exit %d\n%s%s", code, out, errb)
+	}
+}
