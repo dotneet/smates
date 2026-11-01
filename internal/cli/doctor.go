@@ -134,10 +134,15 @@ func runDoctor(cf *commonFlags) *doctorReport {
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
 		if len(units) == 0 {
-			r.add(checkWarn, "suite-units", "suite %s (%s): no test files match %v", s.Name, s.Runner, s.Tests).about(s.Name).
+			r.add(checkWarn, "suite-units", "suite %s (%s): no test files match %v (tests from %s)", s.Name, s.Runner, s.TestPatterns(), s.TestsSource).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "#configuration-smatesyml"})
 		} else {
 			r.add(checkOK, "suite-units", "suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command).about(s.Name)
+			r.add(checkOK, "suite-tests-source", "suite %s: tests from %s: %s", s.Name, s.TestsSource, strings.Join(s.TestPatterns(), " ")).about(s.Name)
+		}
+		if s.DiscoveryWarning != "" {
+			r.add(checkWarn, "suite-test-discovery", "suite %s: %s", s.Name, s.DiscoveryWarning).about(s.Name).
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "#which-files-are-tests"})
 		}
 		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
