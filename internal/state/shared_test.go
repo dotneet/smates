@@ -229,6 +229,41 @@ func TestLockUnwritable(t *testing.T) {
 	}
 }
 
+// TestLockStaleUnremovable: a stale lock file that cannot be removed (its directory is
+// read-only) is waited for until the deadline and reported as ErrLocked, instead of
+// retrying the removal in a busy loop forever.
+func TestLockStaleUnremovable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions enforced")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.lock")
+	if err := os.WriteFile(path, []byte("pid 1 (crashed)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	done := make(chan error, 1)
+	go func() {
+		_, err := AcquireLock(path, 200*time.Millisecond, time.Minute)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrLocked) {
+			t.Errorf("err = %v, want ErrLocked", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("AcquireLock still running long past its deadline")
+	}
+}
+
 // TestLockFileJustDeleted: on Windows creating the lock file fails with access denied
 // while its holder deletes it; when the file is gone by the time smates looks, it tries
 // again at once instead of failing.

@@ -64,9 +64,12 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 			}
 		} else if fi, serr := os.Stat(path); serr == nil && time.Since(fi.ModTime()) > stale {
 			// Left behind by a process that died while holding it. (Two processes may
-			// both find it stale; the window is tiny and needs a crash to open.)
-			_ = os.Remove(path)
-			continue
+			// both find it stale; the window is tiny and needs a crash to open.) One that
+			// cannot be removed (a read-only or sticky directory, a file still open on
+			// Windows) is waited for like a live holder's, up to the deadline.
+			if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 		}
 		gone = false
 		if time.Now().After(deadline) {
