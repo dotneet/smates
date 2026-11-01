@@ -462,44 +462,47 @@ func uncommitted(repo *gitx.Repo, kind string) int {
 // recorded on a commit outside HEAD's history (e.g. before a rebase). It fetches at
 // most once per hookPullEvery.
 func refreshHookState(repo *gitx.Repo, f *runFlags, log io.Writer) {
-	path := f.state
-	if path == "" {
-		cfg, err := hookConfig(repo, f.config)
-		if err != nil {
-			return // `smates run` reports it
-		}
-		path = filepath.Join(repo.Root, filepath.FromSlash(cfg.State))
+	cfg, err := hookConfig(repo, f.config)
+	if err != nil {
+		return // `smates run` reports it
 	}
-	st, err := state.Load(path)
+	// Loading seeds a worktree without a state (from the main worktree's, or the
+	// remote one: that attempt counts as this hook's fetch).
+	store := openStore(repo, cfg, f.state, log)
+	path := store.path
+	st, err := store.Load()
 	missing := err != nil || st.Empty()
 	if !missing && !hookStateStale(repo, st) {
 		return
 	}
 	// The attempt is recorded whatever its outcome, so pushes in between do not fetch.
-	stamp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".pulled")
-	if fi, err := os.Stat(stamp); err == nil && time.Since(fi.ModTime()) < hookPullEvery {
+	if !store.pullDue() {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err == nil {
-		_ = os.WriteFile(stamp, nil, 0o644)
-	}
 	refs := stateRefs(repo)
-	if missing {
+	if missing && !store.shared {
 		_ = pullState(repo, path, "origin", refs, log)
 		return
 	}
 	// Same extension: state.Load picks the format from it.
-	tmp := filepath.Join(filepath.Dir(path), ".pull-"+filepath.Base(path))
+	tmp := filepath.Join(filepath.Dir(store.local), ".pull-"+filepath.Base(path))
 	defer os.Remove(tmp)
-	if err := pullState(repo, tmp, "origin", refs, io.Discard); err != nil {
+	plog := io.Discard
+	if missing {
+		plog = log
+	}
+	if err := pullState(repo, tmp, "origin", refs, plog); err != nil {
 		return
 	}
 	remote, err := state.Load(tmp)
-	if err != nil || remote.Empty() || !remote.Created.After(st.Created) {
+	if err != nil || remote.Empty() || (!missing && !remote.Created.After(st.Created)) {
 		return
 	}
+	if st == nil {
+		st = state.New()
+	}
 	st.Merge(remote)
-	if err := st.Save(path); err != nil {
+	if err := store.Save(st); err != nil {
 		fmt.Fprintf(log, "smates: could not save the refreshed state: %v\n", err)
 		return
 	}

@@ -192,12 +192,17 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkWarn, "state-recorded", "no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath).
 			fix(doctorFix{Command: "smates run --all", Doc: docURL + "#quick-start"})
 	} else {
-		age := time.Since(p.state.Created).Round(time.Minute)
 		n := 0
 		for _, s := range p.state.Suites {
 			n += len(s.Tests)
 		}
-		r.add(checkOK, "state-recorded", "state %s: %d tests recorded, snapshot from commit %.12s (%s ago)", p.statePath, n, p.state.Commit, age)
+		if p.state.Created.IsZero() {
+			// Shared state without a snapshot of this worktree yet.
+			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, no snapshot in this worktree yet (the next run records one)", p.statePath, n)
+		} else {
+			age := time.Since(p.state.Created).Round(time.Minute)
+			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, snapshot from commit %.12s (%s ago)", p.statePath, n, p.state.Commit, age)
+		}
 	}
 	if okA, why := agent.Available(p.cfg.Agent); okA {
 		r.add(checkOK, "agent", "agent: %s available for unattributed changes (orphans: %s)", agent.Describe(p.cfg.Agent), p.cfg.Orphans)

@@ -231,6 +231,37 @@ there are any, and when the pushed branch is not the one checked out; commit or 
 them first for an exact result. `smates hook uninstall` removes only what smates wrote;
 `smates hook status` shows where the hook lives.
 
+### Parallel worktrees
+
+Coding agents often work in several `git worktree`s at once. Each worktree has its own
+`.smates/state.json.gz`, so a fresh one would start with no recording. Instead, the first
+command that needs the state in a linked worktree without one seeds it, and prints one
+line saying from where:
+
+1. the main worktree's state, if it has one;
+2. else the remote state (`smates state push`), fetched at most once an hour like the
+   hook does (a state ref another worktree already fetched is used without fetching).
+
+The seeded snapshot is kept only when it was recorded on a commit in this worktree's
+history; otherwise the worktree keeps the per-test entries and judges changed files
+against the default branch, as without a snapshot. A worktree is seeded once (`smates
+state clear` keeps it from being seeded again). Turn seeding off with
+`state_seed: false` in `smates.yml` or `SMATES_NO_STATE_SEED=1`.
+
+To share what any worktree learns with all of them, set `state_shared: true`: the
+per-test entries, agent answers and run records live in one file under the git common
+directory (`.git/smates/state.json.gz`; `smates state path` prints it), and each
+worktree keeps only its own full-tree snapshot (`.smates/state.snapshot.json.gz`), so a
+run on one branch never makes another branch's changes look like this one's. Saving takes
+a lock file next to the shared state and merges this run's changes into what is on disk,
+so smates processes in several worktrees at once do not lose each other's results (when
+two of them re-ran the same test, the newer result wins and outcome histories are
+combined; `smates flaky --clear` and `smates state clear`, which clears it for every
+worktree, are not undone by a run that started earlier). A lock left behind by a
+crashed process is taken over after two minutes.
+`smates state show` says where the state lives, whether it is shared, and where it was
+seeded from.
+
 ### GitHub Actions
 
 ```yaml
@@ -314,6 +345,8 @@ env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select
 env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
+state_seed: true      # seed a new git worktree's state from the main worktree (or the remote)
+state_shared: false   # one state for all worktrees, under the git common dir (see "Parallel worktrees")
 flaky:
   retry: 0            # re-run a suite run whose failures are all known flaky tests, up to N times (default 0: never hide a failure)
 agent:

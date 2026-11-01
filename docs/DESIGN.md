@@ -449,6 +449,57 @@ histories and flake evidence (flip counts take the maximum, since both sides usu
 a past). Outcome histories and flake evidence are optional fields, so state files from
 before them still load and the format version is unchanged.
 
+**Worktrees.** The state is per working tree by default. A linked worktree (its git dir
+differs from the common dir) without a state is seeded on first use (`stateStore` in
+`internal/cli/statestore.go`): from the main worktree's state file (the first entry of
+`git worktree list --porcelain`), else from the remote state ref, fetched under the
+hook's once-an-hour stamp (refs live in the common dir, so one worktree's fetch serves
+all). Per-test entries are valid in any tree (each one is re-checked against its own
+dependency hashes), but the full-tree snapshot is not: the snapshot of another branch
+would report that branch's differences as orphans here. So the seeded snapshot is kept
+only when its commit is an ancestor of HEAD; otherwise it is dropped with its commit and
+time, and changed files come from the merge base with the default branch, as for a state
+without a snapshot. (No snapshot time makes the hook treat the state as stale and merge
+in a newer remote one, as for any state without a snapshot.) A `.state.json.gz.seeded`
+marker records the source (for `state show`) and keeps a cleared state from being seeded
+again; `state_seed: false` / `SMATES_NO_STATE_SEED` turn it off.
+
+With `state_shared: true` the state is split by what it describes. The entries, the
+agent cache and the run records describe the code and are shared: one file,
+`<git common dir>/smates/state.json.gz`. The snapshot (with its commit and time)
+describes one working tree and stays in it: `.smates/state.snapshot.json.gz`, read in
+place of the shared file's snapshot. A worktree without one has none (no files, commit
+or time), and judges changed files against the default branch.
+
+Loading reads the shared file once and decodes it twice: the process's working copy and
+`base`, what it started from. (Two reads without the lock could see two versions; a
+`base` newer than the working copy would make an entry another worktree just updated
+look changed by this process, and the save would put the older copy back.) Writes are
+load-merge-save under an exclusive lock file (`O_CREATE|O_EXCL`, portable to every OS
+and file system git runs on; a lock older than two minutes is stale, since a save takes
+seconds). Inside the lock the shared file is re-read and `State.MergeChanges(base, ours)`
+applies this process's changes, a three-way merge per entry:
+
+- an entry ours left unchanged keeps the disk's version (another worktree may have
+  updated it), and stays deleted when the disk no longer has it (`state clear`, or
+  another process's full run pruned it);
+- an entry only ours added or changed replaces the disk's outright (so `flaky --clear`
+  is not undone);
+- an entry both changed is combined like `state merge` (newer `At` wins, histories
+  unioned); flake evidence one side cleared stays cleared unless the other side
+  recorded a flip after `base` (new evidence);
+- an entry ours deleted (a full run drops units that no longer exist) is deleted unless
+  the disk's changed since `base`. A test that exists only on another branch's worktree
+  is thus pruned by a full run here and recorded again by the next run there.
+
+Agent answers and run records this process added are added; ones it only inherited are
+not, so a cleared state does not get them back. After a save, the working copy takes
+the merged entries and `base` is re-read under the lock. The shared file also carries
+the last writer's snapshot, so it stays a complete state for `state push` (which in
+shared mode pushes the entries with this worktree's snapshot) and for older smates
+versions. `state pull` in shared mode merges into the shared entries instead of
+replacing them.
+
 The state also keeps a short record of each `smates run` (`runs`: selection mode, units
 selected/total, recorded duration of the skipped units, exit code, shadow misses, orphan
 handling, agent usage, flaky flips) for `smates stats`. Records carry a random ID, so

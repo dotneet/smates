@@ -596,7 +596,7 @@ func (c *cycle) saveState() error {
 		}
 	}
 	p.state.Tool = "smates/" + Version
-	if err := p.state.Save(p.statePath); err != nil {
+	if err := p.store.Save(p.state); err != nil {
 		return fmt.Errorf("saving state: %w", err)
 	}
 	return nil
@@ -843,7 +843,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	applyShard(sel.res, shardI, shardN)
 	if sel.agentDec != nil && !sel.agentCache {
 		// Keep the agent's answer for the next run on the same change.
-		if err := p.state.Save(p.statePath); err != nil {
+		if err := p.store.Save(p.state); err != nil {
 			p.logf("could not save agent cache: %v", err)
 		}
 	}
