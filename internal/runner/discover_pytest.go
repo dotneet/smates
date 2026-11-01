@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/dotneet/smates/internal/gitx"
@@ -18,14 +19,79 @@ import (
 type pytestOptions struct {
 	file    string // repo-relative path of the config file
 	section string
-	values  map[string][]string // testpaths, python_files (whitespace-separated words)
+	values  map[string][]string // testpaths, python_files, norecursedirs (whitespace-separated words)
 }
 
-// Discover reads testpaths and python_files from the pytest configuration pytest would
-// use: the first of pytest.ini, .pytest.ini, pyproject.toml ([tool.pytest.ini_options]
-// or [tool.pytest]), tox.ini ([pytest]) and setup.cfg ([tool:pytest]) found from the
-// suite directory up. testpaths only apply when that file is in the suite directory
-// (pytest uses them when started in its rootdir without arguments).
+// pytestNoRecurse is pytest's default norecursedirs.
+var pytestNoRecurse = []string{"*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}"}
+
+// pytestVenvExclude approximates pytest skipping virtualenvs whatever norecursedirs says
+// (unless --collect-in-virtualenv).
+var pytestVenvExclude = []string{"**/.venv/**", "**/venv/**", "**/site-packages/**", "**/.tox/**", "**/.nox/**"}
+
+// pytestExclude is the exclude globs (relative to the suite directory, where pytest
+// starts collecting) of a suite whose pytest skips virtualenvs and the directories
+// matching the norecursedirs patterns noRecurse: fnmatch patterns matched against a
+// directory's name, or the end of its path when they have a "/", at any depth. fnmatch's
+// "*" also matches "/": a "*" path segment of a pattern with a "/" becomes "**" (a "*"
+// within a segment stays in it). pytest still collects the testpaths themselves: when a
+// pattern matches a testpath or one of its parents, it only excludes what is below the
+// testpaths (only their files are tests then).
+func pytestExclude(noRecurse, testpaths []string) []string {
+	out := append([]string{}, pytestVenvExclude...)
+	add := func(g string) {
+		if !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	var dirs []string // testpaths that are directories
+	for _, p := range testpaths {
+		if p = strings.Trim(strings.TrimPrefix(p, "./"), "/"); p != "" && p != "." && !strings.HasSuffix(p, ".py") {
+			dirs = append(dirs, p)
+		}
+	}
+	for _, pat := range noRecurse {
+		// fnmatch has no escapes and no braces.
+		pat = strings.NewReplacer(`\`, `\\`, "{", `\{`, "}", `\}`).Replace(strings.Trim(pat, "/"))
+		if strings.Contains(pat, "/") {
+			segs := strings.Split(pat, "/")
+			for i, s := range segs {
+				if s == "*" {
+					segs[i] = "**"
+				}
+			}
+			pat = strings.Join(segs, "/")
+		}
+		dir := "**/" + pat
+		covers := false // a testpath is below a directory the pattern matches
+		for _, p := range testpaths {
+			p = strings.Trim(strings.TrimPrefix(p, "./"), "/")
+			for q := p; q != "." && q != "" && q != "/"; q = path.Dir(q) {
+				covers = covers || pathutil.Match([]string{dir}, q)
+			}
+		}
+		if !covers {
+			add(dir + "/**")
+			continue
+		}
+		for _, p := range dirs {
+			add(globEscape(p) + "/**/" + pat + "/**")
+		}
+	}
+	return out
+}
+
+// globEscape quotes the glob metacharacters of a literal path.
+func globEscape(p string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`, "{", `\{`, "}", `\}`).Replace(p)
+}
+
+// Discover reads testpaths, python_files and norecursedirs from the pytest
+// configuration pytest would use: the first of pytest.ini, .pytest.ini, pyproject.toml
+// ([tool.pytest.ini_options] or [tool.pytest]), tox.ini ([pytest]) and setup.cfg
+// ([tool:pytest]) found from the suite directory up. testpaths only apply when that
+// file is in the suite directory (pytest uses them when started in its rootdir without
+// arguments). A configured norecursedirs replaces pytest's default one.
 func (pytest) Discover(repo *gitx.Repo, s *Suite) Discovery {
 	if c, ok := commandFlag(s, "-c", "--config-file", "--rootdir"); ok {
 		return Discovery{Warning: fmt.Sprintf("the suite command sets a pytest configuration (%s): using the default test patterns (set tests: in smates.yml if they differ)", c)}
@@ -43,12 +109,19 @@ func (pytest) Discover(repo *gitx.Repo, s *Suite) Discovery {
 func pytestDiscovery(opts *pytestOptions, root string) Discovery {
 	files, hasFiles := opts.values["python_files"]
 	paths, hasPaths := opts.values["testpaths"]
+	noRecurse, hasNoRecurse := opts.values["norecursedirs"]
 	dir := path.Dir(opts.file)
 	if dir != root {
 		hasPaths = false
 	}
-	if (!hasFiles || len(files) == 0) && (!hasPaths || len(paths) == 0) {
+	if (!hasFiles || len(files) == 0) && (!hasPaths || len(paths) == 0) && !hasNoRecurse {
 		return Discovery{}
+	}
+	if !hasNoRecurse {
+		noRecurse = pytestNoRecurse
+	}
+	if !hasPaths {
+		paths = nil
 	}
 	var keys []string
 	if !hasFiles || len(files) == 0 {
@@ -83,7 +156,10 @@ func pytestDiscovery(opts *pytestOptions, root string) Discovery {
 		}
 	}
 	m.Tests = tests
-	return Discovery{Matchers: []Matcher{m}, Source: fmt.Sprintf("%s %s %s", opts.file, opts.section, strings.Join(keys, ", "))}
+	if hasNoRecurse {
+		keys = append(keys, "norecursedirs")
+	}
+	return Discovery{Matchers: []Matcher{m}, Source: fmt.Sprintf("%s %s %s", opts.file, opts.section, strings.Join(keys, ", ")), Exclude: pytestExclude(noRecurse, paths)}
 }
 
 // findPytestConfig returns the options of the pytest config file for dir (nil if none).

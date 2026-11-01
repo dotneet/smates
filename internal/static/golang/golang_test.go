@@ -242,12 +242,55 @@ func TestDepsModuleResolutionEdgeCases(t *testing.T) {
 		file string
 		want []string
 	}{
+		// With vendor/modules.txt the build runs in vendor mode: example.com/v is the
+		// vendored copy (importing it through the vendor/ path is still rejected).
 		{"main.go", []string{
-			"go.mod", "cgo.c", "cgo.h",
+			"go.mod", "cgo.c", "cgo.h", "vendor/modules.txt",
 			"third_party/forked/sub/s.go", "third_party/quoted/q.go",
-			"internal/testdata/fixture/fixture.go",
+			"internal/testdata/fixture/fixture.go", "vendor/example.com/v/v.go",
 		}},
-		{"rel/a.go", []string{"go.mod", "rel/b/b.go", "third_party/quoted/q.go"}},
+		{"rel/a.go", []string{"go.mod", "vendor/modules.txt", "rel/b/b.go", "third_party/quoted/q.go"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			assertDeps(t, deps(a, h, tt.file), tt.want)
+		})
+	}
+}
+
+func TestDepsVendorMode(t *testing.T) {
+	h := newRepo(t, map[string]string{
+		// A vendored module.
+		"go.mod":                         "module example.com/m\n\ngo 1.22\n",
+		"vendor/modules.txt":             "# example.com/v v1.0.0\n## explicit\nexample.com/v\nexample.com/w\n",
+		"vendor/example.com/v/v.go":      goSrc("v", `"example.com/w"`, `"strings"`),
+		"vendor/example.com/v/v_test.go": goSrc("v"),
+		"vendor/example.com/w/w.go":      goSrc("w"),
+		"pkg/a/a.go":                     goSrc("a", `"example.com/v"`, `"example.com/m/pkg/b"`, `"fmt"`),
+		"pkg/a/a_test.go":                goSrc("a", `"example.com/notvendored"`),
+		"pkg/b/b.go":                     goSrc("b"),
+		// A module without vendor/modules.txt resolves nothing to its vendor copy.
+		"plain/go.mod":                    "module example.com/plain\n",
+		"plain/vendor/example.com/v/v.go": goSrc("v"),
+		"plain/p.go":                      goSrc("p", `"example.com/v"`),
+		// A workspace vendor directory serves its modules.
+		"ws/go.work":                   "go 1.22\n\nuse ./mod\n",
+		"ws/vendor/modules.txt":        "# example.com/x v1.0.0\n",
+		"ws/vendor/example.com/x/x.go": goSrc("x"),
+		"ws/mod/go.mod":                "module example.com/wsmod\n",
+		"ws/mod/m.go":                  goSrc("m", `"example.com/x"`),
+	})
+	a := New(h, Options{})
+	tests := []struct {
+		file string
+		want []string
+	}{
+		{"pkg/a/a.go", []string{"go.mod", "vendor/modules.txt", "vendor/example.com/v/v.go", "pkg/b/b.go"}},
+		{"pkg/a/a_test.go", []string{"go.mod", "vendor/modules.txt", "pkg/a/a.go"}},
+		// Vendored packages resolve their own imports through vendor/ too.
+		{"vendor/example.com/v/v.go", []string{"go.mod", "vendor/modules.txt", "vendor/example.com/w/w.go"}},
+		{"plain/p.go", []string{"plain/go.mod"}},
+		{"ws/mod/m.go", []string{"ws/mod/go.mod", "ws/go.work", "ws/vendor/modules.txt", "ws/vendor/example.com/x/x.go"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {

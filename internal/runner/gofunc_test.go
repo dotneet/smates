@@ -148,6 +148,30 @@ func TestGoOutcomesJSON(t *testing.T) {
 	}
 }
 
+// With -count=N a test that fails in one iteration and passes in a later one failed.
+func TestGoOutcomesCount(t *testing.T) {
+	plain := &goOutcomes{}
+	feed(plain, "=== RUN   TestA\n--- FAIL: TestA (0.00s)\n    a_test.go:5: first\n=== RUN   TestC\n    a_test.go:9: always\n--- FAIL: TestC (0.00s)\n"+
+		"=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestC\n    a_test.go:9: always\n--- FAIL: TestC (0.00s)\nFAIL\nFAIL\tm/a\t0.01s\n")
+	js := &goOutcomes{}
+	feed(js, `{"Action":"run","Package":"m/a","Test":"TestA"}
+{"Action":"output","Package":"m/a","Test":"TestA","Output":"    a_test.go:5: first\n"}
+{"Action":"fail","Package":"m/a","Test":"TestA"}
+{"Action":"run","Package":"m/a","Test":"TestA"}
+{"Action":"output","Package":"m/a","Test":"TestA","Output":"--- PASS: TestA (0.00s)\n"}
+{"Action":"pass","Package":"m/a","Test":"TestA"}
+{"Action":"fail","Package":"m/a"}
+`)
+	for name, g := range map[string]*goOutcomes{"plain": plain, "json": js} {
+		if st, inf, _ := g.status("m/a", "TestA"); st != state.Fail || inf {
+			t.Errorf("%s: TestA %q (inferred %v), want fail", name, st, inf)
+		}
+		if f := g.failure("m/a", "TestA"); !strings.Contains(f, "first") || strings.Contains(f, "PASS") {
+			t.Errorf("%s: failure %q", name, f)
+		}
+	}
+}
+
 func goRC(t *testing.T, command string, env map[string]string) *RunContext {
 	t.Helper()
 	repo := tempRepo(t)

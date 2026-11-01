@@ -100,7 +100,11 @@ func (g *goOutcomes) line(l string) {
 		} else {
 			g.cur = ""
 		}
-		g.pending[m[2]] = st
+		// With -count=N a test reports once per iteration: one that failed in any
+		// of them failed.
+		if g.pending[m[2]] != state.Fail {
+			g.pending[m[2]] = st
+		}
 		return
 	}
 	if m := goSummaryRe.FindStringSubmatch(l); m != nil {
@@ -159,14 +163,19 @@ func (g *goOutcomes) event(ev goTestEvent) {
 	if strings.Contains(ev.Test, "/") {
 		return
 	}
+	// With -count=N a test reports once per iteration: one that failed in any of them
+	// failed, and keeps the output of that iteration.
+	failed := p.tests[ev.Test] == state.Fail
 	switch ev.Action {
 	case "output":
-		if len(p.fails[ev.Test]) < trace.MaxMessage {
+		if !failed && len(p.fails[ev.Test]) < trace.MaxMessage {
 			p.fails[ev.Test] += ev.Output
 		}
 	case "pass", "skip":
-		p.tests[ev.Test] = state.Pass
-		delete(p.fails, ev.Test)
+		if !failed {
+			p.tests[ev.Test] = state.Pass
+			delete(p.fails, ev.Test)
+		}
 	case "fail":
 		p.tests[ev.Test] = state.Fail
 	}

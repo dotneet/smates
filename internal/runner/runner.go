@@ -42,6 +42,13 @@ type CommandDefaulter interface {
 	DefaultsFor(repo *gitx.Repo, root, command string) Defaults
 }
 
+// SuiteDefaulter is implemented by adapters whose defaults depend on more of the
+// suite's configuration (go: GOWORK in env: decides which nested modules belong to the
+// suite). Resolve then calls DefaultsForSuite instead of Defaults.
+type SuiteDefaulter interface {
+	DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults
+}
+
 // StaticMapper is implemented by adapters whose units depend on less than the static
 // import closure of their test files (Go test functions): MapStatic returns the
 // dependency keys of unit given that closure.
@@ -190,7 +197,9 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 		return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
 	}
 	var d Defaults
-	if cd, ok := a.(CommandDefaulter); ok {
+	if sd, ok := a.(SuiteDefaulter); ok {
+		d = sd.DefaultsForSuite(repo, c)
+	} else if cd, ok := a.(CommandDefaulter); ok {
 		d = cd.DefaultsFor(repo, c.Root, c.Command)
 	} else {
 		d = a.Defaults(repo, c.Root)

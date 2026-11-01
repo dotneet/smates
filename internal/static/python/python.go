@@ -75,7 +75,7 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 			}
 		}
 	}
-	if isTestLike(p) {
+	if a.idx.isTestLike(p) {
 		r.conftests()
 	}
 	return r.result()
@@ -332,14 +332,20 @@ func (r *resolver) under(dir, namePrefix string) {
 }
 
 // isTestLike reports whether pytest would load conftest.py files for p: test modules
-// (test_*.py, *_test.py), conftest.py itself, and anything under a tests/ directory.
-func isTestLike(p string) bool {
+// (index.testGlobs), conftest.py itself, and anything under a test/ directory or one
+// whose name contains "tests" (tests/, unit_tests/, tests_e2e/).
+func (ix *index) isTestLike(p string) bool {
 	base := path.Base(p)
-	if strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py") || base == "conftest.py" {
+	if base == "conftest.py" {
 		return true
 	}
+	for _, g := range ix.testGlobs {
+		if ok, _ := path.Match(g, base); ok {
+			return true
+		}
+	}
 	for _, seg := range strings.Split(parentDir(p), "/") {
-		if seg == "tests" || seg == "test" {
+		if seg == "test" || strings.Contains(seg, "tests") {
 			return true
 		}
 	}

@@ -226,16 +226,17 @@ can alter test results.
 | vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
 | node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly) |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
-| bun | test file | `bun test --coverage` lcov + `require.cache` per process | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
+| bun | test file | `bun test --coverage` lcov + `require.cache` per process (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
-| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest); `isolate: true` = one process per module |
+| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
 | go test, `granularity: func` | top-level test function | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`) + declarations of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`) |
 
 Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
 the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
 `roots`/`testPathIgnorePatterns`, vitest `include`/`exclude`/`dir` and projects united
-into one suite, pytest `testpaths`/`python_files`) into matchers relative to the
+into one suite, pytest `testpaths`/`python_files`/`norecursedirs`, Go modules nested in
+the suite's, which belong to it only through the go.work workspace) into matchers relative to the
 config's base directory, and falls back to its default globs, with a `doctor` warning,
 when the config is not literal. Derived patterns do not mark the suite narrowed: a full
 run still lets the runner discover its tests, so an approximation (a converted
@@ -399,7 +400,10 @@ are replaced wholesale (the full-run rule) only when every call of it ran. A run
 stopped early does not touch the repository-wide snapshot, neither the full-run refresh
 nor the orphans it handled: tests that would have covered them may not have run. Results,
 failure hints, flake evidence, the summary and `--report` only contain what ran;
-`--report` lists the rest under `not_run` and the summary and log count them.
+`--report` lists the rest under `not_run` and the summary and log count them. An
+interrupted run (Ctrl-C) stops the same way: the batch it cuts short is not recorded
+either (a killed runner fails its tests or reports nothing), what finished is recorded
+and reported (`interrupted` in `--report`), and smates exits 1.
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
 ### Flaky tests
@@ -606,9 +610,11 @@ output: it stops starting runs (until it changes while idle).
 
 **Orphans.** Every cycle after the first applies the orphan policy only to orphans among
 the files that changed since the previous cycle (the rest were handled at start, or are
-branch changes that a state without a full-run snapshot reports on every run). The agent
-is called only with `--agent`, so a burst of saves never turns into a burst of LLM calls;
-without it `orphans: agent` behaves like `smates run --no-agent`.
+branch changes that a state without a full-run snapshot reports on every run); only
+those are written into the snapshot as handled, so a `smates run` still applies the
+policy to the rest. The agent is called only with `--agent`, so a burst of saves never
+turns into a burst of LLM calls; without it `orphans: agent` behaves like
+`smates run --no-agent`.
 
 **Fail fast.** `smates watch --fail-fast` passes `--fail-fast` to every cycle; the footer
 counts what ran and how many selected units were not started. Rerun (`Enter`) still

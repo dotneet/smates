@@ -329,3 +329,102 @@ func TestPytestStyle(t *testing.T) {
 		}
 	}
 }
+
+// With --failfast, the modules whose tests never ran are not recorded as passing.
+func TestUnittestFailfastStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix paths")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	repo := tempRepo(t)
+	write := func(rel, content string) { testutil.Write(t, repo.Root, rel, content) }
+	write("tests/__init__.py", "")
+	write("tests/test_a.py", "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.fail('a')\n")
+	write("tests/test_b.py", "import unittest\nclass T(unittest.TestCase):\n    def test_b(self):\n        raise RuntimeError('b')\n")
+	shimDir := t.TempDir()
+	if _, err := trace.ExtractShims(shimDir); err != nil {
+		t.Fatal(err)
+	}
+	s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest -f", Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}}, Adapter: unittestRunner{}}
+	s.Tests = []string{"**/test*.py"}
+	var out bytes.Buffer
+	rc := &RunContext{
+		Repo: repo, Suite: s, Units: []string{"tests/test_a.py", "tests/test_b.py"}, All: true, Record: true,
+		TraceDir: t.TempDir(), ShimDir: shimDir, Stdout: &out, Stderr: &out,
+		IsTest: s.IsTestFile,
+		UnitOf: func(f string) string {
+			if s.IsTestFile(f) {
+				return f
+			}
+			return ""
+		},
+	}
+	res, err := unittestRunner{}.Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if res.ExitCode == 0 {
+		t.Errorf("exit code 0\n%s", out.String())
+	}
+	if o := res.Observations["tests/test_a.py"]; o == nil || o.Status != state.Fail {
+		t.Errorf("test_a: %+v\n%s", o, out.String())
+	}
+	if o := res.Observations["tests/test_b.py"]; o != nil && o.Status == state.Pass {
+		t.Errorf("test_b never ran but is recorded as passed: %+v\n%s", o, out.String())
+	}
+	if o := res.Observations["tests/test_b.py"]; o == nil || o.Status != state.Unknown || o.Inferred || !strings.Contains(o.Failure, "--failfast") {
+		t.Errorf("test_b: %+v", o)
+	}
+	if strings.Contains(out.String(), "a helper matching") {
+		t.Errorf("helper warning for a module that never ran:\n%s", out.String())
+	}
+}
+
+// A SIGINT (smates watch restarting a run, Ctrl-C) ends unittest with a
+// KeyboardInterrupt, without -c: the module it interrupted and those that never ran are
+// not recorded as passing.
+func TestUnittestInterrupted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix signals")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	repo := tempRepo(t)
+	write := func(rel, content string) { testutil.Write(t, repo.Root, rel, content) }
+	write("tests/__init__.py", "")
+	write("tests/test_a.py", "import os, signal, unittest\nclass T(unittest.TestCase):\n    def test_a1(self):\n        os.kill(os.getpid(), signal.SIGINT)\n    def test_a2(self):\n        pass\n")
+	write("tests/test_b.py", "import unittest\nclass T(unittest.TestCase):\n    def test_b(self):\n        pass\n")
+	shimDir := t.TempDir()
+	if _, err := trace.ExtractShims(shimDir); err != nil {
+		t.Fatal(err)
+	}
+	s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest", Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}}, Adapter: unittestRunner{}}
+	s.Tests = []string{"**/test*.py"}
+	var out bytes.Buffer
+	rc := &RunContext{
+		Repo: repo, Suite: s, Units: []string{"tests/test_a.py", "tests/test_b.py"}, All: true, Record: true,
+		TraceDir: t.TempDir(), ShimDir: shimDir, Stdout: &out, Stderr: &out,
+		IsTest: s.IsTestFile,
+		UnitOf: func(f string) string {
+			if s.IsTestFile(f) {
+				return f
+			}
+			return ""
+		},
+	}
+	res, err := unittestRunner{}.Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if res.ExitCode == 0 {
+		t.Errorf("exit code 0\n%s", out.String())
+	}
+	for _, u := range []string{"tests/test_a.py", "tests/test_b.py"} {
+		if o := res.Observations[u]; o == nil || o.Status != state.Unknown {
+			t.Errorf("%s after an interrupt: %+v, want unknown\n%s", u, o, out.String())
+		}
+	}
+}
