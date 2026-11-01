@@ -6,7 +6,7 @@
 //   {"k":"start", pid, ppid, tid, argv, cwd, t, lang}
 //   {"k":"read","p":"/abs/path"}   a file under the repository was opened for reading
 //   {"k":"dir","p":"/abs/dir"}     a directory under the repository was listed
-//   {"k":"probe","p":"/abs/path"}  existence of a path was checked (exists/stat/access)
+//   {"k":"probe","p":"/abs/path"}  existence of a path was checked (exists/stat/realpath...)
 //   {"k":"exec","args":[...],"shell":true,"cwd":"/abs"}  a child process was started
 //   {"k":"tree","p":"/abs/dir"}    everything below a directory may have been read
 //   {"k":"code","p":"/abs/file"}   a module was loaded (Bun, which has no V8 coverage)
@@ -19,6 +19,13 @@
   const traceDir = process.env.SMATES_TRACE_DIR;
   const repoRoot = process.env.SMATES_REPO_ROOT;
   if (!traceDir || !repoRoot || globalThis.__smatesTrace) return;
+  // The rest of the tracing environment, for children given an environment of their own.
+  const env0 = {
+    NODE_OPTIONS: process.env.NODE_OPTIONS || '',
+    NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE || '',
+    PYTHONPATH: process.env.PYTHONPATH || '',
+    PYTEST_PLUGINS: process.env.PYTEST_PLUGINS || '',
+  };
 
   const fs = require('fs');
   const path = require('path');
@@ -34,6 +41,7 @@
   const openSync0 = fs.openSync;
   const writeSync0 = fs.writeSync;
   const statSync0 = fs.statSync;
+  const realpath0 = fs.realpathSync.native || fs.realpathSync;
   const out = path.join(traceDir, `proc-${process.pid}-${threadId}.jsonl`);
   let fd = -1;
   const write = (obj) => {
@@ -43,8 +51,10 @@
     } catch (_) {}
   };
   const rootPrefix = repoRoot.endsWith(path.sep) ? repoRoot : repoRoot + path.sep;
+  const rootDir = rootPrefix.slice(0, -1);
   const nm = path.sep + 'node_modules' + path.sep;
-  const seen = new Set();
+  const seen = new Set(); // context + kind + path
+  let ctx = ''; // the current attribution context (see __smatesTrace.context)
 
   const toPath = (p) => {
     if (typeof p === 'string') return p.startsWith('file:') ? safeFileURL(p) : p;
@@ -61,40 +71,93 @@
       return null;
     }
   };
+  // Workspace packages are linked into node_modules (npm, yarn and pnpm workspaces): a
+  // path through such a link is a path of the repository. Only the package directory
+  // after the last node_modules is resolved, once per package; real packages stay out.
+  const links = new Map(); // package directory -> its path in the repository, or null
+  const linked = (s) => {
+    const i = s.lastIndexOf(nm) + nm.length;
+    const parts = s.slice(i).split(path.sep);
+    const n = parts[0].startsWith('@') ? 2 : 1;
+    if (parts.length < n) return null;
+    const pkg = s.slice(0, i) + parts.slice(0, n).join(path.sep);
+    let real = links.get(pkg);
+    if (real === undefined) {
+      try {
+        real = realpath0(pkg);
+        if (!real.startsWith(rootPrefix) || real.includes(nm)) real = null;
+      } catch (_) {
+        real = null;
+      }
+      links.set(pkg, real);
+    }
+    return real && path.join(real, ...parts.slice(n));
+  };
   // Tracing must never throw into user code (a deleted cwd, odd path objects...).
   const record = (kind, p) => {
     try {
       let s = toPath(p);
       if (!s) return;
       if (!path.isAbsolute(s)) s = path.resolve(s);
-      if (!s.startsWith(rootPrefix) || s.includes(nm)) return;
-      const key = kind + '\0' + s;
+      if (s.includes(nm) && !(s = linked(s))) return;
+      // The repository root itself can be listed (readdirSync('.')), not read.
+      if (!s.startsWith(rootPrefix) && !(s === rootDir && (kind === 'dir' || kind === 'tree'))) return;
+      // Per context: a file read before a context (vitest's config reading .env) and
+      // again within it (global setup) is a dependency of both. Not executed code: a
+      // coverage result may list scripts that ran in earlier contexts.
+      const key = (kind === 'code' ? '' : ctx) + '\0' + kind + '\0' + s;
       if (seen.has(key)) return;
       seen.add(key);
       write({ k: kind, p: s });
     } catch (_) {}
   };
 
-  const wrap = (obj, name, kind, isOpen) => {
-    const orig = obj && obj[name];
-    if (typeof orig !== 'function' || orig.__smates) return;
-    const wrapped = function (p, flags) {
+  // wrapFn returns a replacement for orig that first calls before with the arguments
+  // (it may return other arguments to call orig with) and has orig's properties. A
+  // util.promisify.custom implementation is wrapped the same way: those of
+  // child_process.exec and execFile call the internal functions, not the exports.
+  // spawning is above zero while a wrapped isSpawn function runs, so that the functions
+  // it calls (exec calls execFile, Bun's child_process calls Bun.spawn) record nothing.
+  let promisifyCustom = null;
+  try {
+    promisifyCustom = require('util').promisify.custom;
+  } catch (_) {}
+  let spawning = 0;
+  const wrapFn = (orig, before, isSpawn) => {
+    const wrapped = function () {
+      let args = arguments;
       try {
-        if (typeof p !== 'number' && (!isOpen || isReadFlags(flags))) {
-          if (typeof kind === 'function') kind.apply(null, arguments);
-          else record(kind, p);
-        }
+        args = before.apply(null, arguments) || arguments;
       } catch (_) {}
-      return orig.apply(this, arguments);
+      if (!isSpawn) return orig.apply(this, args);
+      spawning++;
+      try {
+        return orig.apply(this, args);
+      } finally {
+        spawning--;
+      }
     };
     Object.defineProperty(wrapped, '__smates', { value: true });
     Object.defineProperty(wrapped, 'name', { value: orig.name });
     for (const k of Reflect.ownKeys(orig)) {
       if (k === 'length' || k === 'name' || k === 'prototype') continue;
       try {
-        Object.defineProperty(wrapped, k, Object.getOwnPropertyDescriptor(orig, k));
+        const d = Object.getOwnPropertyDescriptor(orig, k);
+        if (k === promisifyCustom && typeof d.value === 'function') d.value = wrapFn(d.value, before, isSpawn);
+        Object.defineProperty(wrapped, k, d);
       } catch (_) {}
     }
+    return wrapped;
+  };
+  const wrap = (obj, name, kind, isOpen) => {
+    const orig = obj && obj[name];
+    if (typeof orig !== 'function' || orig.__smates) return;
+    const wrapped = wrapFn(orig, function (p, flags) {
+      if (typeof p !== 'number' && (!isOpen || isReadFlags(flags))) {
+        if (typeof kind === 'function') kind.apply(null, arguments);
+        else record(kind, p);
+      }
+    });
     try {
       obj[name] = wrapped;
     } catch (_) {}
@@ -110,10 +173,22 @@
   for (const name of ['readFileSync', 'readFile']) wrap(fs, name, 'read');
   for (const name of ['openSync', 'open']) wrap(fs, name, 'read', true);
   wrap(fs, 'createReadStream', 'read');
-  for (const name of ['readdirSync', 'readdir', 'opendirSync', 'opendir']) wrap(fs, name, 'dir');
+  // A recursive listing (Node 18.17+/20.1+) lists everything below the directory.
+  const recordDir = (p, opts) => record(opts && typeof opts === 'object' && opts.recursive ? 'tree' : 'dir', p);
+  for (const name of ['readdirSync', 'readdir', 'opendirSync', 'opendir']) wrap(fs, name, recordDir);
   // A test whose outcome depends on whether a file exists depends on that file's
   // existence (even when it does not exist yet).
   for (const name of ['existsSync', 'exists', 'statSync', 'stat', 'lstatSync', 'lstat', 'accessSync', 'access']) wrap(fs, name, 'probe');
+  // Resolving a path checks that it exists too. Node's module loaders resolve every
+  // module they load, passing their cache under a symbol key: that is no probe.
+  const recordRealpath = (p, opts) => {
+    if (!(opts && typeof opts === 'object' && Object.getOwnPropertySymbols(opts).length)) record('probe', p);
+  };
+  for (const name of ['realpathSync', 'realpath']) {
+    wrap(fs[name], 'native', 'probe'); // before its parent, which copies it
+    wrap(fs, name, recordRealpath);
+  }
+  for (const name of ['readlinkSync', 'readlink']) wrap(fs, name, 'probe');
   // Copying reads the source: a test that copies a fixture into a temporary directory
   // depends on the fixture. A recursive cp of a directory may read everything below it
   // (cp is native from Node 22 on, so nothing else would be seen). statSync0 is the
@@ -134,54 +209,141 @@
   if (fsp) {
     wrap(fsp, 'readFile', 'read');
     wrap(fsp, 'open', 'read', true);
-    wrap(fsp, 'readdir', 'dir');
-    wrap(fsp, 'opendir', 'dir');
-    for (const name of ['stat', 'lstat', 'access']) wrap(fsp, name, 'probe');
+    wrap(fsp, 'readdir', recordDir);
+    wrap(fsp, 'opendir', recordDir);
+    for (const name of ['stat', 'lstat', 'access', 'realpath', 'readlink']) wrap(fsp, name, 'probe');
     wrap(fsp, 'copyFile', 'read');
     wrap(fsp, 'cp', recordCp);
   }
   // Child processes: Node and Python children trace themselves; for anything else
   // (shell scripts, grep, make...) smates infers dependencies from the command line.
+  // cwd may be a string, a file: URL (string or object) or a Buffer.
+  const cwdOf = (o) => {
+    const c = o && typeof o === 'object' && o.cwd;
+    return path.resolve((c && (toPath(c) || String(c))) || process.cwd());
+  };
+  const execEv = (args, shell, opts) => {
+    try {
+      write({ k: 'exec', args: args.map(String), shell: Boolean(shell), cwd: cwdOf(opts) });
+    } catch (_) {}
+  };
+  // A child given an environment of its own ({env: {PATH}}) would start untraced, and
+  // smates trusts Node and Python children to trace themselves: the tracing variables
+  // (as NodeEnv and PythonEnv set them) are added to a copy of it. Values the caller set
+  // are kept; NODE_OPTIONS, PYTHONPATH and PYTEST_PLUGINS get the shims' entries added.
+  const optionValue = (s) => (s.startsWith('"') ? JSON.parse(s) : s);
+  let shimPath = __filename; // as NODE_OPTIONS names it, if it does
+  for (const m of env0.NODE_OPTIONS.matchAll(/--(?:require|preload)[= ]("(?:[^"\\]|\\.)*"|\S+)/g)) {
+    try {
+      const p = optionValue(m[1]);
+      if (p === __filename || realpath0(p) === __filename) shimPath = p;
+    } catch (_) {}
+  }
+  const shimOption = '--require=' + (/[\s"'\\]/.test(shimPath) ? JSON.stringify(shimPath) : shimPath);
+  // The Python shims are extracted next to the Node one (shims/node_modules/smates).
+  let pyEntry;
+  const pythonEntry = () => {
+    if (pyEntry === undefined) {
+      pyEntry = '';
+      try {
+        const dir = realpath0(path.join(__dirname, '..', '..', 'py'));
+        for (const e of env0.PYTHONPATH.split(path.delimiter)) {
+          try {
+            if (e && realpath0(e) === dir) pyEntry = e;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    return pyEntry;
+  };
+  const tracedEnv = (env) => {
+    const e = Object.assign({}, env);
+    let changed = false;
+    const set = (k, v) => {
+      if (v && e[k] === undefined) {
+        e[k] = v;
+        changed = true;
+      }
+    };
+    const add = (k, entry, sep, first) => {
+      const cur = e[k] === undefined || e[k] === null ? '' : String(e[k]);
+      if (cur.split(sep).some((s) => s.trim() === entry)) return;
+      e[k] = !cur ? entry : first ? entry + sep + cur : cur + sep + entry;
+      changed = true;
+    };
+    set('SMATES_TRACE_DIR', traceDir);
+    set('SMATES_REPO_ROOT', repoRoot);
+    set('SMATES_TRACE_PARENT', `${process.pid}-${threadId}`);
+    set('NODE_V8_COVERAGE', env0.NODE_V8_COVERAGE);
+    const opts = e.NODE_OPTIONS === undefined || e.NODE_OPTIONS === null ? '' : String(e.NODE_OPTIONS);
+    if (!opts.includes(shimPath) && !opts.includes(__filename)) {
+      e.NODE_OPTIONS = (shimOption + ' ' + opts).trim();
+      changed = true;
+    }
+    if (pythonEntry()) {
+      add('PYTHONPATH', pyEntry, path.delimiter, true);
+      if (env0.PYTEST_PLUGINS.split(',').includes('smates_pytest')) add('PYTEST_PLUGINS', 'smates_pytest', ',', false);
+    }
+    return changed ? e : env;
+  };
+  // withEnv returns args with the options at index i given a traced environment, or
+  // nothing when they need none.
+  const withEnv = (args, i) => {
+    const o = args[i];
+    if (!o || typeof o !== 'object' || !o.env || typeof o.env !== 'object') return;
+    const env = tracedEnv(o.env);
+    if (env === o.env) return;
+    const a = Array.prototype.slice.call(args);
+    a[i] = Object.assign(Object.create(Object.getPrototypeOf(o)), o, { env });
+    return a;
+  };
   try {
     const cp = require('child_process');
-    // cwd may be a string, a file: URL (string or object) or a Buffer.
-    const cwdOf = (o) => {
-      const c = o && typeof o === 'object' && o.cwd;
-      return path.resolve((c && (toPath(c) || String(c))) || process.cwd());
-    };
-    const execEv = (args, shell, opts) => {
-      try {
-        write({ k: 'exec', args: args.map(String), shell: Boolean(shell), cwd: cwdOf(opts) });
-      } catch (_) {}
-    };
-    const wrapCP = (name, fn) => {
+    const wrapCP = (name, ev, at) => {
       const orig = cp[name];
       if (typeof orig !== 'function' || orig.__smates) return;
-      const wrapped = function () {
-        try {
-          fn.apply(null, arguments);
-        } catch (_) {}
-        return orig.apply(this, arguments);
-      };
-      Object.defineProperty(wrapped, '__smates', { value: true });
-      for (const k of Reflect.ownKeys(orig)) {
-        if (k === 'length' || k === 'name' || k === 'prototype') continue;
-        try {
-          Object.defineProperty(wrapped, k, Object.getOwnPropertyDescriptor(orig, k));
-        } catch (_) {}
-      }
-      cp[name] = wrapped;
+      cp[name] = wrapFn(
+        orig,
+        function () {
+          if (spawning) return;
+          const i = at(arguments);
+          if (ev) ev(arguments, i);
+          return withEnv(arguments, i);
+        },
+        true,
+      );
     };
-    const fileForm = (file, args, opts) => {
-      if (!Array.isArray(args)) {
-        opts = args;
-        args = [];
-      }
+    // (file, args?, options?, callback?): args may be omitted or null.
+    const fileOpts = (a) => (Array.isArray(a[1]) || a[1] === null || a[1] === undefined ? 2 : 1);
+    const fileForm = (a, i) => {
+      const file = a[0];
+      const args = Array.isArray(a[1]) ? a[1] : [];
+      const opts = a[i];
       const shell = opts && typeof opts === 'object' && opts.shell;
       execEv(shell ? [[file].concat(args).join(' ')] : [file].concat(args), shell, opts);
     };
-    for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) wrapCP(name, fileForm);
-    for (const name of ['exec', 'execSync']) wrapCP(name, (cmd, opts) => execEv([cmd], true, opts));
+    for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) wrapCP(name, fileForm, fileOpts);
+    for (const name of ['exec', 'execSync']) wrapCP(name, (a, i) => execEv([a[0]], true, a[i]), () => 1);
+    // fork starts a Node child, which traces itself.
+    wrapCP('fork', null, fileOpts);
+  } catch (_) {}
+  // Worker threads trace themselves too, given an environment that enables it.
+  try {
+    const wt = require('worker_threads');
+    const Orig = wt.Worker;
+    if (typeof Orig === 'function' && !Orig.__smates) {
+      const Worker = class Worker extends Orig {
+        constructor() {
+          let args = arguments;
+          try {
+            args = withEnv(arguments, 1) || arguments;
+          } catch (_) {}
+          super(...args);
+        }
+      };
+      Object.defineProperty(Worker, '__smates', { value: true });
+      wt.Worker = Worker;
+    }
   } catch (_) {}
   try {
     require('module').syncBuiltinESMExports();
@@ -231,12 +393,29 @@
         Bun.Glob = Glob;
       }
     } catch (_) {}
+    // Bun.spawn(cmd, options?) and Bun.spawn({cmd, ...options}), like child_process
+    // (whose Bun implementation calls them: those children are recorded already). Bun.$
+    // runs its own shell, with builtins such as cat, and is not traced.
+    for (const name of ['spawn', 'spawnSync']) {
+      try {
+        const orig = Bun[name];
+        if (typeof orig !== 'function' || orig.__smates) continue;
+        Bun[name] = wrapFn(orig, function (cmd, opts) {
+          if (spawning) return;
+          const i = Array.isArray(cmd) ? 1 : 0;
+          const argv = i ? cmd : cmd && cmd.cmd;
+          if (Array.isArray(argv)) execEv(argv, false, arguments[i]);
+          return withEnv(arguments, i);
+        });
+      } catch (_) {}
+    }
   }
 
   globalThis.__smatesTrace = {
     // Runner integrations call this to attribute subsequent activity to a test file.
     context(id) {
-      write({ k: 'ctx', id: String(id), t: Date.now() });
+      ctx = String(id);
+      write({ k: 'ctx', id: ctx, t: Date.now() });
     },
   };
 
@@ -293,7 +472,6 @@
     };
     const recorded = new Set(); // context + name
     const tries = new Map(); // context + name -> reads without repository code on the stack
-    let envCtx = '';
     // envProxy traces an environment object (initial: its values now).
     const envProxy = (target) => {
       const initial = Object.assign(Object.create(null), target);
@@ -302,7 +480,7 @@
           if (typeof name !== 'string') return;
           const own = hasOwn.call(env, name);
           if (!own && (name in Object.prototype || protocol.has(name))) return;
-          const key = envCtx + '\0' + name;
+          const key = ctx + '\0' + name;
           if (recorded.has(key)) return;
           if ((own ? env[name] : undefined) !== initial[name]) return; // set by this process
           const n = tries.get(key) || 0;
@@ -369,11 +547,6 @@
         proxy = v && typeof v === 'object' ? envProxy(v) : v;
       },
     });
-    const context = globalThis.__smatesTrace.context;
-    globalThis.__smatesTrace.context = function (id) {
-      envCtx = String(id);
-      return context.apply(this, arguments);
-    };
     // Jest gives every test file a copy of process.env (jest-util's
     // installCommonGlobals): trace the copy too.
     const Module = require('module');
