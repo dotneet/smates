@@ -518,6 +518,63 @@ func TestSelectOthersOnlyCover(t *testing.T) {
 	}
 }
 
+func TestSelectOrphansOfSuitesLeftOut(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"api/test_api.py": "",
+		"api/server.py":   "",
+		"web/a.test.ts":   "",
+		"web/unused.ts":   "",
+		"go_test.go":      "",
+	})
+	f.suites = []*runner.Suite{
+		suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}, Static: new(bool)}),
+		suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.ts"}, Static: new(bool)}),
+		suite(t, config.Suite{Name: "root", Runner: "go", Tests: []string{"*_test.go"}, Static: new(bool)}),
+	}
+	st := f.record(nil, nil)
+	f.write("web/unused.ts", "export const x = 1")
+	f.write("api/server.py", "x = 1")
+	f.write("Dockerfile", "FROM x")
+	// --suite web: api/server.py is only py's (and the root suite's) to run.
+	res := f.sel(st, func(in *Input) { in.Suites, in.Others = f.suites[1:2], []*runner.Suite{f.suites[0], f.suites[2]} })
+	if want := []string{"Dockerfile", "web/unused.ts"}; !reflect.DeepEqual(res.Orphans, want) {
+		t.Errorf("orphans %v, want %v", res.Orphans, want)
+	}
+	if len(res.Notes) == 0 || !strings.Contains(res.Notes[len(res.Notes)-1], "left out by --suite") {
+		t.Errorf("notes %v", res.Notes)
+	}
+	// --suite root: a suite rooted at the repository root may be affected by any
+	// change, as the orphan policy over every suite would run it too.
+	res = f.sel(st, func(in *Input) { in.Suites, in.Others = f.suites[2:], f.suites[:2] })
+	if want := []string{"Dockerfile", "api/server.py", "web/unused.ts"}; !reflect.DeepEqual(res.Orphans, want) {
+		t.Errorf("root suite orphans %v, want %v", res.Orphans, want)
+	}
+}
+
+func TestOwned(t *testing.T) {
+	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
+	all := []*runner.Suite{mk("web"), mk("api"), mk(".")}
+	cases := []struct {
+		f    string
+		n    int
+		want bool
+	}{
+		{"web/a.ts", 1, true},   // web is selected
+		{"api/a.py", 1, false},  // only api and the root suite (left out)
+		{"Dockerfile", 1, true}, // no suite root contains it: every suite
+		{"api/a.py", 3, true},   // every suite selected
+	}
+	for _, c := range cases {
+		if got := Owned(c.f, all, c.n); got != c.want {
+			t.Errorf("Owned(%q, n=%d) = %v, want %v", c.f, c.n, got, c.want)
+		}
+	}
+	// The root suite selected alone owns every file.
+	if !Owned("api/a.py", []*runner.Suite{mk("."), mk("api")}, 1) {
+		t.Error("root suite owns api/a.py")
+	}
+}
+
 // ---- diff mode ----
 
 func gitFixture(t *testing.T, f *fixture) (*gitx.Repo, string) {
@@ -939,5 +996,44 @@ func TestExistenceProbe(t *testing.T) {
 	f.remove("present.cfg")
 	if d := decisions(f.sel(st, nil)); d["test_x.py"] != ReasonChanged {
 		t.Errorf("probed file removed: %v", d)
+	}
+}
+
+func TestSnapshotHash(t *testing.T) {
+	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
+	for f, want := range map[string]struct {
+		h  string
+		ok bool
+	}{"a": {"h1", true}, "b": {"", false}, "c": {"", false}, "d": {"", false}} {
+		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
+			t.Errorf("%s: %q %v", f, h, ok)
+		}
+	}
+}
+
+func TestMarkers(t *testing.T) {
+	m := Marker("h1", []string{"b", "a", "a"})
+	if m != "?h1@a,b" {
+		t.Fatalf("Marker: %q", m)
+	}
+	if h, seen, ok := ParseMarker(m); !ok || h != "h1" || !reflect.DeepEqual(seen, []string{"a", "b"}) {
+		t.Errorf("ParseMarker: %q %v %v", h, seen, ok)
+	}
+	if _, _, ok := ParseMarker("h1"); ok {
+		t.Error("a content hash is no marker")
+	}
+	if got := MarkSeen(m, "h1", []string{"c"}); got != "?h1@a,b,c" {
+		t.Errorf("same hash: %q", got)
+	}
+	if got := MarkSeen(m, "h2", []string{"c"}); got != "?h2@c" {
+		t.Errorf("new hash: %q", got)
+	}
+	if got := MarkSeen("h0", "", []string{"a"}); got != "?@a" {
+		t.Errorf("absent: %q", got)
+	}
+	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
+	all := []*runner.Suite{mk("a"), mk("b")}
+	if !OwnedOnly("a/x", all, 1) || OwnedOnly("Dockerfile", all, 1) || OwnedOnly("b/x", all, 1) || !OwnedOnly("Dockerfile", all, 2) {
+		t.Error("OwnedOnly")
 	}
 }

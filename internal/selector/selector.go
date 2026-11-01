@@ -191,6 +191,10 @@ type Result struct {
 	Suites  []*Suite `json:"suites"`
 	Changed []string `json:"changed"`
 	Orphans []string `json:"orphans"`
+	// LeftOut are the changes no test depends on that only suites left out by --suite
+	// own (see Owned): not orphans of this run (the jobs running those suites handle
+	// them), but tests of this run that name them are still selected (References).
+	LeftOut []string `json:"left_out,omitempty"`
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
 	Notes          []string          `json:"notes,omitempty"`
@@ -275,6 +279,19 @@ func Select(in *Input) (*Result, error) {
 		changedSet, err = changedFiles(in)
 		if err != nil {
 			return nil, err
+		}
+		if len(in.Others) > 0 && len(in.State.Files) > 0 {
+			// Entries --suite runs wrote as markers (cli saveState): unchanged
+			// for this run when every suite it runs saw the current content.
+			var names []string
+			for _, s := range in.Suites {
+				names = append(names, s.Name)
+			}
+			for f := range changedSet {
+				if h, seen, ok := ParseMarker(in.State.Files[f]); ok && h == in.Snap[f] && subset(names, seen) {
+					delete(changedSet, f)
+				}
+			}
 		}
 		for f := range changedSet {
 			res.Changed = append(res.Changed, f)
@@ -410,14 +427,22 @@ func Select(in *Input) (*Result, error) {
 	}
 
 	if res.Mode != ModeAll {
+		all := append(slices.Clip(in.Suites), in.Others...)
 		for _, f := range res.Changed {
 			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
 				continue
 			}
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
 			if !res.Explains(f, existenceChanged) {
+				if len(in.Others) > 0 && !Owned(f, all, len(in.Suites)) {
+					res.LeftOut = append(res.LeftOut, f)
+					continue
+				}
 				res.Orphans = append(res.Orphans, f)
 			}
+		}
+		if len(res.LeftOut) > 0 {
+			res.Notes = append(res.Notes, fmt.Sprintf("%d unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them", len(res.LeftOut)))
 		}
 	}
 	return res, nil
@@ -552,10 +577,30 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 // revision in diff mode; unknown counts as existing, which keeps f an orphan).
 func existedBefore(in *Input, f string) bool {
 	if len(in.State.Files) > 0 {
-		_, ok := in.State.Files[f]
+		_, ok := SnapshotHash(in.State.Files, f)
 		return ok
 	}
 	return true
+}
+
+func subset(a, b []string) bool {
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
+	}
+	return true
+}
+
+// SnapshotHash returns the hash a snapshot holds for f and whether it holds one. An
+// Unrecorded entry counts as none: the hash after the marker is only what --suite runs
+// of other suites compare (Select), never content the file's own suites have seen.
+func SnapshotHash(files map[string]string, f string) (string, bool) {
+	v, ok := files[f]
+	if strings.HasPrefix(v, Unrecorded) {
+		return "", false
+	}
+	return v, ok
 }
 
 func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
@@ -829,20 +874,14 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 // suites whose root contains the orphan (a suite rooted at the repository root contains
 // every file), or all suites for orphans outside any non-root suite.
 func (r *Result) OrphanAll(orphans []string) []Addition {
+	roots := make([]string, len(r.Suites))
+	for i, s := range r.Suites {
+		roots[i] = s.Suite.Root
+	}
 	pick := map[string][]string{} // suite -> orphans that pull it in
 	for _, o := range orphans {
-		matched := false
-		for _, s := range r.Suites {
-			if s.Suite.Root != "." && pathutil.Under(o, s.Suite.Root) {
-				pick[s.Name] = append(pick[s.Name], o)
-				matched = true
-			}
-		}
-		for _, s := range r.Suites {
-			// With a match, also the root suites ("." or ""), which contain every file.
-			if (!matched || pathutil.Under(o, s.Suite.Root)) && !slices.Contains(pick[s.Name], o) {
-				pick[s.Name] = append(pick[s.Name], o)
-			}
+		for _, i := range orphanOwners(o, roots) {
+			pick[r.Suites[i].Name] = append(pick[r.Suites[i].Name], o)
 		}
 	}
 	var adds []Addition
@@ -852,6 +891,113 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 		}
 	}
 	return adds
+}
+
+// Unrecorded prefixes a snapshot entry that only some suites have compared: a
+// --suite run records a file the suites left out also own (or own alone) as
+// "?<hash>@<suites>", the hash it saw and the suites it ran (Marker). A --suite run
+// whose suites all saw that hash finds the file unchanged; any other run, a run over
+// every suite included, finds it changed until it records the file itself.
+const Unrecorded = "?"
+
+// Marker is the snapshot entry saying that suites saw a file with hash ("" = absent).
+func Marker(hash string, suites []string) string {
+	s := slices.Clone(suites)
+	sort.Strings(s)
+	return Unrecorded + hash + "@" + strings.Join(slices.Compact(s), ",")
+}
+
+// ParseMarker splits a Marker entry; ok is false for a content hash.
+func ParseMarker(v string) (hash string, suites []string, ok bool) {
+	rest, ok := strings.CutPrefix(v, Unrecorded)
+	if !ok {
+		return "", nil, false
+	}
+	hash, names, _ := strings.Cut(rest, "@")
+	if names != "" {
+		suites = strings.Split(names, ",")
+	}
+	return hash, suites, true
+}
+
+// MarkSeen returns the entry after suites saw a file with hash: the suites that
+// already saw that same hash keep it, the others do not.
+func MarkSeen(v, hash string, suites []string) string {
+	if h, seen, ok := ParseMarker(v); ok && h == hash {
+		return Marker(hash, append(seen, suites...))
+	}
+	return Marker(hash, suites)
+}
+
+// Owners returns the names of the suites of all the orphan policy would run for f.
+func Owners(f string, all []*runner.Suite) []string {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	var out []string
+	for _, i := range orphanOwners(f, roots) {
+		out = append(out, all[i].Name)
+	}
+	return out
+}
+
+// OwnedOnly reports whether every suite the orphan policy would run for f (see Owned)
+// is one of the first n suites of all.
+func OwnedOnly(f string, all []*runner.Suite, n int) bool {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	for _, i := range orphanOwners(f, roots) {
+		if i >= n {
+			return false
+		}
+	}
+	return true
+}
+
+// orphanOwners returns the indexes of the suites (by root) an orphan may affect: the
+// suites whose root contains it, where a suite rooted at the repository root contains
+// every file but only counts on its own when no other suite contains the orphan (then
+// every suite may be affected).
+func orphanOwners(o string, roots []string) []int {
+	var out []int
+	for i, r := range roots {
+		if r != "." && r != "" && pathutil.Under(o, r) {
+			out = append(out, i)
+		}
+	}
+	if len(out) == 0 {
+		for i := range roots {
+			out = append(out, i)
+		}
+		return out
+	}
+	for i, r := range roots {
+		if r == "." || r == "" {
+			out = append(out, i)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// Owned reports whether a change belongs to at least one of the first n suites of all
+// (the suites a --suite run selects; the rest are the suites left out): the orphan
+// policy over every suite would run one of them for it. A change only suites left out
+// own is theirs to handle, in the job that runs them.
+func Owned(f string, all []*runner.Suite, n int) bool {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	for _, i := range orphanOwners(f, roots) {
+		if i < n {
+			return true
+		}
+	}
+	return false
 }
 
 // References finds tests that mention an orphan file by name in their own sources or
