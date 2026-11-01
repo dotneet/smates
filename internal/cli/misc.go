@@ -227,11 +227,13 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			case "content":
 				if service != "" {
 					how = append(how, service)
-				} else if slices.Contains(s.Known[t.ID], target) {
+				} else if slices.Contains(s.Known[t.ID], target) || slices.Contains(s.Known[t.ID], selector.ConfigKey(target)) {
 					how = append(how, "static/inputs")
 				}
 				if st != nil && st.Tests[t.ID] != nil {
-					if _, ok := st.Tests[t.ID].Deps[target]; ok {
+					_, ok := st.Tests[t.ID].Deps[target]
+					_, okCfg := st.Tests[t.ID].Deps[selector.ConfigKey(target)]
+					if ok || okCfg {
 						how = append(how, "recorded")
 					}
 				}
@@ -293,15 +295,29 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		for _, d := range s.Known[target] {
 			known[d] = true
 		}
+		// The suite's settings key and the file itself print as one line.
+		type source struct{ static, recorded bool }
+		var order []string
+		srcs := map[string]*source{}
 		for _, d := range deps {
+			name := selector.DisplayKey(d)
+			if srcs[name] == nil {
+				order = append(order, name)
+				srcs[name] = &source{}
+			}
+			_, rec := traced[d]
+			srcs[name].static = srcs[name].static || known[d]
+			srcs[name].recorded = srcs[name].recorded || rec
+		}
+		for _, name := range order {
 			var src []string
-			if known[d] {
+			if srcs[name].static {
 				src = append(src, "static")
 			}
-			if _, ok := traced[d]; ok {
+			if srcs[name].recorded {
 				src = append(src, "recorded")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
+			fmt.Fprintf(stdout, "%s\t%s\n", name, strings.Join(src, ","))
 		}
 		return nil
 	}

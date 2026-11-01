@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/dotneet/smates/internal/hints"
+	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -190,5 +191,17 @@ suites:
 	}
 	if n := calls.Load(); n != 1 {
 		t.Errorf("%d API calls after disabling", n)
+	}
+}
+
+func TestDisplayCandidates(t *testing.T) {
+	key := selector.ConfigKey("smates.yml")
+	got := displayCandidates([]hints.Candidate{{Path: key, Old: "config:1", New: "config:2"}, {Path: "a.go", Old: "x", New: "y"}})
+	if len(got) != 2 || got[0].Path != "smates.yml" || got[0].Old != "" || got[0].New != "" || got[1].Old != "x" {
+		t.Errorf("mapped: %+v", got)
+	}
+	got = displayCandidates([]hints.Candidate{{Path: key, Old: "config:1"}, {Path: "smates.yml", Old: "b1", New: "b2"}})
+	if len(got) != 1 || got[0].Old != "b1" {
+		t.Errorf("the content candidate wins: %+v", got)
 	}
 }

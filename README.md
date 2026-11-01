@@ -42,7 +42,9 @@ used and their git blob hashes at the time it last ran:
 D(T) = traced(T)        files executed or read while T ran (incl. its child processes),
                         and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
-     ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
+     ∪ inputs           lockfiles, manifests, runner config, your globs, and the
+                        suite's own settings in smates.yml (editing ignore, agent,
+                        orphans or another suite re-runs nothing)
      ∪ depends_on       code of a server the tests talk to in another process (declared)
 ```
 
@@ -87,11 +89,20 @@ left to the job that runs that suite). smates then
 
 1. selects tests whose sources or dependencies mention the file by name (fixtures,
    migrations, schemas referenced as strings);
-2. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+2. skips **untested code**: Go, Python and JS/TS source under a suite's root that no
+   test imports, directly or through other code, and that no test executed (a `main`
+   package, a component without tests). No test can be affected, so nothing runs; the
+   summary and the pull request comment list these files as "changes to untested code".
+   Tool configuration written as code (`vite.config.ts`, `setup.py`, setup files), files
+   under `testdata/`, `fixtures/` or `__mocks__/`, and files a suite excludes are not
+   counted, and without a recorded state (when only imports are known) nothing is. Code another process runs (a server an e2e suite talks to) needs `rules` so its
+   tests are selected; `untested: orphan` hands these files to the
+   next steps instead;
+3. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
    `OPENROUTER_API_KEY` is set): it explores the
    repository with read-only tools and adds specific tests or requests a full run.
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
-3. otherwise runs the suites the orphan can affect in full.
+4. otherwise runs the suites the orphan can affect in full.
 
 Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
 covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
@@ -255,6 +266,7 @@ suites:
     root: tools
 
 orphans: agent        # agent | all | ignore
+untested: skip        # skip | orphan: changed source code no test reaches (default skip: nothing to run)
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select nothing ("*": tracking off)
 env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
