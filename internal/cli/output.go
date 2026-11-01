@@ -205,6 +205,10 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s\n", started, selected, total, elapsedText)
 		return
 	}
+	if len(failed) == 0 && c.interrupted {
+		fmt.Fprintf(w, "smates: INTERRUPTED after %s: %d selected test unit(s) not run (they stay selected)\n", elapsedText, countUnits(c.notRun))
+		return
+	}
 	if len(failed) == 0 {
 		fmt.Fprintf(w, "smates: FAILED (exit code %d) in %s, but no test unit is known to have failed (see the output above)\n", c.worst, elapsedText)
 		return
@@ -250,7 +254,9 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 			fmt.Fprintf(w, "    → %s\n", explanationLine(ex))
 		}
 	}
-	if n := countUnits(c.notRun); n > 0 {
+	if n := countUnits(c.notRun); n > 0 && c.interrupted {
+		fmt.Fprintf(w, "  (interrupted: %d selected test unit(s) not run)\n", n)
+	} else if n > 0 {
 		fmt.Fprintf(w, "  (--fail-fast left %d selected test unit(s) not started)\n", n)
 	}
 	fmt.Fprintf(w, "smates: rerun them: %s\n", c.rerunCommand(failed))
