@@ -91,8 +91,11 @@ JSON
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want %q", err, tt.wantErr)
 				}
-				if time.Since(started) > 4*time.Second {
-					t.Errorf("command was not stopped in time")
+				// Only the timeout bounds the run: the other commands exit by themselves,
+				// and the brief before them (git diffs) may alone take seconds on a
+				// loaded machine.
+				if tt.timeout > 0 && time.Since(started) > 4*time.Second {
+					t.Errorf("command was not stopped in time: %s", time.Since(started))
 				}
 				return
 			}

@@ -363,6 +363,31 @@ func TestAPICorrectsUnknownTests(t *testing.T) {
 	}
 }
 
+// A "tests" decision listing no test is sent back for a correction too, and logged as
+// such (not as 0 unknown tests).
+func TestAPICorrectsEmptyTestsDecision(t *testing.T) {
+	f := newFixture(t)
+	empty := `{"decision":"tests","tests":[],"no_impact":[],"summary":"s"}`
+	good := `{"decision":"tests","tests":[{"suite":"web","test":"src/db.test.ts","why":"db"}],"no_impact":[],"summary":"s"}`
+	b, _ := newTestBackend(t,
+		reply("tool_use", toolUse("s1", "submit_selection", empty)),
+		reply("tool_use", toolUse("s2", "submit_selection", good)),
+	)
+	var log bytes.Buffer
+	req := f.request(testConfig())
+	req.Log = &log
+	d, err := b.Decide(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Add) != 1 || d.Add[0].Test != "src/db.test.ts" {
+		t.Fatalf("decision = %+v", d)
+	}
+	if !strings.Contains(log.String(), "turn 1: submission listed no tests; asking for a correction") || strings.Contains(log.String(), "named 0") {
+		t.Errorf("log:\n%s", log.String())
+	}
+}
+
 // A second submission whose tests still do not exist fails the run (the CLI then
 // applies the orphan policy) instead of being accepted with nothing selected.
 func TestAPIRejectsUncorrectedUnknownTests(t *testing.T) {
