@@ -223,11 +223,25 @@ func TestSuggestGlobs(t *testing.T) {
 		{Path: `odd\name.txt`, Kind: orphanKindIgnore},
 		{Path: "seed/one.sql", Kind: orphanKindIgnore},
 		{Path: "seed/two.sql", Kind: orphanKindIgnore},
+		{Path: "fixtures/a.json", Kind: orphanKindIgnore},
+		{Path: "fixtures/b.json", Kind: orphanKindIgnore},
+		{Path: "config/x.yml", Kind: orphanKindIgnore},
+		{Path: "config/y.yml", Kind: orphanKindIgnore},
+		{Path: "gone/sub/a.txt", Kind: orphanKindIgnore},
+		{Path: "gone/sub/b.txt", Kind: orphanKindIgnore},
+		{Path: "envy/a.txt", Kind: orphanKindIgnore},
+		{Path: "envy/b.txt", Kind: orphanKindIgnore},
 	}
 	tree := []string{"web/src/a.ts", "web/src/b.ts", "web/public/x.png", "lib/one.txt", "lib/two.txt", "lib/dep.go", "solo/only.txt", "root.txt",
 		"app/[id]/page.tsx", "app/[id]/layout.tsx", "app/dep.ts", "pages/{slug}*?.tsx", `odd\name.txt`,
 		"seed/one.sql", "seed/two.sql", "seed/users.sql", "seed/other.sql"}
-	covered := map[string]bool{"lib/dep.go": true, "app/dep.ts": true}
+	covered := map[string]bool{
+		"lib/dep.go": true, "app/dep.ts": true,
+		"fixtures/":         true, // a test lists fixtures/
+		"config/local.yml?": true, // a test checks whether config/local.yml exists
+		"gone/old.txt":      true, // a dependency no longer in the working tree
+		"$ENVY":             true, // variables block nothing
+	}
 	var asked []string
 	refs := func(files []string) []string {
 		asked = append(asked, files...)
@@ -252,6 +266,11 @@ func TestSuggestGlobs(t *testing.T) {
 		`odd\name.txt`:       `odd\\name.txt`,
 		// seed/ holds a file a test names, although it never changed.
 		"seed/one.sql": "seed/one.sql", "seed/two.sql": "seed/two.sql",
+		// Listings, existence checks and files outside the tree block their directories.
+		"fixtures/a.json": "fixtures/a.json", "fixtures/b.json": "fixtures/b.json",
+		"config/x.yml": "config/x.yml", "config/y.yml": "config/y.yml",
+		"gone/sub/a.txt": "gone/sub/**", "gone/sub/b.txt": "gone/sub/**",
+		"envy/a.txt": "envy/**", "envy/b.txt": "envy/**",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)

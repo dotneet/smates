@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/selector"
@@ -308,6 +309,20 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, r
 		}
 		for d := path.Dir(of.Path); d != "." && d != "/"; d = path.Dir(d) {
 			candidates[d]++
+		}
+	}
+	// Every dependency blocks the directories holding it, including listings and
+	// existence checks (a test that lists a directory notices files appearing there)
+	// and files no longer in the working tree.
+	for key := range covered {
+		switch kind, p := depkey.Parse(key); kind {
+		case depkey.KindListing, depkey.KindTree:
+			if p != "" && p != "." && p != "/" {
+				blocked[p] = true
+				block(p)
+			}
+		case depkey.KindContent, depkey.KindExistence:
+			block(p)
 		}
 	}
 	ranks := map[string]bool{}
