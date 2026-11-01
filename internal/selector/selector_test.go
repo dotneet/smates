@@ -1333,3 +1333,22 @@ func TestSelectFileNamedLikeProbe(t *testing.T) {
 		t.Errorf("orphans %v", res.Orphans)
 	}
 }
+
+// An executable Go file's hash carries the executable marker; its declarations are
+// still hashed from its content.
+func TestDeclsOfExecutableFile(t *testing.T) {
+	dir := t.TempDir()
+	src := "package p\n\nfunc A() int { return 1 }\n"
+	if err := os.MkdirAll(filepath.Join(dir, "p"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p", "a.go"), []byte(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blob := gitx.HashBytes([]byte(src))
+	plain := NewHasher(gitx.Snapshot{"p/a.go": blob}).WithRoot(dir).Hash("p/a.go#decls")
+	exec := NewHasher(gitx.Snapshot{"p/a.go": blob + gitx.ExecSuffix}).WithRoot(dir).Hash("p/a.go#decls")
+	if !strings.HasPrefix(plain, "decls:") || exec != plain {
+		t.Errorf("decls of an executable file %q, of a plain one %q", exec, plain)
+	}
+}

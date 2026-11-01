@@ -137,6 +137,10 @@ type Input struct {
 	Orphans map[string]string
 	// Hash returns a dependency key's current hash ("" when absent).
 	Hash func(string) string
+	// Unchanged reports whether a key recorded with a hash other than its current one
+	// still counts as unchanged (selector.Hasher.Unchanged: a hash recorded without the
+	// executable marker; nil allowed).
+	Unchanged func(key, recorded string) bool
 	// Direct returns the static direct imports of a file (nil allowed).
 	Direct func(string) []string
 	// Service reports files the unit depends on through depends_on/serves (nil allowed).
@@ -245,7 +249,7 @@ func changed(in Input, key string) (Candidate, bool) {
 		var old string
 		old, recorded = in.Entry.Deps[key]
 		if recorded {
-			if old == cur {
+			if old == cur || in.Unchanged != nil && in.Unchanged(key, old) {
 				return c, false
 			}
 			c.Old = old

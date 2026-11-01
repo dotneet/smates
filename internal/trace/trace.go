@@ -321,7 +321,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		return p
 	}
-	rel := relCache(repoRoot)
+	rel, links := relCache(repoRoot), linksCache(repoRoot)
 
 	entries, err := os.ReadDir(traceDir)
 	if err != nil {
@@ -334,7 +334,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		pid, _ := strconv.Atoi(m[1])
 		tid, _ := strconv.Atoi(m[2])
-		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, repoRoot); err != nil {
+		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, links, repoRoot); err != nil {
 			return nil, err
 		}
 	}
@@ -405,7 +405,22 @@ func relCache(root string) func(string) (string, bool) {
 	}
 }
 
-func readStream(file string, p *Proc, rel func(string) (string, bool), root string) error {
+// linksCache returns a memoized pathutil.Links for root.
+func linksCache(root string) func(string) []string {
+	cache := map[string][]string{}
+	return func(p string) []string {
+		l, ok := cache[p]
+		if !ok {
+			l = pathutil.Links(root, p)
+			cache[p] = l
+		}
+		return l
+	}
+}
+
+// readStream reads one process's event stream into p. rel and links are shared by the
+// streams of one trace (relCache, linksCache).
+func readStream(file string, p *Proc, rel func(string) (string, bool), links func(string) []string, root string) error {
 	f, err := os.Open(file)
 	if err != nil {
 		return err
@@ -442,19 +457,26 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				spawn = relCtx(c, rel)
 			}
 		case "read", "code", "dir", "probe", "tree":
-			key := ""
+			var keys []string
 			if r, ok := rel(ev.P); ok {
-				key = add(ev.K, r)
+				keys = append(keys, add(ev.K, r))
+				// The symlinks the path went through are read too: retargeting one
+				// changes what the test sees.
+				for _, l := range links(ev.P) {
+					keys = append(keys, add("read", l))
+				}
 			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
-				key = add(ev.K, ".")
+				keys = append(keys, add(ev.K, "."))
 			}
-			if by, ok := rel(ev.By); ok && key != "" && ev.By != "" {
+			if by, ok := rel(ev.By); ok && len(keys) > 0 && ev.By != "" {
 				m := p.ReadsBy[by]
 				if m == nil {
 					m = map[string]bool{}
 					p.ReadsBy[by] = m
 				}
-				m[key] = true
+				for _, key := range keys {
+					m[key] = true
+				}
 			}
 		case "env":
 			if ev.P == "" {

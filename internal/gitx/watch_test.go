@@ -3,6 +3,7 @@ package gitx
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -61,6 +62,29 @@ func TestScanTreeChanges(t *testing.T) {
 	step("remove untracked", "new/deep/n.txt")
 	r.git("checkout", "-q", "other")
 	step("checkout", "a.txt")
+}
+
+func TestScanTreeChmod(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no executable bit")
+	}
+	r := newTestRepo(t)
+	r.write("run.sh", "#!/bin/sh\n")
+	os.Chmod(filepath.Join(r.dir, "run.sh"), 0o755)
+	r.commit("init")
+	prev := r.scan(nil)
+	for _, mode := range []os.FileMode{0o644, 0o755} {
+		os.Chmod(filepath.Join(r.dir, "run.sh"), mode)
+		cur := r.scan(prev)
+		got, err := r.repo.Changes(prev, cur)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, []string{"run.sh"}) {
+			t.Errorf("chmod %o: changes %q, want [run.sh]", mode, got)
+		}
+		prev = cur
+	}
 }
 
 func TestScanTreeRacyRewrite(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 
 	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/selector"
 )
@@ -511,6 +512,9 @@ func (tb *toolbox) gitDiff(ctx context.Context, p string) (string, error) {
 		return "", toolErrorf("%s exists neither in the old state nor in the working tree", rel)
 	}
 	if old != nil && curExists && bytes.Equal(old, cur) {
+		if m := tb.modeChange(rel); m != "" {
+			return fmt.Sprintf("%s: %s, no content change against %s", rel, m, oldDesc), nil
+		}
 		return fmt.Sprintf("%s: no content change against %s", rel, oldDesc), nil
 	}
 	if old != nil && isBinary(old) || curExists && isBinary(cur) {
@@ -534,8 +538,10 @@ func (tb *toolbox) gitDiff(ctx context.Context, p string) (string, error) {
 func (tb *toolbox) oldContent(ctx context.Context, rel string) ([]byte, string) {
 	o, isOrphan := tb.orphans[rel]
 	if isOrphan && o.OldBlob != "" {
-		if data, err := gitOutput(ctx, tb.root, "cat-file", "blob", o.OldBlob); err == nil {
-			return data, "recorded blob " + short(o.OldBlob)
+		// A recorded hash carries the executable marker after the blob SHA-1.
+		blob := gitx.Blob(o.OldBlob)
+		if data, err := gitOutput(ctx, tb.root, "cat-file", "blob", blob); err == nil {
+			return data, "recorded blob " + short(blob)
 		}
 	}
 	base := tb.base
@@ -552,6 +558,29 @@ func (tb *toolbox) oldContent(ctx context.Context, rel string) ([]byte, string) 
 		}
 	}
 	return nil, "no previous version"
+}
+
+// modeChange describes how the executable bit of rel changed between its recorded hash
+// and the working tree ("mode changed (+x added)"), "" when it did not or is unknown.
+func (tb *toolbox) modeChange(rel string) string {
+	o, ok := tb.orphans[rel]
+	if !ok || o.OldBlob == "" {
+		return ""
+	}
+	cur := o.NewBlob
+	if cur == "" {
+		cur, _ = gitx.HashFile(filepath.Join(tb.root, filepath.FromSlash(rel)))
+	}
+	if cur == "" || gitx.Blob(cur) != gitx.Blob(o.OldBlob) {
+		return ""
+	}
+	switch oldX, newX := o.OldBlob != gitx.Blob(o.OldBlob), cur != gitx.Blob(cur); {
+	case newX && !oldX:
+		return "mode changed (+x added)"
+	case oldX && !newX:
+		return "mode changed (+x removed)"
+	}
+	return ""
 }
 
 func (tb *toolbox) workingContent(rel string) ([]byte, bool, error) {
