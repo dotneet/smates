@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -215,19 +217,137 @@ func TestSuggestGlobs(t *testing.T) {
 		{Path: "lib/two.txt", Kind: orphanKindIgnore},
 		{Path: "solo/only.txt", Kind: orphanKindIgnore},
 		{Path: "root.txt", Kind: orphanKindIgnore},
+		{Path: "app/[id]/page.tsx", Kind: orphanKindIgnore},
+		{Path: "app/[id]/layout.tsx", Kind: orphanKindIgnore},
+		{Path: "pages/{slug}*?.tsx", Kind: orphanKindIgnore},
+		{Path: `odd\name.txt`, Kind: orphanKindIgnore},
+		{Path: "seed/one.sql", Kind: orphanKindIgnore},
+		{Path: "seed/two.sql", Kind: orphanKindIgnore},
 	}
-	tree := []string{"web/src/a.ts", "web/src/b.ts", "web/public/x.png", "lib/one.txt", "lib/two.txt", "lib/dep.go", "solo/only.txt", "root.txt"}
-	covered := map[string]bool{"lib/dep.go": true}
-	got := suggestGlobs(ranked, tree, covered)
+	tree := []string{"web/src/a.ts", "web/src/b.ts", "web/public/x.png", "lib/one.txt", "lib/two.txt", "lib/dep.go", "solo/only.txt", "root.txt",
+		"app/[id]/page.tsx", "app/[id]/layout.tsx", "app/dep.ts", "pages/{slug}*?.tsx", `odd\name.txt`,
+		"seed/one.sql", "seed/two.sql", "seed/users.sql", "seed/other.sql"}
+	covered := map[string]bool{"lib/dep.go": true, "app/dep.ts": true}
+	var asked []string
+	refs := func(files []string) []string {
+		asked = append(asked, files...)
+		var out []string
+		for _, f := range files {
+			if f == "seed/users.sql" { // a test names it
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	got := suggestGlobs(ranked, tree, covered, refs)
 	want := map[string]string{
 		"web/src/a.ts": "web/**", "web/src/b.ts": "web/**", "web/public/x.png": "web/**", // shallowest clean directory
 		"ops/k8s/a.yaml": "ops/k8s/**", "ops/k8s/b.yaml": "ops/k8s/**", // ops/ holds an execution-relevant file
 		"lib/one.txt": "lib/one.txt", "lib/two.txt": "lib/two.txt", // lib/ holds a dependency
 		"solo/only.txt": "solo/only.txt", // a single file is not collapsed
 		"root.txt":      "root.txt",
+		// Metacharacters are escaped.
+		"app/[id]/page.tsx": `app/\[id\]/**`, "app/[id]/layout.tsx": `app/\[id\]/**`,
+		"pages/{slug}*?.tsx": `pages/\{slug\}\*\?.tsx`,
+		`odd\name.txt`:       `odd\\name.txt`,
+		// seed/ holds a file a test names, although it never changed.
+		"seed/one.sql": "seed/one.sql", "seed/two.sql": "seed/two.sql",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
+	}
+	for f, g := range got {
+		if !pathutil.Match([]string{g}, f) {
+			t.Errorf("glob %q does not match %q", g, f)
+		}
+	}
+	// Only unranked, uncovered files below a candidate directory go to the reference scan.
+	sort.Strings(asked)
+	if want := []string{"seed/other.sql", "seed/users.sql"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("reference scan asked about %v, want %v", asked, want)
+	}
+}
+
+// TestOrphansEscapedAndReferencedTree replays a commit touching bracketed paths and a
+// directory holding a file a test names (in the working tree, not in the history).
+func TestOrphansEscapedAndReferencedTree(t *testing.T) {
+	g, _ := orphanFixture(t)
+	write := func(rel string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(g.dir+rel), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("seed/users.sql")
+	if err := os.WriteFile(filepath.Join(g.dir, "a", "z_check.sh"), []byte("psql < seed/users.sql\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g.git("add", "-A")
+	g.commit("setup")
+	for _, f := range []string{"seed/one.sql", "seed/two.sql", "web/[id]/page.tsx", "web/[id]/layout.tsx", "web2/[slug].tsx"} {
+		write(f)
+	}
+	g.git("add", "-A")
+	g.commit("change")
+
+	rep, _ := runOrphans(t, g, "--history", "1")
+	globs := map[string]string{}
+	for _, f := range rep.Files {
+		globs[f.Path] = f.Glob
+	}
+	want := map[string]string{
+		"seed/one.sql": "seed/one.sql", "seed/two.sql": "seed/two.sql",
+		"web/[id]/page.tsx": "web/**", "web/[id]/layout.tsx": "web/**",
+		"web2/[slug].tsx": `web2/\[slug\].tsx`,
+	}
+	if !reflect.DeepEqual(globs, want) {
+		t.Errorf("globs %v, want %v", globs, want)
+	}
+	// Every suggestion matches its files, and the replay with them agrees.
+	still := 0
+	var all []string
+	for _, ig := range rep.Ignore {
+		all = append(all, ig.Glob)
+		for _, f := range ig.Files {
+			if !pathutil.Match([]string{ig.Glob}, f) {
+				t.Errorf("%q does not match %q", ig.Glob, f)
+			}
+		}
+	}
+	for _, h := range rep.History {
+		for _, f := range h.Orphans {
+			if !pathutil.Match(all, f) {
+				still++
+				break
+			}
+		}
+	}
+	if rep.CommitsWithOrphans != 1 || rep.CommitsWithOrphansAfterIgnore != still || still != 0 {
+		t.Errorf("counts %d %d (by matching: %d)", rep.CommitsWithOrphans, rep.CommitsWithOrphansAfterIgnore, still)
+	}
+}
+
+func TestOrphansShallowClone(t *testing.T) {
+	g, _ := orphanFixture(t)
+	dir := filepath.Join(t.TempDir(), "clone")
+	g.git("clone", "-q", "--depth", "3", "file://"+g.dir, dir)
+	var out, errb bytes.Buffer
+	if code := Main([]string{"orphans", "-C", dir, "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("orphans: %d %s", code, errb.String())
+	}
+	var rep orphanReport
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	// c7, c6 replayed; c5 (the boundary) is not diffed as a root commit adding every file.
+	if rep.Commits != 2 || len(rep.Warnings) != 2 || !strings.Contains(rep.Warnings[1], "shallow clone") {
+		t.Errorf("commits %d, warnings %v", rep.Commits, rep.Warnings)
+	}
+	for _, f := range rep.Files {
+		if f.Path == ".env.example" || f.Path == "Makefile" {
+			t.Errorf("file from the boundary commit reported: %+v", f)
+		}
 	}
 }
 

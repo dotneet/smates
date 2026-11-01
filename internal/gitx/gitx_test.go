@@ -363,4 +363,38 @@ func TestFirstParentHistory(t *testing.T) {
 	if got := show(commits[0]); got != "A feat/x.txt" {
 		t.Errorf("merge (first-parent diff): %s", got)
 	}
+	for _, c := range commits {
+		if c.Shallow {
+			t.Errorf("full clone: %s marked shallow", c.Subject)
+		}
+	}
+}
+
+func TestFirstParentHistoryShallow(t *testing.T) {
+	up := newTestRepo(t)
+	for _, msg := range []string{"one", "two", "three"} {
+		up.write("f"+msg, msg)
+		up.write("common", msg)
+		up.commit(msg)
+	}
+	dir := filepath.Join(t.TempDir(), "clone")
+	up.git("clone", "-q", "--depth", "2", "file://"+up.dir, dir)
+	repo, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &testRepo{t: t, dir: dir, repo: repo}
+	commits, err := r.repo.FirstParentCommits("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 || commits[0].Shallow || !commits[1].Shallow || commits[1].Parent != "" {
+		t.Fatalf("commits %+v", commits)
+	}
+	if ch, err := r.repo.ChangedInCommit(commits[0]); err != nil || len(ch) != 2 {
+		t.Errorf("inside the clone: %v %v", ch, err)
+	}
+	if ch, err := r.repo.ChangedInCommit(commits[1]); err == nil || !strings.Contains(err.Error(), "shallow") {
+		t.Errorf("boundary commit must not be diffed as a root: %v %v", ch, err)
+	}
 }

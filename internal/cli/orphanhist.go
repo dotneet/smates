@@ -126,6 +126,16 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// A shallow clone's oldest commit has no parent to diff against (it is not a root):
+	// replay stops there.
+	shallow := 0
+	for i, c := range commits {
+		if c.Shallow && c.Parent == "" {
+			shallow = len(commits) - i
+			commits = commits[:i]
+			break
+		}
+	}
 	changes := make([][]gitx.FileChange, len(commits))
 	for i, c := range commits {
 		if changes[i], err = p.repo.ChangedInCommit(c); err != nil {
@@ -138,6 +148,9 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	}
 	rep := p.orphanHistory(res, commits, changes)
 	rep.Since = *since
+	if shallow > 0 {
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf("shallow clone: stopped at the oldest fetched commit, whose parent is missing (%d commit(s) not replayed); fetch more history (`git fetch --deepen=N` or `--unshallow`) to replay further", shallow))
+	}
 	if *format == "json" {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -202,7 +215,10 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 		rep.Files = append(rep.Files, of)
 	}
 	sort.SliceStable(rep.Files, func(i, j int) bool { return rep.Files[i].Commits > rep.Files[j].Commits })
-	globOf := suggestGlobs(rep.Files, p.files, res.Covered)
+	globOf := suggestGlobs(rep.Files, p.files, res.Covered, func(files []string) []string {
+		_, ex := res.References(p.graph, files)
+		return ex
+	})
 	commitsOf := map[string]map[int]bool{}
 	files := map[string][]string{}
 	for i := range rep.Files {
@@ -275,8 +291,9 @@ func nonNil(s []string) []string {
 // suggestGlobs maps each orphan of kind "ignore" to the glob suggested for it: the
 // shallowest directory "dir/**" holding at least two of them where no file (in the
 // ranking or in the working tree) is a dependency of a test, explained by a reference
-// or execution-relevant; otherwise the file itself.
-func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool) map[string]string {
+// (refs returns the files of a list that tests name) or execution-relevant; otherwise
+// the file itself. Glob metacharacters in paths are escaped.
+func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, refs func([]string) []string) map[string]string {
 	blocked := map[string]bool{} // directories that must not be ignored as a whole
 	block := func(f string) {
 		for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
@@ -293,8 +310,28 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool) m
 			candidates[d]++
 		}
 	}
+	ranks := map[string]bool{}
+	for _, of := range ranked {
+		ranks[of.Path] = true
+	}
+	var unexplained []string // files below a candidate directory that a test may name
 	for _, f := range tree {
 		if selector.Covers(covered, f, false) != "" || affectsExecution(f) != "" {
+			block(f)
+			continue
+		}
+		if ranks[f] {
+			continue // already classified
+		}
+		for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
+			if candidates[d] >= 2 {
+				unexplained = append(unexplained, f)
+				break
+			}
+		}
+	}
+	if refs != nil && len(unexplained) > 0 {
+		for _, f := range refs(unexplained) {
 			block(f)
 		}
 	}
@@ -303,19 +340,32 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool) m
 		if of.Kind != orphanKindIgnore {
 			continue
 		}
-		out[of.Path] = of.Path
+		out[of.Path] = escapeGlob(of.Path)
 		var dirs []string
 		for d := path.Dir(of.Path); d != "." && d != "/"; d = path.Dir(d) {
 			dirs = append(dirs, d)
 		}
 		for i := len(dirs) - 1; i >= 0; i-- { // shallowest first
 			if d := dirs[i]; !blocked[d] && candidates[d] >= 2 {
-				out[of.Path] = d + "/**"
+				out[of.Path] = escapeGlob(d) + "/**"
 				break
 			}
 		}
 	}
 	return out
+}
+
+// escapeGlob escapes the doublestar metacharacters in a path, so that a glob made from
+// it (app/[id]/page.tsx, a file named "a*b") matches the path itself.
+func escapeGlob(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		if strings.ContainsRune(`*?[]{}\`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // affectsExecution says what kind of file f is when it may change how tests run (a CI
