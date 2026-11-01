@@ -192,8 +192,13 @@ root からの相対)で依存を付けるテストを絞れます。宣言ご�
 | `go` | パッケージ | 静的 import 閉包(Go では正確)+ `go test -exec` 経由の `-test.testlogfile`。テストの Node/Python 子プロセス | バイナリの終了コード、ビルド失敗 |
 | `custom` | テストファイル | コマンドが起動する Node/Python プロセス | 全体の終了コード |
 
-Python のプロジェクトは、pytest への言及(依存、`[tool.pytest…]`、`pytest.ini`、
-`conftest.py`、tox)があれば `pytest`、なければ `unittest` として検出します。`unittest`
+Python のプロジェクトは、pytest を使っている形跡があれば `pytest`、なければ `unittest`
+として検出します。形跡とは、`pytest.ini` や `conftest.py`、プロジェクトかその上位
+ディレクトリのマニフェスト・ロックファイル・タスクファイル(`pyproject.toml`、`setup.cfg`、
+`setup.py`、`tox.ini`、`noxfile.py`、`Pipfile`、`poetry.lock`/`pdm.lock`/`uv.lock`、
+`*requirements*.txt`/`.in`、`requirements/` 配下のファイル)での pytest への言及、pytest を
+実行する GitHub ワークフロー、pytest 向けに書かれたテストファイル(`import pytest`、
+モジュールレベルの `def test_…` 関数)です。`unittest`
 ランナーのテストファイルはディスカバリーに従い、既定はスイート root 以下の `test*.py`、
 `python -m unittest discover …` のコマンドなら `-s`/`-p`/`-t`(開始ディレクトリ、パターン、
 トップレベルディレクトリ)で決まります。選択したファイルは常にトップレベルディレクトリからの
@@ -201,7 +206,11 @@ Python のプロジェクトは、pytest への言及(依存、`[tool.pytest…]
 ディレクトリも飛ばされません)。モジュール名にならないパスのファイルはテストとみなしません。
 記録時は選択したモジュールを Python シムに同梱の `python -m smates_unittest` で 1 プロセスで
 実行し、モジュールの import 中に送出された例外は実行全体の中断ではなくそのモジュールの失敗に
-なります。`isolate: true` ならモジュールごとに 1 プロセスで実行します。
+なります。`isolate: true` ならモジュールごとに 1 プロセスで実行します。unittest のテストを
+1 つも実行しなかったモジュール(pytest 形式の関数、パターンに一致した補助モジュール)は
+成功として記録せず、結果を unknown として次回も実行し、`runner: pytest`(補助モジュールなら
+`exclude`)を勧めるメッセージを出します。選択したどのモジュールにもテストがなかった実行は
+(unittest の終了コード 5 のまま)失敗になり、同じ助言を表示します。
 
 ```yaml
   - name: legacy

@@ -10,9 +10,12 @@ unittest's own main, adding the contexts the pytest plugin uses:
 
 and per-file results ({"k": "result"}): a failure, an error (also in a fixture or while
 importing the module) or an unexpected success fails the file; skipped tests and
-expected failures pass.
+expected failures pass. A module that loaded but ran no test at all (pytest-style test
+functions, which unittest does not collect, or a helper module matching the pattern) is
+"unknown", never "pass": it runs again next time, and smates says why.
 """
 
+import json
 import os
 import sys
 import time
@@ -86,8 +89,16 @@ def _enter(f):
 def _result(f):
     r = _results.get(f)
     if r is None:
-        r = _results[f] = {"ms": 0, "failed": False, "msg": ""}
+        r = _results[f] = {"ms": 0, "failed": False, "msg": "", "ran": 0}
     return r
+
+
+_NO_TESTS = (
+    "smates: unittest ran no test from this module. unittest only runs unittest.TestCase "
+    "methods: if the module holds pytest-style tests (plain `def test_...` functions), "
+    "set `runner: pytest` on the suite in smates.yml; if it is a helper matching the test "
+    "pattern, add it to the suite's `exclude`."
+)
 
 
 def _fail(f, text):
@@ -124,6 +135,8 @@ class _Result(unittest.TextTestResult):
     def startTest(self, test):
         f = _file_of(test)
         _enter(f)
+        if f is not None:
+            _result(f)["ran"] += 1
         self._smates_start = time.time()
         super().startTest(test)
 
@@ -161,7 +174,8 @@ class _Result(unittest.TextTestResult):
         super().addSkip(test, reason)
         f = self._outcome_file(test)
         if f is not None:
-            _result(f)
+            # A class skipped in setUpClass reports its skip without starting a test.
+            _result(f)["ran"] += 1
 
 
 class _Runner(unittest.TextTestRunner):
@@ -179,10 +193,31 @@ def _finish():
         return
     _tracer.switch("")
     for f, r in sorted(_results.items()):
-        ev = {"k": "result", "id": f, "status": "fail" if r["failed"] else "pass", "ms": r["ms"]}
+        status = "fail" if r["failed"] else "pass"
+        if not r["failed"] and r["ran"] == 0:
+            status, r["msg"] = "unknown", _NO_TESTS
+            sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _NO_TESTS))
+        ev = {"k": "result", "id": f, "status": status, "ms": r["ms"]}
         if r["msg"]:
             ev["msg"] = r["msg"]
-        _tracer.write(ev)
+        if status == "unknown":
+            # Results files (results-*.jsonl) are final: a status in the process trace
+            # is combined with the run's exit code, which would make this a pass.
+            _write_result_file(ev)
+        else:
+            _tracer.write(ev)
+
+
+def _write_result_file(ev):
+    out = os.path.join(os.environ.get("SMATES_TRACE_DIR", ""), "results-unittest-%d.jsonl" % os.getpid())
+    try:
+        fd = os.open(out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (json.dumps(ev) + "\n").encode("utf-8", "surrogateescape"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _loaded(loader, make, name, *exc):

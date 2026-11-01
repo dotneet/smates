@@ -171,8 +171,12 @@ analyzed from their command line and script contents. A command smates cannot se
 (`make`, a compiled binary) makes the test depend on everything below the directory it
 runs in.
 
-Python projects use `pytest` when anything mentions it (a dependency, `[tool.pytest…]`,
-`pytest.ini`, a `conftest.py`, tox) and `unittest` otherwise. The `unittest` runner's
+Python projects use `pytest` when anything points to it and `unittest` otherwise:
+`pytest.ini` or a `conftest.py`; pytest named in a manifest, lockfile or task file of the
+project or a directory above it (`pyproject.toml`, `setup.cfg`, `setup.py`, `tox.ini`,
+`noxfile.py`, `Pipfile`, `poetry.lock`/`pdm.lock`/`uv.lock`, `*requirements*.txt`/`.in`,
+files under `requirements/`); a GitHub workflow running pytest; or a test file written
+for pytest (`import pytest`, module-level `def test_…` functions). The `unittest` runner's
 test files follow discovery: `test*.py` below the suite root by default, or the
 `-s`/`-p`/`-t` (start directory, pattern, top-level directory) of a
 `python -m unittest discover …` command. smates always passes the selected files as
@@ -181,7 +185,11 @@ directory without `__init__.py` is not skipped); files whose path is not a modul
 are not tests. While recording, the selected modules run in one process through
 `python -m smates_unittest` (shipped with the Python shims), which also turns an
 exception raised while importing a module into a failure of that module instead of the
-end of the run. `isolate: true` runs one process per module instead.
+end of the run. `isolate: true` runs one process per module instead. A module that
+runs no unittest test (pytest-style functions, or a helper matching the pattern) is never
+recorded as passed: its status is unknown, so it runs again, with a message suggesting
+`runner: pytest` (or `exclude` for a helper); a run in which no selected module has a
+test fails (unittest's exit code 5) with the same advice.
 
 Package managers: npm, pnpm, yarn, bun (local `node_modules/.bin` binaries are used
 directly), uv / virtualenvs for Python. Monorepos with several suites, workspaces

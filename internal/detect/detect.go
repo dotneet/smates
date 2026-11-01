@@ -4,10 +4,12 @@ package detect
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -176,13 +178,44 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	return kept
 }
 
-// pytestMarkers are files whose mention of pytest means the project uses it.
-var pytestMarkers = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|Pipfile|requirements.*\.(txt|in))$`)
+var (
+	// pytestManifests are manifests, lockfiles and task files whose mention of pytest
+	// means the project uses it.
+	pytestManifests = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|noxfile\.py|Pipfile|Pipfile\.lock|poetry\.lock|pdm\.lock|uv\.lock|.*requirements.*\.(txt|in))$`)
+	// requirementsFile is any pip requirements file inside a requirements/ directory.
+	requirementsFile = regexp.MustCompile(`\.(txt|in)$`)
+	workflowFile     = regexp.MustCompile(`\.ya?ml$`)
+	pytestWord       = regexp.MustCompile(`\bpytest\b`)
+	// pytestStyle marks a test file written for pytest. A TestCase class next to it does
+	// not make it a unittest file: unittest runs neither module-level test functions nor
+	// pytest marks, fixtures or parametrization, while pytest runs TestCase classes too.
+	pytestStyle = regexp.MustCompile(`(?m)^(import pytest\b|from pytest import|(async )?def test_)`)
+	// pyTestFile is a file either runner would collect.
+	pyTestFile = regexp.MustCompile(`^(test.*|.*_test)\.py$`)
+)
 
-// usesPytest reports whether the Python project at dir uses pytest: a pytest.ini or
-// conftest.py in the project, or pytest named in its manifests and configuration
-// (dependencies, [tool.pytest.ini_options], [tool:pytest], tox commands).
+// maxStyleChecks bounds the test files usesPytest reads (and maxStyleBytes how much of
+// each).
+const (
+	maxStyleChecks = 300
+	maxStyleBytes  = 256 << 10
+)
+
+// usesPytest reports whether the Python project at dir uses pytest, so that a project
+// is never left to unittest when it has pytest tests (unittest would run none of them):
+//   - a pytest.ini or conftest.py in the project;
+//   - pytest named in a manifest, lockfile or task file (pyproject.toml, setup.cfg,
+//     setup.py, tox.ini, noxfile.py, Pipfile, poetry/pdm/uv locks, *requirements*.txt or
+//     .in, any .txt/.in under a requirements/ directory) in the project or a directory
+//     above it up to the repository root;
+//   - a GitHub workflow that runs pytest;
+//   - a test file written for pytest: `import pytest` or a module-level `def test_`
+//     function (even next to TestCase classes).
 func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
+	mentions := func(rel string) bool {
+		data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(rel)))
+		return err == nil && pytestWord.Match(data)
+	}
 	for d, names := range dirFiles {
 		if !pathutil.Under(d, dir) {
 			continue
@@ -193,12 +226,64 @@ func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool 
 			}
 		}
 	}
-	for _, n := range dirFiles[dir] {
-		if !pytestMarkers.MatchString(n) {
+	// Manifests of the project and of the directories above it (a monorepo's shared
+	// requirements-dev.txt), and requirements/ directories below the project.
+	for d := dir; ; d = path.Dir(d) {
+		for _, n := range dirFiles[d] {
+			if pytestManifests.MatchString(n) && mentions(path.Join(d, n)) {
+				return true
+			}
+		}
+		if d == "." || d == "/" || d == "" {
+			break
+		}
+	}
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) || !slices.Contains(strings.Split(d, "/"), "requirements") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(dir), n))
-		if err == nil && strings.Contains(string(data), "pytest") {
+		for _, n := range names {
+			if (requirementsFile.MatchString(n) || pytestManifests.MatchString(n)) && mentions(path.Join(d, n)) {
+				return true
+			}
+		}
+	}
+	for _, n := range dirFiles[".github/workflows"] {
+		if workflowFile.MatchString(n) && mentions(".github/workflows/"+n) {
+			return true
+		}
+	}
+	return hasPytestStyleTests(repo, dir, dirFiles)
+}
+
+// hasPytestStyleTests reports whether a test file under dir is written for pytest
+// (`import pytest` or module-level test functions).
+func hasPytestStyleTests(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
+	var files []string
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) {
+			continue
+		}
+		for _, n := range names {
+			if pyTestFile.MatchString(n) {
+				files = append(files, path.Join(d, n))
+			}
+		}
+	}
+	sort.Strings(files)
+	if len(files) > maxStyleChecks {
+		files = files[:maxStyleChecks]
+	}
+	buf := make([]byte, maxStyleBytes)
+	for _, f := range files {
+		fh, err := os.Open(filepath.Join(repo.Root, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		n, _ := io.ReadFull(fh, buf)
+		fh.Close()
+		src := buf[:n]
+		if pytestStyle.Match(src) {
 			return true
 		}
 	}

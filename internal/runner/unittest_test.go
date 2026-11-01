@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -167,13 +168,16 @@ class T(unittest.TestCase):
 	// unittest survives only an ImportError when it loads modules by name: the wrapper
 	// keeps the run going after any exception (this module loads first).
 	write("lib/tests/test_0_raises.py", "raise RuntimeError(\"boom at import\")\n")
+	// pytest-style tests under unittest: the module loads and runs nothing, which must
+	// not count as a pass.
+	write("lib/tests/test_pytest_style.py", "def test_x():\n    assert False\n")
 	shimDir := t.TempDir()
 	if _, err := trace.ExtractShims(shimDir); err != nil {
 		t.Fatal(err)
 	}
 	s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest discover -s lib/tests -t lib", Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}}, Adapter: unittestRunner{}}
 	s.Tests = []string{"lib/tests/**/test*.py"}
-	units := []string{"lib/tests/test_0_raises.py", "lib/tests/test_a.py", "lib/tests/test_b.py", "lib/tests/test_broken.py", "lib/tests/test_skipped.py"}
+	units := []string{"lib/tests/test_0_raises.py", "lib/tests/test_a.py", "lib/tests/test_b.py", "lib/tests/test_broken.py", "lib/tests/test_pytest_style.py", "lib/tests/test_skipped.py"}
 	var out bytes.Buffer
 	rc := &RunContext{
 		Repo: repo, Suite: s, Units: units, All: true, Record: true,
@@ -197,7 +201,7 @@ class T(unittest.TestCase):
 	want := map[string]string{
 		"lib/tests/test_a.py": state.Pass, "lib/tests/test_b.py": state.Fail,
 		"lib/tests/test_broken.py": state.Fail, "lib/tests/test_skipped.py": state.Pass,
-		"lib/tests/test_0_raises.py": state.Fail,
+		"lib/tests/test_0_raises.py": state.Fail, "lib/tests/test_pytest_style.py": state.Unknown,
 	}
 	for u, st := range want {
 		o := obs[u]
@@ -224,6 +228,9 @@ class T(unittest.TestCase):
 	if !bytes.Contains([]byte(b.Failure), []byte("AssertionError")) || !bytes.Contains([]byte(obs["lib/tests/test_broken.py"].Failure), []byte("does_not_exist")) {
 		t.Errorf("failure output: %q / %q", b.Failure, obs["lib/tests/test_broken.py"].Failure)
 	}
+	if o := obs["lib/tests/test_pytest_style.py"]; o == nil || !strings.Contains(o.Failure, "runner: pytest") {
+		t.Errorf("module without unittest tests: %+v", o)
+	}
 
 	// isolate: true records each module in its own process, with the same outcome.
 	isolate := true
@@ -249,5 +256,25 @@ class T(unittest.TestCase):
 	res, err = unittestRunner{}.Run(context.Background(), rc)
 	if err != nil || res.ExitCode != 0 || !bytes.Contains(out.Bytes(), []byte("Ran 1 test")) {
 		t.Errorf("selection: exit %d err %v\n%s", res.ExitCode, err, out.String())
+	}
+
+	// A run in which no selected module has a unittest test is not a clean pass.
+	for _, record := range []bool{true, false} {
+		out.Reset()
+		rc.Record, rc.TraceDir, rc.Units = record, t.TempDir(), []string{"lib/tests/test_pytest_style.py"}
+		res, err = unittestRunner{}.Run(context.Background(), rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// unittest exits 5 when no test ran from Python 3.12 on (0 before).
+		if res.ExitCode != unittestNoTests && res.ExitCode != 0 {
+			t.Errorf("record=%v: exit %d\n%s", record, res.ExitCode, out.String())
+		}
+		if res.ExitCode == unittestNoTests && (len(res.Warnings) == 0 || !strings.Contains(res.Warnings[0], "runner: pytest")) {
+			t.Errorf("record=%v: warnings %q", record, res.Warnings)
+		}
+		if o := res.Observations["lib/tests/test_pytest_style.py"]; record && (o == nil || o.Status != state.Unknown) {
+			t.Errorf("recorded status %+v", o)
+		}
 	}
 }

@@ -108,12 +108,24 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		codes, err := isolatedRun(ctx, rc, units, runtime.NumCPU(), func(u string, _ int) ([]string, []string, error) {
 			return uc.argv(rc, true, []string{byUnit[u]}), env, nil
 		})
-		for u, c := range codes {
+		// A module without tests is reported by the wrapper ("unknown"); the run only
+		// fails for it when no module ran any test, as in a single process.
+		empty := 0
+		for _, c := range codes {
 			if c == unittestNoTests {
-				codes[u] = 0
+				empty++
 			}
 		}
-		res.ExitCode, res.Duration = worstCode(codes), time.Since(start)
+		worst := 0
+		for _, c := range codes {
+			if c != unittestNoTests || empty == len(codes) {
+				worst = max(worst, c)
+			}
+		}
+		res.ExitCode, res.Duration = worst, time.Since(start)
+		if empty == len(codes) && empty > 0 {
+			res.Warnings = append(res.Warnings, noTestsWarning(len(units)))
+		}
 		if err != nil {
 			return res, err
 		}
@@ -124,7 +136,8 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 				setUnitExit(o, c)
 			}
 		}
-		res.Observations, res.Warnings, res.ReadsBy = obs, warns, readsBy
+		res.Observations, res.ReadsBy = obs, readsBy
+		res.Warnings = append(res.Warnings, warns...)
 		return res, err
 	}
 	worst := 0
@@ -134,18 +147,26 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 			res.ExitCode, res.Duration = code, time.Since(start)
 			return res, err
 		}
-		if code == unittestNoTests {
-			// "No tests ran" (Python 3.12+): a selection of modules without tests.
-			code = 0
-		}
+		// "No tests ran" (exit 5, Python 3.12+) stays a failure: the selected modules
+		// define no unittest tests (pytest-style tests under the wrong runner?).
 		worst = max(worst, code)
 	}
 	res.ExitCode, res.Duration = worst, time.Since(start)
+	if worst == unittestNoTests {
+		res.Warnings = append(res.Warnings, noTestsWarning(len(modules)))
+	}
 	if !rc.Record {
 		return res, nil
 	}
-	res.Observations, res.Warnings, res.ReadsBy, err = observeAll(rc, worst, traceOptions{})
+	var warns []string
+	res.Observations, warns, res.ReadsBy, err = observeAll(rc, worst, traceOptions{})
+	res.Warnings = append(res.Warnings, warns...)
 	return res, err
+}
+
+// noTestsWarning explains a unittest run that ran no test at all.
+func noTestsWarning(modules int) string {
+	return fmt.Sprintf("unittest ran no test in the %d selected module(s) (exit code %d): unittest only runs unittest.TestCase methods. If the suite holds pytest-style tests (plain `def test_...` functions), set \"runner: pytest\" on it in smates.yml; helper modules matching the test pattern belong in its exclude.", modules, unittestNoTests)
 }
 
 // unittestNoTests is unittest's exit code when no test ran (Python 3.12+).
