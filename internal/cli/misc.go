@@ -99,6 +99,7 @@ Next steps:
   smates run --all     # run everything once and record what each test uses
   smates run           # afterwards: run only what your changes can affect
   smates why <file>    # see which tests depend on a file
+  smates hook install  # optional: run the affected tests before every git push
 `)
 	return nil
 }
@@ -510,22 +511,28 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	case "pull":
 		refs := []string{*ref}
 		if *ref == "" {
-			ci := detectCI()
-			b := first(os.Getenv("SMATES_BRANCH"), ci.Branch, repo.CurrentBranch())
-			def := first(ci.DefaultBranch, repo.DefaultBranch())
-			refs = nil
-			if b != "" {
-				refs = append(refs, stateRefPrefix+b)
-			}
-			if def != b {
-				refs = append(refs, stateRefPrefix+def)
-			}
+			refs = stateRefs(repo)
 		}
 		return pullState(repo, path, *remote, refs, stderr)
 	default:
 		return usageError{fmt.Errorf("unknown state command %q", sub)}
 	}
 	return nil
+}
+
+// stateRefs are the refs `smates state pull` tries: the branch's, then the default branch's.
+func stateRefs(repo *gitx.Repo) []string {
+	ci := detectCI()
+	b := first(os.Getenv("SMATES_BRANCH"), ci.Branch, repo.CurrentBranch())
+	def := first(ci.DefaultBranch, repo.DefaultBranch())
+	var refs []string
+	if b != "" {
+		refs = append(refs, stateRefPrefix+b)
+	}
+	if def != b {
+		refs = append(refs, stateRefPrefix+def)
+	}
+	return refs
 }
 
 func branchName(repo *gitx.Repo) string {

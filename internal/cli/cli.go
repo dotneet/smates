@@ -38,8 +38,10 @@ Usage:
   smates why <file>                     tests that depend on a file
   smates deps <test>                    files a test depends on
   smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
+  smates stats [--since 30d] [--format json] time saved, shadow misses, orphans and agent use
   smates list                           list suites and test units
   smates state show|path|pull|push|merge|clear
+  smates hook install|uninstall|status  run the affected tests from a git pre-push hook
   smates doctor                         check setup
   smates version
 
@@ -72,10 +74,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdDeps(rest, stdout, stderr)
 	case "flaky":
 		err = cmdFlaky(rest, stdout, stderr)
+	case "stats":
+		err = cmdStats(rest, stdout, stderr)
 	case "list", "ls":
 		err = cmdList(rest, stdout, stderr)
 	case "state":
 		err = cmdState(rest, stdout, stderr)
+	case "hook":
+		code, err = cmdHook(ctx, rest, os.Stdin, stdout, stderr)
 	case "doctor":
 		code, err = cmdDoctor(rest, stdout, stderr)
 	case "version", "--version", "-v":

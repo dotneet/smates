@@ -30,6 +30,15 @@ type Input struct {
 	Run *Run
 	// Sections are appended after the built-in ones (flaky tests, failure hints, ...).
 	Sections []Section
+	// Savings is the test time the recorded runs skipped so far (nil: not shown).
+	Savings *Savings
+}
+
+// Savings is the cumulative skipped test time of the recorded runs (`smates stats`).
+type Savings struct {
+	Runs    int
+	SavedMs int64
+	Since   time.Time
 }
 
 // Run is the outcome of a run.
@@ -170,6 +179,9 @@ func (v *view) header(b *strings.Builder) {
 	default:
 		fmt.Fprintf(b, "This change affects **%s in %s**; %d skipped%s.\n",
 			plural(c.selected, "test unit"), ofSuites(affected, len(v.suites)), skipped, saved(c))
+	}
+	if s := v.in.Savings; s != nil {
+		fmt.Fprintf(b, "\n_So far: about **%s** of recorded test time skipped over %d recorded runs since %s (`smates stats`)._\n", dur(s.SavedMs), s.Runs, s.Since.Format("2006-01-02"))
 	}
 	if v.res.Mode == selector.ModeDiff {
 		b.WriteString("\n_No recorded state yet: selected by static analysis against the base revision._\n")
@@ -602,6 +614,9 @@ func plural(n int, noun string) string {
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
 }
+
+// Duration formats a duration in milliseconds compactly ("1m 5s").
+func Duration(ms int64) string { return dur(ms) }
 
 // dur formats a duration in milliseconds compactly.
 func dur(ms int64) string {

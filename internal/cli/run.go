@@ -130,13 +130,14 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 	}
 	c.failures.wait()
+	elapsed := time.Since(start).Round(time.Millisecond)
 	if c.record {
+		p.state.AddRun(c.runRecord(elapsed, hooks != nil))
 		if err := c.saveState(); err != nil {
 			return 1, err
 		}
 	}
 	c.failures.print(stderr)
-	elapsed := time.Since(start).Round(time.Millisecond)
 	c.logOutcome(elapsed)
 	c.writeSummaries(elapsed)
 	if f.report != "" {
@@ -411,6 +412,7 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 	p, f := c.p, c.f
 	sum := summaryInput(c.sel, f.shardI, f.shardN)
 	sum.Run = &summary.Run{ExitCode: c.worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible}
+	sum.Savings = cumulativeSavings(p.state.Runs)
 	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
 			if c.ran[sr.Name][t.ID] == state.Fail {

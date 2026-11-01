@@ -166,6 +166,27 @@ assert os.environ.get("SMATES_TEST_MODE") != "broken"
 	if rep.Results["py"]["tests/b_check.py"] != "fail" {
 		t.Errorf("results %v", rep.Results)
 	}
+
+	// Every recorded run is in the stats; --dry-run and --no-record add none.
+	run("run", "--dry-run")
+	run("run", "--no-record")
+	var out, errb bytes.Buffer
+	if code := Main([]string{"stats", "-C", g.dir, "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("stats: %d %s", code, errb.String())
+	}
+	var st statsReport
+	if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if st.Runs != 4 || st.ByMode["all"] != 1 || st.ByMode["state"] != 2 || st.ByMode["shadow"] != 1 || st.FailedRuns != 2 || st.BySource["local"] != 4 {
+		t.Errorf("stats runs: %+v", st)
+	}
+	if st.Shadow.Runs != 1 || st.Shadow.Possible != 2 || st.Shadow.Escapes != 0 || st.Shadow.Failed != 2 {
+		t.Errorf("stats shadow: %+v", st.Shadow)
+	}
+	if st.Total != 6 || st.Selected != 4 {
+		t.Errorf("stats selection: %d of %d", st.Selected, st.Total)
+	}
 }
 
 func contains(s []string, x string) bool {
