@@ -135,7 +135,10 @@ func TestExecDepsOperands(t *testing.T) {
 	// A repository script that ends by exec'ing node is still a shell script.
 	writeScript(t, root, "run.sh", "#!/bin/sh\ncat data.txt\nexec node app.js\n")
 	writeScript(t, root, "tool", "#!/usr/bin/env -S python3 -u\nimport sys\n")
-	touch(t, root, "lib/x.jq")
+	touch(t, root, "lib/x.jq", "inc.sed", "f1", "f2", "expected/a.txt", "actual/a.txt", "other/f.txt")
+	writeScript(t, root, "bin/tool", "\x7fELF")
+	writeScript(t, root, "scripts/gen.sh", "#!/bin/sh\ncat /dev/null\n")
+	testutil.Write(t, root, "nul.lst", "data.txt\x00sub/data.txt\x00")
 
 	cases := []struct {
 		name string
@@ -235,6 +238,76 @@ func TestExecDepsOperands(t *testing.T) {
 		{"awk print >", `awk '{ print > "out.txt" }' data.txt`, []string{"./**", "data.txt"}},
 		{"awk -f with getline", "awk -F, -f prog.awk data.txt", []string{"./**", "data.txt", "prog.awk"}},
 		{"awk comparison", `awk -v n=1 '$1 > n { print }' data.txt`, []string{"data.txt"}},
+		{"awk quoted braces", `awk '{print $1} NR > 1' data.txt`, []string{"data.txt"}},
+
+		// Input redirections of builtins and compound commands.
+		{"read < file", "read -r V < list.txt", []string{"list.txt"}},
+		{"IFS= read < file", "IFS= read -r V < list.txt; echo $V", []string{"list.txt"}},
+		{"export < file", "export X=1 < list.txt", []string{"list.txt"}},
+		{"brace group < file", "{ cat data.txt; } < list.txt", []string{"data.txt", "list.txt"}},
+		{"while read < file", `while read l; do echo "$l"; done < list.txt`, []string{"list.txt"}},
+
+		// sed scripts: r and R read a file, e and s///e run commands.
+		{"sed r", "sed '/x/r inc.sed' data.txt", []string{"data.txt", "inc.sed"}},
+		{"sed -e R", "sed -e 's/a/b/' -e '1R inc.sed' data.txt", []string{"data.txt", "inc.sed"}},
+		{"sed r in a block", "sed '/x/{r inc.sed\nd}' data.txt", []string{"data.txt", "inc.sed"}},
+		{"sed w", "sed 's/a/b/w out.txt' data.txt", []string{"data.txt"}},
+		{"sed e", "sed '1e make' data.txt", []string{"./**", "data.txt"}},
+		{"sed s///e", "sed 's/x/make/e' data.txt", []string{"./**", "data.txt"}},
+		{"sed commands", `sed -n '$!N;/a/,/b/p;1~2d;s|/usr|/opt|g;s/[/]/x/;y/ab/cd/' data.txt`, []string{"data.txt"}},
+
+		// diff compares the files two directories have in common.
+		{"diff of directories", "diff expected actual", []string{"actual/**", "expected/**"}},
+		{"diff -q of directories", "diff -q expected actual", []string{"actual/**", "expected/**"}},
+
+		// find -exec runs a command for the files found ({}), -execdir in their directory.
+		{"find -exec", `find sub -exec cat other/f.txt \;`, []string{"other/f.txt", "sub/**"}},
+		{"find -exec {}", "find sub -name '*.txt' -exec grep -rl x {} +", []string{"sub/**"}},
+		{"find -execdir", `find sub -execdir cat ../list.txt \;`, []string{"list.txt", "sub/**"}},
+		{"find -ok opaque", `find sub -ok rm {} \;`, []string{"./**", "sub/**"}},
+		{"find -files0-from", "find -files0-from nul.lst -name x", []string{"data.txt", "nul.lst", "sub/data.txt"}},
+
+		// Brace expansion (unquoted, before variables).
+		{"brace expansion", "cat expected/{a,b}.txt", []string{"expected/a.txt", "expected/b.txt?"}},
+		{"brace sequence", "cat f{1..2}", []string{"f1", "f2"}},
+		{"for over a brace sequence", "for i in {1..2}; do cat f$i; done", []string{"f1", "f2"}},
+		{"quoted braces", `cat '{a,b}' "{a,b}"; jq '{a: .b}' data.txt; echo {a,b}`, []string{"data.txt", "{a,b}?"}},
+		{"braces in a variable", "P={a,b}; cat $P", []string{"{a,b}?"}},
+		{"${VAR} in double quotes", `D=sub; cat "${D}/data.txt"`, []string{"sub/data.txt"}},
+
+		// pushd/popd and cd options.
+		{"pushd popd", "pushd sub; ls; popd; cat data.txt", []string{"data.txt", "sub/"}},
+		{"pushd in a subshell", "(pushd sub; cat data.txt); popd; cat data.txt", []string{"data.txt", "sub/data.txt"}},
+		{"cd -P", "cd -P sub; cat data.txt", []string{"sub/data.txt"}},
+
+		// Shell functions run in the caller's state.
+		{"function called after cd", "f() { cat data.txt; }\ncd sub\nf", []string{"sub/data.txt"}},
+		{"cd in a called function", "f() { cd sub; }; f; cat data.txt", []string{"sub/data.txt"}},
+		{"function never called", "f() { cd sub; cat data.txt; }; cat list.txt", []string{"list.txt", "sub/data.txt"}},
+		{"function keyword", "function g { cat data.txt; }; if g; then :; fi", []string{"data.txt"}},
+		{"recursive function", "f() { f; cat data.txt; }; f", []string{"data.txt"}},
+
+		// case items: patterns are no commands, their ")" closes no subshell.
+		{"case", `case "$1" in a|b) cat data.txt;; (c) make;; esac; cat list.txt`, []string{"./**", "data.txt", "list.txt"}},
+		{"case in a subshell", "(cd sub; case a in a) cat data.txt;; esac)", []string{"sub/data.txt"}},
+
+		// Command substitutions run their commands.
+		{"$(cd dir && cat)", "X=$(cd sub && cat data.txt)", []string{"sub/data.txt"}},
+		{"$(cd unknown && pwd)", `X=$(cd "$Y" && pwd); echo $X`, nil},
+		{"$(cd unknown && cat)", `X=$(cd "$Y" && cat data.txt)`, []string{"./**"}},
+		{"$(<file)", "X=$(<list.txt)", []string{"list.txt"}},
+		{"$(script)", "X=$(./run.sh)", []string{"data.txt", "run.sh"}},
+
+		// A program named by its path is read.
+		{"program by path", "./bin/tool", []string{"./**", "bin/tool"}},
+		{"program outside its directory", "cd sub; ../bin/tool", []string{"bin/tool", "sub/**"}},
+		{"missing program outside its directory", "cd sub; ../missing", []string{"missing?", "sub/**"}},
+
+		// grep -d recurse, --files0-from.
+		{"grep -d recurse", "grep -d recurse data sub", []string{"sub/**"}},
+		{"grep --directories=recurse", "grep --directories=recurse data sub", []string{"sub/**"}},
+		{"wc --files0-from", "wc --files0-from=nul.lst", []string{"data.txt", "nul.lst", "sub/data.txt"}},
+		{"wc --files0-from stdin", "wc --files0-from=-", []string{"./**"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -250,5 +323,38 @@ func TestExecDepsOperands(t *testing.T) {
 	// No shell expands an argv's globs: no listing.
 	if got := execKeys(root, []string{"cat", "sub/*.log"}, false); got != nil {
 		t.Errorf("argv glob: %v, want []", got)
+	}
+
+	// Argvs, and commands running elsewhere (in a subdirectory, outside the repository:
+	// only the paths they name count).
+	tmp := t.TempDir()
+	for _, c := range []struct {
+		name  string
+		cwd   string
+		args  []string
+		shell bool
+		want  []string
+	}{
+		{"argv sed r", root, []string{"sed", "/x/r inc.sed", "data.txt"}, false, []string{"data.txt", "inc.sed"}},
+		{"argv find -exec", root, []string{"find", "sub", "-exec", "cat", "other/f.txt", ";"}, false, []string{"other/f.txt", "sub/**"}},
+		{"argv diff of directories", root, []string{"diff", "expected", "actual"}, false, []string{"actual/**", "expected/**"}},
+		{"argv grep -d recurse", root, []string{"grep", "-d", "recurse", "data", "sub"}, false, []string{"sub/**"}},
+		{"argv bash -c braces", root, []string{"bash", "-c", "cat expected/{a,b}.txt"}, false, []string{"expected/a.txt", "expected/b.txt?"}},
+		{"argv braces", root, []string{"cat", "expected/{a,b}.txt"}, false, []string{"expected/{a,b}.txt?"}},
+		{"program outside cwd", root + "/sub", []string{"../bin/tool"}, false, []string{"bin/tool", "sub/**"}},
+		{"program in the repository, cwd outside", tmp, []string{root + "/bin/tool"}, false, []string{"bin/tool"}},
+		{"missing program, cwd outside", tmp, []string{root + "/bin/missing", "x"}, false, []string{"bin/missing?"}},
+		{"program on PATH, cwd outside", tmp, []string{"tool"}, false, nil},
+		{"$(script), cwd outside", tmp, []string{"X=$(" + root + "/scripts/gen.sh); echo $X"}, true, []string{"scripts/gen.sh"}},
+		{"$(<file), cwd outside", tmp, []string{"X=$(<" + root + "/list.txt)"}, true, []string{"list.txt"}},
+		{"read < file, cwd outside", tmp, []string{"read -r V < " + root + "/list.txt"}, true, []string{"list.txt"}},
+	} {
+		seen := map[string]bool{}
+		for _, k := range execDeps(c.args, c.shell, c.cwd, root, relCache(root)) {
+			seen[k] = true
+		}
+		if got := keys(seen); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: execDeps(%q) in %s = %v, want %v", c.name, c.args, c.cwd, got, c.want)
+		}
 	}
 }

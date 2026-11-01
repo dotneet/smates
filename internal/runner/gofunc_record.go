@@ -187,6 +187,8 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 		listed[strings.TrimSpace(l)] = true
 	}
 
+	var built map[string]bool // the functions of the test files this configuration compiles
+	var unbuilt []string
 	sem := make(chan struct{}, fr.jobs)
 	var wg sync.WaitGroup
 	var firstErr error
@@ -194,9 +196,21 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	for j, name := range names {
 		unit := FuncUnit(dir, name)
 		if !listed[name] {
-			// Not compiled in this configuration (build constraints) or not run (an
-			// example without output): running it would run nothing.
-			fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
+			if built == nil {
+				built = fr.builtFuncs(ctx, pkg, dir)
+			}
+			if built[name] {
+				// Compiled but never run: an example without output, on every platform.
+				fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
+			} else {
+				// Not compiled in this configuration (a //go:build linux file on darwin, a
+				// tag the command does not pass): nothing ran, so nothing is recorded. A
+				// pass would hide the function from a configuration that compiles it and
+				// shares the state (a Linux CI job); left unrecorded, the entry such a run
+				// recorded stays, and without one the function is offered again (it costs
+				// no test process here).
+				unbuilt = append(unbuilt, name)
+			}
 			continue
 		}
 		wg.Add(1)
@@ -218,7 +232,38 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 		}(j, name)
 	}
 	wg.Wait()
+	if len(unbuilt) > 0 {
+		fr.mu.Lock()
+		fr.res.Warnings = append(fr.res.Warnings, fmt.Sprintf("%s: %s not compiled in this configuration (build constraints): not recorded", dir, strings.Join(unbuilt, ", ")))
+		fr.mu.Unlock()
+	}
 	return "", firstErr
+}
+
+// builtFuncs returns the test functions declared by the test files of package pkg
+// (repo-relative directory dir) that go list says this configuration compiles; none
+// when it cannot tell.
+func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) map[string]bool {
+	rc := fr.rc
+	argv := append(append([]string{"go", "list", "-f", `{{range .TestGoFiles}}{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{.}}{{"\n"}}{{end}}`}, fr.flags.build...), pkg)
+	var out, errb bytes.Buffer
+	built := map[string]bool{}
+	if code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &errb); err != nil || code != 0 {
+		return built
+	}
+	for _, f := range strings.Split(out.String(), "\n") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		tf, err := readTestFile(rc.Repo.Root, path.Join(dir, f))
+		if err != nil {
+			continue
+		}
+		for _, n := range tf.Tests {
+			built[n] = true
+		}
+	}
+	return built
 }
 
 func (fr *funcRecorder) add(unit string, o *Observation) {

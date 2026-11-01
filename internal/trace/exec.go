@@ -1,10 +1,13 @@
 package trace
 
 import (
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/dotneet/smates/internal/depkey"
@@ -19,10 +22,14 @@ import (
 //     including shell globs (and the directories they search), on whether the named
 //     paths that do not exist yet exist, and on the working directory when they name no
 //     path (ls lists it, find, rg and grep -r search it);
-//   - launchers (uv run, uvx, bunx) are analyzed as the command they run;
+//   - launchers (uv run, uvx, bunx) and the commands of find -exec are analyzed as the
+//     command they run; sed scripts as the files their r commands read;
+//   - shell code is followed through cd, pushd/popd, source, variables, for-loops, brace
+//     expansion, case items, input redirections, command substitutions and the bodies of
+//     the functions it calls (in the caller's directory);
 //   - any other program may read anything below the directory it runs in, so the test
 //     depends on that whole tree ("<dir>/**"), plus the files named on its command line
-//     (the script itself).
+//     (the script itself) and the program when it is named by path (./build, ../bin/tool).
 //
 // This over-approximates on purpose: an opaque command is exactly where a dependency
 // could hide.
@@ -66,9 +73,10 @@ var scriptFirst = map[string]bool{
 // readerOpts lists, per reader, the options whose arguments are separate words, one
 // letter per argument: 's' an inline script or pattern (the first operand is then a
 // file), 'f' a script or pattern file, 'p' another file the command reads, 'd' a
-// directory it reads files from, 'x' a program it runs, '%' a format (an argument only
-// when it contains "%": BSD stat -f FORMAT, GNU stat -f takes none), 'o' anything else (a
-// number, a separator, a name, an output file).
+// directory it reads files from, 'l' a file listing more files to read (NUL-separated),
+// 'x' a program it runs, '%' a format (an argument only when it contains "%": BSD stat -f
+// FORMAT, GNU stat -f takes none), 'o' anything else (a number, a separator, a name, an
+// output file).
 var readerOpts = map[string]map[string]string{
 	"grep": grepOpts, "egrep": grepOpts, "fgrep": grepOpts,
 	"rg": {
@@ -86,7 +94,8 @@ var readerOpts = map[string]map[string]string{
 	"yq":     {"-f": "o", "--from-file": "f", "-o": "o", "--output-format": "o", "-p": "o", "--input-format": "o", "-I": "o", "--indent": "o"},
 	"head":   {"-n": "o", "-c": "o"},
 	"tail":   {"-n": "o", "-c": "o"},
-	"sort":   {"-k": "o", "--key": "o", "-t": "o", "--field-separator": "o", "-o": "o", "--output": "o", "-S": "o", "-T": "o"},
+	"sort":   {"-k": "o", "--key": "o", "-t": "o", "--field-separator": "o", "-o": "o", "--output": "o", "-S": "o", "-T": "o", "--files0-from": "l"},
+	"wc":     {"--files0-from": "l"},
 	"cut":    {"-d": "o", "-f": "o", "-c": "o", "-b": "o"},
 	"uniq":   {"-f": "o", "-s": "o"},
 	"diff":   {"-U": "o", "-C": "o", "-x": "o", "-X": "p", "-I": "o", "--ignore-matching-lines": "o"},
@@ -99,7 +108,7 @@ var readerOpts = map[string]map[string]string{
 
 var grepOpts = map[string]string{
 	"-e": "s", "--regexp": "s", "-f": "f", "--file": "f", "-m": "o", "--max-count": "o",
-	"-A": "o", "-B": "o", "-C": "o", "--context": "o", "-d": "o", "-D": "o",
+	"-A": "o", "-B": "o", "-C": "o", "--context": "o", "-d": "o", "--directories": "o", "-D": "o", "--devices": "o",
 	"--include": "o", "--exclude": "o", "--exclude-dir": "o", "--exclude-from": "p", "--label": "o",
 	"--binary-files": "o", "--group-separator": "o",
 }
@@ -119,7 +128,7 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 // execDeps infers dependencies of a child process. It returns repo-relative keys:
 // plain paths (content), "dir/" (listing), "dir/**" (whole tree) and "path?" (existence).
 func execDeps(args []string, shell bool, cwd, root string, rel func(string) (string, bool)) []string {
-	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, shell: shell}
+	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, bodies: map[string][][]string{}, calling: map[string]bool{}, shell: shell}
 	if shell {
 		a.shellText(strings.Join(args, " "), cwd, "", 0)
 	} else {
@@ -129,11 +138,31 @@ func execDeps(args []string, shell bool, cwd, root string, rel func(string) (str
 }
 
 type execAnalysis struct {
-	rel   func(string) (string, bool)
-	root  string
-	out   []string
-	funcs map[string]bool // shell functions defined by the analyzed scripts
-	shell bool            // the words come from shell code (a shell expands their globs)
+	rel     func(string) (string, bool)
+	root    string
+	out     []string
+	funcs   map[string]bool       // shell functions defined by the analyzed scripts
+	bodies  map[string][][]string // their bodies, analyzed where they are called
+	calling map[string]bool       // functions whose body is being analyzed (recursion)
+	calls   int                   // function bodies analyzed at a call (bounded)
+	shell   bool                  // the words come from shell code (a shell expands their globs)
+}
+
+// maxCalls bounds the function calls whose bodies are analyzed; past it a call is opaque.
+const maxCalls = 200
+
+// shellState is what the next command of a script sees: its working directory, the
+// variables assigned so far and the pushd stack; scopes saves them at "(" for ")".
+type shellState struct {
+	cwd    string
+	vars   map[string][]string
+	dirs   []string
+	scopes []shellState
+}
+
+// subshell returns a copy of st that st's later changes do not affect.
+func (st *shellState) subshell() *shellState {
+	return &shellState{cwd: st.cwd, vars: maps.Clone(st.vars), dirs: slices.Clone(st.dirs)}
 }
 
 func (a *execAnalysis) add(p string) {
@@ -216,30 +245,46 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 	if strings.Contains(text, "`") || strings.Contains(text, "eval ") {
 		a.opaque(cwd) // backticks or eval: cannot follow
 	}
-	vars := map[string][]string{}
-	// A ( ... ) subshell gets its own working directory and variables.
-	type scope struct {
-		cwd  string
-		vars map[string][]string
-	}
-	var outer []scope
-	for _, seg := range splitShell(text) {
+	segs := splitShell(text)
+	called := map[string]bool{}
+	calledNames(segs, called)
+	a.run(&shellState{cwd: cwd, vars: map[string][]string{}}, segs, called, depth)
+}
+
+// run analyzes the commands of a script in order. called holds the names the script
+// runs as commands: the body of a function it calls is analyzed at each call, in the
+// caller's state (a cd in it changes the caller's directory, as in the shell); the body
+// of one it never calls by name (a trap, a function for the scripts sourcing this one)
+// where it is defined, in a scope of its own.
+func (a *execAnalysis) run(st *shellState, segs [][]string, called map[string]bool, depth int) {
+	for k := 0; k < len(segs); k++ {
+		if name, body, next, ok := funcDefAt(segs, k); ok {
+			a.funcs[name], a.bodies[name] = true, body
+			if !called[name] {
+				a.run(st.subshell(), body, called, depth)
+			}
+			k = next - 1
+			continue
+		}
+		seg := segs[k]
 		switch seg[0] {
 		case subshellOpen:
-			outer = append(outer, scope{cwd, vars})
-			vars = maps.Clone(vars)
+			// A ( ... ) subshell gets its own working directory and variables.
+			st.scopes = append(st.scopes, shellState{cwd: st.cwd, vars: st.vars, dirs: st.dirs})
+			st.vars, st.dirs = maps.Clone(st.vars), slices.Clone(st.dirs)
 			continue
 		case subshellClose:
-			if n := len(outer); n > 0 {
-				cwd, vars, outer = outer[n-1].cwd, outer[n-1].vars, outer[:n-1]
+			if n := len(st.scopes); n > 0 {
+				s := st.scopes[n-1]
+				st.cwd, st.vars, st.dirs, st.scopes = s.cwd, s.vars, s.dirs, st.scopes[:n-1]
 			}
 			continue
 		}
-		seg = expandVars(seg, vars)
+		seg = expandVars(braceSeg(seg), st.vars)
 		if len(seg) > 0 && isAssignments(seg) {
 			for _, w := range seg {
 				name, value, _ := strings.Cut(w, "=")
-				vars[name] = []string{globChars.Replace(value)}
+				st.vars[name] = []string{globChars.Replace(value)}
 			}
 			continue
 		}
@@ -250,24 +295,137 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 			for _, w := range seg[3:] {
 				vals = append(vals, globChars.Replace(w))
 			}
-			vars[seg[1]] = vals
+			st.vars[seg[1]] = vals
 			continue
 		}
-		if len(seg) > 0 && (a.funcs[seg[0]] || strings.HasSuffix(seg[0], "()")) {
-			continue // a function call (its body is analyzed where it is defined)
-		}
-		if next, ok := a.builtin(seg, cwd, depth); ok {
-			cwd = next
+		if w := trimKeywords(trimAssignments(seg)); len(w) > 0 && (a.funcs[w[0]] || strings.HasSuffix(w[0], "()")) {
+			a.redirects(w, st.cwd)
+			a.call(st, w[0], called, depth)
 			continue
 		}
-		a.command(seg, cwd, depth)
+		if a.builtin(seg, st, depth) {
+			continue
+		}
+		a.command(seg, st.cwd, depth)
+	}
+}
+
+// call analyzes the body of the shell function name called in state st.
+func (a *execAnalysis) call(st *shellState, name string, called map[string]bool, depth int) {
+	body, ok := a.bodies[name]
+	switch {
+	case !ok || a.calling[name]:
+		// Defined where it cannot be followed (its body was analyzed there), or a
+		// recursive call (the body is being analyzed).
+	case a.calls >= maxCalls:
+		a.opaque(st.cwd)
+	default:
+		a.calls++
+		a.calling[name] = true
+		a.run(st, body, called, depth)
+		delete(a.calling, name)
+	}
+}
+
+// funcDefAt recognizes a function definition starting at segs[k], "name() { ... }" or
+// "function name { ... }" (splitShell makes "()" a subshell that opens and closes): it
+// returns the function's name, the segments of its body (from "{" to the matching "}")
+// and the index of the segment after it.
+func funcDefAt(segs [][]string, k int) (name string, body [][]string, next int, ok bool) {
+	seg, i := segs[k], k+1
+	parens := func() bool {
+		return i+1 < len(segs) && len(segs[i]) == 1 && segs[i][0] == subshellOpen && len(segs[i+1]) == 1 && segs[i+1][0] == subshellClose
+	}
+	var first []string
+	switch {
+	case len(seg) == 1 && funcName.MatchString(seg[0]) && !keywords[seg[0]] && parens():
+		name, i = seg[0], i+2
+	case len(seg) >= 2 && seg[0] == "function" && funcName.MatchString(seg[1]):
+		name = seg[1]
+		if len(seg) > 2 {
+			first = seg[2:]
+		} else if parens() {
+			i += 2
+		}
+	default:
+		return "", nil, 0, false
+	}
+	if first == nil {
+		if i >= len(segs) {
+			return "", nil, 0, false
+		}
+		first, i = segs[i], i+1
+	}
+	if first[0] != "{" {
+		return "", nil, 0, false // a ( ... ) body or a malformed definition: analyzed in place
+	}
+	body = [][]string{first}
+	for open := braceDepth(first); open > 0; i++ {
+		if i >= len(segs) {
+			return "", nil, 0, false
+		}
+		body = append(body, segs[i])
+		open += braceDepth(segs[i])
+	}
+	return name, body, i, true
+}
+
+// braceDepth is how many { ... } groups the keywords that start seg open (or close).
+func braceDepth(seg []string) int {
+	n := 0
+	for _, w := range seg {
+		if !keywords[w] {
+			break
+		}
+		switch w {
+		case "{":
+			n++
+		case "}":
+			n--
+		}
+	}
+	return n
+}
+
+// calledNames adds to called the names the segments run as commands (outside function
+// definitions, inside their bodies).
+func calledNames(segs [][]string, called map[string]bool) {
+	for k := 0; k < len(segs); k++ {
+		if _, body, next, ok := funcDefAt(segs, k); ok {
+			calledNames(body, called)
+			k = next - 1
+			continue
+		}
+		if w := trimKeywords(trimAssignments(segs[k])); len(w) > 0 {
+			called[w[0]] = true
+		}
+	}
+}
+
+func trimKeywords(seg []string) []string {
+	for len(seg) > 0 && keywords[seg[0]] {
+		seg = seg[1:]
+	}
+	return seg
+}
+
+// redirects records the files the input redirections (< file) of a command read.
+func (a *execAnalysis) redirects(seg []string, cwd string) {
+	for i := 0; i+1 < len(seg); i++ {
+		if seg[i] == "<" && !strings.Contains(seg[i+1], "$") {
+			for _, m := range expand(seg[i+1], cwd) {
+				a.add(m)
+			}
+		}
 	}
 }
 
 var (
 	funcDef = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)`)
-	varRef  = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
-	assign  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+	// funcName matches the names of shell functions (bash also allows "-", "." and ":").
+	funcName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.:-]*$`)
+	varRef   = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+	assign   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 	bashSource       = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?\}|\$BASH_SOURCE\b`)
 	bashSourcePrefix = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?%`)
@@ -320,10 +478,10 @@ func expandVars(seg []string, vars map[string][]string) []string {
 	return out
 }
 
-// substitutions handles $(...) and `...` command substitutions: commands that only read
-// (pwd, basename, cat ...) are analyzed like any other command, anything else makes the
-// surrounding directory opaque. The output is unknown (unresolvedSubst), except for
-// $(pwd) in a script that never changes directory.
+// substitutions handles $(...) and `...` command substitutions: their commands are
+// analyzed like any other command, following a cd among them; $(<file) reads file. The
+// output is unknown (unresolvedSubst), except for $(pwd) in a script that never changes
+// directory.
 func (a *execAnalysis) substitutions(text, cwd string, depth int) string {
 	pwd := unresolvedSubst
 	if !cwdChange.MatchString(text) && !strings.ContainsAny(cwd, " \t\n\"'$\\`;&|<>()*?[") {
@@ -362,17 +520,30 @@ func (a *execAnalysis) substitution(inner, cwd, pwd string, depth int) string {
 	if strings.TrimSpace(inner) == "pwd" {
 		return pwd
 	}
+	st := &shellState{cwd: cwd, vars: map[string][]string{}}
+	lost := false // after a cd to an unknown directory
 	for _, seg := range splitShell(inner) {
 		if len(seg) == 0 || seg[0] == subshellOpen || seg[0] == subshellClose {
 			continue
 		}
-		if readers[filepath.Base(seg[0])] || seg[0] == "cd" {
-			if seg[0] != "cd" {
-				a.command(seg, cwd, depth)
+		seg = braceSeg(seg)
+		w := trimKeywords(trimAssignments(seg))
+		switch {
+		case len(w) == 0:
+		case w[0] == "cd" || w[0] == "pushd":
+			// $(cd "$(dirname "$0")" && pwd) reads nothing; what follows the cd runs there.
+			d, ok := cdTarget(w, st.cwd)
+			st.cwd, lost = d, lost || !ok
+		case w[0] == "<":
+			a.redirects(w, st.cwd) // $(<file)
+		case lost:
+			if !nameOnly[filepath.Base(w[0])] {
+				a.opaque(cwd)
 			}
-			continue
+		case a.builtin(seg, st, depth):
+		default:
+			a.command(seg, st.cwd, depth)
 		}
-		a.opaque(cwd)
 	}
 	return unresolvedSubst
 }
@@ -386,44 +557,78 @@ var keywords = map[string]bool{
 var noops = map[string]bool{
 	"set": true, "export": true, "local": true, "readonly": true, "unset": true, "shift": true, "return": true,
 	"exit": true, "trap": true, "wait": true, "declare": true, "typeset": true, "alias": true, ":": true,
-	"popd": true, "umask": true, "read": true, "break": true, "continue": true,
+	"umask": true, "read": true, "break": true, "continue": true,
 }
 
-// builtin handles shell builtins; it returns the new working directory and whether the
-// segment was fully handled.
-func (a *execAnalysis) builtin(seg []string, cwd string, depth int) (string, bool) {
+// builtin handles shell builtins (updating st); it reports whether the segment was fully
+// handled.
+func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) bool {
 	seg = trimAssignments(seg)
 	for len(seg) > 0 && keywords[seg[0]] {
+		if seg[0] == "case" {
+			return true // case WORD in: splitShell leaves out the patterns
+		}
 		seg = seg[1:]
 	}
 	if len(seg) == 0 {
-		return cwd, true
+		return true
 	}
 	switch seg[0] {
+	case "<", ">", ">>", "<<", "<<<":
+		// Redirections of a compound command: "} < file", "done < list".
+		a.redirects(seg, st.cwd)
+		return true
 	case "cd", "pushd":
-		if len(seg) < 2 || strings.Contains(seg[1], "$") || seg[1] == "-" {
-			a.opaque(cwd)
-			return cwd, true
+		if seg[0] == "pushd" {
+			st.dirs = append(st.dirs, st.cwd)
 		}
-		d := literal(seg[1])
-		if !filepath.IsAbs(d) {
-			d = filepath.Join(cwd, d)
+		if d, ok := cdTarget(seg, st.cwd); ok {
+			st.cwd = d
+		} else {
+			a.opaque(st.cwd)
 		}
-		return filepath.Clean(d), true
+		return true
+	case "popd":
+		if n := len(st.dirs); n > 0 {
+			st.cwd, st.dirs = st.dirs[n-1], st.dirs[:n-1]
+		}
+		return true
 	case "source", ".":
 		switch {
 		case len(seg) < 2:
 		case strings.Contains(seg[1], "$"):
-			a.opaque(cwd) // unresolved path: cannot follow
+			a.opaque(st.cwd) // unresolved path: cannot follow
 		default:
-			a.script(literal(seg[1]), cwd, depth)
+			a.script(literal(seg[1]), st.cwd, depth)
 		}
-		return cwd, true
+		return true
 	}
 	if noops[seg[0]] {
-		return cwd, true
+		a.redirects(seg, st.cwd) // read -r V < VERSION
+		return true
 	}
-	return cwd, false
+	return false
+}
+
+// cdTarget returns the directory a cd or pushd command (seg) run in cwd changes to; ok
+// is false when it is unknown (no operand, a variable, "-", a pushd stack rotation).
+func cdTarget(seg []string, cwd string) (string, bool) {
+	args := seg[1:]
+	for len(args) > 0 && (args[0] == "-L" || args[0] == "-P" || args[0] == "-e" || args[0] == "-@") {
+		args = args[1:]
+	}
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 || strings.Contains(args[0], "$") || args[0] == "-" || strings.HasPrefix(args[0], "+") ||
+		strings.HasPrefix(args[0], "<") || strings.HasPrefix(args[0], ">") || (strings.HasPrefix(args[0], "-") && isDigits(args[0][1:])) {
+		return "", false
+	}
+	d := literal(args[0])
+	if !filepath.IsAbs(d) {
+		d = filepath.Join(cwd, d)
+	}
+	return filepath.Clean(d), true
 }
 
 // command analyzes one simple command (argv) run in cwd.
@@ -490,6 +695,20 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		return
 	}
 	traced := tracedPrograms[prog] || strings.HasPrefix(prog, "python3.")
+	// A program named by its path (./build, ../bin/tool, /repo/bin/tool) is read to run
+	// it, wherever the command runs; one that is missing may appear. A bare name is looked
+	// up in PATH.
+	if !traced && strings.Contains(seg[0], "/") {
+		p := literal(seg[0])
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(cwd, p)
+		}
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			a.add(p)
+		} else if err != nil && !within(p, cwd) {
+			a.existence(p) // below cwd, the tree of the opaque command covers it
+		}
+	}
 	grepLike := prog == "grep" || prog == "egrep" || prog == "fgrep"
 	recursive := prog == "rg" || prog == "find"
 	for i, w := range seg[1:] {
@@ -500,14 +719,47 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 			recursive = recursive || w == "--recursive" || (cluster && strings.Contains(w, "R"))
 		case w == "-r" || w == "-R" || w == "--recursive" || (grepLike && cluster && strings.ContainsAny(w, "rR")):
 			recursive = true
+		case grepLike && (w == "-drecurse" || w == "--directories=recurse" ||
+			((w == "-d" || w == "--directories") && i+2 < len(seg) && seg[i+2] == "recurse")):
+			recursive = true // grep -d recurse is grep -r
 		}
-		if w == "<" && i+2 < len(seg) && !strings.Contains(seg[i+2], "$") {
-			for _, m := range expand(seg[i+2], cwd) {
-				a.add(m)
+	}
+	a.redirects(seg, cwd)
+	args := operands(prog, seg[1:])
+	// --files0-from lists the files to read, NUL-separated.
+	for _, l := range args.lists {
+		if l == "-" || strings.Contains(l, "$") {
+			args.runs = true // names read from stdin, or an unresolved list
+			continue
+		}
+		for _, m := range expand(l, cwd) {
+			a.add(m)
+			data, _ := os.ReadFile(m)
+			for n, name := range strings.Split(string(data), "\x00") {
+				if name != "" && n < 10000 {
+					// Names in the list are literal: no glob, no variable.
+					args.files = append(args.files, quoteMarks.Replace(strings.ReplaceAll(name, "$", literalDollar)))
+				}
 			}
 		}
 	}
-	args := operands(prog, seg[1:])
+	// find -exec runs a command for the files found: {} stands for them, below the
+	// paths searched (recorded as trees). -execdir runs it in the directory of each.
+	for _, x := range args.execs {
+		roots := args.roots
+		if len(roots) == 0 {
+			roots = []string{"."}
+		}
+		if x.dir {
+			for _, r := range roots {
+				for _, d := range expand(r, cwd) {
+					a.command(replacePlaceholder(x.cmd, []string{"."}), d, depth)
+				}
+			}
+		} else {
+			a.command(replacePlaceholder(x.cmd, roots), cwd, depth)
+		}
+	}
 	// Without a path, ls lists and find, rg and grep -r search the working directory.
 	if len(args.files) == 0 && !traced {
 		switch {
@@ -523,12 +775,36 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 	scripted := args.runs
 	switch prog {
 	case "awk":
-		scripted = scripted || awkIO.MatchString(args.script)
+		scripted = scripted || awkIO.MatchString(literal(args.script))
 		for _, f := range args.scriptFiles {
 			for _, m := range expand(f, cwd) {
 				if data, err := os.ReadFile(m); err == nil && awkIO.Match(data) {
 					scripted = true
 				}
+			}
+		}
+	case "sed":
+		// The r and R commands read a file; e and s///e run commands.
+		scripts := []string{literal(args.script)}
+		for _, f := range args.scriptFiles {
+			for _, m := range expand(f, cwd) {
+				if data, err := os.ReadFile(m); err == nil {
+					scripts = append(scripts, string(data))
+				}
+			}
+		}
+		for _, s := range scripts {
+			reads, runs := sedScript(s)
+			scripted = scripted || runs
+			for _, r := range reads {
+				if strings.Contains(r, "$") {
+					scripted = true
+					continue
+				}
+				if !filepath.IsAbs(r) {
+					r = filepath.Join(cwd, r)
+				}
+				a.add(r)
 			}
 		}
 	case "yq":
@@ -567,7 +843,8 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 				}
 			case fi.IsDir() && traced:
 				// A runtime given a directory runs code that traces itself.
-			case fi.IsDir() && (recursive || !readers[prog]):
+			case fi.IsDir() && (recursive || !readers[prog] || prog == "diff"):
+				// diff of two directories compares the files they have in common.
 				a.opaque(m)
 			case fi.IsDir():
 				a.listing(m)
@@ -590,11 +867,35 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 
 // cmdArgs is what the arguments of a command name.
 type cmdArgs struct {
-	files       []string // operands and file arguments of options (not redirection targets)
-	dirs        []string // directories it reads files from (jq -L)
-	script      string   // the inline script or pattern of a scriptFirst reader
-	scriptFiles []string // the files a scriptFirst reader reads its script from
-	runs        bool     // an option runs another program (rg --pre)
+	files       []string   // operands and file arguments of options (not redirection targets)
+	dirs        []string   // directories it reads files from (jq -L)
+	lists       []string   // files listing, NUL-separated, more files to read (--files0-from)
+	script      string     // the inline script or pattern of a scriptFirst reader (-e ones too)
+	scriptFiles []string   // the files a scriptFirst reader reads its script from
+	runs        bool       // an option runs another program (rg --pre)
+	roots       []string   // the paths find searches
+	execs       []findExec // the commands find runs
+}
+
+// findExec is a command find runs: -exec / -ok (dir: -execdir / -okdir).
+type findExec struct {
+	cmd []string
+	dir bool
+}
+
+// replacePlaceholder replaces find's {} in the words of cmd by each of paths.
+func replacePlaceholder(cmd, paths []string) []string {
+	var out []string
+	for _, w := range cmd {
+		if !strings.Contains(w, "{}") {
+			out = append(out, w)
+			continue
+		}
+		for _, p := range paths {
+			out = append(out, strings.ReplaceAll(w, "{}", p))
+		}
+	}
+	return out
 }
 
 // operands parses the arguments of a command.
@@ -602,20 +903,38 @@ func operands(prog string, args []string) (c cmdArgs) {
 	switch prog {
 	case "find":
 		// find [-H|-L|-P] path... expression: the expression names no file to read
-		// except the reference files of -newer and -samefile.
+		// except the reference files of -newer and -samefile, the list of -files0-from
+		// and what the commands of -exec and -ok read.
 		paths := true
-		for i, w := range args {
+		for i := 0; i < len(args); i++ {
+			w := args[i]
 			switch {
 			case w == "<" || w == ">" || w == ">>" || w == "<<" || w == "<<<":
 				paths = false
 			case paths && (w == "-H" || w == "-L" || w == "-P"):
+			case w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir":
+				paths = false
+				// The command ends at ";" or, after {}, at "+".
+				j := i + 1
+				for j < len(args) && args[j] != ";" && (args[j] != "+" || args[j-1] != "{}") {
+					j++
+				}
+				if j > i+1 {
+					c.execs = append(c.execs, findExec{cmd: args[i+1 : j], dir: strings.HasSuffix(w, "dir")})
+				}
+				i = j
 			case strings.HasPrefix(w, "-") || w == "!" || w == "(":
 				paths = false
-				if (strings.HasPrefix(w, "-newer") || w == "-anewer" || w == "-cnewer" || w == "-samefile") && i+1 < len(args) {
+				switch {
+				case i+1 >= len(args):
+				case strings.HasPrefix(w, "-newer") || w == "-anewer" || w == "-cnewer" || w == "-samefile":
 					c.files = append(c.files, args[i+1])
+				case w == "-files0-from":
+					c.lists = append(c.lists, args[i+1])
 				}
 			case paths:
 				c.files = append(c.files, w)
+				c.roots = append(c.roots, w)
 			}
 		}
 		return c
@@ -649,6 +968,12 @@ func operands(prog string, args []string) (c cmdArgs) {
 			switch kind {
 			case 's':
 				needScript = false
+				if c.script != "" {
+					c.script += "\n"
+				}
+				c.script += arg
+			case 'l':
+				c.lists = append(c.lists, arg)
 			case 'f':
 				needScript = false
 				c.files = append(c.files, arg)
@@ -1022,22 +1347,318 @@ func stripComments(text string) string {
 
 var varDefault = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^}$]+)\}$`)
 
-// Quoted "$", "*", "?" and "[" in words produced by splitShell are marked so they are
-// not mistaken for an unresolved variable or a glob pattern; literal restores them.
+// Quoted "$", "*", "?", "[", "{" and "}" in words produced by splitShell are marked so
+// they are not mistaken for an unresolved variable, a glob pattern or a brace expansion;
+// literal restores them.
 const (
 	literalDollar = "\x01"
 	literalStar   = "\x03"
 	literalQuery  = "\x04"
 	literalSet    = "\x05"
+	literalOpen   = "\x06"
+	literalClose  = "\x07"
 )
 
 var (
-	quoteMarks   = strings.NewReplacer("*", literalStar, "?", literalQuery, "[", literalSet)
-	unquoteMarks = strings.NewReplacer(literalDollar, "$", literalStar, "*", literalQuery, "?", literalSet, "[")
-	globChars    = strings.NewReplacer(literalStar, "*", literalQuery, "?", literalSet, "[") // keeps literalDollar
+	quoteMarks   = strings.NewReplacer("*", literalStar, "?", literalQuery, "[", literalSet, "{", literalOpen, "}", literalClose)
+	unquoteMarks = strings.NewReplacer(literalDollar, "$", literalStar, "*", literalQuery, "?", literalSet, "[", literalOpen, "{", literalClose, "}")
+	// globChars makes quoted glob characters active again (a variable used unquoted);
+	// braces stay marked: the shell expands braces before variables.
+	globChars = strings.NewReplacer(literalStar, "*", literalQuery, "?", literalSet, "[") // keeps literalDollar
 )
 
 func literal(word string) string { return unquoteMarks.Replace(word) }
+
+// maxBraceWords bounds the words one brace expansion makes.
+const maxBraceWords = 1024
+
+// braceSeg brace-expands the words of a command (bash, zsh and ksh do, and /bin/sh is
+// bash on macOS; dash would open a file literally named "{a,b}", which nobody creates).
+// Assignments are not expanded.
+func braceSeg(seg []string) []string {
+	var out []string
+	for _, w := range seg {
+		if assign.MatchString(w) {
+			out = append(out, w)
+			continue
+		}
+		out = append(out, braceExpand(w)...)
+	}
+	return out
+}
+
+// braceExpand expands the unquoted brace expressions of a word, {a,b} and {1..3} or
+// {a..e} (with an increment), as the shell does before any other expansion; "{}", "{x}"
+// and ${...} stay as they are. Quoted braces are marked (see splitShell).
+func braceExpand(w string) []string {
+	for i := 0; i < len(w); i++ {
+		if w[i] != '{' {
+			continue
+		}
+		j := matchBrace(w, i)
+		if j < 0 {
+			return []string{w}
+		}
+		if i > 0 && w[i-1] == '$' {
+			i = j // ${...}
+			continue
+		}
+		alts := braceAlternatives(w[i+1 : j])
+		if alts == nil {
+			continue // literal braces; the ones inside may still expand
+		}
+		var out []string
+		for _, alt := range alts {
+			out = append(out, braceExpand(w[:i]+alt+w[j+1:])...)
+			if len(out) >= maxBraceWords {
+				return out[:maxBraceWords]
+			}
+		}
+		return out
+	}
+	return []string{w}
+}
+
+// matchBrace returns the index of the "}" closing the "{" at w[i], or -1.
+func matchBrace(w string, i int) int {
+	depth := 0
+	for j := i; j < len(w); j++ {
+		switch w[j] {
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+var braceRange = regexp.MustCompile(`^(-?[0-9]+|[A-Za-z])\.\.(-?[0-9]+|[A-Za-z])(?:\.\.(-?[0-9]+))?$`)
+
+// braceAlternatives returns the words a brace expression's body (between the braces)
+// stands for: its comma-separated parts or the elements of its sequence; nil when it is
+// neither.
+func braceAlternatives(body string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for k := 0; k < len(body); k++ {
+		switch body[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, body[start:k])
+				start = k + 1
+			}
+		}
+	}
+	if parts != nil {
+		return append(parts, body[start:])
+	}
+	m := braceRange.FindStringSubmatch(body)
+	if m == nil {
+		return nil
+	}
+	step := 1
+	if m[3] != "" {
+		step, _ = strconv.Atoi(m[3])
+		if step < 0 {
+			step = -step
+		}
+		if step == 0 {
+			step = 1
+		}
+	}
+	from, errFrom := strconv.Atoi(m[1])
+	to, errTo := strconv.Atoi(m[2])
+	letters := errFrom != nil && errTo != nil
+	switch {
+	case letters:
+		from, to = int(m[1][0]), int(m[2][0])
+	case errFrom != nil || errTo != nil:
+		return nil // {1..a}
+	}
+	// {01..10}: a leading zero pads every number to the widest end.
+	width := 0
+	if !letters && (strings.HasPrefix(strings.TrimPrefix(m[1], "-"), "0") && len(strings.TrimPrefix(m[1], "-")) > 1 ||
+		strings.HasPrefix(strings.TrimPrefix(m[2], "-"), "0") && len(strings.TrimPrefix(m[2], "-")) > 1) {
+		width = max(len(m[1]), len(m[2]))
+	}
+	var out []string
+	for v := from; len(out) < maxBraceWords; {
+		switch {
+		case letters:
+			out = append(out, string(rune(v)))
+		case width > 0:
+			out = append(out, fmt.Sprintf("%0*d", width, v))
+		default:
+			out = append(out, strconv.Itoa(v))
+		}
+		if v == to || (from < to && v+step > to) || (from > to && v-step < to) {
+			break
+		}
+		if from < to {
+			v += step
+		} else {
+			v -= step
+		}
+	}
+	return out
+}
+
+// sedScript parses a sed script: it returns the files its r and R commands read, and
+// whether it runs commands (e, the e flag of s) or could not be parsed.
+func sedScript(s string) (reads []string, runs bool) {
+	i := 0
+	skip := func(set string) {
+		for i < len(s) && strings.IndexByte(set, s[i]) >= 0 {
+			i++
+		}
+	}
+	// toEOL returns the rest of the line (a file name, a command, a label).
+	toEOL := func() string {
+		start := i
+		for i < len(s) && s[i] != '\n' {
+			i++
+		}
+		return s[start:i]
+	}
+	// delimited skips a regular expression or replacement ending at delim; brackets
+	// protect it in regular expressions.
+	delimited := func(delim byte, regex bool) bool {
+		for ; i < len(s); i++ {
+			switch {
+			case s[i] == '\\':
+				i++
+			case regex && s[i] == '[':
+				j := i + 1
+				if j < len(s) && s[j] == '^' {
+					j++
+				}
+				if j < len(s) && s[j] == ']' {
+					j++
+				}
+				for j < len(s) && s[j] != ']' {
+					j++
+				}
+				i = j
+			case s[i] == delim:
+				i++
+				return true
+			}
+		}
+		return false
+	}
+	address := func() bool {
+		switch {
+		case i >= len(s):
+			return false
+		case s[i] >= '0' && s[i] <= '9':
+			skip("0123456789")
+			if i < len(s) && s[i] == '~' {
+				i++
+				skip("0123456789")
+			}
+		case s[i] == '$':
+			i++
+		case s[i] == '/':
+			i++
+			if !delimited('/', true) {
+				return false
+			}
+			skip("IM")
+		case s[i] == '\\' && i+1 < len(s):
+			d := s[i+1]
+			i += 2
+			if !delimited(d, true) {
+				return false
+			}
+			skip("IM")
+		}
+		return true
+	}
+	for {
+		skip(" \t\n;")
+		if i >= len(s) {
+			return reads, runs
+		}
+		if !address() {
+			return reads, true
+		}
+		skip(" \t")
+		if i < len(s) && s[i] == ',' {
+			i++
+			skip(" \t")
+			if i < len(s) && (s[i] == '+' || s[i] == '~') {
+				i++
+				skip("0123456789")
+			} else if !address() {
+				return reads, true
+			}
+		}
+		skip(" \t!")
+		if i >= len(s) {
+			return reads, true
+		}
+		cmd := s[i]
+		i++
+		switch cmd {
+		case '{', '}', '=', 'd', 'D', 'g', 'G', 'h', 'H', 'n', 'N', 'p', 'P', 'x', 'z', 'F':
+		case '#':
+			toEOL()
+		case ':', 'b', 't', 'T', 'v':
+			for i < len(s) && s[i] != '\n' && s[i] != ';' {
+				i++
+			}
+		case 'a', 'i', 'c':
+			// Text to the end of the line; a line ending in a backslash continues it.
+			for {
+				line := toEOL()
+				if !strings.HasSuffix(line, "\\") || i >= len(s) {
+					break
+				}
+				i++
+			}
+		case 'r', 'R', 'w', 'W':
+			skip(" \t")
+			name := toEOL()
+			if (cmd == 'r' || cmd == 'R') && name != "" {
+				reads = append(reads, name)
+			}
+		case 'e':
+			toEOL()
+			runs = true
+		case 'l', 'L', 'q', 'Q':
+			skip(" \t")
+			skip("0123456789")
+		case 's', 'y':
+			if i >= len(s) || s[i] == '\\' || s[i] == '\n' {
+				return reads, true
+			}
+			d := s[i]
+			i++
+			if !delimited(d, cmd == 's') || !delimited(d, false) {
+				return reads, true
+			}
+			for cmd == 's' && i < len(s) && strings.IndexByte("gpiImMe0123456789w", s[i]) >= 0 {
+				if s[i] == 'e' {
+					runs = true
+				}
+				if s[i] == 'w' {
+					toEOL() // writes a file
+					break
+				}
+				i++
+			}
+		default:
+			return reads, true
+		}
+	}
+}
 
 // expand resolves a command-line word relative to cwd, expanding glob patterns.
 func expand(word, cwd string) []string {
@@ -1078,17 +1699,30 @@ const (
 
 // splitShell splits a shell command line into simple commands (on |, ||, &&, ;, &,
 // newlines) and words, honoring quotes. Redirection operators become separate words;
-// parentheses become subshellOpen and subshellClose segments.
+// parentheses become subshellOpen and subshellClose segments. The patterns of case
+// items are left out.
 func splitShell(cmd string) [][]string {
 	var segs [][]string
 	var words []string
 	var cur strings.Builder
 	inWord := false
+	// cases counts the case commands open; pattern is set where the patterns of an item
+	// start (after "case WORD in", ";;", ";&" or ";;&"). They run nothing, and the ")"
+	// ending them closes no subshell.
+	cases, pattern := 0, false
 	flushWord := func() {
 		if inWord {
-			words = append(words, cur.String())
+			w := cur.String()
+			words = append(words, w)
 			cur.Reset()
 			inWord = false
+			switch n := len(words); {
+			case w == "in" && n >= 3 && words[n-3] == "case":
+				cases++
+				pattern = true
+			case w == "esac" && cases > 0 && len(trimKeywords(words)) == 0:
+				cases--
+			}
 		}
 	}
 	flushSeg := func() {
@@ -1104,6 +1738,19 @@ func splitShell(cmd string) [][]string {
 	}
 	var heredocs []heredoc // here-documents whose bodies follow the current line
 	for i := 0; i < len(cmd); i++ {
+		if pattern {
+			flushSeg()
+			pattern = false
+			j := i
+			for j < len(cmd) && strings.IndexByte(" \t\n", cmd[j]) >= 0 {
+				j++
+			}
+			esac := strings.HasPrefix(cmd[j:], "esac") && (j+4 == len(cmd) || strings.IndexByte(" \t\n;|&)", cmd[j+4]) >= 0)
+			if end := patternEnd(cmd, j); !esac && end >= 0 {
+				i = end
+				continue
+			}
+		}
 		c := cmd[i]
 		switch {
 		case c == '\\' && i+1 < len(cmd) && cmd[i+1] == '\n':
@@ -1127,12 +1774,27 @@ func splitShell(cmd string) [][]string {
 			inWord = true
 		case c == '"':
 			i++
+			param := 0 // inside ${...}, whose braces are not marked
 			for ; i < len(cmd) && cmd[i] != '"'; i++ {
-				if cmd[i] == '\\' && i+1 < len(cmd) {
+				switch {
+				case cmd[i] == '\\' && i+1 < len(cmd):
 					i++
 					if cmd[i] == '\n' {
 						continue // line continuation
 					}
+				case cmd[i] == '$' && i+1 < len(cmd) && cmd[i+1] == '{':
+					cur.WriteString("${")
+					i++
+					param++
+					continue
+				case param > 0 && (cmd[i] == '{' || cmd[i] == '}'):
+					if cmd[i] == '{' {
+						param++
+					} else {
+						param--
+					}
+					cur.WriteByte(cmd[i])
+					continue
 				}
 				cur.WriteString(quoteMarks.Replace(cmd[i : i+1]))
 			}
@@ -1185,6 +1847,14 @@ func splitShell(cmd string) [][]string {
 			}
 			i = j
 			heredocs = nil
+		case c == ';' && cases > 0 && i+1 < len(cmd) && (cmd[i+1] == ';' || cmd[i+1] == '&'):
+			// ;; ;& ;;& end a case item: the next one starts with its patterns.
+			flushSeg()
+			i++
+			if cmd[i] == ';' && i+1 < len(cmd) && cmd[i+1] == '&' {
+				i++
+			}
+			pattern = true
 		case c == '|' || c == ';' || c == '&' || c == '\n':
 			flushSeg()
 		case c == '<' && strings.HasPrefix(cmd[i:], "<<<"):
@@ -1244,4 +1914,24 @@ func splitShell(cmd string) [][]string {
 	}
 	flushSeg()
 	return segs
+}
+
+// patternEnd returns the index of the unquoted ")" ending the patterns of a case item
+// that start at cmd[i], or -1.
+func patternEnd(cmd string, i int) int {
+	for ; i < len(cmd); i++ {
+		switch cmd[i] {
+		case '\\':
+			i++
+		case '\'', '"':
+			j := strings.IndexByte(cmd[i+1:], cmd[i])
+			if j < 0 {
+				return -1
+			}
+			i += j + 1
+		case ')':
+			return i
+		}
+	}
+	return -1
 }

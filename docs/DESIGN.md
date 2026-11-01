@@ -294,11 +294,16 @@ source files (`go list -find`) are added to every package's dependencies.
 analyzed from their command line when the child starts (`child_process.*` in Node,
 `subprocess.Popen`/`os.system` audit events in Python):
 
-- read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name;
-- shell scripts are read and analyzed the same way, following `cd`, `source`, variables,
-  for-loops, functions, `$(dirname "$0")` and read-only command substitutions;
+- read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name
+  (and the files of `sed` `r` commands; `diff` of directories on their trees; `find -exec`
+  is analyzed as the command it runs);
+- shell scripts are read and analyzed the same way, following `cd`, `pushd`/`popd`,
+  `source`, variables, for-loops, brace expansion, `case`, input redirections, the bodies
+  of the functions they call (where they are called), `$(dirname "$0")` and the commands
+  of command substitutions (`$(<file)` reads the file);
 - anything else may read anything below its working directory: the test depends on
-  `cwd/**` (commands running outside the repository only on the paths they name).
+  `cwd/**` (commands running outside the repository only on the paths they name), and on
+  the program itself when it is named by path (`../bin/tool`).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
@@ -322,7 +327,12 @@ main-module packages it links (`go list -deps -test`), lists its tests (`-test.l
 and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
-and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`).
+and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`). A
+selected function `-test.list` does not list runs nothing: an example without output
+(compiled, never run anywhere) passes; one in a file this configuration does not compile
+(a `//go:build linux` file recorded on darwin, a tag the command does not pass) is not
+recorded, with a warning, so a shared state keeps what a configuration that compiles it
+recorded (without such an entry it is selected again, but runs no test process).
 Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
 binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
 (blocks placed by `//line` in a file that is not there: every Go file of the package);
