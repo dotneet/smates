@@ -1,7 +1,7 @@
 # smates
 
 **Run only the tests your change can affect** — for TypeScript/JavaScript (vitest, jest,
-`node --test`, bun), Go and Python (pytest, uv), in CI and locally.
+`node --test`, bun), Go and Python (pytest, unittest, uv), in CI and locally.
 
 smates learns what every test *actually uses* by tracing real test runs (executed code,
 files read, directories listed, child processes), adds a static import graph as a safety
@@ -104,11 +104,15 @@ left to the job that runs that suite). smates then
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
 4. otherwise runs the suites the orphan can affect in full.
 
+A coding agent that calls smates can decide instead, with `--add` and `--orphans`: see
+[Letting the calling agent decide](#letting-the-calling-agent-decide).
+
 Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
 covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
 100 first-parent commits (`--history N`, `--since rev`) against the current dependency
 map with the same rule, ranks the files that would have been orphans, and prints a
-ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency),
+ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency;
+`--apply` writes those globs into `smates.yml` for you, keeping its comments),
 plus how many commits would still have orphans. Files that can change how tests run (CI
 workflows, Makefiles, Dockerfiles, compose files, toolchain pins) are listed for
 `inputs:` or `rules:` instead. Run it after `smates run --all`: without recorded
@@ -123,8 +127,47 @@ dependencies it only knows the static graph and overstates the orphans.
 | `node` (`node --test`) | test file | V8 coverage per test process + fs hooks | process exit code |
 | `bun` | test file | per-file `bun test --coverage` + module cache, preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` (while recording) | process exit code |
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
-| `go` | package | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
+| `unittest` (`python -m unittest`) | test module | same Python tracing; every selected module runs in one process through a `unittest` wrapper with contexts per module (import, `setUpModule`/`setUpClass`, tests) | wrapper result class |
+| `go` | package, or test function with `granularity: func` | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests. Per function: coverage per test process (below) | binary exit code, build failures; per function: its own process (recording) or go test's `--- FAIL` lines |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code |
+
+**Go test functions** (`granularity: func` on a `go` suite). When one package holds most
+of the tests and most changes reach it, selecting packages saves little. With
+`granularity: func` a unit is a top-level test function (`internal/api#TestCreateUser`:
+`TestXxx`, `FuzzXxx` with its seed corpus, `ExampleXxx`; subtests run with their parent).
+While recording, smates builds each package's test binary once with coverage over the
+repository packages it links (`go test -c -cover -coverpkg=...`, with the suite command's
+build flags such as `-tags` and `-race`) and runs every function in its own process
+(`-test.run '^TestX$'`, a coverage profile and a test log). A function then depends on:
+
+- the Go files in which it executed code (a file counts when any of its blocks ran;
+  package initialization runs in every process, so it counts for every function);
+- the *declarations* of every other Go file it may reach (the file without its function
+  bodies): a changed constant, variable initializer, type, signature or method selects
+  every function that could see it, an edit inside a body only those that executed it;
+- its own `_test.go` file, the test files declaring helpers it names, and test files with
+  `TestMain`, `init` or package-level variables initialized by calls;
+- as for a package: files and directories its test log recorded, environment variables
+  it read, embedded and other non-Go files of the static closure, `go.mod`/`go.sum`,
+  what its child processes used; Go packages it builds or runs as a subprocess count in
+  full; and the listing of its package directory (a file added there selects every
+  function of the package).
+
+A changed test file selects the functions it declares; a new function is selected as new.
+Selected functions run with `go test -run '^(TestA|TestB)$'` (or the whole package when
+the pattern would be too long) when not recording. When the binary cannot be built with
+coverage, or the suite command is not a plain `go test` (or passes `-run`, `-skip`,
+`-bench`, `-fuzz`, `-c`), that package is recorded as a whole and says so: each of its
+functions then depends on everything the package does. Recording costs one process per
+function (plus one coverage build per package); functions of one package run one at a
+time, as `go test` runs them, unless `record_jobs` allows more, and packages as many at a
+time as `-p` allows (in the command or `GOFLAGS`; default GOMAXPROCS). Test flags such as
+`-timeout`, `-short`, `-count` or `-v`, in the command or in `GOFLAGS`, reach every
+function's process.
+
+Which files are tests comes from each runner's own configuration (jest `testMatch`,
+vitest `include`, pytest `testpaths`, ...) unless `tests:` is set; see
+[Which files are tests](#which-files-are-tests).
 
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are
@@ -132,9 +175,45 @@ analyzed from their command line and script contents. A command smates cannot se
 (`make`, a compiled binary) makes the test depend on everything below the directory it
 runs in.
 
+Python projects use `pytest` when anything points to it and `unittest` otherwise:
+`pytest.ini` or a `conftest.py`; pytest named in a manifest, lockfile or task file of the
+project or a directory above it (`pyproject.toml`, `setup.cfg`, `setup.py`, `tox.ini`,
+`noxfile.py`, `Pipfile`, `poetry.lock`/`pdm.lock`/`uv.lock`, `*requirements*.txt`/`.in`,
+files under `requirements/`); a GitHub workflow running pytest; or a test file written
+for pytest (`import pytest`, module-level `def test_…` functions). The `unittest` runner's
+test files follow discovery: `test*.py` below the suite root by default, or the
+`-s`/`-p`/`-t` (start directory, pattern, top-level directory) of a
+`python -m unittest discover …` command. smates always passes the selected files as
+dotted module names relative to the top-level directory (also for a full run, so a
+directory without `__init__.py` is not skipped); files whose path is not a module name
+are not tests. While recording, the selected modules run in one process through
+`python -m smates_unittest` (shipped with the Python shims), which also turns an
+exception raised while importing a module into a failure of that module instead of the
+end of the run. `isolate: true` runs one process per module instead. A module that
+runs no unittest test is told apart by its source: a helper matching the pattern passes
+(with a warning suggesting `exclude`), while one written for pytest (`import pytest`,
+module-level `def test_…` functions) is never recorded as passed: its status is unknown,
+so it runs again, with a message suggesting `runner: pytest`. A run in which no module
+ran a test fails (unittest's exit code 5) only when one of them is written for pytest.
+
 Package managers: npm, pnpm, yarn, bun (local `node_modules/.bin` binaries are used
 directly), uv / virtualenvs for Python. Monorepos with several suites, workspaces
 (npm/pnpm/yarn/bun) and tsconfig `paths` are handled by the static analyzer.
+
+### Works with coverage tools
+
+Keep collecting coverage in the suite `command`; smates records on top of it, and the
+reports stay the same as without smates:
+
+| tool | how both keep working |
+|---|---|
+| `vitest --coverage` (v8 provider), jest `--coverage --coverageProvider=v8` | They take V8's coverage through `node:inspector` and stop it, which would leave smates' `NODE_V8_COVERAGE` files empty; smates records the scripts listed in the coverage they take instead. |
+| `c8` | c8 uses `NODE_V8_COVERAGE` as its temporary directory when it is set, so it reads smates' files for its report (`--reports-dir` output as usual, but no `coverage/tmp`). Every runner invocation gets a directory of its own, so c8's `--clean` never deletes another invocation's files. |
+| `node --test --experimental-test-coverage` | Works as is; smates' preload lives in a `node_modules` directory, which coverage reports leave out. |
+| your own `NODE_V8_COVERAGE` (environment or suite `env`) | Replaced while recording; the raw coverage files are copied into your directory after the run (existing files are never overwritten or deleted). |
+| pytest-cov / coverage.py | Every core: `sys.settrace` (ctrace, pytrace) and `sys.monitoring` (`COVERAGE_CORE=sysmon`). smates takes a `sys.monitoring` tool id of its own (3, 4, 2 or 5; coverage.py uses 1 and moves up when it is taken), and before 3.12 chains to any profile function already installed. What pytest-cov reads for its report after the tests is no dependency of any test. |
+| pytest-xdist (`-n auto`) | The plugin loads in every worker; dependencies and results are per test file as without xdist. |
+| `go test -cover`, `-coverpkg`, `-coverprofile`, `-covermode` | Unaffected by smates' `-exec` wrapper; the profile is written as usual. With `-coverpkg` (on the command, after `--` or in `GOFLAGS`), go builds the packages it names into every test binary, so every test package also depends on their source files (a compile error there fails them all). |
 
 ## Quick start
 
@@ -150,6 +229,8 @@ smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
 smates hook install  # optional: run the affected tests before every git push
+smates hook install --claude  # optional: Claude Code fixes failing tests before it stops
+smates guide         # how a coding agent should use smates (docs/AGENTS.md)
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
@@ -161,7 +242,9 @@ the setup.
 in the code, and variables from `.env.example` the code reads, become commented-out
 `services:`/`env:` blocks to check and enable. If an existing workflow already runs the
 tests, it writes no second one (unless `--force`) and prints a patch replacing those
-steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+steps with the smates action (`--patch FILE` writes it for `git apply`). When
+`smates.yml` already exists, `smates init --github` leaves it untouched and only generates
+the workflow (or the patch) from its suites; `--force` rewrites it. Flags and
 variables of a Makefile `test` target become commented `command:`/`env:` hints in
 `smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
 version outside `engines.node`, and services that are not running. smates never lets
@@ -190,6 +273,37 @@ unstaged) changes and untracked files are part of what is tested. The hook warns
 there are any, and when the pushed branch is not the one checked out; commit or stash
 them first for an exact result. `smates hook uninstall` removes only what smates wrote;
 `smates hook status` shows where the hook lives.
+
+### Parallel worktrees
+
+Coding agents often work in several `git worktree`s at once. Each worktree has its own
+`.smates/state.json.gz`, so a fresh one would start with no recording. Instead, the first
+command that needs the state in a linked worktree without one seeds it, and prints one
+line saying from where:
+
+1. the main worktree's state, if it has one;
+2. else the remote state (`smates state push`), fetched at most once an hour like the
+   hook does (a state ref another worktree already fetched is used without fetching).
+
+The seeded snapshot is kept only when it was recorded on a commit in this worktree's
+history; otherwise the worktree keeps the per-test entries and judges changed files
+against the default branch, as without a snapshot. A worktree is seeded once (`smates
+state clear` keeps it from being seeded again). Turn seeding off with
+`state_seed: false` in `smates.yml` or `SMATES_NO_STATE_SEED=1`.
+
+To share what any worktree learns with all of them, set `state_shared: true`: the
+per-test entries, agent answers and run records live in one file under the git common
+directory (`.git/smates/state.json.gz`; `smates state path` prints it), and each
+worktree keeps only its own full-tree snapshot (`.smates/state.snapshot.json.gz`), so a
+run on one branch never makes another branch's changes look like this one's. Saving takes
+a lock file next to the shared state and merges this run's changes into what is on disk,
+so smates processes in several worktrees at once do not lose each other's results (when
+two of them re-ran the same test, the newer result wins and outcome histories are
+combined; `smates flaky --clear` and `smates state clear`, which clears it for every
+worktree, are not undone by a run that started earlier). A lock left behind by a
+crashed process is taken over after two minutes.
+`smates state show` says where the state lives, whether it is shared, and where it was
+seeded from.
 
 ### GitHub Actions
 
@@ -239,7 +353,7 @@ suites:
     runner: vitest
     root: packages/web
     # optional:
-    tests: ["src/**/*.test.ts"]      # test file globs (relative to root)
+    tests: ["src/**/*.test.ts"]      # test file globs (relative to root; default: from the runner config)
     exclude: ["src/legacy/**"]
     command: "pnpm exec vitest run"   # selected files are appended (or put in {tests})
     inputs: ["/proto/**"]            # extra files all tests of the suite depend on ("/" = repo root)
@@ -247,11 +361,13 @@ suites:
       - tests: ["src/db/**"]
         deps: ["migrations/**"]
     env: { TZ: UTC }
-    isolate: true                    # jest/bun: one process per file while recording
+    isolate: true                    # jest/bun/unittest: one process per file while recording
     junit: reports/junit.xml          # per-file status from a JUnit report you produce
   - name: api
     runner: go
     root: services/api
+    granularity: func                # select Go tests per test function (default: package)
+    record_jobs: 4                   # with func: functions of one package recorded at once (default 1)
   - name: e2e                        # Playwright against the api server (docker compose)
     runner: custom
     root: e2e
@@ -264,6 +380,10 @@ suites:
   - name: tools
     runner: pytest
     root: tools
+  - name: legacy
+    runner: unittest                 # python -m unittest (no pytest needed)
+    root: legacy
+    command: "python3 -m unittest discover -s tests -p '*_check.py'"  # -s/-p/-t pick the test files
 
 orphans: agent        # agent | all | ignore
 untested: skip        # skip | orphan: changed source code no test reaches (default skip: nothing to run)
@@ -272,6 +392,8 @@ env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select
 env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
+state_seed: true      # seed a new git worktree's state from the main worktree (or the remote)
+state_shared: false   # one state for all worktrees, under the git common dir (see "Parallel worktrees")
 flaky:
   retry: 0            # re-run a suite run whose failures are all known flaky tests, up to N times (default 0: never hide a failure)
 agent:
@@ -284,6 +406,34 @@ agent:
   explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
+
+### Which files are tests
+
+Without `tests:`, smates reads the test files of a suite from its runner's configuration,
+statically (config files are never executed):
+
+| runner | read from | options |
+|---|---|---|
+| `jest` | `--config` of the command, else the nearest `jest.config.{js,ts,mjs,cjs,mts,cts,json}` or `package.json` `"jest"` from the suite root up (jest stops at the nearest `package.json`) | `rootDir`, `roots`, `testMatch` (micromatch extglobs such as `?(x)` and `+(spec\|test)` are converted; `!` patterns exclude), `testRegex`, `testPathIgnorePatterns` (`<rootDir>` substituted) |
+| `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), and projects: `test.projects`, `test.workspace` or `vitest.workspace.*` |
+| `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
+
+A JS/TS config is read when it exports an object literal (`module.exports = {...}`,
+`export default {...}`, `defineConfig({...})`, or a top-level `const` it names) and the options are
+string, array or regex literals. Anything else (a function, another call such as `mergeConfig(base, ...)`, `testMatch: dirs.map(...)`, a `const` the module changes later such as `config.roots.push(...)`, a
+`...spread` that may set the option, `jest` `projects`, a `testRegex` with lookaround Go's
+`regexp` lacks) falls back to the default globs, and `smates list` / `smates doctor` warn
+with the reason: set `tests:` (and `exclude:`) in `smates.yml` then. A vitest workspace is
+one suite whose test files are the union of its projects, each project's include/exclude
+applied below its own root; a project whose config cannot be read keeps the defaults for
+its directory. When a root vitest config does not count a nested package's tests (its own
+`vitest.config.*` and no `projects` covering it), auto-detection makes that package a
+separate suite.
+
+`smates list` shows where each suite's tests come from (`tests=jest.config.js testMatch`;
+`-v` adds the patterns), as does `smates doctor`. Unlike `tests:`/`exclude:` in
+`smates.yml`, derived patterns do not make smates pass every file explicitly on a full run
+(`smates run --all`): they describe what the runner discovers by itself.
 
 ### Tests that exercise a server
 
@@ -323,16 +473,85 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
-| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--budget 90s`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
+| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
-| `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
-| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
+| `smates init [--github] [--agents-md]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup; `--agents-md`: add a short smates section to `AGENTS.md`/`CLAUDE.md`; over an existing config either one runs alone). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
+| `smates list` / `doctor` | suites, test units and where the test patterns come from (`tests_source`, `test_patterns`, `discovery_warning` in JSON); setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
+| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable): `--format text\|json` |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
-| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
-| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
-| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
+| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite`; `--apply` adds the suggested globs to `ignore:` (nothing else), `--apply --dry-run` prints the diff |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `untested`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
+| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags`; `--claude [--user]` for a Claude Code Stop hook |
+| `smates guide` | the guide for coding agents ([docs/AGENTS.md](docs/AGENTS.md)) |
+
+### For AI coding agents
+
+**[docs/AGENTS.md](docs/AGENTS.md)** is a one-page guide for an agent working in a
+repository that uses smates (`smates guide` prints it). `smates init` suggests a short
+section that points an agent at it when the repository has `AGENTS.md` or `CLAUDE.md`
+(`smates init --agents-md` appends it, once).
+
+An agent reads everything a command prints, so `smates run --output failures` (or
+`SMATES_OUTPUT=agent` in its environment; the flag wins) keeps the output small:
+
+- each runner batch's output is buffered and printed only when the batch fails. For
+  runners that report each failing test's own output (vitest, jest, pytest, `go test`,
+  JUnit) only that is printed; otherwise the failing batch's output, at most 200 lines
+  (the first 30 and the last 170, with a note in between);
+- smates' own progress lines are left out; the selection line stays;
+- the run ends with a short summary: one line when it passed, otherwise the failing tests,
+  the changed inputs of each (from the failure hints) and a command that reruns exactly
+  them:
+
+```
+smates: FAILED 1 of 7 test unit(s) in 3.2s:
+  web: src/cart.test.ts
+    changed inputs: src/price.ts (modified), fixtures/prices.json (modified)
+smates: rerun them: smates run --output failures --only web:src/cart.test.ts
+```
+
+`--only suite:unit` (repeatable) runs exactly those test units (a test file, or a package
+directory for Go) and records them as usual; the other tests and changes are left for the
+next run. `--report -` writes the JSON report to stdout and everything else to stderr.
+
+**Long runs.** In failures mode smates prints `smates: still running <suite> (n of m test
+unit(s) started, 1m 30s)` after every 30 s without output (`SMATES_HEARTBEAT=10s` changes
+it, `0` turns it off), so a tool timeout does not take a silent run for a hang. When the
+recorded durations of the selected tests add up to more than `--budget` (default 90s;
+`0` turns it off), `smates run` first prints how to split it: one suite at a time
+(`--suite`), or in the background with `--report file.json`.
+
+**Claude Code Stop hook.** `smates hook install --claude` adds a Stop hook to
+`.claude/settings.json` (`--user`: `~/.claude/settings.json`, active in projects that have
+a `smates.yml`). When Claude ends its turn the hook runs `smates hook claude-stop`, which
+runs the affected tests (`--output failures --no-agent`; more run flags after `--`). When
+some fail it prints `{"decision": "block", "reason": "<failing tests and the rerun
+command>"}` and exits 0, Claude Code's documented way to keep Claude going: it reads the
+reason and fixes the tests. It never blocks when the hook input has `stop_hook_active`
+(Claude is already continuing because of a Stop hook), returns at once when nothing is
+selected (without writing the state, also with `state_shared: true`, where it runs per
+worktree), and reports smates' own errors (what makes `smates run` exit 2, 3 or 4) to
+the user with exit 1 instead of blocking; failing tests still block when the state could
+not be saved. The entry is spliced into the file's text, so everything else (other keys
+and hooks, their order and formatting) stays byte for byte, and installing again changes
+nothing; `smates hook uninstall --claude` removes exactly that text (and a `Stop` or
+`hooks` it leaves empty). A file smates cannot edit unambiguously (invalid JSON, a
+duplicate key, `hooks` that is not an object or `Stop` that is not an array) is reported
+and left alone. `smates hook status` shows the hook, and `SMATES_SKIP_HOOK=1` skips it. The command does
+nothing where `smates` is not installed.
+
+**Exit codes** tell "fix the code" from "fix the setup":
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | tests failed (whatever code the runner exited with; `--report` has it in `exit_code`) |
+| 2 | usage error: invalid command line |
+| 3 | configuration error: invalid `smates.yml`, unknown runner, a suite command that cannot be parsed, a suite or test named on the command line (`--suite`, `--only`) that the configuration does not define, no suites at all |
+| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4; a state that cannot be saved (e.g. the shared state's lock is held by another worktree's run), reported after the summary, or 1 when tests failed |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
@@ -375,7 +594,7 @@ reported).
 **Stats** (`smates stats`) sum up the runs recorded in the state: how many test units
 ran out of how many (skip rate), the recorded test time the skipped units would have
 taken (the time saved, also extrapolated to 30 days), shadow-mode misses and their rate,
-orphans by how they were handled (reference scan, agent, full suite run), agent calls
+orphans by how they were handled (reference scan, agent, full suite run, skipped by caller), agent calls
 with their tokens and cost (when the backend reports one, e.g. `claude -p`), and flaky
 flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
 the state keeps the last 1000 records within 180 days, and `smates state merge` unions
@@ -484,6 +703,42 @@ ok  	example.com/shop/internal/store	0.170s
   running the affected suites in full.
 - Fork pull requests get no secrets: smates simply falls back.
 
+### Letting the calling agent decide
+
+When smates is called by a coding agent (Claude Code, Codex, …), that agent already
+knows what it changed and why: asking another LLM is wasteful, and running whole suites
+is slow. The agent can make the orphan decision itself:
+
+1. `smates select --format json` lists `orphan_candidates`, one per orphan:
+   `path`, `status` (`added`/`modified`/`deleted`), `referenced_by` (tests that name the
+   file, with the `file` that names it and whether the test is already `selected`),
+   `suites` (what the orphan policy would run in full) and `handling` (how this
+   selection handled it: `reference`, `agent`, `no-impact`, `policy`, `ignored`,
+   `skipped`). The other fields of the JSON are unchanged.
+2. `smates run --add <suite>:<unit>` adds tests (repeatable; reason `caller`). The unit
+   may also be a test file (`--add api:tests/test_users.py`, `--add pkg/foo_test.go` for
+   a Go package unit; repository-relative, relative to the current directory, or after
+   `suite:` relative to the suite's root; the suite may be left out when only one has
+   it). A name that matches no test of the run is an error (exit 2).
+3. `--orphans=agent|full|skip` overrides `orphans:` for this run: `agent` is the built-in
+   agent, `full` runs the affected suites in full (`orphans: all`), `skip` applies no
+   orphan policy to what the reference scan did not explain.
+
+```sh
+smates select --format json        # read orphan_candidates
+smates run --orphans=skip --add api:tests/test_users.py --add web:src/app.test.ts
+```
+
+The safety principle stays: the caller can only add tests, never remove any that the
+deterministic selection (or the name-reference scan) picked. `--orphans=skip` is the one
+explicit opt-out, for a caller that judged the changes itself: the log, the job summary
+and the run record (`smates stats`) show those orphans as *skipped by caller*, and like
+any handled orphan they are not reported again on the same branch. Both flags are also
+accepted by `smates select` (to preview the result) and as run flags of the git hook
+(`smates hook install -- --orphans=full`). When orphans make whole suites run and the
+caller decided nothing (for example without an API key), the log says how to decide
+instead.
+
 ## Limitations
 
 - Tracing follows the test process and its children, not a server the tests reach over
@@ -501,8 +756,14 @@ ok  	example.com/shop/internal/store	0.170s
   be confirmed by whoever reads the state file; list such variables in `env_ignore`.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.
-- Granularity is the file (the package for Go): a change anywhere in a module re-runs
-  every test that loaded it. For Python, data a module reads at import time or behind a
+- Granularity is the file (the package for Go, or the test function with
+  `granularity: func`): a change anywhere in a module re-runs every test that loaded it.
+  Go per-function selection costs one process per test function while recording (the
+  default branch's full runs get slower; selective runs only start the selected
+  functions); functions share no process, so a test relying on state another test of
+  its package left behind in memory behaves differently than under `go test`. Code that
+  matters without running (an unexecuted method satisfying an interface) is covered
+  through declarations, but code executed through reflection alone is not. For Python, data a module reads at import time or behind a
   cache belongs to that module.
 - Jest occasionally runs two files back to back in one worker even when recycling; their
   dependencies are then merged (still correct). `isolate: true` makes it exact at the cost
@@ -512,7 +773,16 @@ ok  	example.com/shop/internal/store	0.170s
 - Arguments passed through to the runner (`smates run -- -t name`) may filter tests, so
   such runs never record a test as passed; put permanent flags in the suite `command`.
 - Python 3.8–3.11 is traced with `sys.setprofile`, which slows tests noticeably while
-  recording; Python 3.12+ uses `sys.monitoring` (low overhead).
+  recording; Python 3.12+ uses `sys.monitoring` (low overhead). With coverage.py's
+  `sysmon` core, smates re-enables monitoring events at every test switch, which also
+  re-arms coverage.py's: its results are unchanged, but it does some work again per test.
+  A profiler installed later with `sys.setprofile` (before 3.12) replaces smates' tracer.
+- Coverage tools (see [Works with coverage tools](#works-with-coverage-tools)): a command
+  that sets `NODE_V8_COVERAGE` itself (`env NODE_V8_COVERAGE=… node`, or a script that
+  exports it) hides the code the processes below it execute from smates (only the static
+  graph covers it then; set it in the environment or the suite `env` instead), and c8 writes no
+  `coverage/tmp` while smates records (`c8 report` afterwards has nothing to read; let c8
+  report in the same command).
 - On case-insensitive file systems, an import whose case differs from the file on disk
   is recorded under the imported spelling and may not match the file's changes.
 - Type-only changes are handled like any change (type checking is not a test run;

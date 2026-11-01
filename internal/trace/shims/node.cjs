@@ -404,6 +404,45 @@
     };
   } catch (_) {}
 
+  // Coverage tools that drive the V8 profiler themselves (vitest's v8 provider, jest
+  // with coverageProvider "v8", through node:inspector) take and then stop V8's precise
+  // coverage in the worker. That also ends the collection behind NODE_V8_COVERAGE, so
+  // the worker's coverage file no longer lists what it executed: the scripts in each
+  // coverage they take are recorded here instead (their results are left untouched).
+  if (typeof Bun === 'undefined') {
+    try {
+      const Session = require('inspector').Session;
+      const post = Session && Session.prototype.post;
+      if (typeof post === 'function' && !post.__smates) {
+        const noteCoverage = (res) => {
+          try {
+            for (const s of (res && res.result) || []) {
+              if (s && typeof s.url === 'string' && s.url.startsWith('file:')) record('code', s.url);
+            }
+          } catch (_) {}
+        };
+        const wrapped = function (method, params, cb) {
+          if (method === 'Profiler.takePreciseCoverage') {
+            const args = Array.prototype.slice.call(arguments);
+            const i = typeof params === 'function' ? 1 : 2;
+            const done = args[i];
+            if (typeof done === 'function') {
+              args[i] = function (err, res) {
+                if (!err) noteCoverage(res);
+                return done.apply(this, arguments);
+              };
+              return post.apply(this, args);
+            }
+          }
+          return post.apply(this, arguments);
+        };
+        Object.defineProperty(wrapped, '__smates', { value: true });
+        Object.defineProperty(wrapped, 'name', { value: post.name });
+        Session.prototype.post = wrapped;
+      }
+    } catch (_) {}
+  }
+
   process.on('exit', (code) => {
     // Bun has no V8 coverage: the module cache tells which modules were loaded.
     if (typeof Bun !== 'undefined') {

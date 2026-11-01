@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func TestToolDefinitions(t *testing.T) {
@@ -189,7 +191,7 @@ func TestToolErrorsAreToolErrors(t *testing.T) {
 
 func TestToolOutputTruncated(t *testing.T) {
 	f := newFixture(t)
-	writeFile(t, f.repo.Root, "big/huge.txt", strings.Repeat(strings.Repeat("x", 990)+"\n", 40))
+	testutil.Write(t, f.repo.Root, "big/huge.txt", strings.Repeat(strings.Repeat("x", 990)+"\n", 40))
 	tb := newToolbox(f.request(testConfig()))
 	out, err := runTool(t, tb, toolReadFile, map[string]any{"path": "big/huge.txt", "max_lines": 40})
 	if err != nil {

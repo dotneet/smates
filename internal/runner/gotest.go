@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +37,12 @@ func (goTest) Defaults(repo *gitx.Repo, root string) Defaults {
 	}
 }
 
-// Units are package directories.
+// Units are package directories, or with granularity "func" top-level test functions
+// ("dir#TestName", see gofunc.go).
 func (goTest) Units(s *Suite, testFiles []string) []string {
+	if funcGranularity(s) {
+		return funcUnits(s, testFiles)
+	}
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range testFiles {
@@ -50,21 +56,23 @@ func (goTest) Units(s *Suite, testFiles []string) []string {
 }
 
 func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
-	var pkgs []string
-	for _, u := range rc.Units {
-		r := relToSuite(rc.Suite, u)
-		if r == "." {
-			pkgs = append(pkgs, ".")
-		} else {
-			pkgs = append(pkgs, "./"+r)
-		}
+	if funcGranularity(rc.Suite) {
+		return runFuncs(ctx, rc)
 	}
+	return runPackages(ctx, rc, rc.Units, rc.All, "", nil)
+}
+
+// runPackages runs go test on package units (all: on ./..., letting go find them),
+// restricted to the tests matching run when it is set; out also receives the output.
+// When recording, observations are keyed by package unit.
+func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, run string, out io.Writer) (*RunResult, error) {
 	var testArgs []string
-	if rc.All {
+	if all {
 		testArgs = []string{"./..."}
 	} else {
-		testArgs = pkgs
+		testArgs = pkgArgs(rc.Suite, units)
 	}
+	extra := runFlag(run)
 	var env []string
 	if rc.Fresh && !rc.Record {
 		// go test does not recheck files outside the module before reusing a cached
@@ -94,17 +102,18 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		base := suiteEnv(rc.Suite)
-		env = append(env, trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)...)
-		env = append(env, trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)[2:3]...) // PYTHONPATH only
+		env = append(env, childTraceEnv(rc, rc.TraceDir)...)
 	}
 	start := time.Now()
 	// Packages that fail to build never start a test binary; go test reports them as
 	// "FAIL <import path> [build failed]".
 	failed := &buildFailures{}
-	out := *rc
-	out.Stdout = io.MultiWriter(rc.Stdout, failed)
-	code, err := runAll(ctx, &out, testArgs, env)
+	sub := *rc
+	sub.Stdout = io.MultiWriter(rc.Stdout, failed)
+	if out != nil {
+		sub.Stdout = io.MultiWriter(rc.Stdout, failed, out)
+	}
+	code, err := runAll(ctx, &sub, extra, testArgs, env)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
 	if err != nil {
 		return res, err
@@ -124,39 +133,19 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		return res, err
 	}
 	children := trace.GoChildren(procs)
+	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	res.Observations = map[string]*Observation{}
 	for _, r := range runs {
-		unit, ok := pathutil.Rel(rc.Repo.Root, r.Dir)
+		unit, ok := repoDir(rc.Repo.Root, r.Dir)
 		if !ok {
-			if filepath.Clean(r.Dir) != rc.Repo.Root {
-				continue
-			}
-			unit = "."
+			continue
 		}
 		o := res.Observations[unit]
 		if o == nil {
 			o = &Observation{Files: map[string]bool{}}
 			res.Observations[unit] = o
 		}
-		for _, f := range r.Files {
-			// CollectGo returns absolute paths: a directory (listed) ends in a separator,
-			// an existence check in "?".
-			kind := depkey.KindContent
-			switch {
-			case strings.HasSuffix(f, string(filepath.Separator)):
-				kind, f = depkey.KindListing, strings.TrimSuffix(f, string(filepath.Separator))
-			case strings.HasSuffix(f, "?"):
-				kind, f = depkey.KindExistence, strings.TrimSuffix(f, "?")
-			}
-			if rel, ok := pathutil.Rel(rc.Repo.Root, f); ok && !pathutil.IsVendored(rel) {
-				o.AddFile(depkey.Make(kind, rel))
-			} else if kind == depkey.KindListing && filepath.Clean(f) == rc.Repo.Root {
-				o.AddFile(depkey.Listing("."))
-			}
-		}
-		for _, name := range r.Env {
-			o.AddFile(depkey.Env(name))
-		}
+		addTestLog(o, rc.Repo.Root, r.Files, r.Env)
 		for f := range children[r.Dir] {
 			o.AddFile(f)
 		}
@@ -166,9 +155,10 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.Status = st
 		}
 	}
+	addCoverPkgDeps(ctx, rc, res)
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		modDir, mod := findModule(rc.Repo.Root, rc.Dir())
-		for _, u := range rc.Units {
+		for _, u := range units {
 			ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
 			if ip == "" {
 				continue
@@ -182,6 +172,82 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// pkgArg is the go test argument naming the package directory unit (repo-relative).
+func pkgArg(s *Suite, unit string) string {
+	if r := relToSuite(s, unit); r != "." {
+		return "./" + r
+	}
+	return "."
+}
+
+// pkgArgs is pkgArg of each package directory unit.
+func pkgArgs(s *Suite, units []string) []string {
+	var out []string
+	for _, u := range units {
+		out = append(out, pkgArg(s, u))
+	}
+	return out
+}
+
+// runFlag is the go test flag restricting a run to the tests matching run (none if "").
+func runFlag(run string) []string {
+	if run == "" {
+		return nil
+	}
+	return []string{"-run", run}
+}
+
+// repoDir is the repo-relative form of the absolute package directory dir ("." for
+// the root); ok is false when dir is outside the repository.
+func repoDir(root, dir string) (string, bool) {
+	if rel, ok := pathutil.Rel(root, dir); ok {
+		return rel, true
+	}
+	if filepath.Clean(dir) == root {
+		return ".", true
+	}
+	return "", false
+}
+
+// childTraceEnv is the environment tracing the Node and Python processes a Go test
+// starts, writing their traces under dir.
+func childTraceEnv(rc *RunContext, dir string) []string {
+	base := suiteEnv(rc.Suite)
+	node := trace.NodeEnv(dir, rc.Repo.Root, rc.Shims(), base)
+	return slices.Concat(node, trace.PythonEnv(dir, rc.Repo.Root, rc.Shims(), base)[2:3]) // PYTHONPATH only
+}
+
+// lastMessage keeps the last trace.MaxMessage bytes of a test's output.
+func lastMessage[T string | []byte](out T) T {
+	if len(out) > trace.MaxMessage {
+		return out[len(out)-trace.MaxMessage:]
+	}
+	return out
+}
+
+// addTestLog adds what a Go test log recorded (absolute paths from trace.ParseTestLog:
+// a directory that was listed ends in a separator, an existence check in "?"; and the
+// environment variables looked up) to an observation.
+func addTestLog(o *Observation, root string, files, env []string) {
+	for _, f := range files {
+		kind := depkey.KindContent
+		switch {
+		case strings.HasSuffix(f, string(filepath.Separator)):
+			kind, f = depkey.KindListing, strings.TrimSuffix(f, string(filepath.Separator))
+		case strings.HasSuffix(f, "?"):
+			kind, f = depkey.KindExistence, strings.TrimSuffix(f, "?")
+		}
+		if rel, ok := pathutil.Rel(root, f); ok && !pathutil.IsVendored(rel) {
+			o.AddFile(depkey.Make(kind, rel))
+		} else if kind == depkey.KindListing && filepath.Clean(f) == root {
+			o.AddFile(depkey.Listing("."))
+		}
+	}
+	for _, name := range env {
+		o.AddFile(depkey.Env(name))
+	}
 }
 
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
@@ -224,10 +290,7 @@ func (b *buildFailures) collect(line []byte) {
 			if b.output == nil {
 				b.output = map[string]string{}
 			}
-			out := b.pending
-			if len(out) > trace.MaxMessage {
-				out = out[len(out)-trace.MaxMessage:] // the failures and panics are at the end
-			}
+			out := lastMessage(b.pending) // the failures and panics are at the end
 			b.output[string(m[2])] = trace.JoinMessage(b.output[string(m[2])], string(out))
 		}
 		b.pending = b.pending[:0]
@@ -330,11 +393,15 @@ func modulePath(gomod string) string {
 }
 
 // runAll runs go test without the "./..." expansion trick: go accepts many package
-// arguments, chunked if needed.
-func runAll(ctx context.Context, rc *RunContext, args []string, env []string) (int, error) {
+// arguments, chunked if needed; extra flags go before them.
+func runAll(ctx context.Context, rc *RunContext, extra, args []string, env []string) (int, error) {
 	worst := 0
-	for _, b := range chunk(args) {
-		argv, err := rc.CommandLine(nil, b)
+	for i, b := range chunk(args) {
+		argv, err := rc.CommandLine(extra, b)
+		if err != nil {
+			return 1, err
+		}
+		env, err := trace.SeparateV8(env, rc.TraceDir, i)
 		if err != nil {
 			return 1, err
 		}
@@ -361,4 +428,122 @@ func goExecWrapper(rc *RunContext) (string, error) {
 		return "", err
 	}
 	return link, nil
+}
+
+// addCoverPkgDeps adds the source files of the -coverpkg packages to every observation
+// of res. With -coverpkg, go test builds the packages it names into every test binary of
+// the invocation: one that does not compile fails them all, whatever they import. That
+// holds for function units too: they run with the user's command when not recording.
+func addCoverPkgDeps(ctx context.Context, rc *RunContext, res *RunResult) {
+	pats := coverPkgs(rc)
+	if len(pats) == 0 || res == nil || len(res.Observations) == 0 {
+		return
+	}
+	files, err := goPackageFiles(ctx, rc, pats)
+	if err != nil {
+		res.Warnings = append(res.Warnings, "could not list the -coverpkg packages ("+err.Error()+"); tests depend only on what they import")
+	}
+	for _, o := range res.Observations {
+		for _, f := range files {
+			o.AddFile(f)
+		}
+	}
+}
+
+// coverPkgs returns the package patterns of a -coverpkg flag on the suite command, the
+// arguments passed through or GOFLAGS (nil when there is none).
+func coverPkgs(rc *RunContext) []string {
+	words, _ := SplitWords(rc.Suite.Command)
+	words = append(words, rc.ExtraArgs...)
+	words = append(words, strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))...)
+	var pats []string
+	for i, w := range words {
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		if flag != "coverpkg" || w == flag {
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(words) {
+				continue
+			}
+			value = words[i+1]
+		}
+		for _, p := range strings.Split(value, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				pats = append(pats, p)
+			}
+		}
+	}
+	return pats
+}
+
+// Build flags that change which files go test compiles, forwarded to go list. Others
+// (test flags, -exec, -coverpkg, -count) are not go list's and are left out.
+var (
+	goListValueFlags = map[string]bool{"tags": true, "mod": true, "modfile": true, "overlay": true}
+	goListBoolFlags  = map[string]bool{"race": true, "msan": true, "asan": true}
+)
+
+// goListFlags returns the build flags of GOFLAGS, the suite command and the arguments
+// passed through (in that order: later ones win, as with go test) that go list needs to
+// see the files go test builds.
+func goListFlags(rc *RunContext) []string {
+	words := strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))
+	cmd, _ := SplitWords(rc.Suite.Command)
+	words = append(append(words, cmd...), rc.ExtraArgs...)
+	var out []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "--" || w == "-args" || w == "--args" {
+			break // what follows goes to the test binary
+		}
+		if !strings.HasPrefix(w, "-") {
+			continue
+		}
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		switch {
+		case goListValueFlags[flag] && hasValue:
+			out = append(out, "-"+flag+"="+value)
+		case goListValueFlags[flag] && i+1 < len(words):
+			out = append(out, "-"+flag+"="+words[i+1])
+			i++
+		case goListBoolFlags[flag]:
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// goPackageFiles lists the Go source files (repository-relative) of the packages
+// matching patterns, resolved in the suite directory. Files excluded by build
+// constraints count too (minus tests): go test may build them under tags or a platform
+// this listing cannot see, and listing too many only selects more tests.
+func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]string, error) {
+	const format = "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}{{range .IgnoredGoFiles}}|{{.}}{{end}}"
+	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", format, "--")
+	args = append(args, patterns...)
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = rc.Dir()
+	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
+	// flags) must not reach go list.
+	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, "|")
+		for _, name := range parts[1:] {
+			if strings.HasSuffix(name, "_test.go") || !strings.HasSuffix(name, ".go") {
+				continue // IgnoredGoFiles lists tests too; -coverpkg builds no test files
+			}
+			if rel, ok := pathutil.Rel(rc.Repo.Root, filepath.Join(parts[0], name)); ok && !pathutil.IsVendored(rel) {
+				files = append(files, rel)
+			}
+		}
+	}
+	return files, nil
 }

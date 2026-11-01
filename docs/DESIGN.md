@@ -2,13 +2,14 @@
 
 smates ("smart test selection") selects the tests a change can actually affect, for
 TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go and
-Python (pytest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
+Python (pytest, unittest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
 with no runtime dependencies; language shims (a Node preload, a Python `sitecustomize` and
 pytest plugin, reporters for vitest and jest) are embedded and extracted at run time.
 
 ## 1. Core idea: per-test content fingerprints over observed inputs
 
-For every test unit `T` (a test file; a package directory for Go) smates stores the
+For every test unit `T` (a test file; a package directory for Go, or a top-level test
+function with `granularity: func`, see "Go test functions" below) smates stores the
 inputs it was observed to depend on, with the content hash (git blob SHA-1) each had when
 `T` last ran, and whether `T` passed:
 
@@ -82,6 +83,7 @@ Dependency keys:
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
+| `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
@@ -161,10 +163,10 @@ explain the changes their tests depend on (`Input.Others`), so a run limited to 
 suites selects what a run over every suite selects for them; and a change that only
 suites left out would run for under the orphan policy (it is under their root, not under
 the root of a picked suite, and no suite rooted at the repository root is picked) is not
-an orphan of the run either (`selector.Owned`): the job that runs those suites handles
+an orphan of the run either (`selector.Ownership.Owned`): the job that runs those suites handles
 it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
 the snapshot for them: a file only its suites own gets its hash; a file the suites left
-out also own (or own alone) gets a marker `?<hash>@<suites>` (`selector.Marker`), the
+out also own (or own alone) gets a marker `?<hash>@<suites>` (`state.MarkerSnap`), the
 content these suites saw, unless its entry already equals the current hash (or holds a
 content hash and only suites left out own it). A later `--suite` run finds a marked
 file unchanged only when every suite it runs saw that content; a run of other suites,
@@ -197,6 +199,15 @@ recorded entry yet; so is everything without a recorded state, where `D(T)` hold
 4. **The orphan policy** (default without agent: run the suites the orphan can affect, by
    suite root).
 
+A calling agent (a coding agent running smates) can take the place of steps 2 and 3:
+`smates select --format json` reports `orphan_candidates` (status, the tests that name
+each file from step 1's `selector.Mentions`, the suites `OrphanAll` would run, the
+handling), `--add suite:unit|test-file` adds tests with reason `caller` (through
+`Result.Apply`, so it can only select), and `--orphans=agent|full|skip` overrides the
+policy for one run. `skip` is the one explicit opt-out: the orphans are recorded as
+handled `skipped` ("skipped by caller" in the summary and `smates stats`). Step 1 still
+runs, and nothing the caller passes can deselect a test.
+
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change).
 
@@ -217,7 +228,18 @@ can alter test results.
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
+| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
+| go test, `granularity: func` | top-level test function | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`) + declarations of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`) |
+
+Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
+the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
+`roots`/`testPathIgnorePatterns`, vitest `include`/`exclude`/`dir` and projects united
+into one suite, pytest `testpaths`/`python_files`) into matchers relative to the
+config's base directory, and falls back to its default globs, with a `doctor` warning,
+when the config is not literal. Derived patterns do not mark the suite narrowed: a full
+run still lets the runner discover its tests, so an approximation (a converted
+extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
@@ -226,6 +248,23 @@ without a test of its own belongs to its nearest traced ancestor that has one; p
 under a Go test binary belong to that package. Helpers of the runner itself that execute
 repository code (a server from global setup) are global dependencies; helpers that only
 read files (crawlers, transformers) are ignored.
+
+**Coverage tools sharing the same mechanisms.** V8 precise coverage is one per isolate:
+vitest's v8 provider and jest's v8 coverage take it through `node:inspector` and then stop
+it, so the `NODE_V8_COVERAGE` file of such a worker lists almost nothing; the Node shim
+wraps `inspector.Session.prototype.post` and records the scripts of every
+`Profiler.takePreciseCoverage` result (left untouched). c8 adopts a set
+`NODE_V8_COVERAGE` as its temporary directory and empties it on start (`--clean`), so
+every runner invocation gets its own `v8`, `v8-1`, … directory. A `NODE_V8_COVERAGE` the
+user set is replaced while recording and the files are copied there afterwards (never
+overwriting); one inherited from an outer smates run is not the user's. The preload lives
+under `shims/node_modules/` so coverage reports (which skip `node_modules`) never list it.
+Python: smates takes a `sys.monitoring` tool id of its own (3, 4, 2, 5; coverage.py's
+sysmon core takes 1 and moves up), or chains to an existing `sys.setprofile` function;
+the pytest plugin switches to a `session:end` context (attributed to nothing) once the
+test loop is over, before pytest-cov reads every `--cov` module for its report. Go:
+`-coverpkg` builds the named packages into every test binary of the invocation, so their
+source files (`go list -find`) are added to every package's dependencies.
 
 **Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
 analyzed from their command line when the child starts (`child_process.*` in Node,
@@ -250,6 +289,44 @@ and `os.getenv`) records the name with the nearest repository frame as `by`;
 same instruction are the copy. Go: `getenv` lines of the test log; they carry no stack,
 so the lookup `t.Setenv` makes to restore a variable later counts as a read (the test
 depends on the outer value of a variable it sets: more runs, never fewer).
+
+**Go test functions.** With `granularity: func` a unit is `dir#Name` for every top-level
+`TestXxx(*testing.T)`, `FuzzXxx(*testing.F)` and `ExampleXxx()` found by parsing the
+package's `_test.go` files (a file that does not parse makes the package itself a unit).
+Recording builds the package's test binary once with `-cover -coverpkg=` set to the
+main-module packages it links (`go list -deps -test`), lists its tests (`-test.list`),
+and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
+profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
+directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
+and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`).
+Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
+binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
+(blocks placed by `//line` in a file that is not there: every Go file of the package);
+the declarations (`f.go#decls`) of every Go file of the static closure, which is what
+makes this sound: coverage only sees statements inside function bodies, so constants,
+variable initializers, types, signatures and method sets are hashed separately (as
+tokens, so formatting does not count) and a change to them selects every function that
+could see them, while an edit inside a body selects only the functions that executed
+it; the content of Go files of packages the binary does not link (a test that runs
+`go run ../cmd/tool`); the content of its own test file, of test files declaring a name
+its file mentions (transitively) and of test files with `TestMain`, `init` or
+package-level variables initialized by a call, and the declarations of the package's
+other test files (without their test functions, so adding a test does not select its
+neighbours); the listing of the package directory (a new file selects every function
+of the package); and everything the package unit has besides (test log reads and
+environment variables, non-Go files of the closure, `go.mod`/`go.sum`, children). A
+missing profile makes every file of the closure a content dependency. When per-function
+recording is impossible (the binary does not build with coverage, `go list` fails, the
+command is not a plain `go test` or passes `-run`, `-skip`, `-bench`, `-fuzz`, `-c`,
+`-o`), the package is recorded through the package path with `-run` restricted to the
+selected functions, and each function gets the package's observation with every Go file
+of its closure as content: package granularity under function IDs, with a warning.
+Without recording, selected functions run with `go test -run '^(A|B)$'` (one pattern
+for as many packages as fit in 16 KiB; a function of the same name in another of those
+packages runs too; a package that alone needs more runs whole), and outcomes come from
+the top-level `--- FAIL/PASS/SKIP` lines (or `-json` events) before each package's
+summary line: a package that passed passes all its functions, a failed build fails them
+all, other functions of a failed package are unknown (inferred).
 
 **Python module-level state.** pytest imports a module once per process, and caches
 (`functools.cache`) run once: a read made then belongs to the module that made it
@@ -398,6 +475,57 @@ with `smates state merge`, which keeps the newer entry of each test but unions o
 histories and flake evidence (flip counts take the maximum, since both sides usually share
 a past). Outcome histories and flake evidence are optional fields, so state files from
 before them still load and the format version is unchanged.
+
+**Worktrees.** The state is per working tree by default. A linked worktree (its git dir
+differs from the common dir) without a state is seeded on first use (`stateStore` in
+`internal/cli/statestore.go`): from the main worktree's state file (the first entry of
+`git worktree list --porcelain`), else from the remote state ref, fetched under the
+hook's once-an-hour stamp (refs live in the common dir, so one worktree's fetch serves
+all). Per-test entries are valid in any tree (each one is re-checked against its own
+dependency hashes), but the full-tree snapshot is not: the snapshot of another branch
+would report that branch's differences as orphans here. So the seeded snapshot is kept
+only when its commit is an ancestor of HEAD; otherwise it is dropped with its commit and
+time, and changed files come from the merge base with the default branch, as for a state
+without a snapshot. (No snapshot time makes the hook treat the state as stale and merge
+in a newer remote one, as for any state without a snapshot.) A `.state.json.gz.seeded`
+marker records the source (for `state show`) and keeps a cleared state from being seeded
+again; `state_seed: false` / `SMATES_NO_STATE_SEED` turn it off.
+
+With `state_shared: true` the state is split by what it describes. The entries, the
+agent cache and the run records describe the code and are shared: one file,
+`<git common dir>/smates/state.json.gz`. The snapshot (with its commit and time)
+describes one working tree and stays in it: `.smates/state.snapshot.json.gz`, read in
+place of the shared file's snapshot. A worktree without one has none (no files, commit
+or time), and judges changed files against the default branch.
+
+Loading reads the shared file once and decodes it twice: the process's working copy and
+`base`, what it started from. (Two reads without the lock could see two versions; a
+`base` newer than the working copy would make an entry another worktree just updated
+look changed by this process, and the save would put the older copy back.) Writes are
+load-merge-save under an exclusive lock file (`O_CREATE|O_EXCL`, portable to every OS
+and file system git runs on; a lock older than two minutes is stale, since a save takes
+seconds). Inside the lock the shared file is re-read and `State.MergeChanges(base, ours)`
+applies this process's changes, a three-way merge per entry:
+
+- an entry ours left unchanged keeps the disk's version (another worktree may have
+  updated it), and stays deleted when the disk no longer has it (`state clear`, or
+  another process's full run pruned it);
+- an entry only ours added or changed replaces the disk's outright (so `flaky --clear`
+  is not undone);
+- an entry both changed is combined like `state merge` (newer `At` wins, histories
+  unioned); flake evidence one side cleared stays cleared unless the other side
+  recorded a flip after `base` (new evidence);
+- an entry ours deleted (a full run drops units that no longer exist) is deleted unless
+  the disk's changed since `base`. A test that exists only on another branch's worktree
+  is thus pruned by a full run here and recorded again by the next run there.
+
+Agent answers and run records this process added are added; ones it only inherited are
+not, so a cleared state does not get them back. After a save, the working copy takes
+the merged entries and `base` is re-read under the lock. The shared file also carries
+the last writer's snapshot, so it stays a complete state for `state push` (which in
+shared mode pushes the entries with this worktree's snapshot) and for older smates
+versions. `state pull` in shared mode merges into the shared entries instead of
+replacing them.
 
 The state also keeps a short record of each `smates run` (`runs`: selection mode, units
 selected/total, recorded duration of the skipped units, exit code, shadow misses, orphan

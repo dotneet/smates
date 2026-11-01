@@ -31,21 +31,22 @@ suites:
       - tests: ["."]
         deps: &core
           - "cmd/**"
+          - "docs/*.go"
           - "internal/{agent,cli,config,depkey,detect,gitx,hints,pathutil,selector,state}/**"
           - "internal/summary/*.go"
           - "internal/static/*.go"
           - "internal/static/host/**"
           - "internal/trace/*.go"
-          - "internal/runner/{runner,common,custom,preflight,procgroup*}.go"
+          - "internal/runner/{runner,common,custom,preflight,procgroup*,discover}.go"
       - tests: ["."]
         # vitest, jest, node --test and bun.
-        deps: &js ["internal/runner/node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
+        deps: &js ["internal/runner/node.go", "internal/runner/discover_node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
       - tests: ["."]
         deps: &vitest ["internal/trace/shims/vitest-reporter.mjs"]
       - tests: ["."]
-        deps: &pytest ["internal/runner/pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
+        deps: &pytest ["internal/runner/pytest.go", "internal/runner/discover_pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
       - tests: ["."]
-        deps: &gotest ["internal/runner/gotest.go", "internal/static/golang/**"]
+        deps: &gotest ["internal/runner/{gotest,gofunc,gofunc_parse,gofunc_select,gofunc_flags,gofunc_record,gofunc_output}.go", "internal/static/golang/**"]
       - tests: ["."]
         deps: &polyglot ["e2e/fixtures/polyglot/**"]
 
@@ -102,6 +103,24 @@ suites:
       - { tests: ["."], deps: *pytest }
       - { tests: ["."], deps: ["e2e/fixtures/{vitest-npm,python-uv}/**"] }
 
+  # Coverage tools next to the runners (vitest --coverage, c8, node --test coverage,
+  # pytest-cov with xdist and sysmon, go test -cover): both smates' trace and the tools'
+  # reports must survive.
+  - name: e2e-coverage-tools
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: coverage-tools }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *vitest }
+      - { tests: ["."], deps: *pytest }
+      - { tests: ["."], deps: *gotest }
+      - { tests: ["."], deps: ["e2e/fixtures/coverage-tools/**"] }
+
   # Every fixture not named above: a new fixture runs here until it gets a suite.
   - name: e2e-others
     runner: go
@@ -109,14 +128,15 @@ suites:
     command: go test -tags e2e -timeout 40m
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
-    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv" }
+    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv,-coverage-tools" }
     rules:
       - { tests: ["."], deps: *core }
       - { tests: ["."], deps: *js }
       - { tests: ["."], deps: *vitest } # pnpm-monorepo
       - { tests: ["."], deps: *gotest }
-      - { tests: ["."], deps: *pytest } # env (Python through a custom runner)
-      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,node-test,pnpm-monorepo}/**"] }
+      - { tests: ["."], deps: *pytest } # env (Python through a custom runner), python-unittest
+      - { tests: ["."], deps: ["internal/runner/unittest.go"] } # python-unittest
+      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,node-test,pnpm-monorepo,python-unittest}/**"] }
 
 # Release packaging and CI files that no test reads; action.yml is covered by the
 # action job in .github/workflows/ci.yml.

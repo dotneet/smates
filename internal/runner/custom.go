@@ -46,5 +46,6 @@ func (custom) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		return res, nil
 	}
 	res.Observations, res.Warnings, res.ReadsBy, err = observeAll(rc, code, traceOptions{})
+	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	return res, err
 }

@@ -34,6 +34,28 @@ type Adapter interface {
 	Run(ctx context.Context, rc *RunContext) (*RunResult, error)
 }
 
+// CommandDefaulter is implemented by adapters whose defaults depend on the configured
+// command (unittest: the discovery start directory and pattern name the test files).
+// Resolve then calls DefaultsFor instead of Defaults; command is "" when none is
+// configured.
+type CommandDefaulter interface {
+	DefaultsFor(repo *gitx.Repo, root, command string) Defaults
+}
+
+// StaticMapper is implemented by adapters whose units depend on less than the static
+// import closure of their test files (Go test functions): MapStatic returns the
+// dependency keys of unit given that closure.
+type StaticMapper interface {
+	MapStatic(s *Suite, unit string, closure []string) []string
+}
+
+// Commander is implemented by adapters that run something other than the suite
+// command with the units appended; Commands returns what Run would execute without
+// recording (for --dry-run).
+type Commander interface {
+	Commands(rc *RunContext) ([][]string, error)
+}
+
 // Defaults are adapter-provided defaults.
 type Defaults struct {
 	Tests   []string // globs relative to the suite root
@@ -49,6 +71,17 @@ type Suite struct {
 	// Narrowed is set when smates.yml configures tests or exclude: the runner's own
 	// discovery would then run a different set of files, so units are always passed.
 	Narrowed bool
+	// Discovered selects test files from the runner's own configuration (see
+	// Discovery); when set it replaces Tests.
+	Discovered []Matcher
+	// TestsSource says where the test patterns come from: SourceConfig, SourceDefaults
+	// or the runner configuration they were read from.
+	TestsSource string
+	// DiscoveryWarning says why the runner configuration could not be read.
+	DiscoveryWarning string
+	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
+	// units are found in the test files' contents.
+	RepoRoot string
 }
 
 // RunContext carries everything an adapter needs to run a suite.
@@ -77,6 +110,9 @@ type RunContext struct {
 	IsTest func(string) bool
 	// UnitOf maps a test file to its unit ID ("" if not a test).
 	UnitOf func(string) string
+	// Known returns the dependency keys a unit is known to have before it runs (static
+	// closure, inputs, rules; nil when unknown).
+	Known func(unit string) []string
 }
 
 // RunResult is the outcome of running a suite.
@@ -137,26 +173,56 @@ func Names() []string {
 func Resolve(repo *gitx.Repo, cs []config.Suite) ([]*Suite, error) {
 	var out []*Suite
 	for _, c := range cs {
-		a, ok := Get(c.Runner)
-		if !ok {
-			return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
-		}
-		d := a.Defaults(repo, c.Root)
-		s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0}
-		if len(s.Tests) == 0 {
-			s.Tests = d.Tests
-		}
-		s.Exclude = append(append([]string{}, d.Exclude...), s.Exclude...)
-		s.Inputs = append(append([]string{}, d.Inputs...), s.Inputs...)
-		if s.Command == "" {
-			s.Command = d.Command
-		}
-		if s.Command == "" {
-			return nil, fmt.Errorf("suite %q: no command configured and none could be inferred", c.Name)
+		s, err := NewSuite(repo, c)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// NewSuite applies adapter defaults, and the test files the runner's configuration
+// describes, to a configured suite.
+func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
+	a, ok := Get(c.Runner)
+	if !ok {
+		return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
+	}
+	var d Defaults
+	if cd, ok := a.(CommandDefaulter); ok {
+		d = cd.DefaultsFor(repo, c.Root, c.Command)
+	} else {
+		d = a.Defaults(repo, c.Root)
+	}
+	s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
+	if repo != nil {
+		s.RepoRoot = repo.Root
+	}
+	if s.Command == "" {
+		s.Command = d.Command
+	}
+	if s.Command == "" {
+		return nil, fmt.Errorf("suite %q: no command configured and none could be inferred", c.Name)
+	}
+	exclude := d.Exclude
+	if len(s.Tests) == 0 {
+		s.Tests = d.Tests
+		s.TestsSource = SourceDefaults
+		if dc, ok := a.(discoverer); ok && repo != nil {
+			disc := dc.Discover(repo, s)
+			s.DiscoveryWarning = disc.Warning
+			if len(disc.Matchers) > 0 {
+				s.Discovered, s.TestsSource, s.Tests = disc.Matchers, disc.Source, nil
+				if disc.Exclude != nil {
+					exclude = disc.Exclude
+				}
+			}
+		}
+	}
+	s.Exclude = append(append([]string{}, exclude...), s.Exclude...)
+	s.Inputs = append(append([]string{}, d.Inputs...), s.Inputs...)
+	return s, nil
 }
 
 // TestFiles returns the repo-relative test files of the suite among files.
@@ -177,7 +243,18 @@ func (s *Suite) IsTestFile(f string) bool {
 		return false
 	}
 	rel := pathutil.RelTo(f, s.Root)
-	return pathutil.Match(s.Tests, rel) && !pathutil.Match(s.Exclude, rel)
+	if pathutil.Match(s.Exclude, rel) {
+		return false
+	}
+	if len(s.Discovered) > 0 {
+		for i := range s.Discovered {
+			if s.Discovered[i].Match(f) {
+				return true
+			}
+		}
+		return false
+	}
+	return pathutil.Match(s.Tests, rel)
 }
 
 // InputMatch reports whether a repo-relative path matches the suite's inputs.
@@ -214,12 +291,21 @@ func (rc *RunContext) RelArgs(prefix string) []string {
 	return out
 }
 
+// CommandError is a suite command that cannot be parsed (a configuration error).
+type CommandError struct {
+	Suite string
+	Err   error
+}
+
+func (e *CommandError) Error() string { return fmt.Sprintf("suite %q command: %v", e.Suite, e.Err) }
+func (e *CommandError) Unwrap() error { return e.Err }
+
 // CommandLine builds argv from the suite command: "{tests}" is replaced by testArgs,
 // otherwise testArgs are appended; extra args go before the tests.
 func (rc *RunContext) CommandLine(extra []string, testArgs []string) ([]string, error) {
 	words, err := SplitWords(rc.Suite.Command)
 	if err != nil {
-		return nil, fmt.Errorf("suite %q command: %w", rc.Suite.Name, err)
+		return nil, &CommandError{Suite: rc.Suite.Name, Err: err}
 	}
 	var argv []string
 	replaced := false

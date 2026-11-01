@@ -37,6 +37,12 @@ type Config struct {
 	Agent    AgentConfig `yaml:"agent"`
 	// State: path of the state file, relative to the repository root.
 	State string `yaml:"state"`
+	// StateSeed: in a linked git worktree without a state, start from the main
+	// worktree's state (or the remote one) instead of cold (default true).
+	StateSeed *bool `yaml:"state_seed"`
+	// StateShared: keep the per-test entries in one file under the git common
+	// directory, shared by all worktrees; each worktree keeps its own snapshot.
+	StateShared bool `yaml:"state_shared"`
 	// FullRunBranches: branches on which `smates run` runs everything (default: the default branch).
 	FullRunBranches []string `yaml:"full_run_branches"`
 	// Flaky configures what happens to tests known to be flaky.
@@ -82,8 +88,14 @@ type Suite struct {
 	Isolate *bool `yaml:"isolate"`
 	// RecordJobs bounds how many per-file processes run at once while recording with
 	// one process per file (bun always; jest/vitest with isolate). Default: 1 for bun
-	// (bun test runs files one after another), the CPU count otherwise.
+	// (bun test runs files one after another), the CPU count otherwise. With Go
+	// granularity "func", it bounds how many test functions of one package run at once
+	// while recording (default 1, as go test runs them one after another).
 	RecordJobs int `yaml:"record_jobs"`
+	// Granularity of Go units: "package" (default) or "func" (one unit per top-level
+	// test function, selected by per-test coverage; recording runs one process per
+	// function).
+	Granularity string `yaml:"granularity"`
 	// Static enables import-graph analysis (default true).
 	Static *bool `yaml:"static"`
 	// Junit: optional path (relative to Root) of a JUnit XML report the command writes;
@@ -482,6 +494,19 @@ func (c *Config) Normalize() error {
 		if err := checkEnvPatterns(fmt.Sprintf("suite %q", s.Name), s.EnvIgnore, s.EnvTrack); err != nil {
 			return err
 		}
+		switch s.Granularity {
+		case "", GranularityPackage:
+		case GranularityFunc, "function":
+			if s.Runner != "go" {
+				return fmt.Errorf("suite %q: granularity %q is only supported by the go runner", s.Name, s.Granularity)
+			}
+			s.Granularity = GranularityFunc
+		default:
+			return fmt.Errorf("suite %q: granularity must be package or func (got %q)", s.Name, s.Granularity)
+		}
+		if s.RecordJobs < 0 {
+			return fmt.Errorf("suite %q: record_jobs must not be negative (got %d)", s.Name, s.RecordJobs)
+		}
 	}
 	for i := range c.Suites {
 		if err := checkDependencies(&c.Suites[i], names); err != nil {
@@ -490,6 +515,12 @@ func (c *Config) Normalize() error {
 	}
 	return nil
 }
+
+// Go unit granularities (Suite.Granularity).
+const (
+	GranularityPackage = "package" // one unit per package directory
+	GranularityFunc    = "func"    // one unit per top-level test function
+)
 
 // Bool returns *b or def.
 func Bool(b *bool, def bool) bool {

@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
@@ -577,12 +579,12 @@ func TestOwned(t *testing.T) {
 		{"api/a.py", 3, true},   // every suite selected
 	}
 	for _, c := range cases {
-		if got := Owned(c.f, all, c.n); got != c.want {
+		if got := NewOwnership(all[:c.n], all[c.n:]).Owned(c.f); got != c.want {
 			t.Errorf("Owned(%q, n=%d) = %v, want %v", c.f, c.n, got, c.want)
 		}
 	}
 	// The root suite selected alone owns every file.
-	if !Owned("api/a.py", []*runner.Suite{mk("."), mk("api")}, 1) {
+	if !NewOwnership([]*runner.Suite{mk(".")}, []*runner.Suite{mk("api")}).Owned("api/a.py") {
 		t.Error("root suite owns api/a.py")
 	}
 }
@@ -834,6 +836,23 @@ func TestReferences(t *testing.T) {
 	if _, ex := r.References(g, []string{"fixtures/users_seed.sql"}); !reflect.DeepEqual(ex, []string{"fixtures/users_seed.sql"}) {
 		t.Errorf("qualified match: %v", ex)
 	}
+	// Mentions also lists the tests already selected (References only adds the others),
+	// with the file that names the orphan.
+	ms, _ := r.Mentions(g, []string{"fixtures/users_seed.sql", "conf/routes.yaml"})
+	var mgot []string
+	for _, m := range ms {
+		mgot = append(mgot, fmt.Sprintf("%s %s %s %t", m.Test, m.Orphan, m.File, m.Qualified))
+	}
+	if want := []string{
+		"t/test_users.py fixtures/users_seed.sql t/test_users.py true",
+		"t/test_other.py conf/routes.yaml t/helper.py false",
+		"t/test_sel.py fixtures/users_seed.sql t/test_sel.py false",
+	}; !reflect.DeepEqual(mgot, want) {
+		t.Errorf("mentions:\n%s\nwant\n%s", strings.Join(mgot, "\n"), strings.Join(want, "\n"))
+	}
+	if adds := r.ReferenceAdditions(ms); len(adds) != 2 || adds[0].Test != "t/test_users.py" || adds[1].Test != "t/test_other.py" {
+		t.Errorf("reference additions from mentions: %+v", adds)
+	}
 	if a, e := r.References(nil, []string{"x"}); a != nil || e != nil {
 		t.Error("nil graph")
 	}
@@ -1011,6 +1030,85 @@ func TestExistenceProbe(t *testing.T) {
 	}
 }
 
+// Go test functions (granularity func) depend on the bodies they executed and on the
+// declarations of the rest of their package's closure.
+func TestSelectGoFuncUnits(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.22\n",
+		"p/a.go":      "package p\n\nconst K = 1\n\nfunc A() int { return K }\n",
+		"p/b.go":      "package p\n\nfunc B() int { return 2 }\n",
+		"p/a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+		"p/b_test.go": "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n",
+	})
+	s := suite(t, config.Suite{Runner: "go", Tests: []string{"**/*_test.go"}, Inputs: []string{"go.mod"}, Granularity: config.GranularityFunc})
+	s.RepoRoot = f.dir
+	f.suites = []*runner.Suite{s}
+	repo := &gitx.Repo{Root: f.dir}
+	sel := func(st *state.State, all bool) *Result {
+		return f.sel(st, func(in *Input) { in.Repo, in.All = repo, all })
+	}
+	st := state.New()
+	res := sel(st, true)
+	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB"}) {
+		t.Fatalf("units %v", got)
+	}
+	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
+		t.Errorf("known %v", known)
+	}
+	if files := res.Suites[0].Files["p#TestA"]; !reflect.DeepEqual(files, []string{"p/a_test.go"}) {
+		t.Errorf("files %v", files)
+	}
+	executed := map[string]string{"p#TestA": "p/a.go", "p#TestB": "p/b.go"}
+	obs := map[string]*runner.Observation{}
+	for u, f := range executed {
+		obs[u] = &runner.Observation{Files: map[string]bool{f: true}, Status: state.Pass}
+	}
+	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
+	st.Files = map[string]string(f.snap())
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+		t.Fatalf("unchanged: %v", got)
+	}
+
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}) {
+		t.Errorf("body: %v", got)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged}) {
+		t.Errorf("declarations: %v", got)
+	}
+	for _, tt := range res.Suites[0].Tests {
+		if tt.ID == "p#TestB" && (!reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) || tt.Via["p/a.go#decls"] != ViaImport) {
+			t.Errorf("TestB changed %v via %v", tt.Changed, tt.Via)
+		}
+	}
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n")
+
+	// A new test file in the package selects every function (and its own as new).
+	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew}) {
+		t.Errorf("new file: %v", got)
+	}
+}
+
+func TestCoversDeclarations(t *testing.T) {
+	deps := map[string]bool{"p/a.go#decls": true}
+	if got := depkey.Covers(deps, "p/a.go", false); got != depkey.CoverDecls {
+		t.Errorf("Covers = %q", got)
+	}
+	// Without a recording, a changed file changes its declarations.
+	tt := &Test{}
+	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, map[string]bool{"p/a.go": true})
+	if !tt.Selected || !reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) {
+		t.Errorf("diff mode: %+v", tt)
+	}
+}
+
 func TestUntested(t *testing.T) {
 	mk := func(runner_, root string, static bool) *Suite {
 		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
@@ -1061,7 +1159,7 @@ func TestSelectLegacyConfigHash(t *testing.T) {
 	st := f.record(nil, nil)
 	blob := f.snap()["smates.yml"]
 	for _, e := range st.Suites["web"].Tests {
-		delete(e.Deps, ConfigKey("smates.yml"))
+		delete(e.Deps, depkey.Config("smates.yml"))
 		e.Deps["smates.yml"] = blob
 	}
 	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
@@ -1100,27 +1198,6 @@ func TestSelectConfigReadByTest(t *testing.T) {
 	}
 }
 
-func TestSnapshotHash(t *testing.T) {
-	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
-	for f, want := range map[string]struct {
-		h  string
-		ok bool
-	}{"a": {"h1", true}, "b": {"", false}, "c": {"", false}, "d": {"", false}} {
-		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
-			t.Errorf("%s: %q %v", f, h, ok)
-		}
-	}
-}
-
-func TestConfigKeyDisplay(t *testing.T) {
-	if got := Covers(map[string]bool{ConfigKey("smates.yml"): true}, "smates.yml", false); got != "content" {
-		t.Errorf("Covers via the settings key: %q", got)
-	}
-	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
-		t.Error("DisplayKey")
-	}
-}
-
 func TestSelectMarksUnrecordedSuites(t *testing.T) {
 	f := webFixture(t)
 	st := f.record(nil, nil)
@@ -1133,29 +1210,39 @@ func TestSelectMarksUnrecordedSuites(t *testing.T) {
 	}
 }
 
-func TestMarkers(t *testing.T) {
-	m := Marker("h1", []string{"b", "a", "a"})
-	if m != "?h1@a,b" {
-		t.Fatalf("Marker: %q", m)
+func TestOwnership(t *testing.T) {
+	mk := func(name, root string) *runner.Suite {
+		return &runner.Suite{Suite: config.Suite{Name: name, Root: root}}
 	}
-	if h, seen, ok := ParseMarker(m); !ok || h != "h1" || !reflect.DeepEqual(seen, []string{"a", "b"}) {
-		t.Errorf("ParseMarker: %q %v %v", h, seen, ok)
+	a, b, root := mk("a", "a"), mk("b", "b"), mk("root", ".")
+	cases := []struct {
+		picked, left []*runner.Suite
+		f            string
+		owners       []string
+		owned, only  bool
+	}{
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "a/x", []string{"a"}, true, true},
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "b/x", []string{"b"}, false, false},
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "Dockerfile", []string{"a", "b"}, true, false},
+		{[]*runner.Suite{a, b}, nil, "Dockerfile", []string{"a", "b"}, true, true},
+		{[]*runner.Suite{a}, []*runner.Suite{root}, "a/x", []string{"a", "root"}, true, false},
+		{[]*runner.Suite{root}, []*runner.Suite{a}, "a/x", []string{"root", "a"}, true, false},
+		{[]*runner.Suite{root}, []*runner.Suite{a}, "z", []string{"root", "a"}, true, false},
+		{nil, []*runner.Suite{a}, "a/x", []string{"a"}, false, false},
 	}
-	if _, _, ok := ParseMarker("h1"); ok {
-		t.Error("a content hash is no marker")
+	for _, c := range cases {
+		o := NewOwnership(c.picked, c.left)
+		if got := o.Owners(c.f); !reflect.DeepEqual(got, c.owners) {
+			t.Errorf("Owners(%q) = %v, want %v", c.f, got, c.owners)
+		}
+		if got := o.Owned(c.f); got != c.owned {
+			t.Errorf("Owned(%q) = %v, want %v", c.f, got, c.owned)
+		}
+		if got := o.OwnedOnly(c.f); got != c.only {
+			t.Errorf("OwnedOnly(%q) = %v, want %v", c.f, got, c.only)
+		}
 	}
-	if got := MarkSeen(m, "h1", []string{"c"}); got != "?h1@a,b,c" {
-		t.Errorf("same hash: %q", got)
-	}
-	if got := MarkSeen(m, "h2", []string{"c"}); got != "?h2@c" {
-		t.Errorf("new hash: %q", got)
-	}
-	if got := MarkSeen("h0", "", []string{"a"}); got != "?@a" {
-		t.Errorf("absent: %q", got)
-	}
-	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
-	all := []*runner.Suite{mk("a"), mk("b")}
-	if !OwnedOnly("a/x", all, 1) || OwnedOnly("Dockerfile", all, 1) || OwnedOnly("b/x", all, 1) || !OwnedOnly("Dockerfile", all, 2) {
-		t.Error("OwnedOnly")
+	if got := NewOwnership([]*runner.Suite{b, a}, []*runner.Suite{root}).Picked(); !reflect.DeepEqual(got, []string{"b", "a"}) {
+		t.Errorf("Picked = %v", got)
 	}
 }

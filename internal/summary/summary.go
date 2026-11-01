@@ -441,9 +441,9 @@ func commonVia(hs []hit) string {
 func (v *view) expand(key string) []string {
 	kind, p := depkey.Parse(key)
 	switch kind {
-	case depkey.KindExistence:
+	case depkey.KindExistence, depkey.KindDecls:
 		return []string{p}
-	case depkey.KindContent, depkey.KindListing, depkey.KindEnv:
+	case depkey.KindContent, depkey.KindConfig, depkey.KindListing, depkey.KindEnv:
 		return []string{key}
 	}
 	prefix := p + "/"
@@ -473,6 +473,8 @@ func viaLabel(via, key, service string) string {
 		return "lists the directory"
 	case depkey.KindExistence:
 		return "checks whether it exists"
+	case depkey.KindDecls:
+		return "its declarations changed (static dependency)"
 	}
 	switch via {
 	case selector.ViaTest:
@@ -516,6 +518,8 @@ func reasonLabel(r string) string {
 		return "Never recorded"
 	case selector.ReasonAgent:
 		return "Selected by the agent"
+	case selector.ReasonCaller:
+		return "Added by the caller"
 	case selector.ReasonReference:
 		return "Names a changed file"
 	case selector.ReasonOrphan:
@@ -595,6 +599,8 @@ func (v *view) handling(o string) string {
 		return "orphan policy: runs " + strings.Join(suites, ", ") + " in full"
 	case selector.OrphanIgnored:
 		return "ignored (`orphans: ignore`)"
+	case selector.OrphanSkipped:
+		return "skipped by caller (`--orphans=skip`)"
 	case selector.OrphanUntested:
 		return "untested code: no test reaches it"
 	}

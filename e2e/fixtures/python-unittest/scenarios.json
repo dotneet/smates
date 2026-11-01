@@ -1,0 +1,120 @@
+[
+  {
+    "name": "no-change",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "tests/test_books.py",
+      "tests/test_loans.py",
+      "tests/test_policy.py",
+      "tests/test_receipt.py",
+      "tests/unit/test_fmt.py"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "leaf-loans",
+    "edits": [
+      {
+        "file": "library/loans.py",
+        "op": "replace",
+        "old": "return max(0, days) * policy.LATE_FEE_CENTS",
+        "new": "return max(1, days) * policy.LATE_FEE_CENTS"
+      }
+    ],
+    "selected": ["tests/test_loans.py"],
+    "not_selected": [
+      "tests/test_books.py",
+      "tests/test_policy.py",
+      "tests/test_receipt.py",
+      "tests/unit/test_fmt.py"
+    ],
+    "fails": ["tests/test_loans.py"],
+    "orphans": [],
+    "hints": {
+      "tests/test_loans.py": {
+        "top": ["library/loans.py"],
+        "output": "test_late_fee"
+      }
+    }
+  },
+  {
+    "name": "template-read-at-call-time",
+    "edits": [
+      {
+        "file": "library/templates/receipt.txt",
+        "op": "replace",
+        "old": "Total due:",
+        "new": "Amount due:"
+      }
+    ],
+    "selected": ["tests/test_receipt.py"],
+    "not_selected": [
+      "tests/test_books.py",
+      "tests/test_loans.py",
+      "tests/test_policy.py",
+      "tests/unit/test_fmt.py"
+    ],
+    "fails": ["tests/test_receipt.py"],
+    "orphans": []
+  },
+  {
+    "name": "policy-read-at-import-in-setUpModule",
+    "edits": [
+      {
+        "file": "library/policy.json",
+        "op": "replace",
+        "old": "\"max_loans\": 3",
+        "new": "\"max_loans\": 2"
+      }
+    ],
+    "selected": ["tests/test_loans.py", "tests/test_policy.py"],
+    "not_selected": [
+      "tests/test_books.py",
+      "tests/test_receipt.py",
+      "tests/unit/test_fmt.py"
+    ],
+    "fails": ["tests/test_loans.py", "tests/test_policy.py"],
+    "orphans": []
+  },
+  {
+    "name": "cached-catalog-read-once-per-process",
+    "note": "books.catalog() reads the CSV once (lru_cache), while test_books runs; test_loans uses the cached catalog and still depends on the CSV through books.py.",
+    "edits": [
+      {
+        "file": "library/data/books.csv",
+        "op": "replace",
+        "old": "222,dune,999",
+        "new": "222,dune,1099"
+      }
+    ],
+    "selected": ["tests/test_books.py", "tests/test_loans.py"],
+    "not_selected": [
+      "tests/test_policy.py",
+      "tests/test_receipt.py",
+      "tests/unit/test_fmt.py"
+    ],
+    "fails": ["tests/test_books.py"],
+    "orphans": []
+  },
+  {
+    "name": "shared-formatting",
+    "edits": [
+      {
+        "file": "library/fmt.py",
+        "op": "replace",
+        "old": "\"$%d.%02d\"",
+        "new": "\"USD %d.%02d\""
+      }
+    ],
+    "selected": [
+      "tests/unit/test_fmt.py",
+      "tests/test_receipt.py",
+      "tests/test_books.py",
+      "tests/test_loans.py"
+    ],
+    "not_selected": ["tests/test_policy.py"],
+    "fails": ["tests/unit/test_fmt.py", "tests/test_receipt.py"],
+    "orphans": []
+  }
+]

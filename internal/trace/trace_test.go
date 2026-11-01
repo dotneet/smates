@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // repoDir returns a temporary repository root with symlinks resolved (as Collect expects).
@@ -25,15 +27,11 @@ func repoDir(t *testing.T) string {
 func touch(t *testing.T, root string, rels ...string) {
 	t.Helper()
 	for _, r := range rels {
-		p := filepath.Join(root, filepath.FromSlash(r))
 		if strings.HasSuffix(r, "/") {
-			os.MkdirAll(p, 0o755)
+			os.MkdirAll(filepath.Join(root, filepath.FromSlash(r)), 0o755)
 			continue
 		}
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Write(t, root, r, "x")
 	}
 }
 
@@ -53,19 +51,14 @@ func stream(t *testing.T, dir string, pid, tid int, events ...any) {
 		b.Write(data)
 		b.WriteByte('\n')
 	}
-	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("proc-%d-%d.jsonl", pid, tid)), []byte(b.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Write(t, dir, fmt.Sprintf("proc-%d-%d.jsonl", pid, tid), b.String())
 }
 
 type ev = map[string]any
 
 func v8File(t *testing.T, traceDir string, pid int, ts int64, tid int, content string) {
 	t.Helper()
-	os.MkdirAll(V8Dir(traceDir), 0o755)
-	if err := os.WriteFile(filepath.Join(V8Dir(traceDir), fmt.Sprintf("coverage-%d-%d-%d.json", pid, ts, tid)), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Write(t, V8Dir(traceDir), fmt.Sprintf("coverage-%d-%d-%d.json", pid, ts, tid), content)
 }
 
 func v8JSON(urls ...string) string {
@@ -502,7 +495,7 @@ func TestParseTestLog(t *testing.T) {
 		"malformed",
 		"",
 	}, "\n")), 0o644)
-	got, env := parseTestLog(log, pkg)
+	got, env := ParseTestLog(log, pkg)
 	if !reflect.DeepEqual(env, []string{"HOME", "APP_MODE"}) {
 		t.Errorf("env %q", env)
 	}
@@ -519,7 +512,7 @@ func TestParseTestLog(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got\n %q\nwant\n %q", got, want)
 	}
-	if files, env := parseTestLog(filepath.Join(root, "nope.log"), pkg); files != nil || env != nil {
+	if files, env := ParseTestLog(filepath.Join(root, "nope.log"), pkg); files != nil || env != nil {
 		t.Error("missing log")
 	}
 }
@@ -582,7 +575,7 @@ func TestExtractShims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{sh.Node, filepath.Join(sh.Python, "smates_trace.py"), filepath.Join(sh.Python, "sitecustomize.py"), filepath.Join(sh.Python, "smates_pytest.py"), filepath.Join(dir, "vitest-reporter.mjs"), filepath.Join(dir, "jest-reporter.cjs")} {
+	for _, p := range []string{sh.Node, filepath.Join(sh.Python, "smates_trace.py"), filepath.Join(sh.Python, "sitecustomize.py"), filepath.Join(sh.Python, "smates_pytest.py"), filepath.Join(sh.Python, "smates_unittest.py"), filepath.Join(dir, "vitest-reporter.mjs"), filepath.Join(dir, "jest-reporter.cjs")} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}

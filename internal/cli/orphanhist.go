@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -53,6 +52,8 @@ type orphanReport struct {
 	History []orphanCommit `json:"history"`
 	// ExistingIgnore is the ignore list of smates.yml today.
 	ExistingIgnore []string `json:"existing_ignore"`
+	// Applied is what --apply added to smates.yml (absent without --apply).
+	Applied *configEdit `json:"applied,omitempty"`
 }
 
 // orphanFile is a changed file no test depends on, with the number of commits it was an
@@ -84,21 +85,22 @@ type orphanCommit struct {
 }
 
 func cmdOrphans(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("orphans", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("orphans", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	history := fs.Int("history", 100, "replay the last `n` first-parent commits (0: no limit)")
-	since := fs.String("since", "", "replay the first-parent commits after `rev` (no count limit unless --history is set)")
-	format := fs.String("format", "text", "output: text, json")
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
+	c.common(&cf)
+	history := c.Int("history", 100, "replay the last `n` first-parent commits (0: no limit)")
+	since := c.String("since", "", "replay the first-parent commits after `rev` (no count limit unless --history is set)")
+	c.withFormat("text", "json")
+	apply := c.Bool("apply", false, "add the suggested ignore globs to smates.yml (and nothing else)")
+	dryRun := c.Bool("dry-run", false, "with --apply: print the diff instead of writing")
+	if err := c.parse(args); err != nil {
+		return err
 	}
-	if *format != "text" && *format != "json" {
-		return usageError{fmt.Errorf("unknown format %q", *format)}
+	if err := c.noArgs(); err != nil {
+		return err
 	}
-	if fs.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v", fs.Args())}
+	if *dryRun && !*apply {
+		return usageError{errors.New("--dry-run needs --apply")}
 	}
 	if *history < 0 {
 		return usageError{errors.New("--history must be >= 0")}
@@ -106,7 +108,7 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	n := *history
 	if *since != "" {
 		explicit := false
-		fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "history" })
+		c.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "history" })
 		if !explicit {
 			n = 0
 		}
@@ -116,7 +118,13 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(p.suites) == 0 {
-		return fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")
+		return configError{fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")}
+	}
+	var cfgAbs, cfgName string
+	if *apply {
+		if cfgAbs, cfgName, err = configFile(cf.dir, cf.config); err != nil {
+			return err
+		}
 	}
 	if *since != "" && !p.repo.RefExists(*since) {
 		return usageError{fmt.Errorf("unknown revision %q", *since)}
@@ -153,16 +161,31 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	if shallow > 0 {
 		rep.Warnings = append(rep.Warnings, fmt.Sprintf("shallow clone: stopped at the oldest fetched commit, whose parent is missing (%d commit(s) not replayed); fetch more history (`git fetch --deepen=N` or `--unshallow`) to replay further", shallow))
 	}
-	if *format == "json" {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+	if *apply {
+		globs := make([]string, 0, len(rep.Ignore))
+		for _, g := range rep.Ignore {
+			globs = append(globs, g.Glob)
+		}
+		if len(globs) == 0 {
+			rep.Applied = &configEdit{File: cfgName, Key: "ignore", Added: []string{}, Present: []string{}, DryRun: *dryRun}
+		} else if rep.Applied, err = addGlobs(cfgAbs, cfgName, "ignore", globs, *dryRun); err != nil {
+			return err
+		}
 	}
-	for _, w := range rep.Warnings {
-		fmt.Fprintf(stderr, "smates: warning: %s\n", w)
-	}
-	printOrphanReport(stdout, rep, p.cfg.Path)
-	return nil
+	return c.emit(stdout, rep, func() {
+		for _, w := range rep.Warnings {
+			fmt.Fprintf(stderr, "smates: warning: %s\n", w)
+		}
+		printOrphanReport(stdout, rep, p.cfg.Path)
+		if rep.Applied != nil {
+			fmt.Fprintln(stdout)
+			if len(rep.Applied.Added)+len(rep.Applied.Present) == 0 {
+				fmt.Fprintln(stdout, "--apply: no ignore globs to add.")
+			} else {
+				printConfigEdit(stdout, rep.Applied)
+			}
+		}
+	})
 }
 
 // orphanHistory replays commits against the current dependency map (res, an All
@@ -337,7 +360,7 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, r
 				blocked[p] = true
 				block(p)
 			}
-		case depkey.KindContent, depkey.KindExistence:
+		case depkey.KindContent, depkey.KindConfig, depkey.KindExistence:
 			block(p)
 		}
 	}
@@ -347,7 +370,7 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, r
 	}
 	var unexplained []string // files below a candidate directory that a test may name
 	for _, f := range tree {
-		if selector.Covers(covered, f, false) != "" || affectsExecution(f) != "" {
+		if depkey.Covers(covered, f, false) != depkey.CoverNone || affectsExecution(f) != "" {
 			block(f)
 			continue
 		}

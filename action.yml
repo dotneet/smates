@@ -112,7 +112,7 @@ outputs:
     description: '"true" when nothing was selected; use it to skip downstream test jobs.'
     value: ${{ steps.smates.outputs.skip }}
   exit-code:
-    description: Exit code of the smates command (the tests' exit code for "run").
+    description: Exit code of the smates command (for "run" 1 when tests failed; 2-4 are smates' own errors, see the README).
     value: ${{ steps.smates.outputs.exit-code }}
   flaky:
     description: Number of test units "run" found flaky (outcome flipped with unchanged inputs).

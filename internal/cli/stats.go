@@ -4,19 +4,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dotneet/smates/internal/config"
-	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/summary"
@@ -295,23 +291,20 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 }
 
 func cmdStats(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("C", "", "run as if started in `dir`")
-	statePath := fs.String("state", "", "state file (default: .smates/state.json.gz)")
-	format := fs.String("format", "text", "output: text, json")
-	since := fs.String("since", "", "only runs since `when`: a date (2026-01-02), an RFC 3339 time, or an age such as 30d, 2w or 12h")
-	branch := fs.String("branch", "", "only runs on `branch`")
-	ciOnly := fs.Bool("ci", false, "only runs on CI")
-	recent := fs.Int("recent", 5, "text: list the last `n` runs")
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
+	c := newCommand("stats", stderr)
+	dir := c.String("C", "", "run as if started in `dir`")
+	statePath := c.String("state", "", "state file (default: .smates/state.json.gz)")
+	c.withFormat("text", "json")
+	c.bareFormatError = true
+	since := c.String("since", "", "only runs since `when`: a date (2026-01-02), an RFC 3339 time, or an age such as 30d, 2w or 12h")
+	branch := c.String("branch", "", "only runs on `branch`")
+	ciOnly := c.Bool("ci", false, "only runs on CI")
+	recent := c.Int("recent", 5, "text: list the last `n` runs")
+	if err := c.parse(args); err != nil {
+		return err
 	}
-	if *format != "text" && *format != "json" {
-		return usageError{fmt.Errorf("unknown format %q", *format)}
-	}
-	if fs.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v", fs.Args())}
+	if err := c.noArgs(); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	f := statsFilter{branch: *branch, ciOnly: *ciOnly}
@@ -322,46 +315,25 @@ func cmdStats(args []string, stdout, stderr io.Writer) error {
 		}
 		f.since = t
 	}
-	path, err := resolveStatePath(*dir, *statePath)
+	store, err := resolveStore(*dir, *statePath, stderr)
 	if err != nil {
 		return err
 	}
-	st, err := state.Load(path)
+	path := store.path
+	st, err := store.Load()
 	if err != nil {
 		return err
 	}
 	rep := aggregateStats(st, f, now)
 	rep.State = path
-	if *format == "json" {
+	if c.asJSON() {
+		// Unlike writeJSON, this escapes HTML characters.
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
 	printStats(stdout, rep, *recent)
 	return nil
-}
-
-// resolveStatePath finds the state file the way `smates state` does.
-func resolveStatePath(dir, path string) (string, error) {
-	if path != "" {
-		return path, nil
-	}
-	if dir == "" {
-		dir = "."
-	}
-	repo, err := gitx.Open(dir)
-	if err != nil {
-		return "", err
-	}
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return "", err
-	}
-	if cfg == nil {
-		cfg = &config.Config{}
-		_ = cfg.Normalize()
-	}
-	return filepath.Join(repo.Root, filepath.FromSlash(cfg.State)), nil
 }
 
 // parseSince parses --since: a date, an RFC 3339 time, or an age (30d, 2w, 12h, 90m).
@@ -443,8 +415,8 @@ func printStats(w io.Writer, rep *statsReport, recent int) {
 		row("files", "none")
 	} else {
 		row("files", "%d in %s", o.Files, plural(o.Runs, "run"))
-		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored, selector.OrphanUntested},
-			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run", selector.OrphanUntested: "untested code"}))
+		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored, selector.OrphanSkipped, selector.OrphanUntested},
+			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run", selector.OrphanSkipped: "skipped by caller", selector.OrphanUntested: "untested code"}))
 	}
 	if a := rep.Agent; a.Calls > 0 {
 		row("agent", "%s (%d cached), %d turns, %s in / %s out tokens", plural(a.Calls, "call"), a.Cached, a.Turns,

@@ -6,6 +6,8 @@ Loaded through PYTEST_PLUGINS while smates records, and without tracing (smates 
     test:<file>      running a test item of that file (setup, call, teardown)
     fixture:<name>@<baseid>   setting up a fixture (shared fixtures are set up once,
                               so their dependencies are added to every test using them)
+    session:end      the end of a session that ran tests (reports such as pytest-cov's),
+                     attributed to no test
 """
 
 import json
@@ -114,6 +116,18 @@ if _tracer is not None or _results_dir:
     def pytest_collectreport(report):
         if report.failed:
             _note_failure(report)
+
+    @pytest.hookimpl(hookwrapper=True, trylast=True)
+    def pytest_runtestloop(session):
+        # Every test has run: what the session does afterwards (pytest-cov reading every
+        # source file under --cov for its report, then the terminal summary) cannot
+        # change an outcome, so it is no dependency of any test. trylast: this wrapper
+        # resumes before the other plugins' (pytest-cov reports in its own wrapper).
+        # Only in a process that ran tests: a pytest-xdist controller has no test
+        # contexts of its own.
+        yield
+        if _results:
+            _tracer.push("session:end")
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(session, exitstatus):

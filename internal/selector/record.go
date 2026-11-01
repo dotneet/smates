@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
@@ -18,6 +19,7 @@ import (
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static/golang"
 )
 
 // Hasher returns content hashes of dependency keys. A key is a repo-relative file path;
@@ -25,7 +27,8 @@ import (
 // (recorded when a test lists a directory, so added or removed files are noticed); a
 // path with a trailing "?" meaning "whether this path exists" (recorded for existence
 // checks, including of paths that do not exist yet); or "$NAME", the value of an
-// environment variable as the tests of a suite see it (see ForSuite).
+// environment variable as the tests of a suite see it (see ForSuite). The kinds of key
+// are defined in package depkey.
 type Hasher struct {
 	snap   gitx.Snapshot
 	ignore []string
@@ -63,9 +66,10 @@ func (h *Hasher) WithRoot(root string) *Hasher {
 	return h
 }
 
-// WithConfig makes the hasher hash the configuration file (c.Path) of a suite (see
-// ForSuite) as ConfigHash instead of its content, so edits that cannot change how the
-// suite's tests run (the ignore list, the agent, another suite) select nothing.
+// WithConfig makes the hasher hash the settings key (depkey.Config) of the
+// configuration file (c.Path) of a suite (see ForSuite) as ConfigHash, so edits that
+// cannot change how the suite's tests run (the ignore list, the agent, another suite)
+// select nothing.
 func (h *Hasher) WithConfig(c *config.Config) *Hasher {
 	h.cfg = c
 	return h
@@ -81,22 +85,17 @@ func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 	return &c
 }
 
-// ConfigKey is the dependency key every test of a suite has on its settings in the
-// configuration file at path (hashed as ConfigHash). Reading the file itself records
-// path, hashed by content as any file.
-func ConfigKey(path string) string { return path + configKeySuffix }
-
-const configKeySuffix = "#suite"
-
-// DisplayKey is the file a dependency key stands for when it is shown or diffed: the
-// configuration file for its settings key (ConfigKey), the key itself otherwise.
-func DisplayKey(key string) string { return strings.TrimSuffix(key, configKeySuffix) }
+// isConfig reports whether key is the settings key (depkey.Config) of the
+// configuration file the hasher was given (WithConfig).
+func (h *Hasher) isConfig(key string) bool {
+	return h.cfg != nil && h.cfg.Path != "" && key == depkey.Config(h.cfg.Path)
+}
 
 // legacyConfig reports whether key is the settings key of an entry an older smates
 // recorded, when every test depended on the configuration file's content: the entry
 // then holds the file's hash instead, and it counts as unchanged while the file is.
 func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
-	if h.cfg == nil || h.cfg.Path == "" || key != ConfigKey(h.cfg.Path) {
+	if !h.isConfig(key) {
 		return false
 	}
 	old, ok := recorded[h.cfg.Path]
@@ -212,14 +211,18 @@ func (h *Hasher) Hash(key string) string {
 			}
 		}
 		return "absent"
-	case depkey.KindContent:
-		if h.cfg != nil && h.cfg.Path != "" && key == ConfigKey(h.cfg.Path) {
-			if h.suite == nil {
-				return ""
-			}
-			return ConfigHash(h.cfg, &h.suite.Suite)
+	case depkey.KindConfig:
+		if !h.isConfig(key) {
+			return h.file(key) // another configuration file's settings: hashed as a path
 		}
+		if h.suite == nil {
+			return ""
+		}
+		return ConfigHash(h.cfg, &h.suite.Suite)
+	case depkey.KindContent:
 		return h.file(key)
+	case depkey.KindDecls:
+		return h.decls(p)
 	}
 	if h.dirs == nil {
 		h.dirs = map[string][]string{}
@@ -249,6 +252,33 @@ func (h *Hasher) Hash(key string) string {
 	}
 	sum := sha1.Sum([]byte(strings.Join(list, "\n")))
 	return "dir:" + hex.EncodeToString(sum[:])
+}
+
+// declsCache maps a Go file's blob hash to the hash of its declarations.
+var declsCache sync.Map
+
+// decls hashes the declarations of a Go file (see golang.DeclsHash): "" when the file
+// is absent, its content hash when the declarations cannot be told apart from the
+// rest (it does not parse, or is not on disk as the snapshot has it), so that any
+// change counts.
+func (h *Hasher) decls(p string) string {
+	blob := h.file(p)
+	if blob == "" || h.root == "" {
+		return blob
+	}
+	if v, ok := declsCache.Load(blob); ok {
+		return v.(string)
+	}
+	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
+	if err != nil || gitx.HashBytes(src) != blob {
+		return blob
+	}
+	v, ok := golang.DeclsHash(src, strings.HasSuffix(p, "_test.go"))
+	if !ok {
+		v = blob
+	}
+	declsCache.Store(blob, v)
+	return v
 }
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
@@ -496,6 +526,13 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 		if depkey.IsEnv(k) {
 			return false // no recorded environment to compare a newly read variable with
+		}
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls {
+			// The declarations of a Go file: unchanged if the file is.
+			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && was != h.Hash(f)) {
+				return false
+			}
+			continue
 		}
 		if depkey.IsPseudo(k) {
 			continue

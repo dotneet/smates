@@ -46,11 +46,14 @@ type hookTarget struct {
 
 func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
-		return 2, usageError{errors.New("usage: smates hook install|uninstall|status|run")}
+		return 2, usageError{errors.New("usage: smates hook install|uninstall|status [--claude]|run|claude-stop")}
 	}
 	sub, rest := args[0], args[1:]
-	if sub == "run" {
+	switch sub {
+	case "run":
 		return hookRun(ctx, rest, stdin, stdout, stderr)
+	case "claude-stop":
+		return hookClaudeStop(ctx, rest, stdin, stdout, stderr)
 	}
 	fs := flag.NewFlagSet("hook "+sub, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -58,8 +61,25 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	kind := fs.String("hook", "pre-push", "git hook: pre-push or pre-commit")
 	appendTo := fs.Bool("append", false, "install: add smates to the end of an existing hook script")
 	useAgent := fs.Bool("agent", false, "install: let the hook call the agent for unattributed changes")
+	claude := fs.Bool("claude", false, "a Claude Code Stop hook in .claude/settings.json instead of a git hook")
+	user := fs.Bool("user", false, "with --claude: in ~/.claude/settings.json (every project with a smates.yml)")
 	if err := fs.Parse(rest); err != nil {
 		return 2, usageError{err}
+	}
+	if *user && !*claude {
+		return 2, usageError{errors.New("--user applies to --claude")}
+	}
+	if *claude {
+		var bad []string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "hook" || f.Name == "append" {
+				bad = append(bad, "--"+f.Name)
+			}
+		})
+		if len(bad) > 0 {
+			return 2, usageError{fmt.Errorf("%s applies to git hooks, not --claude", strings.Join(bad, " and "))}
+		}
+		return claudeHookCmd(sub, *dir, *user, *useAgent, fs.Args(), stdout)
 	}
 	if !slices.Contains(hookKinds, *kind) {
 		return 2, usageError{fmt.Errorf("unsupported --hook %q (want %s)", *kind, strings.Join(hookKinds, " or "))}
@@ -89,7 +109,9 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "uninstall":
 		err = uninstallHook(h, stdout)
 	case "status":
-		err = hookStatus(h, stdout)
+		if err = hookStatus(h, stdout); err == nil {
+			claudeHookStatus(repo, stdout)
+		}
 	default:
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}
@@ -405,6 +427,7 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	f.dir = repo.Root
 	code, err := runCycle(ctx, f, stdout, stderr, nil)
+	code = testsExitCode(code)
 	if code != 0 || err != nil {
 		skip := "git push --no-verify"
 		if kind == "pre-commit" {
@@ -461,44 +484,47 @@ func uncommitted(repo *gitx.Repo, kind string) int {
 // recorded on a commit outside HEAD's history (e.g. before a rebase). It fetches at
 // most once per hookPullEvery.
 func refreshHookState(repo *gitx.Repo, f *runFlags, log io.Writer) {
-	path := f.state
-	if path == "" {
-		cfg, err := hookConfig(repo, f.config)
-		if err != nil {
-			return // `smates run` reports it
-		}
-		path = filepath.Join(repo.Root, filepath.FromSlash(cfg.State))
+	cfg, err := hookConfig(repo, f.config)
+	if err != nil {
+		return // `smates run` reports it
 	}
-	st, err := state.Load(path)
+	// Loading seeds a worktree without a state (from the main worktree's, or the
+	// remote one: that attempt counts as this hook's fetch).
+	store := openStore(repo, cfg, f.state, log)
+	path := store.path
+	st, err := store.Load()
 	missing := err != nil || st.Empty()
 	if !missing && !hookStateStale(repo, st) {
 		return
 	}
 	// The attempt is recorded whatever its outcome, so pushes in between do not fetch.
-	stamp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".pulled")
-	if fi, err := os.Stat(stamp); err == nil && time.Since(fi.ModTime()) < hookPullEvery {
+	if !store.pullDue() {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err == nil {
-		_ = os.WriteFile(stamp, nil, 0o644)
-	}
 	refs := stateRefs(repo)
-	if missing {
+	if missing && !store.shared {
 		_ = pullState(repo, path, "origin", refs, log)
 		return
 	}
 	// Same extension: state.Load picks the format from it.
-	tmp := filepath.Join(filepath.Dir(path), ".pull-"+filepath.Base(path))
+	tmp := filepath.Join(filepath.Dir(store.local), ".pull-"+filepath.Base(path))
 	defer os.Remove(tmp)
-	if err := pullState(repo, tmp, "origin", refs, io.Discard); err != nil {
+	plog := io.Discard
+	if missing {
+		plog = log
+	}
+	if err := pullState(repo, tmp, "origin", refs, plog); err != nil {
 		return
 	}
 	remote, err := state.Load(tmp)
-	if err != nil || remote.Empty() || !remote.Created.After(st.Created) {
+	if err != nil || remote.Empty() || (!missing && !remote.Created.After(st.Created)) {
 		return
 	}
+	if st == nil {
+		st = state.New()
+	}
 	st.Merge(remote)
-	if err := st.Save(path); err != nil {
+	if err := store.Save(st); err != nil {
 		fmt.Fprintf(log, "smates: could not save the refreshed state: %v\n", err)
 		return
 	}

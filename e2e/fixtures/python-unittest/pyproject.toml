@@ -1,0 +1,6 @@
+[project]
+name = "library"
+version = "0.1.0"
+description = "A tiny lending library, tested with the standard library's unittest."
+requires-python = ">=3.8"
+dependencies = []

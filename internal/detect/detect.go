@@ -4,10 +4,12 @@ package detect
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -104,7 +106,8 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 		covered := false
 		for root, rr := range jsRoots {
-			if rr == r && root != d && pathutil.Under(d, root) && (r == "vitest" || r == "jest") && rootOwnsWorkspace(dirFiles[root], r) {
+			if rr == r && root != d && pathutil.Under(d, root) && (r == "vitest" || r == "jest") && rootOwnsWorkspace(dirFiles[root], r) &&
+				rootCovers(repo, root, r, d, files) {
 				covered = true
 			}
 		}
@@ -115,7 +118,9 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		out = append(out, config.Suite{Root: d, Runner: r})
 	}
 
-	// Python: one suite per project with pytest configuration or tests.
+	// Python: one suite per project with pytest configuration or tests. Projects that
+	// show no sign of pytest (no dependency, configuration or conftest.py) use the
+	// standard library's unittest.
 	for _, d := range dirs {
 		isProject := has(d, "pyproject.toml") || has(d, "pytest.ini") || has(d, "setup.cfg") || has(d, "setup.py")
 		if !isProject {
@@ -123,30 +128,32 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 		nested := false
 		for _, s := range out {
-			if s.Runner == "pytest" && pathutil.Under(d, s.Root) {
+			if (s.Runner == "pytest" || s.Runner == "unittest") && pathutil.Under(d, s.Root) {
 				nested = true
 			}
 		}
-		if !nested {
-			out = append(out, config.Suite{Root: d, Runner: "pytest"})
+		if nested {
+			continue
 		}
+		r := "unittest"
+		if usesPytest(repo, d, dirFiles) {
+			r = "pytest"
+		}
+		out = append(out, config.Suite{Root: d, Runner: r})
 	}
 
-	// Keep suites that have tests; give them unique names.
+	// Keep suites that have tests (as the runner's configuration or the default
+	// patterns describe them); give them unique names.
 	var kept []config.Suite
 	for _, s := range out {
-		a, _ := runner.Get(s.Runner)
-		rs := &runner.Suite{Suite: s, Adapter: a}
-		d := a.Defaults(repo, s.Root)
-		rs.Tests, rs.Exclude = d.Tests, d.Exclude
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {
 			if o.Runner == s.Runner && o.Root != s.Root && pathutil.Under(o.Root, s.Root) {
-				rs.Exclude = append(rs.Exclude, pathutil.RelTo(o.Root, s.Root)+"/**")
 				s.Exclude = append(s.Exclude, pathutil.RelTo(o.Root, s.Root)+"/**")
 			}
 		}
-		if len(rs.TestFiles(files)) == 0 {
+		rs, err := runner.NewSuite(repo, s)
+		if err != nil || len(rs.TestFiles(files)) == 0 {
 			continue
 		}
 		kept = append(kept, s)
@@ -169,6 +176,130 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	return kept
 }
 
+var (
+	// pytestManifests are manifests, lockfiles and task files whose mention of pytest
+	// means the project uses it.
+	pytestManifests = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|noxfile\.py|Pipfile|Pipfile\.lock|poetry\.lock|pdm\.lock|uv\.lock|.*requirements.*\.(txt|in))$`)
+	// requirementsFile is any pip requirements file inside a requirements/ directory.
+	requirementsFile = regexp.MustCompile(`\.(txt|in)$`)
+	workflowFile     = regexp.MustCompile(`\.ya?ml$`)
+	pytestWord       = regexp.MustCompile(`\bpytest\b`)
+	// pyTestFile is a file either runner would collect.
+	pyTestFile = regexp.MustCompile(`^(test.*|.*_test)\.py$`)
+)
+
+// maxStyleChecks bounds the test files usesPytest reads (and maxStyleBytes how much of
+// each).
+const (
+	maxStyleChecks = 300
+	maxStyleBytes  = 256 << 10
+)
+
+// usesPytest reports whether the Python project at dir uses pytest, so that a project
+// is never left to unittest when it has pytest tests (unittest would run none of them):
+//   - a pytest.ini or conftest.py in the project;
+//   - pytest named in a manifest, lockfile or task file (pyproject.toml, setup.cfg,
+//     setup.py, tox.ini, noxfile.py, Pipfile, poetry/pdm/uv locks, *requirements*.txt or
+//     .in, any .txt/.in under a requirements/ directory) in the project or a directory
+//     above it up to the repository root;
+//   - a GitHub workflow that runs pytest, for the project at the repository root or
+//     one whose directory the workflow names;
+//   - a test file written for pytest: `import pytest` or a module-level `def test_`
+//     function other than unittest's `test_suite()` (even next to TestCase classes).
+func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
+	mentions := func(rel string) bool {
+		data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(rel)))
+		return err == nil && pytestWord.Match(data)
+	}
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) {
+			continue
+		}
+		for _, n := range names {
+			if n == "pytest.ini" || n == "conftest.py" {
+				return true
+			}
+		}
+	}
+	// Manifests of the project and of the directories above it (a monorepo's shared
+	// requirements-dev.txt), and requirements/ directories below the project.
+	for d := dir; ; d = path.Dir(d) {
+		for _, n := range dirFiles[d] {
+			if pytestManifests.MatchString(n) && mentions(path.Join(d, n)) {
+				return true
+			}
+		}
+		if d == "." || d == "/" || d == "" {
+			break
+		}
+	}
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) || !slices.Contains(strings.Split(d, "/"), "requirements") {
+			continue
+		}
+		for _, n := range names {
+			if (requirementsFile.MatchString(n) || pytestManifests.MatchString(n)) && mentions(path.Join(d, n)) {
+				return true
+			}
+		}
+	}
+	// Workflows run pytest somewhere in the repository: they count for the project at
+	// the root, or for a project whose directory they name.
+	for _, n := range dirFiles[".github/workflows"] {
+		if !workflowFile.MatchString(n) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repo.Root, ".github", "workflows", n))
+		if err == nil && pytestWord.Match(data) && (dir == "." || mentionsDir(data, dir)) {
+			return true
+		}
+	}
+	return hasPytestStyleTests(repo, dir, dirFiles)
+}
+
+// mentionsDir reports whether data names the repository directory dir as a whole path
+// (not as part of a longer name: "svc" is not in "svc2" or "my-svc").
+func mentionsDir(data []byte, dir string) bool {
+	re := regexp.MustCompile(`(^|[^\w./-])(\./)?` + regexp.QuoteMeta(dir) + `($|[^\w.-])`)
+	return re.Match(data)
+}
+
+// hasPytestStyleTests reports whether a test file under dir is written for pytest
+// (`import pytest` or module-level test functions).
+func hasPytestStyleTests(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
+	var files []string
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) {
+			continue
+		}
+		for _, n := range names {
+			if pyTestFile.MatchString(n) {
+				files = append(files, path.Join(d, n))
+			}
+		}
+	}
+	sort.Strings(files)
+	if len(files) > maxStyleChecks {
+		files = files[:maxStyleChecks]
+	}
+	buf := make([]byte, maxStyleBytes)
+	for _, f := range files {
+		fh, err := os.Open(filepath.Join(repo.Root, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		n, _ := io.ReadFull(fh, buf)
+		fh.Close()
+		src := buf[:n]
+		// A TestCase class next to pytest-style code does not make it a unittest file:
+		// pytest runs TestCase classes too, unittest none of pytest's.
+		if runner.PytestStyle(src) {
+			return true
+		}
+	}
+	return false
+}
+
 // rootOwnsWorkspace reports whether a package directory configures the runner for
 // nested packages (vitest workspace/projects, jest projects).
 func rootOwnsWorkspace(names []string, r string) bool {
@@ -181,6 +312,26 @@ func rootOwnsWorkspace(names []string, r string) bool {
 		}
 	}
 	return false
+}
+
+// rootCovers reports whether the suite of runner r at root counts test files under the
+// package directory d as its configuration (include, testMatch, projects) describes
+// them; with the default patterns (or no test files under d at all) it does.
+func rootCovers(repo *gitx.Repo, root, r, d string, files []string) bool {
+	rs, err := runner.NewSuite(repo, config.Suite{Root: root, Runner: r})
+	if err != nil || len(rs.Discovered) == 0 {
+		return true
+	}
+	any := false
+	for _, f := range files {
+		if pathutil.Under(f, d) && !pathutil.IsVendored(f) {
+			if rs.IsTestFile(f) {
+				return true
+			}
+			any = true
+		}
+	}
+	return !any
 }
 
 func underTestdata(d string) bool {

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -137,7 +136,7 @@ func retryFlaky(ctx context.Context, p *project, rc *runner.RunContext, sr *sele
 		}
 		r2, err := sr.Suite.Adapter.Run(ctx, &again)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: retry: %w", sr.Name, err)
+			return nil, nil, fmt.Errorf("retry: %w", err)
 		}
 		r.Warnings = append(r.Warnings, r2.Warnings...)
 		for by, keys := range r2.ReadsBy {
@@ -183,20 +182,17 @@ type flakyUnit struct {
 }
 
 func cmdFlaky(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("flaky", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("flaky", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	format := fs.String("format", "text", "output: text, json")
-	clear := fs.Bool("clear", false, "forget the flake evidence of the given units (all when none is given)")
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
+	c.common(&cf)
+	c.withFormat("text", "json")
+	c.bareFormatError = true
+	clear := c.Bool("clear", false, "forget the flake evidence of the given units (all when none is given)")
+	if err := c.parse(args); err != nil {
+		return err
 	}
-	if *format != "text" && *format != "json" {
-		return usageError{fmt.Errorf("unknown format %q", *format)}
-	}
-	if !*clear && fs.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v (units are only taken with --clear)", fs.Args())}
+	if !*clear && c.NArg() > 0 {
+		return usageError{fmt.Errorf("unexpected arguments %v (units are only taken with --clear)", c.Args())}
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
@@ -208,7 +204,7 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 	}
 	if *clear {
 		only := map[string]bool{}
-		for _, a := range fs.Args() {
+		for _, a := range c.Args() {
 			only[p.relArg(a)] = true
 		}
 		n := 0
@@ -224,7 +220,7 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		if n > 0 {
-			if err := p.state.Save(p.statePath); err != nil {
+			if err := p.store.Save(p.state); err != nil {
 				return err
 			}
 		}
@@ -253,7 +249,8 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 			list = append(list, u)
 		}
 	}
-	if *format == "json" {
+	if c.asJSON() {
+		// Unlike writeJSON, this escapes HTML characters.
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(struct {

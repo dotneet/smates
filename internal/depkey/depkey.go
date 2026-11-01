@@ -5,14 +5,28 @@
 //	path?     whether a path exists (it was probed, possibly before it existed)
 //	dir/**    every file below a directory (a command smates cannot see into ran there)
 //	$NAME     the value of an environment variable (it was read)
+//	f.go#decls the declarations of a Go file: its source without the bodies of its
+//	          functions and methods (Go per-function selection: a test depends on the
+//	          bodies it executed and on the declarations of everything it could reach)
 //	@set:ID   a set of files declared in smates.yml (depends_on/serves), hashed as one
+//	f#suite   the settings of a suite in the configuration file f (smates.yml): what in
+//	          it can change how the suite's tests run, not its whole content
 //
 // Paths are repo-relative slash paths; the repository root is ".". A path at the
 // repository root whose name starts with "$" cannot be told from an environment
-// variable; such files are not expected in practice.
+// variable, nor a file whose name ends in "#decls" or "#suite" from those keys; such
+// files are not expected in practice.
+//
+// This package owns the syntax: other packages build keys with the constructors
+// (Listing, Env, Config, ...), take them apart with Parse and ask for their properties
+// (File, Display, Kind.ContentLike, Kind.Cover, Covers) instead of matching prefixes
+// and suffixes themselves.
 package depkey
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
 
 // Kind is what a key stands for.
 type Kind int
@@ -23,16 +37,47 @@ const (
 	KindExistence             // path?
 	KindTree                  // dir/**
 	KindEnv                   // $NAME
+	KindDecls                 // file.go#decls
 	KindSet                   // @set:ID
+	KindConfig                // smates.yml#suite
 )
+
+var kindNames = [...]string{"content", "listing", "existence", "tree", "env", "decls", "set", "config"}
+
+func (k Kind) String() string {
+	if k >= 0 && int(k) < len(kindNames) {
+		return kindNames[k]
+	}
+	return "unknown"
+}
+
+// ContentLike reports whether a key of kind k stands for a file's content as far as
+// users and comparisons go: the file itself, or a suite's settings in a configuration
+// file (shown as that file, see Display). Every other kind is a pseudo key (IsPseudo).
+func (k Kind) ContentLike() bool { return k == KindContent || k == KindConfig }
 
 const (
 	listingSuffix   = "/"
 	existenceSuffix = "?"
 	treeSuffix      = "/**"
 	envPrefix       = "$"
+	declsSuffix     = "#decls"
 	setPrefix       = "@set:"
+	configSuffix    = "#suite"
 )
+
+// Decls is the key of the declarations of a Go file.
+func Decls(p string) string { return p + declsSuffix }
+
+// File returns the file a content or declarations key names, and false for any other
+// kind of key.
+func File(key string) (string, bool) {
+	switch k, p := Parse(key); k {
+	case KindContent, KindDecls:
+		return p, true
+	}
+	return "", false
+}
 
 // Listing is the key of a directory listing.
 func Listing(dir string) string { return strings.TrimSuffix(dir, "/") + listingSuffix }
@@ -45,6 +90,20 @@ func Tree(dir string) string { return strings.TrimSuffix(dir, "/") + treeSuffix 
 
 // Env is the key of an environment variable.
 func Env(name string) string { return envPrefix + name }
+
+// Config is the key of a suite's settings in the configuration file at file (hashed
+// as a fingerprint of those settings, not of the file). Reading the file itself
+// records its content key.
+func Config(file string) string { return file + configSuffix }
+
+// Display is what a key is shown (and diffed) as: the configuration file for a
+// settings key (Config), the key itself otherwise.
+func Display(key string) string {
+	if k, p := Parse(key); k == KindConfig {
+		return p
+	}
+	return key
+}
 
 // Set is the key of a declared set of files (id names the declaration).
 func Set(id string) string { return setPrefix + id }
@@ -63,21 +122,31 @@ func Make(k Kind, p string) string {
 		return Tree(p)
 	case KindEnv:
 		return Env(p)
+	case KindDecls:
+		return Decls(p)
 	case KindSet:
 		return Set(p)
+	case KindConfig:
+		return Config(p)
 	}
 	return p
 }
 
 // Parse returns the kind of a key and the path it names (the directory of a listing
 // or tree, the probed path of an existence check, the name of a variable, the id of a
-// set).
+// set, the configuration file of a settings key).
 func Parse(key string) (Kind, string) {
 	if id, ok := strings.CutPrefix(key, setPrefix); ok {
 		return KindSet, id
 	}
 	if name, ok := strings.CutPrefix(key, envPrefix); ok {
 		return KindEnv, name
+	}
+	if p, ok := strings.CutSuffix(key, declsSuffix); ok {
+		return KindDecls, p
+	}
+	if p, ok := strings.CutSuffix(key, configSuffix); ok {
+		return KindConfig, p
 	}
 	if dir, ok := strings.CutSuffix(key, treeSuffix); ok {
 		return KindTree, dir
@@ -98,8 +167,79 @@ func KindOf(key string) Kind {
 }
 
 // IsPseudo reports whether a key stands for something other than a file's content (a
-// listing, an existence check, a tree, an environment variable or a declared set).
-func IsPseudo(key string) bool { return KindOf(key) != KindContent }
+// listing, an existence check, a tree, an environment variable, a declared set or a
+// Go file's declarations); see Kind.ContentLike.
+func IsPseudo(key string) bool { return !KindOf(key).ContentLike() }
 
 // IsEnv reports whether a key is an environment variable.
 func IsEnv(key string) bool { return strings.HasPrefix(key, envPrefix) }
+
+// CoverKind is how a dependency key explains a change to a file (see Covers). Its
+// values are the "kind" smates why reports.
+type CoverKind string
+
+const (
+	CoverNone      CoverKind = ""
+	CoverContent   CoverKind = "content"      // the file itself (or its suite settings)
+	CoverDecls     CoverKind = "declarations" // the declarations of a Go file
+	CoverListing   CoverKind = "listing"      // the listing of the file's directory
+	CoverExistence CoverKind = "existence"    // a check whether the file exists
+	CoverTree      CoverKind = "tree"         // every file below one of its directories
+)
+
+// Cover is how a key of kind k explains a change to the file it is about: CoverNone
+// for environment variables and declared sets (a set's files are matched through its
+// declaration, not its key).
+func (k Kind) Cover() CoverKind {
+	switch k {
+	case KindContent, KindConfig:
+		return CoverContent
+	case KindDecls:
+		return CoverDecls
+	case KindListing:
+		return CoverListing
+	case KindExistence:
+		return CoverExistence
+	case KindTree:
+		return CoverTree
+	}
+	return CoverNone
+}
+
+// Covers reports how a dependency set explains a change to file f (CoverNone when it
+// does not), trying the keys about f strongest first: its content or its suite
+// settings; the declarations of Go file f (edits inside function bodies the test did
+// not execute do not select it); a listing of its directory or an existence check,
+// only when existenceChanged (they explain f appearing or disappearing but not edits:
+// an edited file only listed or probed may still be read by something tracing cannot
+// see); a tree (a command smates cannot see into ran below a directory containing f;
+// a tree at the repository root explains nothing: it would hide every change from the
+// orphan check). A key below f counts as content: a submodule, recorded as one entry
+// for its commit, is explained by tests that read files inside it.
+func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
+	kinds := []Kind{KindContent, KindConfig, KindDecls}
+	if existenceChanged {
+		kinds = append(kinds, KindListing, KindExistence)
+	}
+	for _, k := range kinds {
+		p := f
+		if k == KindListing {
+			p = path.Dir(f)
+		}
+		if deps[Make(k, p)] {
+			return k.Cover()
+		}
+	}
+	for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
+		if deps[Tree(d)] {
+			return CoverTree
+		}
+	}
+	prefix := f + "/"
+	for d := range deps {
+		if strings.HasPrefix(d, prefix) {
+			return CoverContent
+		}
+	}
+	return CoverNone
+}
