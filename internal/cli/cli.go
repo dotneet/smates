@@ -123,6 +123,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err != nil {
+		// -h and --help: the flag set has printed the usage (to stderr).
+		if errors.Is(err, flag.ErrHelp) {
+			return ExitOK
+		}
 		var ue usageError
 		if errors.As(err, &ue) {
 			fmt.Fprintf(stderr, "smates %s: %v\n", cmd, err)
@@ -155,6 +159,8 @@ const (
 
 // usageError is an invalid command line (exit code 2).
 type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
 
 // configError is an invalid configuration (exit code 3): fix smates.yml, or the suite
 // or test named on the command line.

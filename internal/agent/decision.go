@@ -129,7 +129,7 @@ func toDecision(sub *submission, req *Request) (*Decision, error) {
 		seen[key] = true
 		why := strings.TrimSpace(t.Why)
 		if why == "" {
-			why = "agent: possibly affected by an orphan change"
+			why = "possibly affected by an orphan change"
 		}
 		d.Add = append(d.Add, selector.Addition{Suite: suite, Test: id, Reason: selector.ReasonAgent, Detail: why})
 	}

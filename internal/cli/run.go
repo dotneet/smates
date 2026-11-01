@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/hints"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
@@ -542,7 +543,8 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
 	// executable or not installed: when tests that report results reported none, they
 	// never ran. The batch is still handled as a failure below.
-	if !notStarted(sr.Suite.Runner, c.record, r) {
+	noResult := notStarted(sr.Suite.Runner, c.record, r)
+	if !noResult {
 		// Any other failing batch failed tests, even when no unit is known to have
 		// failed (TestMain exiting 1, a teardown error, a coverage threshold).
 		c.testsFailed = c.testsFailed || r.ExitCode != 0
@@ -569,7 +571,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		anyFail = anyFail || o.Status == state.Fail
 	}
 	if r.ExitCode != 0 {
-		c.failedBatches = append(c.failedBatches, failedBatch{suite: sr.Name, units: b.units, anyFail: anyFail})
+		c.failedBatches = append(c.failedBatches, failedBatch{suite: sr.Name, units: b.units, anyFail: anyFail, noResult: noResult})
 		if buf != nil {
 			c.printFailedBatch(sr, b, buf, r.Observations)
 		}
@@ -830,15 +832,16 @@ func (c *cycle) save() error {
 
 // recordSeen records in the snapshot that the suites of a --suite run (own's picked
 // suites) saw f with hash h ("" = absent): the hash itself when no suite left out owns
-// f, a marker otherwise (state.MarkerSnap). An entry still equal to h stays as it is,
-// and so does the content hash of a file only suites left out own (they have not
-// compared it yet).
+// f, a marker otherwise (state.MarkerSnap). An entry still matching h (gitx.SameHash:
+// a hash an older smates recorded without the executable marker) stays as it is, and
+// so does the content hash of a file only suites left out own (they have not compared
+// it yet).
 func (p *project) recordSeen(own selector.Ownership, f, h string) {
 	v, ok := p.state.Snap(f)
 	switch {
 	case own.OwnedOnly(f):
 		p.state.SetSnap(f, state.HashSnap(h))
-	case ok && !v.Unrecorded() && v.String() == h:
+	case ok && !v.Unrecorded() && gitx.SameHash(v.String(), h):
 	case ok && !v.Unrecorded() && !own.Owned(f):
 	case !ok && h == "":
 	default:
@@ -883,17 +886,37 @@ func (c *cycle) unstartedSection() (sec summary.Section, ok bool) {
 	return summary.Section{Title: fmt.Sprintf(":warning: %d test unit(s) not run", countUnits(c.unstarted)), Body: b.String()}, true
 }
 
-// notStartedBy names what left the units of notRun not started (when the run was not
-// interrupted): --fail-fast, a runner that could not start, or both.
+// notStartedBy names what left the units of notStartedUnits not started (when the run
+// was not interrupted): --fail-fast, a runner that could not start (or exited 126/127
+// before any test reported a result), or both.
 func (c *cycle) notStartedBy() string {
 	switch {
-	case len(c.unstarted) == 0:
+	case len(c.unstarted) == 0 && c.noResultUnits() == 0:
 		return "--fail-fast"
 	case countUnits(c.unstarted) == countUnits(c.notRun):
 		return "a runner that could not start"
 	default:
 		return "--fail-fast and a runner that could not start"
 	}
+}
+
+// notStartedUnits counts the selected units that did not start: those of notRun and
+// those of the batches whose runner exited 126/127 before any test reported a result.
+func (c *cycle) notStartedUnits() int {
+	return countUnits(c.notRun) + c.noResultUnits()
+}
+
+// noResultUnits counts the units of the batches whose runner exited 126/127 before any
+// test reported a result (notStarted): they did not run, and are recorded with an
+// unknown outcome, so they stay selected.
+func (c *cycle) noResultUnits() int {
+	n := 0
+	for _, fb := range c.failedBatches {
+		if fb.noResult {
+			n += len(fb.units)
+		}
+	}
+	return n
 }
 
 // logShadowAndFlakes logs, in failures mode, what logOutcome logs besides the outcome
@@ -923,7 +946,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 		}
 	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.exit, n)
-	} else if n > 0 {
+	} else if n := c.notStartedUnits(); n > 0 {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.exit, c.notStartedBy(), n)
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.exit)

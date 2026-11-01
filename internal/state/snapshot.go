@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/dotneet/smates/internal/gitx"
 )
 
 // unrecordedPrefix starts a snapshot entry that only some suites have compared: a
@@ -144,9 +146,10 @@ func (v SnapValue) SeenByAll(suites []string) bool {
 }
 
 // MarkSeen returns the entry after suites saw the file with hash: the suites that
-// already saw that same hash keep it, the others do not.
+// already saw that same hash (gitx.SameHash: also one an older smates recorded without
+// the executable marker) keep it, the others do not.
 func (v SnapValue) MarkSeen(hash string, suites []string) SnapValue {
-	if h, ok := v.SeenHash(); ok && h == hash {
+	if h, ok := v.SeenHash(); ok && gitx.SameHash(h, hash) {
 		return MarkerSnap(hash, append(slices.Clone(v.seen), suites...))
 	}
 	return MarkerSnap(hash, suites)

@@ -361,6 +361,19 @@ suites:
 			t.Errorf("deps: nil sources for %s", d.Dep)
 		}
 	}
+	// Flags after the positional argument, as the usage shows them; after "--" every
+	// argument is positional.
+	code, out, errs = smatesCmd(t, g.dir, "deps", "e2e/login_check.sh", "--format", "json")
+	if deps := decodeJSON[depsReport](t, out); code != 0 || deps.Test != "e2e/login_check.sh" {
+		t.Errorf("deps <test> --format json: %d %+v %s", code, deps, errs)
+	}
+	code, out, errs = smatesCmd(t, g.dir, "why", "backend/user.go", "--format", "json")
+	if why := decodeJSON[whyReport](t, out); code != 0 || why.Target != "backend/user.go" || len(why.Tests) == 0 {
+		t.Errorf("why <file> --format json: %d %+v %s", code, why, errs)
+	}
+	if code, _, errs := smatesCmd(t, g.dir, "why", "--", "backend/user.go", "--format", "json"); code != 2 || !strings.Contains(errs, "usage: smates why") {
+		t.Errorf("why -- <file> --format json: exit %d %s", code, errs)
+	}
 
 	_, out, _ = smatesCmd(t, g.dir, "list", "--format", "json")
 	list := decodeJSON[listReport](t, out)

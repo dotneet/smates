@@ -196,6 +196,10 @@ assert not v.startswith("fail"), v
 	}
 	write("smates.yml", config)
 
+	// Units before --clear (flags may follow positional arguments).
+	if code, _, errs := run("flaky", "no_such_test.py", "--clear"); code != 0 || !strings.Contains(errs, "cleared flake evidence of 0") {
+		t.Fatalf("clear of another unit: %d %s", code, errs)
+	}
 	if code, _, errs := run("flaky", "--clear"); code != 0 || !strings.Contains(errs, "cleared flake evidence of 1") {
 		t.Fatalf("clear: %d %s", code, errs)
 	}
