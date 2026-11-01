@@ -8,7 +8,8 @@ pytest plugin, reporters for vitest and jest) are embedded and extracted at run 
 
 ## 1. Core idea: per-test content fingerprints over observed inputs
 
-For every test unit `T` (a test file; a package directory for Go) smates stores the
+For every test unit `T` (a test file; a package directory for Go, or a top-level test
+function with `granularity: func`, see "Go test functions" below) smates stores the
 inputs it was observed to depend on, with the content hash (git blob SHA-1) each had when
 `T` last ran, and whether `T` passed:
 
@@ -82,6 +83,7 @@ Dependency keys:
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
+| `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
@@ -218,6 +220,7 @@ can alter test results.
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
+| go test, `granularity: func` | top-level test function | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`) + declarations of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`) |
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
@@ -250,6 +253,44 @@ and `os.getenv`) records the name with the nearest repository frame as `by`;
 same instruction are the copy. Go: `getenv` lines of the test log; they carry no stack,
 so the lookup `t.Setenv` makes to restore a variable later counts as a read (the test
 depends on the outer value of a variable it sets: more runs, never fewer).
+
+**Go test functions.** With `granularity: func` a unit is `dir#Name` for every top-level
+`TestXxx(*testing.T)`, `FuzzXxx(*testing.F)` and `ExampleXxx()` found by parsing the
+package's `_test.go` files (a file that does not parse makes the package itself a unit).
+Recording builds the package's test binary once with `-cover -coverpkg=` set to the
+main-module packages it links (`go list -deps -test`), lists its tests (`-test.list`),
+and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
+profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
+directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
+and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`).
+Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
+binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
+(blocks placed by `//line` in a file that is not there: every Go file of the package);
+the declarations (`f.go#decls`) of every Go file of the static closure, which is what
+makes this sound: coverage only sees statements inside function bodies, so constants,
+variable initializers, types, signatures and method sets are hashed separately (as
+tokens, so formatting does not count) and a change to them selects every function that
+could see them, while an edit inside a body selects only the functions that executed
+it; the content of Go files of packages the binary does not link (a test that runs
+`go run ../cmd/tool`); the content of its own test file, of test files declaring a name
+its file mentions (transitively) and of test files with `TestMain`, `init` or
+package-level variables initialized by a call, and the declarations of the package's
+other test files (without their test functions, so adding a test does not select its
+neighbours); the listing of the package directory (a new file selects every function
+of the package); and everything the package unit has besides (test log reads and
+environment variables, non-Go files of the closure, `go.mod`/`go.sum`, children). A
+missing profile makes every file of the closure a content dependency. When per-function
+recording is impossible (the binary does not build with coverage, `go list` fails, the
+command is not a plain `go test` or passes `-run`, `-skip`, `-bench`, `-fuzz`, `-c`,
+`-o`), the package is recorded through the package path with `-run` restricted to the
+selected functions, and each function gets the package's observation with every Go file
+of its closure as content: package granularity under function IDs, with a warning.
+Without recording, selected functions run with `go test -run '^(A|B)$'` (one pattern
+for as many packages as fit in 16 KiB; a function of the same name in another of those
+packages runs too; a package that alone needs more runs whole), and outcomes come from
+the top-level `--- FAIL/PASS/SKIP` lines (or `-json` events) before each package's
+summary line: a package that passed passes all its functions, a failed build fails them
+all, other functions of a failed package are unknown (inferred).
 
 **Python module-level state.** pytest imports a module once per process, and caches
 (`functools.cache`) run once: a read made then belongs to the module that made it
