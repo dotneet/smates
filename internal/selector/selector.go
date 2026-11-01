@@ -126,6 +126,9 @@ type Result struct {
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
 	Notes          []string          `json:"notes,omitempty"`
+	// Covered is the union of every test's D(T), including the suites --suite left out
+	// (Input.Others): a changed file it does not explain (Covers) is an orphan.
+	Covered map[string]bool `json:"-"`
 }
 
 // HandleOrphans records how orphans were handled; earlier records win.
@@ -236,6 +239,7 @@ func Select(in *Input) (*Result, error) {
 	if in.Config.Path != "" {
 		covered[in.Config.Path] = true // explained by ConfigKey
 	}
+	res.Covered = covered
 	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
