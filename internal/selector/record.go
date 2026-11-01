@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -375,35 +376,29 @@ func (h *Hasher) snapEntries(key string) (names []string, ok bool) {
 	return names, ok
 }
 
-// listing hashes the entry names of a directory (key "dir/"): those of the snapshot
-// plus, with a root, those on disk that git does not list (ignored files and
-// directories: generated fixtures, build output), except vendored ones and those the
-// ignore globs match. A directory neither the snapshot nor the disk has hashes as "".
-// Like the content of files outside the snapshot, the entries on disk are listed when
+// listing hashes the entry names of a directory (key "dir/"). A directory the snapshot
+// has files below hashes as the snapshot's entries alone: entries git ignores inside it
+// (a log a test writes into its package, a test binary, editor and Finder files) are
+// not part of its listing, or one of them would rerun every test listing the directory
+// (with granularity: func, every test function of a Go package), and on every fresh
+// checkout where a test creates it. A directory the snapshot has no file below (one git
+// ignores entirely: generated fixtures, build output) is listed from disk, with a root,
+// except vendored entries and those the ignore globs match; it hashes as "" when it
+// does not exist. Like the content of files outside the snapshot, it is listed when
 // first hashed, which for a recording is after the run: a test that adds a file to the
-// directory it lists (a timestamped report) then finds the listing it left. A
-// directory without such entries hashes as the snapshot alone, as before entries on
-// disk were listed.
+// directory it lists (a timestamped report) then finds the listing it left.
 func (h *Hasher) listing(key string) string {
 	if v, ok := h.lists[key]; ok {
 		return v
 	}
 	names, ok := h.snapEntries(key)
-	if h.root != "" {
+	if !ok && h.root != "" {
 		dir := strings.TrimSuffix(key, "/")
 		if entries, err := os.ReadDir(filepath.Join(h.root, filepath.FromSlash(dir))); err == nil {
 			ok = true
-			listed := make(map[string]bool, len(names))
-			for _, n := range names {
-				listed[strings.TrimSuffix(n, "/")] = true
-			}
-			snapped := len(names)
-			names = append([]string(nil), names...) // not the snapshot's index
 			for _, e := range entries {
-				n, p := e.Name(), path.Join(dir, e.Name())
-				// Names the snapshot has are listed already (a submodule is a file there
-				// and a directory on disk).
-				if listed[n] || pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
+				n := e.Name()
+				if p := path.Join(dir, n); pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
 					continue
 				}
 				if e.IsDir() {
@@ -411,9 +406,7 @@ func (h *Hasher) listing(key string) string {
 				}
 				names = append(names, n)
 			}
-			if len(names) > snapped {
-				sort.Strings(names)
-			}
+			sort.Strings(names)
 		}
 	}
 	v := ""
@@ -457,29 +450,30 @@ func (h *Hasher) decls(p string) string {
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
 // commands smates cannot see into. Files git ignores below a directory the snapshot
-// lists are left out (build output, caches); a directory the snapshot has no file
-// below (one git ignores entirely: a command ran in build/) is read from disk instead,
-// like the content of files outside the snapshot, as the run left it.
+// lists are left out (build output, caches). A directory the snapshot has no file below
+// (one git ignores entirely: a command ran in build/) is read from disk instead, as the
+// run left it (see diskTree).
 func (h *Hasher) tree(dir string) string {
 	if v, ok := h.trees[dir]; ok {
 		return v
 	}
-	var files []string
-	for f := range h.snap {
-		if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
-			files = append(files, f)
-		}
-	}
-	hash := func(f string) string { return h.snap[f] }
+	var v string
 	if _, listed := h.snapEntries(depkey.Listing(dir)); !listed && h.root != "" && dir != "." && !pathutil.IsVendored(dir) {
-		files, hash = h.diskFiles(dir), h.file
+		v = h.diskTree(dir)
+	} else {
+		var files []string
+		for f := range h.snap {
+			if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
+				files = append(files, f)
+			}
+		}
+		sort.Strings(files)
+		sum := sha1.New()
+		for _, f := range files {
+			sum.Write([]byte(f + "\x00" + h.snap[f] + "\n"))
+		}
+		v = "tree:" + hex.EncodeToString(sum.Sum(nil))
 	}
-	sort.Strings(files)
-	sum := sha1.New()
-	for _, f := range files {
-		sum.Write([]byte(f + "\x00" + hash(f) + "\n"))
-	}
-	v := "tree:" + hex.EncodeToString(sum.Sum(nil))
 	if h.trees == nil {
 		h.trees = map[string]string{}
 	}
@@ -487,13 +481,28 @@ func (h *Hasher) tree(dir string) string {
 	return v
 }
 
-// diskFiles lists the files below dir on disk (repo-relative), without vendored ones
-// and those the ignore globs match; none when dir is not a directory.
-func (h *Hasher) diskFiles(dir string) []string {
-	var files []string
+// maxDiskTree caps the entries diskTree walks (a variable for tests).
+var maxDiskTree = 20000
+
+// diskTree hashes a directory outside the snapshot from disk: the paths and sizes of
+// the files below it, without vendored ones and those the ignore globs match. Contents
+// are not read: such trees are build output (build/, target/, dist/), gigabytes to hash
+// on every selection, and a build that is not reproducible would rerun the tests
+// forever. A tree of more than maxDiskTree entries hashes as a constant (it stays the
+// same while the tree is that large: its changes select nothing).
+func (h *Hasher) diskTree(dir string) string {
+	type file struct {
+		p    string
+		size int64
+	}
+	var files []file
+	n := 0
 	_ = filepath.WalkDir(filepath.Join(h.root, filepath.FromSlash(dir)), func(abs string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable: what can be read still counts
+		}
+		if n++; n > maxDiskTree {
+			return filepath.SkipAll
 		}
 		rel, rerr := filepath.Rel(h.root, abs)
 		if rerr != nil {
@@ -507,11 +516,22 @@ func (h *Hasher) diskFiles(dir string) []string {
 			return nil
 		}
 		if !d.IsDir() {
-			files = append(files, p)
+			var size int64
+			if fi, err := d.Info(); err == nil {
+				size = fi.Size()
+			}
+			files = append(files, file{p, size})
 		}
 		return nil
 	})
-	return files
+	if n > maxDiskTree {
+		return "tree:over:" + strconv.Itoa(maxDiskTree)
+	}
+	sum := sha1.New()
+	for _, f := range files { // WalkDir walks in lexical order
+		sum.Write([]byte(f.p + "\x00" + strconv.FormatInt(f.size, 10) + "\n"))
+	}
+	return "tree:" + hex.EncodeToString(sum.Sum(nil))
 }
 
 func uniq(s []string) []string {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -82,33 +84,49 @@ func TestListingWrittenByRunSettles(t *testing.T) {
 	}
 }
 
-// The listing of a directory the snapshot lists hashes as before entries on disk were
-// read (an entry recorded by an older smates still matches) unless git-ignored entries
-// are on disk; vendored entries and those the ignore globs match never count.
+// The listing of a directory the snapshot lists is the snapshot's alone, as an older
+// smates recorded it: entries git ignores inside it (logs, test binaries, editor and
+// Finder files, an ignored subdirectory) are not part of it. A directory the snapshot
+// has no file below is listed from disk, without vendored entries and those the ignore
+// globs match.
 func TestListingTrackedDir(t *testing.T) {
 	f := webFixture(t)
-	snapOnly := NewHasher(f.snap())
-	h := func() string { return NewHasher(f.snap(), IgnoreGlobs(f.cfg)...).WithRoot(f.dir).Hash("web/src/") }
+	h := func(key string) string {
+		return NewHasher(f.snap(), IgnoreGlobs(f.cfg)...).WithRoot(f.dir).Hash(key)
+	}
 	sum := sha1.Sum([]byte(strings.Join([]string{"a.test.ts", "a.ts", "b.test.ts", "b.ts", "c.test.ts"}, "\n")))
 	want := "dir:" + hex.EncodeToString(sum[:])
-	if got := snapOnly.Hash("web/src/"); got != want {
+	if got := NewHasher(f.snap()).Hash("web/src/"); got != want {
 		t.Fatalf("snapshot listing %s, want %s", got, want)
 	}
-	if got := h(); got != want {
-		t.Errorf("clean tracked directory: %s, want the snapshot's %s", got, want)
+	for _, p := range []string{"web/src/run.log", "web/src/.DS_Store", "web/src/cover.out", "web/src/.a.ts.swp",
+		"web/src/a.ts~", "web/src/gen/x.ts", "web/src/node_modules/x/index.js"} {
+		f.writeUntracked(p, "x")
+		if got := h("web/src/"); got != want {
+			t.Errorf("after %s: %s, want the snapshot's %s", p, got, want)
+		}
 	}
-	f.writeUntracked("web/src/node_modules/x/index.js", "")
-	f.writeUntracked("web/src/__pycache__/a.pyc", "")
-	f.writeUntracked("web/src/NOTES.md", "") // ignored by default (**/*.md)
-	if got := h(); got != want {
-		t.Errorf("vendored and ignored entries: %s, want %s", got, want)
+	if err := os.MkdirAll(filepath.Join(f.dir, "web/src/empty"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	f.writeUntracked("web/src/gen/x.ts", "")
-	if got := h(); got == want {
-		t.Errorf("an ignored directory inside a tracked one is not listed")
+	if got := h("web/src/"); got != want {
+		t.Errorf("empty subdirectory listed: %s", got)
 	}
-	// Existence checks of paths outside the snapshot still go to disk (and are pinned):
-	// a directory git ignores is not taken for one the snapshot lists.
+	// A directory git ignores entirely.
+	gen := h("web/src/gen/")
+	if gen == "" {
+		t.Fatal("ignored directory: no listing")
+	}
+	f.writeUntracked("web/src/gen/node_modules/x.js", "")
+	f.writeUntracked("web/src/gen/NOTES.md", "") // ignored by default (**/*.md)
+	if got := h("web/src/gen/"); got != gen {
+		t.Errorf("vendored and ignored entries listed: %s, want %s", got, gen)
+	}
+	f.writeUntracked("web/src/gen/y.ts", "")
+	if got := h("web/src/gen/"); got == gen {
+		t.Errorf("file added to an ignored directory: listing unchanged")
+	}
+	// Existence checks of paths outside the snapshot still go to disk (and are pinned).
 	hh := NewHasher(f.snap()).WithRoot(f.dir)
 	if got := hh.Hash(depkey.Existence("web/src/gen")); got != "exists" {
 		t.Errorf("existence of an ignored directory: %s", got)
@@ -121,26 +139,109 @@ func TestListingTrackedDir(t *testing.T) {
 	}
 }
 
-// A command smates cannot see into ran in a directory git ignores: its tree is read
-// from disk. A tree the snapshot lists leaves its git-ignored files out, as before.
+// With granularity: func every test function depends on its package's listing. One
+// test writes a git-ignored log into the package and reads it: on fresh checkouts
+// (the log absent before the run) only that test runs again, and files git ignores
+// in the package (.DS_Store, cover.out, a test binary) select nothing.
+func TestListingGoFuncIgnoredFiles(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.22\n",
+		"p/a.go":      "package p\n\nfunc A() int { return 1 }\n",
+		"p/a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+		"p/b_test.go": "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { A() }\n",
+	})
+	s := suite(t, config.Suite{Runner: "go", Tests: []string{"**/*_test.go"}, Granularity: config.GranularityFunc})
+	s.RepoRoot = f.dir
+	f.suites = []*runner.Suite{s}
+	repo := &gitx.Repo{Root: f.dir}
+	st := state.New()
+	run := func(units []string) {
+		res := f.sel(st, func(in *Input) { in.Repo, in.All = repo, len(units) == 0 })
+		h := NewHasher(f.snap()).WithRoot(f.dir)
+		h.PinBefore(st, []string{s.Name}, time.Now())
+		obs := map[string]*runner.Observation{}
+		for _, tt := range res.Suites[0].Tests {
+			if !tt.Selected {
+				continue
+			}
+			o := &runner.Observation{Files: map[string]bool{"p/a.go": true}, Status: state.Pass}
+			if tt.ID == "p#TestA" {
+				f.writeUntracked("p/run.log", strconv.FormatInt(time.Now().UnixNano(), 10))
+				o.Files["p/run.log"] = true
+			}
+			obs[tt.ID] = o
+		}
+		Record(st, res.Suites[0], obs, h.ForSuite(s), RecordOptions{Now: time.Now()})
+		st.Files = map[string]string(f.snap())
+	}
+	sel := func() map[string]string {
+		return decisions(f.sel(st, func(in *Input) { in.Repo = repo }))
+	}
+	run(nil)
+	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+		t.Fatalf("after the run: %v", got)
+	}
+	for i := range 3 {
+		os.Remove(filepath.Join(f.dir, "p/run.log")) // a fresh checkout
+		got := sel()
+		if want := map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("fresh checkout %d: %v, want %v", i, got, want)
+		}
+		run([]string{"p#TestA"})
+	}
+	for _, p := range []string{"p/.DS_Store", "p/cover.out", "p/p.test", "p/cpu.prof", "p/.a.go.swp", "p/.#a.go", "p/a.go~"} {
+		f.writeUntracked(p, "x")
+	}
+	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+		t.Errorf("ignored files in the package: %v", got)
+	}
+}
+
+// A command smates cannot see into ran in a directory git ignores: its tree is the
+// paths and sizes of its files on disk. A rebuilt file of the same size selects
+// nothing, a new file or a size change does; a tree the snapshot lists leaves its
+// git-ignored files out, as before.
 func TestTreeOfIgnoredDir(t *testing.T) {
 	f := webFixture(t)
-	f.writeUntracked("web/build/a.js", "1")
-	tree := func(dir string) string { return NewHasher(f.snap()).WithRoot(f.dir).Hash(depkey.Tree(dir)) }
-	before, src := tree("web/build"), tree("web/src")
-	f.writeUntracked("web/build/a.js", "2")
-	if tree("web/build") == before {
-		t.Errorf("edit in an ignored directory: tree unchanged")
+	for i := range 50 {
+		f.writeUntracked(fmt.Sprintf("web/build/chunk-%02d.js", i), "aaaa")
 	}
+	const unit = "web/src/c.test.ts"
+	key := depkey.Tree("web/build")
+	st := f.record(nil, nil)
+	f.recordRun(st, unit, []string{key}, nil)
+	sel := func() string {
+		return decisions(f.sel(st, func(in *Input) { in.Repo = &gitx.Repo{Root: f.dir} }))[unit]
+	}
+	if d := sel(); d != "-unaffected" {
+		t.Fatalf("nothing changed: %s", d)
+	}
+	f.writeUntracked("web/build/chunk-07.js", "bbbb") // rebuilt, same size
 	f.writeUntracked("web/build/node_modules/x.js", "")
-	f.writeUntracked("web/src/gen/x.ts", "")
-	if got := tree("web/src"); got != src || got != NewHasher(f.snap()).Hash(depkey.Tree("web/src")) {
-		t.Errorf("tracked tree with ignored files: %s, want %s", got, src)
+	if d := sel(); d != "-unaffected" {
+		t.Errorf("same-size rebuild: %s", d)
 	}
-	after := tree("web/build")
-	os.RemoveAll(filepath.Join(f.dir, "web/build/node_modules"))
-	if tree("web/build") != after {
-		t.Errorf("vendored files count in a tree")
+	f.writeUntracked("web/build/chunk-07.js", "bbbbb")
+	if d := sel(); d != ReasonChanged {
+		t.Errorf("size changed: %s", d)
+	}
+	f.writeUntracked("web/build/chunk-07.js", "bbbb")
+	f.writeUntracked("web/build/extra.js", "")
+	if d := sel(); d != ReasonChanged {
+		t.Errorf("file added: %s", d)
+	}
+	tree := func(dir string) string { return NewHasher(f.snap()).WithRoot(f.dir).Hash(depkey.Tree(dir)) }
+	f.writeUntracked("web/src/gen/x.ts", "")
+	if got, want := tree("web/src"), NewHasher(f.snap()).Hash(depkey.Tree("web/src")); got != want {
+		t.Errorf("tracked tree with ignored files: %s, want %s", got, want)
+	}
+	// Beyond the cap the hash is a constant.
+	defer func(n int) { maxDiskTree = n }(maxDiskTree)
+	maxDiskTree = 10
+	big := tree("web/build")
+	f.writeUntracked("web/build/more.js", "x")
+	if got := tree("web/build"); got != big || !strings.HasPrefix(got, "tree:over:") {
+		t.Errorf("tree over the cap: %s then %s", big, got)
 	}
 }
 

@@ -84,21 +84,16 @@ Dependency keys:
 | key | hash | recorded when |
 |---|---|---|
 | `path` | blob SHA-1 (`""` = absent) | a file is executed or read |
-| `dir/` | hash of the entry names (entries git does not list: from disk) | a directory is listed (readdir, os.listdir, Bun.Glob) |
+| `dir/` | hash of the entry names (of a directory git ignores entirely: from disk) | a directory is listed (readdir, os.listdir, Bun.Glob) |
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
-| `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: its files on disk) | a command smates cannot see into ran in `dir` |
+| `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: paths and sizes on disk) | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 The hashes are those of the snapshot taken before the run. Paths git does not list
 (ignored files such as `.env`, caches, reports, generated code) are read from disk
-instead. So are the entries git does not list of a listed directory (a directory of
-generated fixtures, or ignored files in a tracked one), except vendored entries and
-those the `ignore` globs match, and the files below a `dir/**` tree of a directory git
-ignores entirely (a tree the snapshot lists leaves its ignored files out, as build
-output). A listing without such entries hashes as the snapshot's, so entries recorded
-before stay valid. Existence checks of them are taken before the first test starts, for the
+instead. Existence checks of them are taken before the first test starts, for the
 paths the entries of the suites being run probed (`Hasher.PinBefore`), so a test that
 probes an output directory and then creates it is recorded as having seen it absent
 (it runs once more, then settles on `exists`). A path first probed when the run is
@@ -112,12 +107,29 @@ on FAT, with two-second timestamps, a path created in the first second of the ru
 still look older and be recorded as existing before it. The *content* of such files is
 hashed as the run left it: tests commonly rewrite what they read there (a timestamped
 report, a cache, Go tests creating files in the package), and their state before the
-run would never match again. Listings and trees outside the snapshot are hashed the
-same way: a test that adds a timestamped report to the directory it lists settles after
-one run. The flip side, for both: a test that reads (or lists) what it generates itself
+run would never match again. The flip side: a test that reads what it generates itself
 in an ignored path runs again on every fresh checkout, where the path is absent before
 the run. Known limitation: a git-ignored input edited by hand while
 the run is in progress is recorded with its new content, so the edit selects nothing.
+
+A directory the snapshot has no file below (one git ignores entirely: generated
+fixtures, `build/`) is listed from disk too, without vendored entries and those the
+`ignore` globs match, as the run left it like content (a test that adds a timestamped
+report to the directory it lists settles after one run). The listing of a directory the
+snapshot has files below is the snapshot's alone: entries git ignores inside a tracked
+directory are not part of it. That is a known gap (a git-ignored file added next to
+tracked ones selects no test that lists the directory, unless the test read it), kept
+on purpose: with `granularity: func` every Go test function depends on its package's
+listing, so a log a test writes into the package, a `go test -c` binary, `cover.out`,
+profiles, `.DS_Store` or an editor's swap file would rerun the whole package (on every
+fresh checkout, for files a test writes there), where only the test reading the file
+should run. A `dir/**` tree of a directory git ignores entirely is the relative paths
+and sizes of its files on disk, without vendored ones and those the `ignore` globs
+match; contents are not read (build output can be gigabytes, and a build that is not
+reproducible would rerun the tests forever), so a rebuilt file of the same size is no
+change. A tree of more than 20,000 entries hashes as a constant (`tree:over:20000`): its
+changes select nothing while it stays that large. A tree the snapshot has files below
+leaves its ignored files out.
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
