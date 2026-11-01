@@ -108,9 +108,9 @@ type AgentConfig struct {
 // FlakyConfig: smates always detects and reports flaky tests (a unit whose outcome
 // flipped while its inputs stayed the same); a failure is never hidden by default.
 type FlakyConfig struct {
-	// Retry re-runs a failing unit that is already known to be flaky up to this many
-	// times; when it then passes, it is reported as flaky and does not fail the run.
-	// Only applies when every failure of the suite run is such a unit. Default 0.
+	// Retry re-runs a suite run whose failures are all units already known to be flaky,
+	// with the same units, up to this many times; when it then passes, the flip is
+	// reported and the run does not fail. Default 0.
 	Retry int `yaml:"retry"`
 }
 

@@ -192,9 +192,11 @@ runner arguments passed through (`smates run -- ...`), and entries written befor
 histories existed are never evidence. Each entry keeps its last 8
 outcomes (status, fingerprint, time) and, once flaky, the evidence (flip count, first and
 last flip, commit). Detection never changes selection: a failure is re-run next time as
-always. The opt-in `flaky.retry` re-runs a failing unit that is already known to be flaky
-(only when every failure of the suite run is such a unit) and lets the run pass if the
-retry passes; the flip is recorded and reported like any other.
+always. The opt-in `flaky.retry` re-runs the suite run when every failure is a unit
+already known to be flaky, and lets the run pass if the re-run passes; the flip is
+recorded and reported like any other. The re-run covers the same units as the failed
+run, not only the failing ones: a run can also fail for reasons no unit reports (an
+unhandled error, teardown, a crash), which re-running the flaky units alone would hide.
 
 ### Failure hints
 
