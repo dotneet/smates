@@ -226,10 +226,20 @@ func (p *project) resolveAdd(res *selector.Result, arg string) (string, []string
 func (p *project) addPaths(spec string) []string {
 	out := []string{path.Clean(filepath.ToSlash(strings.TrimPrefix(spec, "./")))}
 	try := func(abs string) {
-		if rel, err := filepath.Rel(p.repo.Root, abs); err == nil && !strings.HasPrefix(rel, "..") {
-			if r := filepath.ToSlash(rel); !slices.Contains(out, r) {
-				out = append(out, r)
+		rel, err := filepath.Rel(p.repo.Root, abs)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			// The repository root has its symlinks resolved (/var is /private/var
+			// on macOS): resolve the argument's directory the same way.
+			dir, derr := filepath.EvalSymlinks(filepath.Dir(abs))
+			if derr != nil {
+				return
 			}
+			if rel, err = filepath.Rel(p.repo.Root, filepath.Join(dir, filepath.Base(abs))); err != nil || strings.HasPrefix(rel, "..") {
+				return
+			}
+		}
+		if r := filepath.ToSlash(rel); !slices.Contains(out, r) {
+			out = append(out, r)
 		}
 	}
 	if filepath.IsAbs(spec) {
