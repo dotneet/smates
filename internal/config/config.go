@@ -159,9 +159,14 @@ func (s *Suite) Dependencies() []Dependency {
 	return out
 }
 
+// checkDependencies validates depends_on and serves, and strips a leading "./" from
+// their globs (which would otherwise match nothing).
 func checkDependencies(s *Suite, names map[string]bool) error {
 	where := fmt.Sprintf("suite %q", s.Name)
+	trimDotSlash(s.Serves)
 	for i, d := range s.DependsOn {
+		trimDotSlash(d.Paths)
+		trimDotSlash(d.Tests)
 		at := fmt.Sprintf("%s: depends_on[%d]", where, i)
 		switch {
 		case d.Suite != "" && len(d.Paths) > 0:
@@ -183,8 +188,21 @@ func checkDependencies(s *Suite, names map[string]bool) error {
 	return checkRepoGlobs(where+": serves", s.Serves)
 }
 
+// trimDotSlash removes leading "./" from globs in place.
+func trimDotSlash(globs []string) {
+	for i, g := range globs {
+		for strings.HasPrefix(g, "./") {
+			g = g[2:]
+		}
+		globs[i] = g
+	}
+}
+
 func checkGlobs(where string, globs []string) error {
 	for _, g := range globs {
+		if strings.Contains(g, "\\") {
+			return fmt.Errorf("%s: %q: use / as the path separator (a backslash escapes the next character in a glob)", where, g)
+		}
 		if g == "" || !doublestar.ValidatePattern(g) {
 			return fmt.Errorf("%s: bad glob %q", where, g)
 		}

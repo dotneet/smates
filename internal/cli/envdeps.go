@@ -17,7 +17,10 @@ func selectionReason(t *selector.Test) string {
 	for _, c := range t.Changed {
 		if kind, name := depkey.Parse(c); kind == depkey.KindEnv {
 			env = append(env, name)
-		} else if label := t.Service[c]; label != "" {
+		} else if label := t.Service[c]; label != "" && depkey.IsSet(c) {
+			// A declaration whose changed files cannot be named.
+			files = append(files, "code of "+label)
+		} else if label != "" {
 			files = append(files, c+" ("+label+")")
 		} else {
 			files = append(files, c)

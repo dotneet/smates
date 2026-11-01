@@ -317,14 +317,19 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			// The same rule the selector uses; existence changes are assumed so that
 			// listings and existence checks are shown too.
 			kind := selector.Covers(deps, target, true)
+			// depends_on/serves: one key stands for the declaration's files.
+			service := s.ServiceVia(t.ID, target)
+			if kind == "" && service != "" {
+				kind = "content"
+			}
 			if kind == "" {
 				continue
 			}
 			var how []string
 			switch kind {
 			case "content":
-				if label := s.ServiceVia(t.ID, target); label != "" {
-					how = append(how, label)
+				if service != "" {
+					how = append(how, service)
 				} else if slices.Contains(s.Known[t.ID], target) {
 					how = append(how, "static/inputs")
 				}

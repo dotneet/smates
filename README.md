@@ -265,12 +265,14 @@ would select none of these tests. Declare the dependency on the e2e suite:
     # or: serves: ["backend/**"]
 ```
 
-`{suite: api}` (or just `api`) stands for the files under that suite's root, minus its
-test files, ignored and vendored files and files of suites rooted below it. `paths` are
-repo-relative globs; `tests` (relative to the suite root) narrows which tests get the
-dependency. These files join `D(T)` like inputs (computed at HEAD and hashed when the
-test runs), so a change to them selects the tests and is no longer an orphan, also with
-`--suite`. `--explain`, `smates why` and the pull request summary name the declaration:
+`{suite: api}` (or just `api`) stands for the files under that suite's root, minus test
+files (of any suite), ignored and vendored files and files of suites rooted below it.
+`paths` are repo-relative globs; `tests` (relative to the suite root) narrows which tests
+get the dependency. Each declaration joins `D(T)` as one key whose hash covers all its
+files (computed at HEAD, recorded when the test runs, so the state does not grow with the
+size of the server), so a change to them selects the tests and is no longer an orphan,
+also with `--suite`. `--explain`, `smates why` and the pull request summary name the
+changed files and the declaration:
 
 ```
 + e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]

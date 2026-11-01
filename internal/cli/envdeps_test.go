@@ -21,6 +21,10 @@ func TestSelectionReason(t *testing.T) {
 			Via:     map[string]string{"backend/api/user.go": selector.ViaService, "e2e/h.ts": selector.ViaImport},
 			Service: map[string]string{"backend/api/user.go": "depends_on suite go"}},
 			"changed: backend/api/user.go (depends_on suite go), e2e/h.ts"},
+		{selector.Test{Reason: selector.ReasonChanged, Changed: []string{"@set:suite:go"},
+			Via:     map[string]string{"@set:suite:go": selector.ViaService},
+			Service: map[string]string{"@set:suite:go": "depends_on suite go"}},
+			"changed: code of depends_on suite go"},
 		{selector.Test{Reason: selector.ReasonFailed, Detail: "last run: fail"}, "failed: last run: fail"},
 		{selector.Test{Reason: selector.ReasonNew}, "new"},
 	} {

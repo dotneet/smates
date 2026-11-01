@@ -1,11 +1,15 @@
 package selector
 
 import (
+	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // serviceFixture: Playwright-style tests under e2e/ exercise a Go server under
@@ -161,8 +165,100 @@ func TestServiceVia(t *testing.T) {
 			t.Errorf("ServiceVia(%s, %s) = %q, want %q", c.unit, c.file, got, c.want)
 		}
 	}
-	if !contains(s.Known["e2e/login.spec.ts"], "backend/api/user.go") || contains(s.Known["e2e/login.spec.ts"], "e2e/admin/users.spec.ts") {
-		t.Errorf("known: %v", s.Known["e2e/login.spec.ts"])
+	// One key per declaration, not one per file.
+	if k := s.Known["e2e/login.spec.ts"]; !contains(k, "@set:suite:go") || !contains(k, "@set:paths:worker/**") ||
+		contains(k, "@set:paths:docker-compose.yml") || contains(k, "backend/api/user.go") {
+		t.Errorf("known: %v", k)
+	}
+	if !contains(s.Known["e2e/admin/users.spec.ts"], "@set:paths:docker-compose.yml") {
+		t.Errorf("known: %v", s.Known["e2e/admin/users.spec.ts"])
+	}
+	if got := s.ExpandSets([]string{"@set:suite:go", "e2e/helpers.ts"}); !reflect.DeepEqual(got, []string{"backend/api/user.go", "e2e/helpers.ts"}) {
+		t.Errorf("ExpandSets: %v", got)
+	}
+}
+
+// The state keeps one entry per declaration and test, with a hash over every file.
+func TestRecordDependsOnOneKey(t *testing.T) {
+	f := defaultServiceFixture(t)
+	for i := 0; i < 50; i++ {
+		f.write(fmt.Sprintf("backend/api/h%02d.go", i), "package api\n")
+	}
+	st := f.record(nil, nil)
+	e := st.Suites["e2e"].Tests["e2e/login.spec.ts"]
+	var keys []string
+	for k := range e.Deps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	want := []string{"@set:paths:worker/**", "@set:suite:go", "e2e/helpers.ts", "e2e/login.spec.ts"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("recorded deps %v, want %v", keys, want)
+	}
+	h := NewHasher(f.snap()).WithSets(f.sel(st, nil).SuiteByName("e2e").Services)
+	if v := e.Deps["@set:suite:go"]; !strings.HasPrefix(v, "set:") || v != h.Hash("@set:suite:go") {
+		t.Errorf("set hash %q", v)
+	}
+	// Editing, adding or deleting a server file changes the set, and is named.
+	for _, step := range []struct {
+		do   func()
+		file string
+	}{
+		{func() { f.write("backend/api/h07.go", "package api\n// x\n") }, "backend/api/h07.go"},
+		{func() { f.write("backend/api/new.go", "package api\n") }, "backend/api/new.go"},
+		{func() { f.remove("backend/api/h08.go") }, "backend/api/h08.go"},
+	} {
+		step.do()
+		res := f.sel(st, nil)
+		if got := e2eVia(res)["e2e/login.spec.ts"]; !reflect.DeepEqual(got, map[string]string{step.file: "service: depends_on suite go"}) {
+			t.Errorf("%s: %v", step.file, got)
+		}
+		if len(res.Orphans) != 0 {
+			t.Errorf("%s: orphans %v", step.file, res.Orphans)
+		}
+		st = f.record(nil, nil)
+	}
+}
+
+// Two suites sharing a root: the other suite's tests are not server code.
+func TestSelectDependsOnSameRootSibling(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"src/server.ts":       `export const s = 1`,
+		"src/server.test.ts":  `test("unit")`,
+		"src/util_test.go":    "package src\n",
+		"e2e/login.spec.ts":   `test("e2e")`,
+		"jest.config.js":      `module.exports = {}`,
+		"src/other.test.ts":   `test("unit 2")`,
+		"src/component.go":    "package src\n",
+		"e2e/fixtures/a.json": `{}`,
+	})
+	f.suites = []*runner.Suite{
+		suite(t, config.Suite{Name: "go", Runner: "go", Root: ".", Tests: []string{"**/*_test.go"}, Exclude: []string{"e2e/**"}}),
+		suite(t, config.Suite{Name: "jest", Runner: "jest", Root: ".", Tests: []string{"src/**/*.test.ts"}}),
+		suite(t, config.Suite{Name: "e2e", Runner: "vitest", Root: "e2e", Tests: []string{"*.spec.ts"}, DependsOn: []config.Dependency{{Suite: "go"}}}),
+	}
+	st := f.record(nil, nil)
+	f.write("src/server.test.ts", `test("unit changed")`)
+	f.write("src/util_test.go", "package src\n// changed\n")
+	if got := e2eVia(f.sel(st, nil)); len(got) != 0 {
+		t.Errorf("a sibling suite's test selected e2e: %v", got)
+	}
+	f.write("src/component.go", "package src\n// changed\n")
+	if got := e2eVia(f.sel(st, nil)); len(got) != 1 {
+		t.Errorf("server code: %v", got)
+	}
+}
+
+func TestSelectDependsOnDiffMode(t *testing.T) {
+	f := defaultServiceFixture(t)
+	repo, base := gitFixture(t, f)
+	f.write("backend/api/user.go", "package api\n// changed\n")
+	res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+	if res.Mode != ModeDiff {
+		t.Fatalf("mode %s", res.Mode)
+	}
+	if got := e2eVia(res)["e2e/admin/users.spec.ts"]; !reflect.DeepEqual(got, map[string]string{"backend/api/user.go": "service: depends_on suite go"}) {
+		t.Errorf("diff mode: %v", e2eVia(res))
 	}
 }
 
@@ -176,7 +272,7 @@ func TestServiceExpanderComputesSuiteCodeOnce(t *testing.T) {
 	}
 	e := newServiceExpander(f.cfg, suites, files)
 	a, b := e.forSuite(suites[2]), e.forSuite(other)
-	if len(e.code) != 1 || !reflect.DeepEqual(a[0].Files, []string{"backend/api/user.go"}) || &e.code["go"][0] != &e.suiteCode("go")[0] {
+	if len(e.code) != 1 || !reflect.DeepEqual(a[0].Files, []string{"backend/api/user.go"}) || e.code["go"] != e.suiteCode("go") {
 		t.Errorf("code %v, files %v", e.code, a[0].Files)
 	}
 	if !reflect.DeepEqual(a[0].Files, b[0].Files) {

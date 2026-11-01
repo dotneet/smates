@@ -36,17 +36,29 @@ is needed (`fetch-depth: 1`), dirty working trees work, rebases do not matter.
 **Cross-suite dependencies.** Tracing follows the test process and its children; it
 cannot follow a request into a server running in another process or container (an e2e
 suite against a backend started by docker compose). A suite declares that code with
-`depends_on`: `{suite: S}` is S's code — the files under S's root minus S's test files,
-ignored and vendored files, and files of other suites rooted below S's root (so a suite at
-the repository root does not swallow the others) — and `{paths: [globs]}` is repo-relative
-globs; `tests:` narrows the entry to some of the suite's tests. `serves: [globs]` is
-shorthand for a paths entry. The depending suite's own test files are never added. Each
-entry is expanded once per selection (`serviceExpander`; a suite's code once however many
-suites depend on it), not per test. Like rule deps the files are static: part of
-`Known`, hashed when the test runs, and they cover changes for the orphan check — also
-with `--suite`, since the expansion sees `Input.Others`. The explanation is
-`Test.Via = service` with `Test.Service` naming the declaration ("depends_on suite api"),
-which `--explain`, `smates why`, the summary and failure hints render.
+`depends_on`: `{suite: S}` is S's code — the files under S's root minus test files (of
+any suite: two suites may share a root), ignored and vendored files, and files of other
+suites rooted below S's root (so a suite at the repository root does not swallow the
+others) — and `{paths: [globs]}` is repo-relative globs (a leading `./` is stripped,
+backslashes are rejected); `tests:` narrows the entry to some of the suite's tests.
+`serves: [globs]` is shorthand for a paths entry. The depending suite's own test files are
+never added. Each entry is expanded once per selection (`serviceExpander`; a suite's code
+once however many suites depend on it), not per test.
+
+A declaration is **one dependency key**, `@set:suite:S` or `@set:paths:<globs>`, whose
+hash (`Hasher.WithSets`) is a SHA-1 over the sorted paths and blob hashes of its files at
+HEAD. Like rule deps it is static (in `Known`) and recorded with the test, so the state
+grows with tests × declarations, not tests × server files, and each set is hashed once
+per selection or recording. When the key changed, the explanation names the files of the
+declaration among the selection's changed files (the snapshot or base-revision diff,
+deleted files included: a declaration is also a path predicate, `ServiceDeps.Match`), each
+as `Test.Via = service` with `Test.Service` naming the declaration ("depends_on suite
+api"); only when none of them changed since the snapshot (the change happened between
+the test's run and the snapshot) is the key itself shown ("code of depends_on suite
+api"). `--explain`, `smates why`, the summary and failure hints (which expand the key into
+its files) render it. A changed file a declaration matches is covered for the orphan check
+— also with `--suite`, since the expansion sees `Input.Others`. Older smates versions read
+the key as a missing file and select the test, which is safe.
 
 Dependency keys:
 
@@ -57,6 +69,7 @@ Dependency keys:
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
+| `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome

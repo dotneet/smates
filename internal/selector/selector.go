@@ -3,6 +3,7 @@ package selector
 
 import (
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"sort"
@@ -115,16 +116,26 @@ type Suite struct {
 
 // ServiceDeps is one depends_on/serves declaration of a suite expanded to files: code
 // the suite's tests exercise across a boundary tracing cannot follow (a server running
-// in another process or container).
+// in another process or container). A test depends on the declaration through a single
+// key (Key, see depkey.Set) whose hash covers every file, so the state grows with the
+// number of declarations, not with files × tests.
 type ServiceDeps struct {
+	// Key is the dependency key of the whole set ("@set:suite:api").
+	Key string
 	// Label describes the declaration ("depends_on suite api", "serves backend/**").
 	Label string
 	// Tests narrow the units that get the dependency (globs relative to the suite
 	// root; empty: all).
 	Tests []string
+	// Files are the files of the set at HEAD, sorted.
 	Files []string
-	set   map[string]bool
+	// match reports whether a path belongs to the set (also a deleted one).
+	match func(string) bool
 }
+
+// Match reports whether path f belongs to the declaration (also when f no longer
+// exists).
+func (d *ServiceDeps) Match(f string) bool { return d.match(f) }
 
 // applies reports whether the declaration covers a unit of suite su.
 func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
@@ -135,11 +146,34 @@ func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
 // which unit depends on file f ("" when none does).
 func (s *Suite) ServiceVia(unit, f string) string {
 	for _, d := range s.Services {
-		if d.set[f] && d.applies(s.Suite, unit) {
+		if d.match(f) && d.applies(s.Suite, unit) {
 			return d.Label
 		}
 	}
 	return ""
+}
+
+// service returns the declaration whose set key is key (nil when none is).
+func (s *Suite) service(key string) *ServiceDeps {
+	for _, d := range s.Services {
+		if d.Key == key {
+			return d
+		}
+	}
+	return nil
+}
+
+// ExpandSets replaces the set keys among deps by the files of their sets.
+func (s *Suite) ExpandSets(deps []string) []string {
+	var out []string
+	for _, k := range deps {
+		if d := s.service(k); d != nil {
+			out = append(out, d.Files...)
+		} else {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Mode is how a selection was computed.
@@ -265,11 +299,16 @@ func Select(in *Input) (*Result, error) {
 	}
 	everySuite := append(slices.Clip(in.Suites), in.Others...)
 	services := newServiceExpander(in.Config, everySuite, files)
+	var declared []*ServiceDeps // declarations some test depends on (they cover changes)
 	for i, su := range everySuite {
 		selecting := i < len(in.Suites) // in.Others only add to covered
-		hs := hasher.ForSuite(su)
 		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
 		sr.Services = services.forSuite(su)
+		hs := hasher.ForSuite(su).WithSets(sr.Services)
+		// The changed files of each declaration, and the changed sets with them so
+		// that diff mode sees a set key change.
+		setChanged, setChangedBase := changedSets(sr.Services, changedSet), changedSets(sr.Services, baseChanged)
+		suiteChanged, suiteBaseChanged := withSetKeys(changedSet, setChanged), withSetKeys(baseChanged, setChangedBase)
 		if selecting {
 			res.Suites = append(res.Suites, sr)
 		}
@@ -295,8 +334,9 @@ func Select(in *Input) (*Result, error) {
 			via := map[string]string{} // known deps by strongest explanation
 			for _, d := range sr.Services {
 				if d.applies(su, u) {
-					for _, f := range d.Files {
-						deps[f], via[f] = true, ViaService
+					deps[d.Key], via[d.Key] = true, ViaService
+					if !slices.Contains(declared, d) {
+						declared = append(declared, d)
 					}
 				}
 			}
@@ -347,26 +387,14 @@ func Select(in *Input) (*Result, error) {
 			if entry != nil {
 				t.Duration = entry.DurationMs
 			}
+			setFiles := setChanged
 			if entry == nil && res.Mode == ModeState && baseChanged != nil {
-				decide(t, ModeDiff, nil, dl, hs, baseChanged)
+				decide(t, ModeDiff, nil, dl, hs, suiteBaseChanged)
+				setFiles = setChangedBase
 			} else {
-				decide(t, res.Mode, entry, dl, hs, changedSet)
+				decide(t, res.Mode, entry, dl, hs, suiteChanged)
 			}
-			for _, c := range t.Changed {
-				if t.Via == nil {
-					t.Via = map[string]string{}
-				}
-				t.Via[c] = via[c]
-				switch t.Via[c] {
-				case "":
-					t.Via[c] = ViaTraced
-				case ViaService:
-					if t.Service == nil {
-						t.Service = map[string]string{}
-					}
-					t.Service[c] = sr.ServiceVia(u, c)
-				}
-			}
+			explain(t, sr, via, setFiles)
 			sr.Tests = append(sr.Tests, t)
 		}
 		sr.All = allSelected(sr)
@@ -378,12 +406,87 @@ func Select(in *Input) (*Result, error) {
 				continue
 			}
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
-			if Covers(covered, f, existenceChanged) == "" {
+			if Covers(covered, f, existenceChanged) == "" && !slices.ContainsFunc(declared, func(d *ServiceDeps) bool { return d.match(f) }) {
 				res.Orphans = append(res.Orphans, f)
 			}
 		}
 	}
 	return res, nil
+}
+
+// changedSets returns, for each declaration with changed files in changed, those
+// files (sorted, deleted ones included).
+func changedSets(decls []*ServiceDeps, changed map[string]bool) map[*ServiceDeps][]string {
+	if len(decls) == 0 || len(changed) == 0 {
+		return nil
+	}
+	out := map[*ServiceDeps][]string{}
+	for f := range changed {
+		for _, d := range decls {
+			if d.match(f) {
+				out[d] = append(out[d], f)
+			}
+		}
+	}
+	for _, l := range out {
+		sort.Strings(l)
+	}
+	return out
+}
+
+// withSetKeys returns changed plus the keys of the declarations with changed files.
+func withSetKeys(changed map[string]bool, sets map[*ServiceDeps][]string) map[string]bool {
+	if len(sets) == 0 {
+		return changed
+	}
+	out := maps.Clone(changed)
+	for d := range sets {
+		out[d.Key] = true
+	}
+	return out
+}
+
+// explain sets how each changed dependency reached t: via holds the known deps by
+// strongest explanation (anything else was traced). A changed set key stands for the
+// files of its declaration that changed (sets, against the snapshot or base revision
+// decide compared with), each named with the declaration; it stays as the key only
+// when none can be named (they changed between the test's run and the snapshot).
+func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]string) {
+	if len(t.Changed) == 0 {
+		return
+	}
+	var changed []string
+	t.Via = map[string]string{}
+	add := func(c, how, service string) {
+		if _, dup := t.Via[c]; dup {
+			return
+		}
+		changed = append(changed, c)
+		t.Via[c] = how
+		if service != "" {
+			if t.Service == nil {
+				t.Service = map[string]string{}
+			}
+			t.Service[c] = service
+		}
+	}
+	for _, c := range t.Changed {
+		if d := sr.service(c); d != nil && via[c] == ViaService {
+			if len(sets[d]) == 0 {
+				add(c, ViaService, d.Label)
+			}
+			for _, f := range sets[d] {
+				add(f, ViaService, d.Label)
+			}
+			continue
+		}
+		how := via[c]
+		if how == "" {
+			how = ViaTraced
+		}
+		add(c, how, "")
+	}
+	t.Changed = changed
 }
 
 // IgnoreGlobs are the changes that never need tests unless a test reads them.
@@ -550,19 +653,26 @@ type serviceExpander struct {
 	ignore []string
 	suites []*runner.Suite
 	files  []string
-	code   map[string][]string // suite name -> its code
+	code   map[string]*suiteCode // suite name -> its code
+}
+
+// suiteCode is the code of a suite: a predicate and the files at HEAD.
+type suiteCode struct {
+	match func(string) bool
+	files []string
 }
 
 func newServiceExpander(c *config.Config, suites []*runner.Suite, files []string) *serviceExpander {
-	return &serviceExpander{ignore: IgnoreGlobs(c), suites: suites, files: files, code: map[string][]string{}}
+	return &serviceExpander{ignore: IgnoreGlobs(c), suites: suites, files: files, code: map[string]*suiteCode{}}
 }
 
 // suiteCode is what {suite: name} stands for: the files under the suite's root other
-// than its test files, ignored and vendored files, and files of other suites rooted
-// below it (a suite at the repository root does not take in every other suite).
-func (e *serviceExpander) suiteCode(name string) []string {
-	if out, ok := e.code[name]; ok {
-		return out
+// than test files (of any suite: two suites may share a root), ignored and vendored
+// files, and files of other suites rooted below it (a suite at the repository root does
+// not take in every other suite).
+func (e *serviceExpander) suiteCode(name string) *suiteCode {
+	if c, ok := e.code[name]; ok {
+		return c
 	}
 	var target *runner.Suite
 	var nested []string
@@ -571,27 +681,30 @@ func (e *serviceExpander) suiteCode(name string) []string {
 			target = s
 		}
 	}
+	c := &suiteCode{match: func(string) bool { return false }}
+	e.code[name] = c
 	if target == nil {
 		// Validation guarantees the suite exists; a caller that passed only some suites
 		// (neither Suites nor Others has it) gets no dependency rather than a guess.
-		e.code[name] = nil
-		return nil
+		return c
 	}
 	for _, s := range e.suites {
 		if s.Root != target.Root && pathutil.Under(s.Root, target.Root) {
 			nested = append(nested, s.Root)
 		}
 	}
-	var out []string
-	for _, f := range e.files {
-		if !pathutil.Under(f, target.Root) || target.IsTestFile(f) || pathutil.IsVendored(f) || pathutil.Match(e.ignore, f) ||
-			slices.ContainsFunc(nested, func(r string) bool { return pathutil.Under(f, r) }) {
-			continue
-		}
-		out = append(out, f)
+	suites, ignore := e.suites, e.ignore
+	c.match = func(f string) bool {
+		return pathutil.Under(f, target.Root) && !pathutil.IsVendored(f) && !pathutil.Match(ignore, f) &&
+			!slices.ContainsFunc(nested, func(r string) bool { return pathutil.Under(f, r) }) &&
+			!slices.ContainsFunc(suites, func(s *runner.Suite) bool { return s.IsTestFile(f) })
 	}
-	e.code[name] = out
-	return out
+	for _, f := range e.files {
+		if c.match(f) {
+			c.files = append(c.files, f)
+		}
+	}
+	return c
 }
 
 // forSuite expands the declarations of su. The suite's own test files are left out: a
@@ -600,16 +713,20 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 	var out []*ServiceDeps
 	for _, d := range su.Dependencies() {
 		var cand []string
+		var in func(string) bool
+		var id string
 		if d.Suite != "" {
-			cand = e.suiteCode(d.Suite)
+			c := e.suiteCode(d.Suite)
+			cand, in, id = c.files, c.match, "suite:"+d.Suite
 		} else {
-			cand = expandInputs(d.Paths, e.files)
+			globs := d.Paths
+			cand, in, id = expandInputs(globs, e.files), func(f string) bool { return pathutil.Match(globs, f) }, "paths:"+strings.Join(globs, ",")
 		}
-		sd := &ServiceDeps{Label: d.String(), Tests: d.Tests, set: map[string]bool{}}
+		sd := &ServiceDeps{Key: depkey.Set(id), Label: d.String(), Tests: d.Tests,
+			match: func(f string) bool { return in(f) && !su.IsTestFile(f) && !pathutil.IsVendored(f) }}
 		for _, f := range cand {
-			if !su.IsTestFile(f) && !pathutil.IsVendored(f) {
+			if sd.match(f) {
 				sd.Files = append(sd.Files, f)
-				sd.set[f] = true
 			}
 		}
 		out = append(out, sd)
