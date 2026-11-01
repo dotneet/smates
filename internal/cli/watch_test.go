@@ -402,6 +402,10 @@ func TestWatchIgnore(t *testing.T) {
 		".cache/smates.json.gz": true, ".cache/.state-123": true, ".smates/state.json.gz": true,
 		"web/node_modules/x/index.js": true, "pkg/__pycache__/m.cpython-312.pyc": true,
 		"web/reports/junit.xml": true, "src/.a.go.swp": true, "src/a.go~": true, "web/coverage/lcov.info": true,
+		// Coverage reports, but not source code in a package named coverage.
+		"coverage/index.html": true, "web/coverage/index.html": true, "pkg/a/coverage/lcov-report/index.html": true,
+		"pkg/a/lcov.info": true, "pkg/a/coverage/coverage-final.json": true,
+		"internal/coverage/profile.go": false, "src/coverage/merge.ts": false, "web/src/coverage/index.ts": false,
 	} {
 		if got := ig(path); got != want {
 			t.Errorf("ignored(%q) = %v, want %v", path, got, want)

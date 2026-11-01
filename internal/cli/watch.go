@@ -154,8 +154,13 @@ func agentNote(p *project, agent bool) string {
 func watchIgnore(p *project) func(string) bool {
 	globs := []string{
 		"**/*.swp", "**/*.swx", "**/*.swo", "**/*~", "**/.#*", "**/#*#", "**/4913", "**/.DS_Store",
-		"**/*___jb_tmp___", "**/*___jb_old___", "**/.vitest-cache/**", "**/.vite/**", "**/coverage/**",
+		"**/*___jb_tmp___", "**/*___jb_old___", "**/.vitest-cache/**", "**/.vite/**",
 		"**/.nyc_output/**", "**/*.pyc",
+		// Coverage reports: the report directory of the repository or of a suite (a
+		// coverage/ elsewhere may be source code, Go's internal/coverage), and the
+		// reports' own files wherever a tool writes them.
+		"coverage/**", "**/lcov.info", "**/lcov-report/**", "**/coverage-final.json", "**/coverage-summary.json",
+		"**/clover.xml", "**/cobertura-coverage.xml",
 	}
 	statePaths := []string{p.statePath}
 	if p.store != nil && p.store.snapPath != "" {
@@ -170,6 +175,9 @@ func watchIgnore(p *project) func(string) bool {
 	for _, s := range p.suites {
 		if s.Junit != "" {
 			globs = append(globs, filepath.ToSlash(filepath.Join(s.Root, s.Junit)))
+		}
+		if s.Root != "" && s.Root != "." {
+			globs = append(globs, path.Join(s.Root, "coverage/**"))
 		}
 	}
 	return func(p string) bool {
