@@ -422,18 +422,21 @@ before the test ends (built into `t.TempDir()`) is not seen. The command line is
 the log, so such a child is analyzed as the last case above without the paths it names:
 
 - Node, Bun and Python (by name, or a `#!` script running on them) trace themselves;
-- a re-execution of the test binary (the helper-process pattern) runs the package's own
-  test code and keeps a test log of its own, read like the parent's (see "Re-executions
-  of the test binary" below). When one is missing or cut short, what that child read is
-  unknown, and the test depends on the tree of its Go module (the repository's when the
-  module encloses it): the test code may read anything there, `../../testdata` included,
-  as the parent's own log would show;
-- anything else (`sh -c`, `git`, a compiled tool) depends on the tree of the test's
-  working directory (the package directory, or where a `chdir` took it) and of the
-  `stat`ed `cmd.Dir` when one follows (a `stat` the test makes itself right after
-  starting a program looks the same; both trees are kept), and on the program when it is
-  in the repository. Paths on its command line outside those trees (`sh -c "cat
-  ../../testdata/x"`) are not seen: declare them (`depends_on`, rules).
+- a re-execution of the test binary run as a test binary (the helper-process pattern)
+  runs the package's own test code and keeps a test log of its own, read like the
+  parent's (see "Test logs of re-executions" below). When it is cut short, what that
+  child read is unknown, and the test depends on the tree of its Go module (the
+  repository's when the module encloses it, through symlinks too): the test code may
+  read anything there, `../../testdata` included, as the parent's own log would show;
+- anything else (`sh -c`, `git`, a compiled tool, the binary run with arguments of its
+  own) depends on the tree of the test's working directory (the package directory, or
+  where a `chdir` took it) and of the `stat`ed `cmd.Dir` when one follows (a `stat` the
+  test makes itself right after starting a program looks the same; both trees are kept),
+  and on the program when it is in the repository. Only the line right after the `open`
+  is read: in a parallel test another goroutine's line can come between, and a `cmd.Dir`
+  elsewhere is then missed, as it is with `SysProcAttr` set. Paths on its command line
+  outside those trees (`sh -c "cat ../../testdata/x"`) are not seen: declare them
+  (`depends_on`, rules).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
@@ -522,20 +525,32 @@ binary is not seen; neither is a child of a binary built without coverage.
 
 *Test logs of re-executions* (either granularity). A test log is per process too, and a
 re-execution's arguments lack `-test.testlogfile`. The same test file (which package
-recording adds to every package it runs, through `GOFLAGS`, named by `go/build`) sets the
-flag `test.testlogfile` to `$SMATES_GOTESTLOGDIR/<pid>.testlog` and writes its working
-directory to `<pid>.dir` when its command line has no `-test.testlogfile` (the process
-smates started has one). The test depends on what each child's log records, resolved
-against that directory, and on what the programs the child started may read (see
-"Subprocesses smates cannot trace"). testing writes the log when the tests end, 4096
-bytes at a time: a child that exits earlier (`os.Exit`, as the classic
-`TestHelperProcess` does; a panic, a kill, a `TestMain` that never calls `m.Run`)
-leaves it empty or cut at a multiple of 4096 bytes (a complete log of exactly such a
-size counts as cut). A cut or missing log, or more re-executions in the logs than
-children that started (an environment of its own, a `-test.testlogfile` of its own, a
-package `go/build` cannot name, a user `-overlay` on the command line replacing ours),
-makes the test depend on its Go module's tree. A child started from a copy of the binary
-counts as any other program.
+recording adds to every package with test files it runs, through `GOFLAGS`, named by
+`go/build` with the suite's `GOOS`/`GOARCH`/`CGO_ENABLED` and `-tags`) acts in every
+process of the binary whose command line has no `-test.testlogfile` (the process smates
+started has one). A process run as a test binary (no arguments, or a `-test.` flag
+first: the helper-process pattern) gets `test.testlogfile` set to
+`$SMATES_GOTESTLOGDIR/<pid>.testlog` and writes its working directory to `<pid>.test`;
+the test depends on what that log records, resolved against that directory, and on what
+the programs the child started may read (see "Subprocesses smates cannot trace").
+testing writes the log when the tests end, 4096 bytes at a time: a child that exits
+earlier (`os.Exit`, as the classic `TestHelperProcess` does; a panic, a kill, a
+`TestMain` that never calls `m.Run`) leaves it empty or cut at a multiple of 4096 bytes
+(a complete log of exactly such a size counts as cut), and a cut log makes the test
+depend on its Go module's tree. A process run with arguments of its own (a `TestMain`
+dispatching to the program's command line; the binary used as an `-exec` wrapper by a
+`go test` the test runs) writes only its directory, to `<pid>.cmd`, and counts as any
+other program: the tree of that directory. So do opens of the binary that no marker
+accounts for (a test reading its own binary with `debug/buildinfo`; a child given an
+environment of its own, a `-test.testlogfile` of its own, or of a package without the
+file: one `go/build` cannot name, a user `-overlay` on the command line replacing ours)
+and a child started from a copy of the binary.
+
+smates sets `PWD` to the directory of every command it runs (`exec.Cmd` does so only
+for an inherited environment): the go command trusts `$PWD` when it names its
+directory, and the user's (through a symlink, `/tmp` on macOS) would make the absolute
+paths of the overlays, smates' and the user's, made against the resolved repository
+root, match nothing.
 
 *Compile checks.* A function's dependencies are the bodies it executed and the
 declarations around them, which is what its outcome depends on once the package builds.

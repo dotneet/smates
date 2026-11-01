@@ -10,9 +10,10 @@ import (
 )
 
 // GoTestLogs adds what the programs a Go test started may have read: re-executions of
-// the test binary through their own test logs (all of the module when one is missing or
-// cut short), other programs as the trees of the directories they may run in; Node and
-// Python trace themselves.
+// the test binary run as test binaries through their own test logs (all of the module
+// when one is cut short); re-executions with arguments of their own, opens of the binary
+// no child accounts for and other programs as the trees of the directories they may run
+// in; Node and Python trace themselves.
 func TestGoTestLogs(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("executable bits")
@@ -53,7 +54,7 @@ func TestGoTestLogs(t *testing.T) {
 	}, "\n"), 0o644)
 	children := filepath.Join(root, "children")
 	os.MkdirAll(children, 0o755)
-	os.WriteFile(filepath.Join(children, "100.dir"), []byte(pkg), 0o644)
+	os.WriteFile(filepath.Join(children, "100.test"), []byte(pkg), 0o644)
 	os.WriteFile(filepath.Join(children, "100.testlog"), []byte("# test log\nopen ../shared.txt\ngetenv MODE\n"), 0o644)
 
 	sep := string(filepath.Separator)
@@ -86,18 +87,27 @@ func TestGoTestLogs(t *testing.T) {
 	check("complete child", base, "MODE")
 
 	// A child whose log was cut short (os.Exit before its tests ended): the module.
-	os.WriteFile(filepath.Join(children, "200.dir"), []byte(pkg), 0o644)
+	os.WriteFile(filepath.Join(children, "200.test"), []byte(pkg), 0o644)
 	os.WriteFile(filepath.Join(children, "200.testlog"), []byte(strings.Repeat("x", 4096)), 0o644)
 	check("cut child", append(slices.Clone(base), filepath.Join(root, "**")), "MODE")
-	os.Remove(filepath.Join(children, "200.dir"))
+	os.Remove(filepath.Join(children, "200.test"))
 	os.Remove(filepath.Join(children, "200.testlog"))
 
-	// A re-execution that left no log at all.
+	// A re-execution run with arguments of its own (a TestMain dispatching to a CLI):
+	// the tree of the directory it ran in.
+	os.WriteFile(filepath.Join(children, "300.cmd"), []byte(filepath.Join(root, "work")), 0o644)
 	os.WriteFile(log, []byte("# test log\nopen "+bin+"\nopen "+bin+"\n"), 0o644)
-	check("missing child", []string{filepath.Join(root, "shared.txt"), filepath.Join(root, "**")}, "MODE")
+	check("command child", []string{filepath.Join(root, "shared.txt"), tree("work")}, "MODE")
+	os.Remove(filepath.Join(children, "300.cmd"))
+
+	// More opens of the binary than children (one read it, or ran it without smates'
+	// environment): the trees of the directories they may have run in, not the module.
+	check("unaccounted open", []string{filepath.Join(root, "shared.txt"), tree("pkg")}, "MODE")
+	os.RemoveAll(children)
+	os.WriteFile(log, []byte("# test log\nopen "+bin+"\n"), 0o644)
+	check("binary read", []string{tree("pkg")})
 
 	// Without children, nothing is added.
-	os.RemoveAll(children)
 	os.WriteFile(log, []byte("# test log\nopen data.txt\nstat "+sep+"nope\n"), 0o644)
 	check("no children", []string{filepath.Join(root, "pkg/data.txt"), sep + "nope?"})
 }

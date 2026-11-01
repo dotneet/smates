@@ -3,12 +3,14 @@ package runner
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/testutil"
 	"github.com/dotneet/smates/internal/trace"
 )
 
@@ -149,6 +151,112 @@ func TestRecordFuncChildren(t *testing.T) {
 	} {
 		if got := nonGo(t, res.Observations[unit], out); !slices.Equal(got, want) {
 			t.Errorf("%s: deps %v, want %v", unit, got, want)
+		}
+	}
+}
+
+// A repository reached through a symlink (/tmp on macOS): go trusts an inherited $PWD,
+// so overlay paths (smates' and the user's, made absolute against the resolved root)
+// would match nothing; smates sets PWD for the commands it runs. The tree of the
+// module, reported through the symlink or not, is the repository's.
+func TestRecordPackageChildrenSymlinkedRepo(t *testing.T) {
+	rc := childModule(t, childTests)
+	for rel, content := range map[string]string{
+		"user/u.go":       "package user\n",
+		"user/u_test.go":  "package user\n\nimport \"testing\"\n\nfunc TestU(t *testing.T) {\n\tif V != 2 {\n\t\tt.Fatal(V)\n\t}\n}\n",
+		"user/v.go.txt":   "package user\n\nconst V = 2\n",
+		"user/ov.json":    `{"Replace": {"user/v.go": "user/v.go.txt"}}`,
+		"user/testdata/x": "",
+	} {
+		testutil.Write(t, rc.Repo.Root, rel, content)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(rc.Repo.Root, link); err != nil {
+		t.Skip(err)
+	}
+	t.Setenv("PWD", link)
+	t.Setenv("GOFLAGS", "-overlay=user/ov.json")
+	res, err := runPackages(context.Background(), rc, []string{"p", "user"}, false, "^(TestHelperProcess|TestExiter|TestU)$", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := rc.Stdout.(interface{ String() string }).String()
+	if o := res.Observations["user"]; o == nil || o.Status != state.Pass {
+		t.Fatalf("the user's overlay was not applied: %+v\n%s", o, out)
+	}
+	if got := nonGo(t, res.Observations["p"], out); !slices.Equal(got, []string{"$BE_HELPER", "./**"}) {
+		t.Errorf("p: deps %v, want [$BE_HELPER ./**]", got)
+	}
+	// Function recording builds its binary with the same overlays.
+	fres, err := recordFuncs(context.Background(), rc, []string{"p", "user"}, map[string][]string{"p": {"TestExiter"}, "user": {"TestU"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = rc.Stdout.(interface{ String() string }).String()
+	if got := nonGo(t, fres.Observations["p#TestExiter"], out); !slices.Equal(got, []string{"./**"}) {
+		t.Errorf("p#TestExiter: deps %v, want [./**]", got)
+	}
+	if o := fres.Observations["user#TestU"]; o == nil || o.Status != state.Pass || strings.Contains(out, "recorded at package granularity") {
+		t.Errorf("user#TestU: %+v\n%s", o, out)
+	}
+	// Reported through the symlink (a go command run with the user's PWD).
+	o := &Observation{Files: map[string]bool{}}
+	addTestLog(o, rc.Repo.Root, []string{filepath.Join(link, "**"), filepath.Join(link, "p", "**")}, nil)
+	if !o.Files["./**"] {
+		t.Errorf("module tree through a symlink: %v", o.Files)
+	}
+}
+
+// Processes of the binary that do not run as test binaries (a TestMain dispatching to
+// the program's own command line) and a test reading its own binary depend on the tree
+// of the directory they ran in, not on the module's; a package whose test files the
+// suite's build tags exclude still has none (go test runs no binary for it).
+func TestRecordPackageChildrenNotTests(t *testing.T) {
+	rc := childModule(t, `package p
+
+import (
+	"debug/buildinfo"
+	"os"
+	"os/exec"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv("BE_CLI") == "1" {
+		os.ReadFile("../shared/exit.txt")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestCLI(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "serve", "-v")
+	cmd.Env = append(os.Environ(), "BE_CLI=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cli: %v\n%s", err, out)
+	}
+}
+
+func TestSelf(t *testing.T) {
+	if _, err := buildinfo.ReadFile(os.Args[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+`)
+	testutil.Write(t, rc.Repo.Root, "tagged/a.go", "package tagged\n")
+	testutil.Write(t, rc.Repo.Root, "tagged/a_test.go", "//go:build !integration\n\npackage tagged\n\nimport \"testing\"\n\nfunc TestT(t *testing.T) {}\n")
+	t.Setenv("GOFLAGS", "-tags=integration")
+	for _, run := range []string{"^TestCLI$", "^TestSelf$"} {
+		res, err := runPackages(context.Background(), rc, []string{"p", "tagged"}, false, run, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := rc.Stdout.(interface{ String() string }).String()
+		if got := nonGo(t, res.Observations["p"], out); !slices.Equal(got, []string{"$BE_CLI", "p/**"}) && !slices.Equal(got, []string{"p/**"}) {
+			t.Errorf("%s: deps %v, want p/** (and no ./**)", run, got)
+		}
+		if o := res.Observations["tagged"]; o != nil {
+			t.Errorf("%s: tagged ran a test binary: %+v\n%s", run, o, out)
 		}
 	}
 }

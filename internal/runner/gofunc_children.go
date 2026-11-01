@@ -24,9 +24,12 @@ package runner
 // granularity: package recording adds it to every package it runs). A test log is per
 // process (-test.testlogfile, which the child's arguments lack), so what a child read
 // would not be seen: with $SMATES_GOTESTLOGDIR set and no -test.testlogfile on its
-// command line (the process smates started has one), the init points the flag at
-// <dir>/<pid>.testlog and writes its working directory to <dir>/<pid>.dir, and
-// trace.GoTestLogs adds what the children read to the test's dependencies.
+// command line (the process smates started has one), a process run as a test binary
+// (no arguments, or a -test. flag first) points the flag at <dir>/<pid>.testlog and
+// writes its working directory to <dir>/<pid>.test; one run with arguments of its own
+// (a TestMain dispatching to the program's command line, an -exec wrapper) only writes
+// its directory to <dir>/<pid>.cmd. trace.GoTestLogs adds what the children read, or
+// may have read, to the test's dependencies.
 
 import (
 	"encoding/json"
@@ -81,10 +84,18 @@ func init() {
 				return // the process smates started (or one given a log of its own)
 			}
 		}
-		smatestesting.Init()
-		if wd, err := smatesos.Getwd(); err == nil {
-			smatesos.WriteFile(d+"/"+pid+".dir", []byte(wd), 0o644)
+		wd, err := smatesos.Getwd()
+		if err != nil {
+			return
 		}
+		if len(smatesos.Args) > 1 && !smatesstrings.HasPrefix(smatesos.Args[1], "-test.") && !smatesstrings.HasPrefix(smatesos.Args[1], "--test.") {
+			// Not run as a test binary (a TestMain dispatching to the program's own
+			// command line, an -exec wrapper): it only says where it ran.
+			smatesos.WriteFile(d+"/"+pid+".` + trace.GoChildCmdSuffix + `", []byte(wd), 0o644)
+			return
+		}
+		smatestesting.Init()
+		smatesos.WriteFile(d+"/"+pid+".` + trace.GoChildTestSuffix + `", []byte(wd), 0o644)
 		smatesflag.Set("test.testlogfile", d+"/"+pid+".testlog")
 	}
 }
@@ -205,10 +216,11 @@ func childGoFlags(rc *RunContext, goflags, units []string) ([]string, error) {
 		return goflags, nil
 	}
 	pkgs := map[string]string{}
+	bctx := goBuildContext(rc)
 	for _, u := range units {
 		dir := filepath.Join(rc.Repo.Root, filepath.FromSlash(u))
 		// Only packages with tests: go test runs no binary for the others.
-		if p, err := build.Default.ImportDir(dir, 0); err == nil && p.Name != "" && len(p.TestGoFiles)+len(p.XTestGoFiles) > 0 {
+		if p, err := bctx.ImportDir(dir, 0); err == nil && p.Name != "" && len(p.TestGoFiles)+len(p.XTestGoFiles) > 0 {
 			pkgs[dir] = p.Name
 		}
 	}
@@ -219,6 +231,29 @@ func childGoFlags(rc *RunContext, goflags, units []string) ([]string, error) {
 		return nil, err
 	}
 	return childFlags(goflags, "", rc.Dir(), pkgs, work)
+}
+
+// goBuildContext is go/build's default context with the suite's GOOS, GOARCH and
+// CGO_ENABLED and the -tags of GOFLAGS, the suite command and the arguments passed
+// through (the last one wins, as with go test).
+func goBuildContext(rc *RunContext) build.Context {
+	bctx := build.Default
+	env := suiteEnv(rc.Suite)
+	if v := Getenv(env, "GOOS"); v != "" {
+		bctx.GOOS = v
+	}
+	if v := Getenv(env, "GOARCH"); v != "" {
+		bctx.GOARCH = v
+	}
+	if v := Getenv(env, "CGO_ENABLED"); v != "" {
+		bctx.CgoEnabled = v == "1"
+	}
+	for _, f := range goListFlags(rc) {
+		if tags, ok := strings.CutPrefix(f, "-tags="); ok {
+			bctx.BuildTags = strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || r == ' ' })
+		}
+	}
+	return bctx
 }
 
 func suffixN(n int) string {

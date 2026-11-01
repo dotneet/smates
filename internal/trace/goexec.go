@@ -57,9 +57,17 @@ func GoChildren(procs []*Proc) map[string]map[string]bool {
 
 // GoChildLogEnv names the directory in which re-executions of a Go test binary keep test
 // logs of their own (see GoTestLogs): the test file smates adds to the binary while
-// recording (runner's childSource) leaves <pid>.dir there, holding the process's working
-// directory, and points -test.testlogfile at <pid>.testlog unless the command line sets it.
+// recording (runner's childSource) leaves a marker there holding the process's working
+// directory: <pid>.test for a process run as a test binary, whose -test.testlogfile it
+// points at <pid>.testlog, and <pid>.cmd for one run with arguments of its own. The
+// process smates started (its command line sets -test.testlogfile) leaves none.
 const GoChildLogEnv = "SMATES_GOTESTLOGDIR"
+
+// Suffixes of the markers in a GoChildLogEnv directory.
+const (
+	GoChildTestSuffix = "test"
+	GoChildCmdSuffix  = "cmd"
+)
 
 // GoChildCoverEnv names the coverage directory of the Go test function being recorded
 // (see runner's childSource); package recording leaves it unset.
@@ -249,7 +257,8 @@ func absIn(p, dir string) string {
 // found. Any executable file opened counts (one opened to be read: more dependencies,
 // never fewer); a program removed before the test ends (built into t.TempDir()) is not
 // seen. The program may run in dir, or in the directory of a stat that follows (a stat
-// the test makes itself looks the same).
+// the test makes itself looks the same). Only the next line counts: another goroutine's
+// line in between (parallel tests) hides a cmd.Dir.
 func started(arg, abs, dir string, rest []string) (goStart, bool) {
 	s := goStart{prog: abs, dirs: []string{dir}}
 	if len(rest) > 0 {
@@ -287,16 +296,20 @@ func executable(p string) bool {
 // every file below dir).
 //
 //   - Node, Bun and Python processes trace themselves (GoChildren);
-//   - a re-execution of bin (the helper-process pattern) runs the package's own test
-//     code, with a test log of its own in childDir (GoChildLogEnv), read the same way.
-//     When one is missing or incomplete (the classic TestHelperProcess ends in os.Exit;
-//     a child given an environment of its own writes none) what it read is unknown: the
-//     test depends on the tree of its Go module (the repository's when the module
-//     encloses it), as the test code itself may read anything there (../../testdata);
-//   - any other program (a shell, a compiled binary) may read anything below the
-//     directory it runs in, as for children smates cannot see into elsewhere (see
-//     execAnalysis.opaque), but its command line is unknown: paths it names outside that
-//     directory are not seen.
+//   - a re-execution of bin run as a test binary (no arguments, or a -test. flag first:
+//     the helper-process pattern) runs the package's own test code, with a test log of
+//     its own in childDir (GoChildLogEnv, <pid>.test giving its directory), read the
+//     same way. When that log is missing or cut short (the classic TestHelperProcess
+//     ends in os.Exit) what it read is unknown: the test depends on the tree of its Go
+//     module (the repository's when the module encloses it), as the test code itself
+//     may read anything there (../../testdata);
+//   - a re-execution with arguments of its own (a TestMain dispatching to the program's
+//     command line, an -exec wrapper; <pid>.cmd) and any other program (a shell, a
+//     compiled binary) may read anything below the directory it runs in, as for
+//     children smates cannot see into elsewhere (see execAnalysis.opaque), but its
+//     command line is unknown: paths it names outside that directory are not seen. So
+//     do opens of bin no child accounts for (a test reading its own binary with
+//     debug/buildinfo, a child given an environment of its own).
 func GoTestLogs(file, cwd, bin, childDir string) (files, env []string) {
 	files, env, starts, _ := parseTestLog(file, cwd)
 	seen := map[string]bool{}
@@ -320,53 +333,64 @@ func GoTestLogs(file, cwd, bin, childDir string) (files, env []string) {
 			}
 		}
 	}
+	opaque := func(prog string, dirs ...string) {
+		add([]string{prog}, nil)
+		for _, d := range dirs {
+			add([]string{filepath.Join(d, "**")}, nil)
+		}
+	}
 	binInfo, _ := os.Stat(absIn(bin, cwd))
-	reexecs, unknown := 0, false
+	var reexecs []goStart
 	classify := func(starts []goStart) {
 		for _, s := range starts {
 			fi, err := os.Stat(s.prog)
 			base := strings.TrimSuffix(filepath.Base(s.prog), ".exe")
 			switch {
 			case err == nil && binInfo != nil && os.SameFile(fi, binInfo):
-				reexecs++
+				reexecs = append(reexecs, s) // see the children's markers
 			case tracedPrograms[base] || strings.HasPrefix(base, "python3.") || scriptRuntime(s.prog, false) != "":
 				// It traces itself.
 			default:
-				add([]string{s.prog}, nil)
-				for _, d := range s.dirs {
-					add([]string{filepath.Join(d, "**")}, nil)
-				}
+				opaque(s.prog, s.dirs...)
 			}
 		}
 	}
 	classify(starts)
-	children := 0
+	children, unknown := 0, false
 	if childDir != "" {
 		entries, _ := os.ReadDir(childDir)
 		for _, e := range entries {
-			pid, ok := strings.CutSuffix(e.Name(), ".dir")
-			if !ok {
+			pid, kind, _ := strings.Cut(e.Name(), ".")
+			if kind != GoChildTestSuffix && kind != GoChildCmdSuffix {
 				continue
 			}
 			children++
 			wd, err := os.ReadFile(filepath.Join(childDir, e.Name()))
-			if err != nil || !filepath.IsAbs(string(wd)) {
+			switch {
+			case err != nil || !filepath.IsAbs(string(wd)):
 				unknown = true
-				continue
+			case kind == GoChildCmdSuffix:
+				opaque(bin, string(wd))
+			default:
+				cf, ce, cs, complete := parseTestLog(filepath.Join(childDir, pid+".testlog"), string(wd))
+				if !complete {
+					unknown = true
+					continue
+				}
+				add(cf, ce)
+				classify(cs)
 			}
-			cf, ce, cs, complete := parseTestLog(filepath.Join(childDir, pid+".testlog"), string(wd))
-			if !complete {
-				unknown = true
-				continue
-			}
-			add(cf, ce)
-			classify(cs)
 		}
 	}
-	// A re-execution without a log of its own (an environment of its own, -test.testlogfile
-	// on its command line, a binary built without smates' test file) is unknown too.
-	if unknown || reexecs > children {
+	if unknown {
 		add([]string{filepath.Join(goModuleDir(cwd), "**")}, nil)
+	}
+	// Opens of the binary that no child accounts for: read, or run without smates' test
+	// file in its environment. Which ones is not known: they all count as programs.
+	if len(reexecs) > children {
+		for _, s := range reexecs {
+			opaque(s.prog, s.dirs...)
+		}
 	}
 	return files, env
 }

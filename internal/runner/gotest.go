@@ -406,7 +406,7 @@ func addTestLog(o *Observation, root string, files, env []string) {
 		if dir, ok := strings.CutSuffix(f, tree); ok {
 			if rel, ok := pathutil.Rel(root, dir); ok {
 				o.AddFile(depkey.Tree(rel))
-			} else if r, err := filepath.Rel(dir, root); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			} else if enclosesRoot(dir, root) {
 				o.AddFile(depkey.Tree("."))
 			}
 			continue
@@ -430,6 +430,26 @@ func addTestLog(o *Observation, root string, files, env []string) {
 	for _, name := range env {
 		o.AddFile(depkey.Env(name))
 	}
+}
+
+// enclosesRoot reports whether directory dir is the repository root or encloses it,
+// through symlinks too (the root is resolved; a go command run below /tmp on macOS
+// reports /tmp, not /private/tmp).
+func enclosesRoot(dir, root string) bool {
+	for _, d := range []string{dir, resolvedDir(dir)} {
+		if r, err := filepath.Rel(d, root); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedDir is dir with its symlinks resolved (dir itself when that fails).
+func resolvedDir(dir string) string {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		return r
+	}
+	return dir
 }
 
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
@@ -718,7 +738,7 @@ func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]s
 	cmd.Dir = rc.Dir()
 	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
 	// flags) must not reach go list.
-	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
+	cmd.Env = withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="}), cmd.Dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
