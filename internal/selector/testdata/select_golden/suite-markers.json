@@ -1,0 +1,212 @@
+{
+  "mode": "state",
+  "changed": [
+    "Dockerfile",
+    "api/app.py",
+    "api/notes.txt",
+    "svc/unused/unused.go",
+    "web/src/b.ts"
+  ],
+  "orphans": [
+    "Dockerfile"
+  ],
+  "left_out": [
+    "svc/unused/unused.go"
+  ],
+  "orphan_handling": null,
+  "notes": [
+    "1 unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them"
+  ],
+  "untested": null,
+  "covered": [
+    "$GOLDEN_APP_REGION",
+    ".tool-versions",
+    "@set:paths:docker-compose.yml",
+    "@set:paths:worker/**",
+    "@set:suite:api",
+    "api/app.py",
+    "api/local.cfg?",
+    "api/notes.txt",
+    "api/test_app.py",
+    "api/test_settings.py",
+    "docker-compose.yml",
+    "e2e/admin/audit.spec.js",
+    "e2e/admin/users.spec.js",
+    "e2e/helpers.js",
+    "e2e/login.spec.js",
+    "e2e/smoke/health.spec.js",
+    "go.mod",
+    "migrations/001.sql",
+    "smates.yml",
+    "smates.yml#suite",
+    "svc/api/api.go",
+    "svc/api/api_test.go",
+    "svc/core/core.go",
+    "svc/core/core_test.go",
+    "tools/**",
+    "web/db/q.test.ts",
+    "web/fixtures/",
+    "web/fixtures/users.json",
+    "web/src/a.test.ts",
+    "web/src/a.ts",
+    "web/src/b.test.ts",
+    "web/src/b.ts",
+    "web/src/c.test.ts",
+    "web/vitest.config.ts",
+    "worker/job.py"
+  ],
+  "declared": [
+    {
+      "key": "@set:suite:api",
+      "label": "depends_on suite api",
+      "tests": null,
+      "files": [
+        "api/app.py",
+        "api/notes.txt"
+      ]
+    },
+    {
+      "key": "@set:paths:docker-compose.yml",
+      "label": "depends_on docker-compose.yml",
+      "tests": [
+        "admin/**"
+      ],
+      "files": [
+        "docker-compose.yml"
+      ]
+    },
+    {
+      "key": "@set:paths:worker/**",
+      "label": "serves worker/**",
+      "tests": null,
+      "files": [
+        "worker/job.py"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "web",
+      "all": false,
+      "unrecorded": false,
+      "tests": [
+        {
+          "id": "web/db/q.test.ts",
+          "selected": false,
+          "reason": "unaffected",
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/a.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "web/src/a.ts"
+          ],
+          "via": {
+            "web/src/a.ts": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/b.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "web/src/b.ts"
+          ],
+          "via": {
+            "web/src/b.ts": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/c.test.ts",
+          "selected": false,
+          "reason": "unaffected",
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/fixtures/users.json",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/fixtures/",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "known": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite",
+        "web/vitest.config.ts"
+      ],
+      "files": {
+        "web/db/q.test.ts": [
+          "web/db/q.test.ts"
+        ],
+        "web/src/a.test.ts": [
+          "web/src/a.test.ts"
+        ],
+        "web/src/b.test.ts": [
+          "web/src/b.test.ts"
+        ],
+        "web/src/c.test.ts": [
+          "web/src/c.test.ts"
+        ]
+      },
+      "services": null
+    }
+  ]
+}

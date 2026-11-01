@@ -1,0 +1,577 @@
+{
+  "mode": "state",
+  "changed": [
+    "Dockerfile",
+    "README.md",
+    "api/app.py",
+    "api/local.cfg",
+    "api/notes.txt",
+    "docker-compose.yml",
+    "e2e/admin/audit.spec.js",
+    "migrations/002.sql",
+    "svc/core/core.go",
+    "svc/testdata/in.go",
+    "svc/unused/unused.go",
+    "tools/gen.sh",
+    "web/fixtures/admins.json",
+    "web/fixtures/users.json",
+    "web/src/a.ts",
+    "web/src/orphan.ts",
+    "worker/job.py"
+  ],
+  "orphans": [
+    "Dockerfile",
+    "e2e/admin/audit.spec.js",
+    "svc/testdata/in.go",
+    "svc/unused/unused.go",
+    "web/src/orphan.ts"
+  ],
+  "left_out": null,
+  "orphan_handling": null,
+  "notes": null,
+  "untested": [
+    "svc/unused/unused.go",
+    "web/src/orphan.ts"
+  ],
+  "covered": [
+    "$GOLDEN_APP_REGION",
+    ".tool-versions",
+    "@set:paths:docker-compose.yml",
+    "@set:paths:worker/**",
+    "@set:suite:api",
+    "api/app.py",
+    "api/local.cfg",
+    "api/local.cfg?",
+    "api/notes.txt",
+    "api/test_app.py",
+    "api/test_settings.py",
+    "docker-compose.yml",
+    "e2e/admin/users.spec.js",
+    "e2e/helpers.js",
+    "e2e/login.spec.js",
+    "e2e/smoke/health.spec.js",
+    "go.mod",
+    "migrations/001.sql",
+    "migrations/002.sql",
+    "smates.yml",
+    "smates.yml#suite",
+    "svc/api/api.go",
+    "svc/api/api_test.go",
+    "svc/core/core.go",
+    "svc/core/core_test.go",
+    "tools/**",
+    "web/db/q.test.ts",
+    "web/fixtures/",
+    "web/fixtures/users.json",
+    "web/src/a.test.ts",
+    "web/src/a.ts",
+    "web/src/b.test.ts",
+    "web/src/b.ts",
+    "web/src/c.test.ts",
+    "web/vitest.config.ts",
+    "worker/job.py"
+  ],
+  "declared": [
+    {
+      "key": "@set:suite:api",
+      "label": "depends_on suite api",
+      "tests": null,
+      "files": [
+        "api/app.py",
+        "api/local.cfg",
+        "api/notes.txt"
+      ]
+    },
+    {
+      "key": "@set:paths:docker-compose.yml",
+      "label": "depends_on docker-compose.yml",
+      "tests": [
+        "admin/**"
+      ],
+      "files": [
+        "docker-compose.yml"
+      ]
+    },
+    {
+      "key": "@set:paths:worker/**",
+      "label": "serves worker/**",
+      "tests": null,
+      "files": [
+        "worker/job.py"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "go",
+      "all": true,
+      "unrecorded": false,
+      "tests": [
+        {
+          "id": "svc/api",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "svc/core/core.go"
+          ],
+          "via": {
+            "svc/core/core.go": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "svc/core",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "svc/core/core.go"
+          ],
+          "via": {
+            "svc/core/core.go": "import"
+          },
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "svc/api": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/api/api.go",
+          "svc/api/api_test.go",
+          "svc/core/core.go"
+        ],
+        "svc/core": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/core/core.go",
+          "svc/core/core_test.go"
+        ]
+      },
+      "known": {
+        "svc/api": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/api/api.go",
+          "svc/api/api_test.go",
+          "svc/core/core.go"
+        ],
+        "svc/core": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/core/core.go",
+          "svc/core/core_test.go"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "go.mod",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "svc/api": [
+          "svc/api/api_test.go"
+        ],
+        "svc/core": [
+          "svc/core/core_test.go"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "web",
+      "all": true,
+      "unrecorded": false,
+      "tests": [
+        {
+          "id": "web/db/q.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "migrations/002.sql"
+          ],
+          "via": {
+            "migrations/002.sql": "input"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/a.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "web/src/a.ts"
+          ],
+          "via": {
+            "web/src/a.ts": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/b.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "web/fixtures/users.json"
+          ],
+          "via": {
+            "web/fixtures/users.json": "traced"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "web/src/c.test.ts",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "web/fixtures/"
+          ],
+          "via": {
+            "web/fixtures/": "traced"
+          },
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/fixtures/users.json",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/fixtures/",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "known": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite",
+        "web/vitest.config.ts"
+      ],
+      "files": {
+        "web/db/q.test.ts": [
+          "web/db/q.test.ts"
+        ],
+        "web/src/a.test.ts": [
+          "web/src/a.test.ts"
+        ],
+        "web/src/b.test.ts": [
+          "web/src/b.test.ts"
+        ],
+        "web/src/c.test.ts": [
+          "web/src/c.test.ts"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "api",
+      "all": true,
+      "unrecorded": false,
+      "tests": [
+        {
+          "id": "api/test_app.py",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "$GOLDEN_APP_REGION",
+            "api/app.py",
+            "tools/**"
+          ],
+          "via": {
+            "$GOLDEN_APP_REGION": "traced",
+            "api/app.py": "import",
+            "tools/**": "traced"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "api/test_settings.py",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "api/local.cfg?"
+          ],
+          "via": {
+            "api/local.cfg?": "traced"
+          },
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "api/test_app.py": [
+          "$GOLDEN_APP_REGION",
+          ".tool-versions",
+          "api/app.py",
+          "api/test_app.py",
+          "smates.yml#suite",
+          "tools/**"
+        ],
+        "api/test_settings.py": [
+          ".tool-versions",
+          "api/local.cfg?",
+          "api/test_settings.py",
+          "smates.yml#suite"
+        ]
+      },
+      "known": {
+        "api/test_app.py": [
+          ".tool-versions",
+          "api/app.py",
+          "api/test_app.py",
+          "smates.yml#suite"
+        ],
+        "api/test_settings.py": [
+          ".tool-versions",
+          "api/test_settings.py",
+          "smates.yml#suite"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "api/test_app.py": [
+          "api/test_app.py"
+        ],
+        "api/test_settings.py": [
+          "api/test_settings.py"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "e2e",
+      "all": true,
+      "unrecorded": false,
+      "tests": [
+        {
+          "id": "e2e/admin/users.spec.js",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "api/app.py",
+            "api/local.cfg",
+            "api/notes.txt",
+            "docker-compose.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "api/app.py": "service",
+            "api/local.cfg": "service",
+            "api/notes.txt": "service",
+            "docker-compose.yml": "service",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "api/app.py": "depends_on suite api",
+            "api/local.cfg": "depends_on suite api",
+            "api/notes.txt": "depends_on suite api",
+            "docker-compose.yml": "depends_on docker-compose.yml",
+            "worker/job.py": "serves worker/**"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "e2e/login.spec.js",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "api/app.py",
+            "api/local.cfg",
+            "api/notes.txt",
+            "worker/job.py"
+          ],
+          "via": {
+            "api/app.py": "service",
+            "api/local.cfg": "service",
+            "api/notes.txt": "service",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "api/app.py": "depends_on suite api",
+            "api/local.cfg": "depends_on suite api",
+            "api/notes.txt": "depends_on suite api",
+            "worker/job.py": "serves worker/**"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "e2e/smoke/health.spec.js",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "api/app.py",
+            "api/local.cfg",
+            "api/notes.txt",
+            "worker/job.py"
+          ],
+          "via": {
+            "api/app.py": "service",
+            "api/local.cfg": "service",
+            "api/notes.txt": "service",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "api/app.py": "depends_on suite api",
+            "api/local.cfg": "depends_on suite api",
+            "api/notes.txt": "depends_on suite api",
+            "worker/job.py": "serves worker/**"
+          },
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "e2e/admin/users.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/users.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/login.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/helpers.js",
+          "e2e/login.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/health.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/health.spec.js",
+          "smates.yml",
+          "smates.yml#suite"
+        ]
+      },
+      "known": {
+        "e2e/admin/users.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/users.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/login.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/helpers.js",
+          "e2e/login.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/health.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/health.spec.js",
+          "smates.yml#suite"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "e2e/admin/users.spec.js": [
+          "e2e/admin/users.spec.js"
+        ],
+        "e2e/login.spec.js": [
+          "e2e/login.spec.js"
+        ],
+        "e2e/smoke/health.spec.js": [
+          "e2e/smoke/health.spec.js"
+        ]
+      },
+      "services": [
+        {
+          "key": "@set:suite:api",
+          "label": "depends_on suite api",
+          "tests": null,
+          "files": [
+            "api/app.py",
+            "api/local.cfg",
+            "api/notes.txt"
+          ]
+        },
+        {
+          "key": "@set:paths:docker-compose.yml",
+          "label": "depends_on docker-compose.yml",
+          "tests": [
+            "admin/**"
+          ],
+          "files": [
+            "docker-compose.yml"
+          ]
+        },
+        {
+          "key": "@set:paths:worker/**",
+          "label": "serves worker/**",
+          "tests": null,
+          "files": [
+            "worker/job.py"
+          ]
+        }
+      ]
+    }
+  ]
+}

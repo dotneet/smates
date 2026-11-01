@@ -1,0 +1,584 @@
+{
+  "mode": "diff",
+  "changed": [
+    "Dockerfile",
+    "e2e/smoke/new.spec.js",
+    "migrations/002.sql",
+    "smates.yml",
+    "svc/unused/unused.go",
+    "web/src/a.ts",
+    "worker/job.py"
+  ],
+  "orphans": [
+    "Dockerfile",
+    "svc/unused/unused.go"
+  ],
+  "left_out": null,
+  "orphan_handling": null,
+  "notes": null,
+  "untested": null,
+  "covered": [
+    ".tool-versions",
+    "@set:paths:docker-compose.yml",
+    "@set:paths:worker/**",
+    "@set:suite:api",
+    "api/app.py",
+    "api/notes.txt",
+    "api/test_app.py",
+    "api/test_settings.py",
+    "docker-compose.yml",
+    "e2e/admin/audit.spec.js",
+    "e2e/admin/users.spec.js",
+    "e2e/helpers.js",
+    "e2e/login.spec.js",
+    "e2e/smoke/health.spec.js",
+    "e2e/smoke/new.spec.js",
+    "go.mod",
+    "migrations/001.sql",
+    "migrations/002.sql",
+    "smates.yml",
+    "smates.yml#suite",
+    "svc/api/api.go",
+    "svc/api/api_test.go",
+    "svc/core/core.go",
+    "svc/core/core_test.go",
+    "web/db/q.test.ts",
+    "web/src/a.test.ts",
+    "web/src/a.ts",
+    "web/src/b.test.ts",
+    "web/src/b.ts",
+    "web/src/c.test.ts",
+    "web/vitest.config.ts",
+    "worker/job.py"
+  ],
+  "declared": [
+    {
+      "key": "@set:suite:api",
+      "label": "depends_on suite api",
+      "tests": null,
+      "files": [
+        "api/app.py",
+        "api/notes.txt"
+      ]
+    },
+    {
+      "key": "@set:paths:docker-compose.yml",
+      "label": "depends_on docker-compose.yml",
+      "tests": [
+        "admin/**"
+      ],
+      "files": [
+        "docker-compose.yml"
+      ]
+    },
+    {
+      "key": "@set:paths:worker/**",
+      "label": "serves worker/**",
+      "tests": null,
+      "files": [
+        "worker/job.py"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "go",
+      "all": true,
+      "unrecorded": true,
+      "tests": [
+        {
+          "id": "svc/api",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        },
+        {
+          "id": "svc/core",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        }
+      ],
+      "deps": {
+        "svc/api": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/api/api.go",
+          "svc/api/api_test.go",
+          "svc/core/core.go"
+        ],
+        "svc/core": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/core/core.go",
+          "svc/core/core_test.go"
+        ]
+      },
+      "known": {
+        "svc/api": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/api/api.go",
+          "svc/api/api_test.go",
+          "svc/core/core.go"
+        ],
+        "svc/core": [
+          ".tool-versions",
+          "go.mod",
+          "smates.yml#suite",
+          "svc/core/core.go",
+          "svc/core/core_test.go"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "go.mod",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "svc/api": [
+          "svc/api/api_test.go"
+        ],
+        "svc/core": [
+          "svc/core/core_test.go"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "web",
+      "all": true,
+      "unrecorded": true,
+      "tests": [
+        {
+          "id": "web/db/q.test.ts",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "migrations/002.sql",
+            "smates.yml"
+          ],
+          "via": {
+            "migrations/002.sql": "input",
+            "smates.yml": "input"
+          }
+        },
+        {
+          "id": "web/src/a.test.ts",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml",
+            "web/src/a.ts"
+          ],
+          "via": {
+            "smates.yml": "input",
+            "web/src/a.ts": "import"
+          }
+        },
+        {
+          "id": "web/src/b.test.ts",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        },
+        {
+          "id": "web/src/c.test.ts",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        }
+      ],
+      "deps": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "known": {
+        "web/db/q.test.ts": [
+          ".tool-versions",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "smates.yml#suite",
+          "web/db/q.test.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/a.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/a.test.ts",
+          "web/src/a.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/b.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/b.test.ts",
+          "web/src/b.ts",
+          "web/vitest.config.ts"
+        ],
+        "web/src/c.test.ts": [
+          ".tool-versions",
+          "smates.yml#suite",
+          "web/src/c.test.ts",
+          "web/vitest.config.ts"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite",
+        "web/vitest.config.ts"
+      ],
+      "files": {
+        "web/db/q.test.ts": [
+          "web/db/q.test.ts"
+        ],
+        "web/src/a.test.ts": [
+          "web/src/a.test.ts"
+        ],
+        "web/src/b.test.ts": [
+          "web/src/b.test.ts"
+        ],
+        "web/src/c.test.ts": [
+          "web/src/c.test.ts"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "api",
+      "all": true,
+      "unrecorded": true,
+      "tests": [
+        {
+          "id": "api/test_app.py",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        },
+        {
+          "id": "api/test_settings.py",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml"
+          ],
+          "via": {
+            "smates.yml": "input"
+          }
+        }
+      ],
+      "deps": {
+        "api/test_app.py": [
+          ".tool-versions",
+          "api/app.py",
+          "api/test_app.py",
+          "smates.yml#suite"
+        ],
+        "api/test_settings.py": [
+          ".tool-versions",
+          "api/test_settings.py",
+          "smates.yml#suite"
+        ]
+      },
+      "known": {
+        "api/test_app.py": [
+          ".tool-versions",
+          "api/app.py",
+          "api/test_app.py",
+          "smates.yml#suite"
+        ],
+        "api/test_settings.py": [
+          ".tool-versions",
+          "api/test_settings.py",
+          "smates.yml#suite"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "api/test_app.py": [
+          "api/test_app.py"
+        ],
+        "api/test_settings.py": [
+          "api/test_settings.py"
+        ]
+      },
+      "services": null
+    },
+    {
+      "name": "e2e",
+      "all": true,
+      "unrecorded": true,
+      "tests": [
+        {
+          "id": "e2e/admin/audit.spec.js",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "smates.yml": "input",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "worker/job.py": "serves worker/**"
+          }
+        },
+        {
+          "id": "e2e/admin/users.spec.js",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "smates.yml": "input",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "worker/job.py": "serves worker/**"
+          }
+        },
+        {
+          "id": "e2e/login.spec.js",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "smates.yml": "input",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "worker/job.py": "serves worker/**"
+          }
+        },
+        {
+          "id": "e2e/smoke/health.spec.js",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "smates.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "smates.yml": "input",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "worker/job.py": "serves worker/**"
+          }
+        },
+        {
+          "id": "e2e/smoke/new.spec.js",
+          "selected": true,
+          "reason": "diff",
+          "changed": [
+            "e2e/smoke/new.spec.js",
+            "smates.yml",
+            "worker/job.py"
+          ],
+          "via": {
+            "e2e/smoke/new.spec.js": "test",
+            "smates.yml": "input",
+            "worker/job.py": "service"
+          },
+          "service": {
+            "worker/job.py": "serves worker/**"
+          }
+        }
+      ],
+      "deps": {
+        "e2e/admin/audit.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/audit.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/admin/users.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/users.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/login.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/helpers.js",
+          "e2e/login.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/health.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/health.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/new.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/new.spec.js",
+          "smates.yml#suite"
+        ]
+      },
+      "known": {
+        "e2e/admin/audit.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/audit.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/admin/users.spec.js": [
+          ".tool-versions",
+          "@set:paths:docker-compose.yml",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/admin/users.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/login.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/helpers.js",
+          "e2e/login.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/health.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/health.spec.js",
+          "smates.yml#suite"
+        ],
+        "e2e/smoke/new.spec.js": [
+          ".tool-versions",
+          "@set:paths:worker/**",
+          "@set:suite:api",
+          "e2e/smoke/new.spec.js",
+          "smates.yml#suite"
+        ]
+      },
+      "inputs": [
+        ".tool-versions",
+        "smates.yml#suite"
+      ],
+      "files": {
+        "e2e/admin/audit.spec.js": [
+          "e2e/admin/audit.spec.js"
+        ],
+        "e2e/admin/users.spec.js": [
+          "e2e/admin/users.spec.js"
+        ],
+        "e2e/login.spec.js": [
+          "e2e/login.spec.js"
+        ],
+        "e2e/smoke/health.spec.js": [
+          "e2e/smoke/health.spec.js"
+        ],
+        "e2e/smoke/new.spec.js": [
+          "e2e/smoke/new.spec.js"
+        ]
+      },
+      "services": [
+        {
+          "key": "@set:suite:api",
+          "label": "depends_on suite api",
+          "tests": null,
+          "files": [
+            "api/app.py",
+            "api/notes.txt"
+          ]
+        },
+        {
+          "key": "@set:paths:docker-compose.yml",
+          "label": "depends_on docker-compose.yml",
+          "tests": [
+            "admin/**"
+          ],
+          "files": [
+            "docker-compose.yml"
+          ]
+        },
+        {
+          "key": "@set:paths:worker/**",
+          "label": "serves worker/**",
+          "tests": null,
+          "files": [
+            "worker/job.py"
+          ]
+        }
+      ]
+    }
+  ]
+}
