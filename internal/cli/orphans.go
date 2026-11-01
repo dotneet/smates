@@ -147,11 +147,13 @@ func (c *callerFlags) validate() error {
 func (p *project) applyCallerAdds(res *selector.Result, args []string) error {
 	var adds []selector.Addition
 	for _, a := range args {
-		suite, id, err := p.resolveAdd(res, a)
+		suite, ids, err := p.resolveAdd(res, a)
 		if err != nil {
 			return usageError{fmt.Errorf("--add %s: %w", a, err)}
 		}
-		adds = append(adds, selector.Addition{Suite: suite, Test: id, Reason: selector.ReasonCaller, Detail: "added by caller"})
+		for _, id := range ids {
+			adds = append(adds, selector.Addition{Suite: suite, Test: id, Reason: selector.ReasonCaller, Detail: "added by caller"})
+		}
 	}
 	if len(adds) == 0 {
 		return nil
@@ -166,52 +168,57 @@ func (p *project) applyCallerAdds(res *selector.Result, args []string) error {
 // resolveAdd maps an --add argument to a suite and a unit: "suite:unit",
 // "suite:path/to/test_file", or a unit or test file without the suite when only one
 // suite has it. Paths are repository-relative, relative to the current directory (or
-// -C), or after "suite:" relative to the suite's root.
-func (p *project) resolveAdd(res *selector.Result, arg string) (string, string, error) {
+// -C), or after "suite:" relative to the suite's root. A test file declaring several
+// units (Go with granularity: func) resolves to all of them.
+func (p *project) resolveAdd(res *selector.Result, arg string) (string, []string, error) {
 	scope := res.Suites
 	spec := arg
-	if name, rest, ok := strings.Cut(arg, ":"); ok && name != "" && !strings.HasPrefix(rest, ":") {
+	// An absolute path (C:\... on Windows) is not "suite:unit".
+	if name, rest, ok := strings.Cut(arg, ":"); ok && name != "" && !strings.HasPrefix(rest, ":") && !filepath.IsAbs(arg) && filepath.VolumeName(arg) == "" {
 		if su := res.SuiteByName(name); su != nil {
 			scope, spec = []*selector.Suite{su}, rest
 		} else if slices.ContainsFunc(p.others, func(s *runner.Suite) bool { return s.Name == name }) {
-			return "", "", fmt.Errorf("suite %q is not part of this run (--suite)", name)
+			return "", nil, fmt.Errorf("suite %q is not part of this run (--suite)", name)
 		} else if !strings.ContainsAny(name, "/.") {
-			return "", "", fmt.Errorf("unknown suite %q (have: %s)", name, resultSuiteNames(res))
+			return "", nil, fmt.Errorf("unknown suite %q (have: %s)", name, resultSuiteNames(res))
 		}
 	}
 	if i := strings.Index(spec, "::"); i > 0 { // pytest node IDs: keep the file
 		spec = spec[:i]
 	}
 	if spec == "" {
-		return "", "", fmt.Errorf("no test unit given (want suite:unit)")
+		return "", nil, fmt.Errorf("no test unit given (want suite:unit)")
 	}
-	type hit struct{ suite, id string }
+	type hit struct {
+		suite string
+		ids   []string
+	}
 	for _, cand := range p.addPaths(spec) {
 		var hits []hit
 		for _, su := range scope {
-			id := unitFor(su, cand)
-			if id == "" && len(scope) == 1 && su.Suite != nil {
+			ids := unitFor(su, cand)
+			if len(ids) == 0 && len(scope) == 1 && su.Suite != nil {
 				// "suite:path" may be relative to the suite's root.
-				id = unitFor(su, path.Join(su.Suite.Root, cand))
+				ids = unitFor(su, path.Join(su.Suite.Root, cand))
 			}
-			if id != "" {
-				hits = append(hits, hit{su.Name, id})
+			if len(ids) > 0 {
+				hits = append(hits, hit{su.Name, ids})
 			}
 		}
 		switch len(hits) {
 		case 0:
 			continue
 		case 1:
-			return hits[0].suite, hits[0].id, nil
+			return hits[0].suite, hits[0].ids, nil
 		default:
 			var names []string
 			for _, h := range hits {
-				names = append(names, h.suite+":"+h.id)
+				names = append(names, h.suite+":"+strings.Join(h.ids, ","))
 			}
-			return "", "", fmt.Errorf("ambiguous: %s (prefix it with the suite)", strings.Join(names, ", "))
+			return "", nil, fmt.Errorf("ambiguous: %s (prefix it with the suite)", strings.Join(names, ", "))
 		}
 	}
-	return "", "", fmt.Errorf("no test unit or test file %q in suite(s) %s (see `smates list`)", spec, resultSuiteNames(res))
+	return "", nil, fmt.Errorf("no test unit or test file %q in suite(s) %s (see `smates list`)", spec, resultSuiteNames(res))
 }
 
 // addPaths are the repository-relative paths an --add argument may mean: as given,
@@ -238,22 +245,29 @@ func (p *project) addPaths(spec string) []string {
 	return out
 }
 
-// unitFor returns the unit of a suite that f names: a unit ID, or a test file of a
-// unit (for Go, a test file of a package unit), or "".
-func unitFor(su *selector.Suite, f string) string {
+// unitFor returns the units of a suite that f names: a unit ID, or every unit whose
+// test files include f (for Go, a test file of a package unit, or each test function
+// it declares with granularity: func), or nil.
+func unitFor(su *selector.Suite, f string) []string {
 	has := func(id string) bool {
 		return slices.ContainsFunc(su.Tests, func(t *selector.Test) bool { return t.ID == id })
 	}
 	if has(f) {
-		return f
+		return []string{f}
 	}
-	if id := unitIndex(su)[f]; id != "" {
-		return id
+	var out []string
+	for _, t := range su.Tests {
+		if slices.Contains(unitFiles(su, t.ID), f) {
+			out = append(out, t.ID)
+		}
+	}
+	if len(out) > 0 {
+		return out
 	}
 	if su.Suite != nil && su.Suite.IsTestFile(f) && has(path.Dir(f)) {
-		return path.Dir(f)
+		return []string{path.Dir(f)}
 	}
-	return ""
+	return nil
 }
 
 func resultSuiteNames(res *selector.Result) string {

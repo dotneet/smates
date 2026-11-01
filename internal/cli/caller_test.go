@@ -244,8 +244,26 @@ func TestUnitFor(t *testing.T) {
 		"pkg/a/x.go":      "",      // not a test file
 		"pkg/c/z_test.go": "",
 	} {
-		if got := unitFor(su, in); got != want {
+		if got := strings.Join(unitFor(su, in), ","); got != want {
 			t.Errorf("unitFor(%q) = %q, want %q", in, got, want)
 		}
+	}
+
+	// Go with granularity: func: a test file adds every test function it declares.
+	fn := &selector.Suite{
+		Name:  "go",
+		Suite: &runner.Suite{Suite: config.Suite{Root: ".", Tests: []string{"**/*_test.go"}}},
+		Tests: []*selector.Test{{ID: "pkg/a#TestOne"}, {ID: "pkg/a#TestTwo"}, {ID: "pkg/a#TestOther"}},
+		Files: map[string][]string{
+			"pkg/a#TestOne":   {"pkg/a/x_test.go"},
+			"pkg/a#TestTwo":   {"pkg/a/x_test.go"},
+			"pkg/a#TestOther": {"pkg/a/y_test.go"},
+		},
+	}
+	if got := strings.Join(unitFor(fn, "pkg/a/x_test.go"), ","); got != "pkg/a#TestOne,pkg/a#TestTwo" {
+		t.Errorf("func granularity: unitFor(x_test.go) = %q, want both functions", got)
+	}
+	if got := strings.Join(unitFor(fn, "pkg/a#TestOther"), ","); got != "pkg/a#TestOther" {
+		t.Errorf("func granularity: unitFor(unit) = %q", got)
 	}
 }
