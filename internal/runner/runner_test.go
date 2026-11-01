@@ -688,7 +688,32 @@ case $last in *b.test*) exit 1;; esac' sh`)
 		res, err := bun{}.Run(context.Background(), rc)
 		check(t, res, err)
 	})
-
+	t.Run("bun without coverage", func(t *testing.T) {
+		// Bun writes no lcov when no source file was covered (a self-contained test) or
+		// the test file failed to import: both are recorded with their exit code.
+		rc := setup(t, `sh -c 'for a; do last=$a; done; case $last in *b.test*) exit 1;; esac' sh`)
+		rc.Known = func(u string) []string { return []string{u, "package.json", "b.test.js"} }
+		rc.IsTest = func(f string) bool { return slices.Contains(units, f) }
+		res, err := bun{}.Run(context.Background(), rc)
+		check(t, res, err)
+		if o := res.Observations["a.test.js"]; o == nil || !o.Files["a.test.js"] {
+			t.Errorf("a: %+v", o)
+		}
+		// A passing test importing source files without coverage would miss them.
+		rc.TraceDir = t.TempDir()
+		os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755)
+		rc.Known = func(u string) []string { return []string{u, "src/lib.js"} }
+		res, err = bun{}.Run(context.Background(), rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o := res.Observations["a.test.js"]; o != nil {
+			t.Errorf("a recorded without the coverage of what it imports: %+v", o)
+		}
+		if o := res.Observations["b.test.js"]; o == nil || o.Status != state.Fail || o.Inferred {
+			t.Errorf("b: %+v", o)
+		}
+	})
 }
 
 // A command line that cannot be built starts nothing.
