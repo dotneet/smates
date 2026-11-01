@@ -201,6 +201,15 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 	selected, total := c.sel.res.Counts()
 	started := countUnits(c.started)
 	failed := c.failedUnits()
+	if len(failed) == 0 && !c.interrupted && len(c.unstarted) > 0 {
+		// Not a pass: smates exits 4 (the runner's error follows).
+		fmt.Fprintf(w, "smates: NOT STARTED: %s left %d selected test unit(s) not started (they stay selected); %d of %d selected unit(s) ran in %s (%d in total)\n",
+			c.notStartedBy(), countUnits(c.notRun), started, selected, elapsedText, total)
+		if c.worst != 0 {
+			fmt.Fprintf(w, "smates: FAILED (exit code %d), but no test unit is known to have failed (see the output above)\n", c.worst)
+		}
+		return
+	}
 	if c.worst == 0 {
 		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s\n", started, selected, total, elapsedText)
 		return

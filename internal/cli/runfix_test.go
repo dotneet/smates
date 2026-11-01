@@ -103,17 +103,23 @@ suites:
 	}
 
 	// Without failing tests the run exits 4, after recording suite a and writing the
-	// report, which lists b's unit as not run.
+	// report, which lists b's unit as not run and gives exit code 4 as well. Failures
+	// mode says the unit did not start, not that the run passed or failed.
 	r.write("a/one_check.py", "print(1)\n")
 	r.g.git("add", "-A")
 	r.g.commit("fix a")
 	report := filepath.Join(t.TempDir(), "report.json")
-	code, _, errs = r.run("run", "--all", "--no-agent", "--report", report)
+	code, _, errs = r.run("run", "--all", "--no-agent", "--output", "failures", "--report", report)
 	if code != ExitEnv {
 		t.Errorf("exit %d, want 4\n%s", code, errs)
 	}
+	if !strings.Contains(errs, "smates: NOT STARTED: a runner that could not start left 1 selected test unit(s) not started (they stay selected)") ||
+		strings.Contains(errs, "PASSED") || strings.Contains(errs, "FAILED") {
+		t.Errorf("failures mode summary:\n%s", errs)
+	}
 	var rep struct {
-		NotRun map[string][]string `json:"not_run"`
+		NotRun   map[string][]string `json:"not_run"`
+		ExitCode int                 `json:"exit_code"`
 	}
 	data, err := os.ReadFile(report)
 	if err != nil {
@@ -124,6 +130,9 @@ suites:
 	}
 	if want := map[string][]string{"b": {"b/two_check.py"}}; !reflect.DeepEqual(rep.NotRun, want) {
 		t.Errorf("not_run %v, want %v", rep.NotRun, want)
+	}
+	if rep.ExitCode != ExitEnv {
+		t.Errorf("report exit_code %d, want 4 (as smates exits)", rep.ExitCode)
 	}
 	// In CI (locally an unrecorded test is judged against the base revision instead).
 	t.Setenv("CI", "true")
@@ -179,6 +188,36 @@ suites:
 	}
 	if n := countLines(t, calls); n != 2 {
 		t.Errorf("agent called %d times in all after two dry runs of a new change, want 2", n)
+	}
+}
+
+// A dry run never marks orphans as handled, even when it selects nothing for them
+// (here --orphans=skip): the next run under the configured policy still runs the
+// affected suite.
+func TestDryRunKeepsOrphansUnseen(t *testing.T) {
+	r := newFixRepo(t, map[string]string{
+		"smates.yml": `version: 1
+orphans: all
+suites:
+  - name: s
+    runner: custom
+    tests: ["t/*_check.py"]
+    command: sh -c 'for f; do python3 "$f" || exit 1; done' sh
+`,
+		".gitignore":    ".smates/\n",
+		"t/a_check.py":  "print(1)\n",
+		"deploy/run.sh": "echo v1\n",
+	})
+	if code, _, errs := r.run("run", "--all"); code != 0 {
+		t.Fatalf("baseline %d %s", code, errs)
+	}
+	r.write("deploy/run.sh", "echo v2\n")
+	if code, out, errs := r.run("run", "--dry-run", "--orphans", "skip"); code != 0 || strings.TrimSpace(out) != "" {
+		t.Fatalf("dry run: %d %q\n%s", code, out, errs)
+	}
+	code, _, errs := r.run("run")
+	if code != 0 || !strings.Contains(errs, "s: running 1 test unit(s)") {
+		t.Errorf("after a dry run with --orphans=skip, the orphan policy did not run suite s: %d\n%s", code, errs)
 	}
 }
 

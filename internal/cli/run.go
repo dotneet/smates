@@ -51,8 +51,9 @@ type runFlags struct {
 	// budget is --budget; heartbeat the progress interval of failures mode (0: none).
 	budget    time.Duration
 	heartbeat time.Duration
-	// skipEmpty returns right after the selection when it runs nothing (no state
-	// update): the Claude Code Stop hook's fast path.
+	// skipEmpty returns right after the selection when it runs nothing, saving only
+	// the agent's new answer and the orphans the policy handled (saveWithoutRun): the
+	// Claude Code Stop hook's fast path.
 	skipEmpty bool
 }
 
@@ -196,7 +197,12 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		if f.dryRun {
 			c.printCommands(batches)
 		}
-		if err := c.saveWithoutRun(len(batches) == 0); err != nil {
+		// The orphans handled count as seen only when the orphan policy itself left
+		// nothing to run: not for a dry run (nothing ran, whatever was selected), a
+		// shard owning none of the tests selected for them, or the caller's
+		// --orphans override.
+		markOrphans := !f.dryRun && len(batches) == 0 && f.shardN <= 1 && f.orphans == ""
+		if err := c.saveWithoutRun(markOrphans); err != nil {
 			p.logf("could not save the agent's answer: %v", err)
 		}
 		return 0, nil
@@ -251,7 +257,6 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			}
 			c.unstarted[b.sr.Name] = append(c.unstarted[b.sr.Name], b.units...)
 			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
-			c.worst = max(c.worst, ExitFailed)
 			continue
 		}
 		if code != 0 && f.failFast && i < len(batches)-1 {
@@ -279,6 +284,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			saveErr = envError{err}
 		}
 	}
+	c.exit = c.exitCode(saveErr)
 	if c.quiet {
 		c.logShadowAndFlakes()
 		c.printAgentSummary(elapsed.String())
@@ -321,6 +327,17 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	return c.worst, saveErr
 }
 
+// exitCode is the exit code the log, the summary, the GitHub outputs and --report give
+// for the run: the runners' worst exit code, or ExitEnv when the run is an environment
+// error without failing tests (a runner could not start, the state could not be
+// saved), as smates exits then.
+func (c *cycle) exitCode(saveErr error) int {
+	if !c.interrupted && !c.testsFailed && (c.envErr != nil || saveErr != nil && c.worst == 0) {
+		return ExitEnv
+	}
+	return c.worst
+}
+
 // cycle is one `smates run` over the selected suites.
 type cycle struct {
 	p      *project
@@ -349,6 +366,7 @@ type cycle struct {
 
 	// Accumulated over the batches.
 	worst    int
+	exit     int                          // the run's exit code as reported (exitCode), set after recording
 	ran      map[string]map[string]string // suite -> unit -> status
 	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
 	// failedBatches are the batches that exited non-zero.
@@ -768,14 +786,15 @@ func (c *cycle) markHandledOrphans(picked, left []*runner.Suite) {
 
 // saveWithoutRun saves what the selection learned when no test runs (--dry-run, or a
 // selection that runs nothing under skipEmpty): the agent's new answer, so the next
-// run on the same change does not ask again, and, when there was nothing to run, the
-// orphans handled (the policy left no test to run for them). No outcome is recorded.
-func (c *cycle) saveWithoutRun(nothingToRun bool) error {
+// run on the same change does not ask again (as `smates select` does), and, with
+// markOrphans, the orphans handled (the orphan policy left no test to run for them).
+// No outcome is recorded.
+func (c *cycle) saveWithoutRun(markOrphans bool) error {
 	if !c.record {
 		return nil
 	}
 	fresh := c.sel.agentDec != nil && !c.sel.agentCache
-	handled := nothingToRun && len(c.sel.res.OrphanHandling) > 0 && len(c.p.state.Files) > 0
+	handled := markOrphans && len(c.sel.res.OrphanHandling) > 0 && len(c.p.state.Files) > 0
 	if !fresh && !handled {
 		return nil
 	}
@@ -889,11 +908,11 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
 	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.worst, n)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.exit, n)
 	} else if n > 0 {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, c.notStartedBy(), n)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.exit, c.notStartedBy(), n)
 	} else {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.worst)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.exit)
 	}
 	logFlakes(p, c.stderr, c.flakes)
 }
@@ -902,7 +921,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 func (c *cycle) writeSummaries(elapsed time.Duration) {
 	p, f := c.p, c.f
 	sum := summaryInput(c.sel, f.shardI, f.shardN)
-	sum.Run = &summary.Run{ExitCode: c.worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted}
+	sum.Run = &summary.Run{ExitCode: c.exit, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted}
 	sum.Savings = cumulativeSavings(p.state.Runs)
 	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
@@ -928,7 +947,7 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 	writeRunSummary(p, f.summary, sum)
 	writeMarkdown(p, f.markdown, sum)
 	if os.Getenv("GITHUB_OUTPUT") != "" {
-		if err := writeGitHubOutputs(c.stdout, c.sel, append([]string{fmt.Sprintf("exit-code=%d", c.worst)}, flakyOutputs(c.flakes)...)...); err != nil {
+		if err := writeGitHubOutputs(c.stdout, c.sel, append([]string{fmt.Sprintf("exit-code=%d", c.exit)}, flakyOutputs(c.flakes)...)...); err != nil {
 			p.logf("could not write GitHub outputs: %v", err)
 		}
 	}
@@ -949,7 +968,7 @@ func (c *cycle) writeReport() error {
 		NotRun   map[string][]string          `json:"not_run"` // --fail-fast, interrupt: selected units not run
 		// Interrupted: the run was cancelled (Ctrl-C); what did not finish is in not_run.
 		Interrupted bool `json:"interrupted"`
-	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted}
+	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}

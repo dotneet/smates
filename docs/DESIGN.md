@@ -267,8 +267,12 @@ runs, and nothing the caller passes can deselect a test.
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change). A run that runs nothing
 (`--dry-run`, or the Claude Code Stop hook when nothing is selected) still saves the
-agent's new answer and, when nothing was selected, the orphans it handled
-(`cycle.saveWithoutRun`); it records no outcome.
+agent's new answer, as `smates select` does (`cycle.saveWithoutRun`); it records no
+outcome. Only the Stop hook's empty run also marks the orphans it handled, and only when
+the orphan policy itself left nothing to run: not for a dry run (what it selected did
+not run), a shard that owns none of the tests selected for them, or an `--orphans`
+override (`--orphans=skip` selects nothing for them, and a later run under the
+configured policy must still see them).
 
 `smates orphans` replays the first-parent history (each commit's diff against its first
 parent; added and deleted files count as existence changes) against the covered set of an
@@ -473,7 +477,8 @@ either (a killed runner fails its tests or reports nothing), what finished is re
 and reported (`interrupted` in `--report`), and smates exits 1.
 A batch whose runner cannot start (not installed, a failed preflight check) does not end
 the run: its units count as not run (`not_run`, they stay selected), later batches run,
-and what ran is recorded and reported; smates then exits 1 when tests failed, else 4.
+and what ran is recorded and reported; smates then exits 1 when tests failed, else 4
+(the exit code `--report`, the summary and the GitHub outputs give, `cycle.exitCode`).
 For the snapshot its suite counts as one `--suite` left out: a full run refreshes it only
 for the suites that ran (markers for files the others also own), and the orphans a
 selective run handled are marked seen by those suites alone. A suite command line that

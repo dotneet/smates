@@ -35,7 +35,8 @@ Exit 4 also covers a runner that could not start (not installed, or exit 126/127
 test result in a recorded run of any runner but `custom`; the other suites still run and
 are recorded, its tests stay selected) and a state that could not be saved (e.g. the
 shared state's lock is held); the summary is printed first. When tests also failed, the
-exit code is 1.
+exit code is 1. `exit_code` in `--report` is 4 in these cases too (when tests failed, it
+is the runner's own exit code).
 
 ## Changes no test is known to depend on (orphans)
 
