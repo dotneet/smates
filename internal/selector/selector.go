@@ -470,14 +470,12 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 			t.Service[c] = service
 		}
 	}
+	// Keys of their own first: a changed file that is also an import, an input or the
+	// test itself keeps that stronger explanation over the declaration's.
+	var setKeys []*ServiceDeps
 	for _, c := range t.Changed {
 		if d := sr.service(c); d != nil && via[c] == ViaService {
-			if len(sets[d]) == 0 {
-				add(c, ViaService, d.Label)
-			}
-			for _, f := range sets[d] {
-				add(f, ViaService, d.Label)
-			}
+			setKeys = append(setKeys, d)
 			continue
 		}
 		how := via[c]
@@ -486,6 +484,15 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 		}
 		add(c, how, "")
 	}
+	for _, d := range setKeys {
+		if len(sets[d]) == 0 {
+			add(d.Key, ViaService, d.Label)
+		}
+		for _, f := range sets[d] {
+			add(f, ViaService, d.Label)
+		}
+	}
+	sort.Strings(changed)
 	t.Changed = changed
 }
 

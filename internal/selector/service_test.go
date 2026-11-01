@@ -279,3 +279,29 @@ func TestServiceExpanderComputesSuiteCodeOnce(t *testing.T) {
 		t.Errorf("%v != %v", a[0].Files, b[0].Files)
 	}
 }
+
+// A changed file both imported by the test and inside a declaration is explained as
+// the import (the set key sorts first but must not take it over).
+func TestSelectDependsOnImportWins(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"e2e/login.spec.ts": `import { User } from "../shared/types"`,
+		"shared/types.ts":   `export type User = {}`,
+		"shared/api.ts":     `export const api = 1`,
+	})
+	f.suites = []*runner.Suite{suite(t, config.Suite{Name: "e2e", Runner: "vitest", Root: "e2e", Tests: []string{"*.spec.ts"},
+		DependsOn: []config.Dependency{{Paths: []string{"shared/**"}}}})}
+	st := f.record(nil, nil)
+	f.write("shared/types.ts", `export type User = {id: string}`)
+	f.write("shared/api.ts", `export const api = 2`)
+	want := map[string]map[string]string{"e2e/login.spec.ts": {
+		"shared/types.ts": "import: ",
+		"shared/api.ts":   "service: depends_on shared/**",
+	}}
+	res := f.sel(st, nil)
+	if got := e2eVia(res); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	if c := res.Suites[0].Tests[0].Changed; !reflect.DeepEqual(c, []string{"shared/api.ts", "shared/types.ts"}) {
+		t.Errorf("changed %v", c)
+	}
+}
