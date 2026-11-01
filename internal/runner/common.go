@@ -381,6 +381,12 @@ func jsBinCommand(repoRoot, dir, bin string, args string) string {
 	return strings.TrimSpace("npx --no-install " + bin + " " + args)
 }
 
+// JSBinCommand is jsBinCommand for a repo-relative suite root, for callers that write
+// a suite's command (detection).
+func JSBinCommand(repoRoot, root, bin, args string) string {
+	return jsBinCommand(repoRoot, filepath.Join(repoRoot, filepath.FromSlash(root)), bin, args)
+}
+
 // jsLockInputs are the dependency manifests, lockfiles and runtime pins every JS test
 // of a suite rooted at root depends on: in the suite directory and in every directory
 // above it up to the repository root (workspace roots).

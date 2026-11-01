@@ -126,6 +126,17 @@ func TestDeps(t *testing.T) {
 			want:   []string{"h/python/hh/__init__.py", "p/lib/pp.py", "s/code/ss.py"},
 		},
 		{
+			name: "setuptools inline package-dir",
+			files: map[string]string{
+				"pyproject.toml":      "[tool.setuptools]\npackage-dir = {\"\" = \"lib\"}\n",
+				"lib/pkg/__init__.py": "",
+				"lib/pkg/m.py":        "",
+				"tests/test_a.py":     "from pkg import m\n",
+			},
+			target: "tests/test_a.py",
+			want:   []string{"lib/pkg/__init__.py", "lib/pkg/m.py"},
+		},
+		{
 			name: "options roots",
 			files: map[string]string{
 				"vendor/shared/tool.py": "",
@@ -214,6 +225,56 @@ func TestDeps(t *testing.T) {
 			},
 			target: "lib/code.py",
 			want:   nil,
+		},
+		{
+			name: "conftest chain for Django-style tests.py and *_tests.py",
+			files: map[string]string{
+				"conftest.py":       "",
+				"app/__init__.py":   "",
+				"app/tests.py":      "import os\n",
+				"lib/code_tests.py": "",
+			},
+			target: "app/tests.py",
+			want:   []string{"app/__init__.py", "conftest.py"},
+		},
+		{
+			name: "conftest chain for *_tests.py",
+			files: map[string]string{
+				"conftest.py":       "",
+				"lib/code_tests.py": "",
+			},
+			target: "lib/code_tests.py",
+			want:   []string{"conftest.py"},
+		},
+		{
+			name: "conftest chain under a *tests* directory",
+			files: map[string]string{
+				"conftest.py":                   "",
+				"unit_tests/conftest.py":        "",
+				"unit_tests/helpers/factory.py": "",
+			},
+			target: "unit_tests/helpers/factory.py",
+			want:   []string{"conftest.py", "unit_tests/conftest.py"},
+		},
+		{
+			name: "conftest chain for configured python_files",
+			files: map[string]string{
+				"pytest.ini":        "[pytest]\npython_files = check_*.py\n",
+				"conftest.py":       "",
+				"lib/check_code.py": "",
+			},
+			target: "lib/check_code.py",
+			want:   []string{"conftest.py"},
+		},
+		{
+			name: "conftest chain for python_files in pyproject",
+			files: map[string]string{
+				"pyproject.toml":   "[tool.pytest.ini_options]\npython_files = [\"check_*.py\", \"*_spec.py\"]\n",
+				"conftest.py":      "",
+				"lib/code_spec.py": "",
+			},
+			target: "lib/code_spec.py",
+			want:   []string{"conftest.py"},
 		},
 		{
 			name: "suffix-style test file",
