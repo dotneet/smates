@@ -103,10 +103,35 @@ smates run --all     # run everything once and record what each test uses
 smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
+smates hook install  # optional: run the affected tests before every git push
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
+
+### Git hook
+
+`smates hook install` writes a `pre-push` hook (`--hook pre-commit` for a pre-commit
+one) that runs `smates run --no-agent` and stops the push when a selected test fails.
+Without the agent the hook makes no API calls (changes no test is known to depend on run
+the affected suites in full); `--agent` keeps it, and `smates run` flags can follow `--`
+(`smates hook install -- --explain`). The hook:
+
+- honours `core.hooksPath` and is shared by all worktrees of the repository;
+- never overwrites a hook it did not write: it stops and prints the line to add, or
+  appends itself to a shell hook with `--append`. With husky or lefthook it prints the
+  snippet for `.husky/pre-push` or `lefthook.yml` instead;
+- pulls the shared state (`smates state pull`) when there is none locally, and merges in
+  the remote one when the local state is older than a week or was recorded on a commit
+  outside the current history (fetching at most once an hour);
+- is skipped with `git push --no-verify` or `SMATES_SKIP_HOOK=1`, and lets the push
+  through with a warning when `smates` is not on `PATH`.
+
+smates hashes the working tree, not the commits being pushed: uncommitted (pre-commit:
+unstaged) changes and untracked files are part of what is tested. The hook warns when
+there are any, and when the pushed branch is not the one checked out; commit or stash
+them first for an exact result. `smates hook uninstall` removes only what smates wrote;
+`smates hook status` shows where the hook lives.
 
 ### GitHub Actions
 
@@ -199,7 +224,9 @@ agent:
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
+| `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
@@ -230,6 +257,17 @@ commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure 
 fails the run and is still selected next time. With `flaky: {retry: 1}`, a failing test
 that is *already known* to be flaky is re-run once, and if it then passes the run does not
 fail (only when every failure of that suite run is such a test; the flip is reported).
+
+**Stats** (`smates stats`) sum up the runs recorded in the state: how many test units
+ran out of how many (skip rate), the recorded test time the skipped units would have
+taken (the time saved, also extrapolated to 30 days), shadow-mode misses and their rate,
+orphans by how they were handled (reference scan, agent, full suite run), agent calls
+with their tokens and cost (when the backend reports one, e.g. `claude -p`), and flaky
+flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
+the state keeps the last 1000 records within 180 days, and `smates state merge` unions
+them, so the stats of a state restored on CI cover the runs that state went through. A
+sharded run leaves one record per shard (its orphans are counted by shard 1 only). The job summary shows the cumulative time saved
+in one line.
 
 ## Failure hints
 
