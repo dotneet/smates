@@ -93,4 +93,21 @@ func TestHasherUnchangedLegacy(t *testing.T) {
 			t.Errorf("Unchanged(%q, %q) = %v, want %v", tc.key, tc.recorded, got, tc.want)
 		}
 	}
+
+	// One set key (@set:suite:X) stands for different files in the hashers of the
+	// suites that depend on X: each compares the legacy hash of its own files.
+	key := depkey.Set("suite:x")
+	setsOf := func(files ...string) []*ServiceDeps { return []*ServiceDeps{{Key: key, Files: files}} }
+	old := NewHasher(gitx.Snapshot{"s/a.sh": "aa", "s/b.txt": "bb", "s/c.sh": "cc"})
+	snap["s/c.sh"] = "cc" + gitx.ExecSuffix
+	cur := NewHasher(snap)
+	for _, files := range [][]string{{"s/a.sh"}, {"s/a.sh", "s/c.sh"}, {"s/c.sh"}} {
+		legacy := old.WithSets(setsOf(files...)).Hash(key)
+		if got := cur.WithSets(setsOf(files...)).Unchanged(key, legacy); !got {
+			t.Errorf("set of %v: legacy hash changed", files)
+		}
+	}
+	if cur.WithSets(setsOf("s/c.sh")).Unchanged(key, old.WithSets(setsOf("s/a.sh")).Hash(key)) {
+		t.Error("set of s/c.sh unchanged with the legacy hash of s/a.sh")
+	}
 }

@@ -187,7 +187,7 @@ func execDeps(args []string, shell bool, cwd, root string, rel func(string) (str
 // all of them); the Node, Bun and Python programs of the others are opaque.
 func execDepsIn(args []string, shell bool, cwd, root string, rel func(string) (string, bool), rt map[string]bool) []string {
 	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, defs: map[string]*funcDef{}, analyzed: map[string]bool{},
-		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, shell: shell, rt: rt}
+		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, changes: map[string]bool{}, shell: shell, rt: rt}
 	if shell {
 		a.shellText(strings.Join(args, " "), cwd, "", 0, nil)
 	} else {
@@ -211,7 +211,9 @@ type execAnalysis struct {
 	calls    int                   // function bodies analyzed at a call (bounded)
 	memo     map[string]callResult // calls analyzed, by callKey
 	relevant map[string][]string   // the variables a function's body may use (callKey)
+	changes  map[string]bool       // whether a function's body may change the caller's state (mayChange)
 	shell    bool                  // the words come from shell code (a shell expands their globs)
+	lost     bool                  // the commands of a state no longer followed were recorded (shellState.unknown)
 	rt       map[string]bool       // the runtimes the child's environment traces (nil: all)
 }
 
@@ -224,28 +226,33 @@ type funcDef struct {
 
 // callResult is what analyzing a call changed in the caller's state.
 type callResult struct {
-	cwd  string
-	dirs []string
-	vars map[string][]string
+	cwd     string
+	dirs    []string
+	vars    map[string][]string
+	unknown bool
 }
 
 // maxCalls bounds the function calls whose bodies are analyzed. Calls in the same state
 // are analyzed once (memo); past the bound, a function's body is analyzed once more in a
-// scope of its own.
+// scope of its own, and the caller's state is no longer followed when the body may
+// change it (mayChange).
 const maxCalls = 200
 
 // shellState is what the next command of a script sees: its working directory, the
 // variables assigned so far and the pushd stack; scopes saves them at "(" for ")".
+// unknown says the state is no longer followed (a call past maxCalls may have changed
+// it): the commands that follow may read anything in the repository.
 type shellState struct {
-	cwd    string
-	vars   map[string][]string
-	dirs   []string
-	scopes []shellState
+	cwd     string
+	vars    map[string][]string
+	dirs    []string
+	scopes  []shellState
+	unknown bool
 }
 
 // subshell returns a copy of st that st's later changes do not affect.
 func (st *shellState) subshell() *shellState {
-	return &shellState{cwd: st.cwd, vars: maps.Clone(st.vars), dirs: slices.Clone(st.dirs)}
+	return &shellState{cwd: st.cwd, vars: maps.Clone(st.vars), dirs: slices.Clone(st.dirs), unknown: st.unknown}
 }
 
 func (a *execAnalysis) add(p string) {
@@ -264,6 +271,25 @@ func (a *execAnalysis) opaque(dir string) {
 	}
 	if rel, err := filepath.Rel(a.root, dir); err == nil && rel == "." {
 		a.out = append(a.out, "./**")
+	}
+}
+
+// absoluteTrees records, for a command with too many words to follow, the tree of the
+// literal directory each absolute word starts with: opaque(cwd) does not cover them
+// (and records nothing when the command runs outside the repository).
+func (a *execAnalysis) absoluteTrees(seg []string) {
+	for _, w := range seg {
+		if i := strings.IndexAny(w, "{$*?["); i >= 0 {
+			w = w[:i]
+		}
+		w = literal(w)
+		if !filepath.IsAbs(w) {
+			continue
+		}
+		if !strings.HasSuffix(w, "/") {
+			w = filepath.Dir(w)
+		}
+		a.opaque(filepath.Clean(w))
 	}
 }
 
@@ -387,13 +413,22 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 		switch seg[0] {
 		case subshellOpen:
 			// A ( ... ) subshell gets its own working directory and variables.
-			st.scopes = append(st.scopes, shellState{cwd: st.cwd, vars: st.vars, dirs: st.dirs})
+			st.scopes = append(st.scopes, shellState{cwd: st.cwd, vars: st.vars, dirs: st.dirs, unknown: st.unknown})
 			st.vars, st.dirs = maps.Clone(st.vars), slices.Clone(st.dirs)
 			continue
 		case subshellClose:
 			if n := len(st.scopes); n > 0 {
 				s := st.scopes[n-1]
-				st.cwd, st.vars, st.dirs, st.scopes = s.cwd, s.vars, s.dirs, st.scopes[:n-1]
+				st.cwd, st.vars, st.dirs, st.unknown, st.scopes = s.cwd, s.vars, s.dirs, s.unknown, st.scopes[:n-1]
+			}
+			continue
+		}
+		if st.unknown {
+			// The working directory and the variables are not known: the command may read
+			// anything in the repository.
+			if !a.lost {
+				a.lost = true
+				a.opaque(a.root)
 			}
 			continue
 		}
@@ -403,6 +438,7 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 		}
 		if !ok {
 			a.opaque(st.cwd) // too many words to follow
+			a.absoluteTrees(segs[k])
 			continue
 		}
 		if len(seg) > 0 && isAssignments(seg) {
@@ -445,6 +481,7 @@ func (a *execAnalysis) define(name string, body [][]string, st *shellState, dept
 	a.pending = append(a.pending, name)
 	clear(a.memo)
 	clear(a.relevant)
+	clear(a.changes)
 }
 
 // call analyzes the body of the shell function name called in state st, applying what
@@ -460,6 +497,7 @@ func (a *execAnalysis) call(st *shellState, name string) {
 	if r, ok := a.memo[key]; ok {
 		st.cwd, st.dirs = r.cwd, slices.Clone(r.dirs)
 		maps.Copy(st.vars, r.vars)
+		st.unknown = st.unknown || r.unknown
 		return
 	}
 	a.calling[name] = true
@@ -469,6 +507,11 @@ func (a *execAnalysis) call(st *shellState, name string) {
 		if scope := name + "\x00scope"; !a.analyzed[scope] {
 			a.analyzed[scope] = true
 			a.run(st.subshell(), d.body, d.depth)
+		}
+		// What the body changes is not applied: when it may change the working
+		// directory, the pushd stack or variables, the caller's state is lost.
+		if a.mayChange(name) {
+			st.unknown = true
 		}
 		return
 	}
@@ -481,7 +524,45 @@ func (a *execAnalysis) call(st *shellState, name string) {
 			changed[k] = v
 		}
 	}
-	a.memo[key] = callResult{cwd: st.cwd, dirs: slices.Clone(st.dirs), vars: changed}
+	a.memo[key] = callResult{cwd: st.cwd, dirs: slices.Clone(st.dirs), vars: changed, unknown: st.unknown}
+}
+
+// mayChange reports whether the body of function name, or a function it calls, may
+// change the caller's state (see run): a cd, pushd or popd, an assignment, a for loop.
+func (a *execAnalysis) mayChange(name string) bool {
+	if v, ok := a.changes[name]; ok {
+		return v
+	}
+	// Only the answer for name is memoized: bodyMayChange cuts a recursive call short,
+	// so its answer for a function reached through one may be incomplete.
+	v := a.bodyMayChange(name, map[string]bool{})
+	a.changes[name] = v
+	return v
+}
+
+func (a *execAnalysis) bodyMayChange(name string, seen map[string]bool) bool {
+	d := a.defs[name]
+	if d == nil || seen[name] {
+		return false
+	}
+	seen[name] = true
+	for _, seg := range d.body {
+		if w := trimKeywords(seg); len(w) > 0 && isAssignments(w) || len(seg) >= 3 && seg[0] == "for" && seg[2] == "in" {
+			return true
+		}
+		w := trimKeywords(trimAssignments(seg))
+		if len(w) == 0 {
+			continue
+		}
+		switch w[0] {
+		case "cd", "pushd", "popd":
+			return true
+		}
+		if a.defs[w[0]] != nil && a.bodyMayChange(w[0], seen) {
+			return true
+		}
+	}
+	return false
 }
 
 // callKey identifies the state a call of name is analyzed in: the working directory,
@@ -1005,6 +1086,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 			}
 		case len(sub) > max(maxWords, len(x.cmd)):
 			a.opaque(cwd)
+			a.absoluteTrees(x.cmd)
 		default:
 			a.command(sub, cwd, depth)
 		}

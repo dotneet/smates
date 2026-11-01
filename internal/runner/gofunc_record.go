@@ -277,8 +277,8 @@ func (fr *funcRecorder) add(unit string, o *Observation) {
 func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, dir, pkgDir, name string) (*Observation, error) {
 	rc := fr.rc
 	unit := FuncUnit(dir, name)
-	covDir := filepath.Join(work, "covdata")
-	for _, d := range []string{covDir, trace.V8Dir(work)} {
+	covDir, childDir := filepath.Join(work, "covdata"), filepath.Join(work, "children")
+	for _, d := range []string{covDir, childDir, trace.V8Dir(work)} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, err
 		}
@@ -287,7 +287,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	argv := append(slices.Clone(fr.flags.exec), bin, "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.coverprofile="+profile,
 		"-test.testlogfile="+testLog, "-test.paniconexit0")
 	argv = append(append(argv, fr.flags.test...), fr.flags.tail...)
-	env := []string{"GOCOVERDIR=" + covDir, childCoverEnv + "=" + covDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
+	env := []string{"GOCOVERDIR=" + covDir, childCoverEnv + "=" + covDir, trace.GoChildLogEnv + "=" + childDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
 	env = append(env, childTraceEnv(rc, work)...)
 	var buf bytes.Buffer
 	start := time.Now()
@@ -305,7 +305,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	if code != 0 {
 		o.Failure = string(lastMessage(buf.Bytes()))
 	}
-	files, envs := trace.ParseTestLog(testLog, pkgDir)
+	files, envs := trace.GoTestLogs(testLog, pkgDir, bin, childDir)
 	addTestLog(o, rc.Repo.Root, files, envs)
 	if procs, err := trace.Collect(work, rc.Repo.Root); err == nil {
 		for f := range trace.GoChildren(procs)[pkgDir] {

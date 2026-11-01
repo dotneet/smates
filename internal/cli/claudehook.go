@@ -148,6 +148,10 @@ func hookClaudeStop(ctx context.Context, args []string, stdin io.Reader, stdout,
 			requireConfig = true
 			continue
 		}
+		if isHelp(a) {
+			fmt.Fprintln(stdout, "usage: smates hook claude-stop [--require-config] [-- run flags]")
+			return 0, nil
+		}
 		fmt.Fprintf(stderr, "smates hook claude-stop: unknown argument %q (run flags follow --)\n", a)
 		return 1, nil
 	}

@@ -503,3 +503,55 @@ func TestExecDepsBounded(t *testing.T) {
 		}
 	}
 }
+
+// Past the bound on calls, a function that may change the caller's state leaves it
+// unknown: the commands after the call may read anything (the cd into sub is not
+// followed, but sub/x is covered).
+func TestExecDepsCallsPastBoundLoseState(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "x", "sub/x")
+	var b strings.Builder
+	b.WriteString("f() { echo $X >/dev/null; cd sub; }\n")
+	for i := 0; i < 205; i++ {
+		fmt.Fprintf(&b, "X=%d; f; cd ..\n", i)
+	}
+	b.WriteString("X=999; f; cat x\n")
+	if got, want := execKeys(root, []string{b.String()}, true), []string{"./**"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("cd in a function past the bound: %v, want %v", got, want)
+	}
+	// A function that changes nothing keeps the state followed, and a subshell confines
+	// the loss to itself.
+	b.Reset()
+	b.WriteString("f() { echo $X >/dev/null; }\ng() { cd sub; }\n")
+	for i := 0; i < 205; i++ {
+		fmt.Fprintf(&b, "X=%d; f\n", i)
+	}
+	b.WriteString("(g; cat list)\ncd sub; cat x\n")
+	if got, want := execKeys(root, []string{b.String()}, true), []string{"./**", "sub/x"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("no change past the bound: %v, want %v", got, want)
+	}
+}
+
+// A command with too many words to follow run outside the repository records the trees
+// of the repository directories its absolute words name.
+func TestExecDepsWordBoundOutsideRepo(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "1", "sub/f1")
+	tmp := repoDir(t)
+	for _, c := range []struct {
+		sh   string
+		want []string
+	}{
+		{"cat " + root + "/{1..2000}", []string{"./**"}},
+		{"cat " + root + "/sub/f{1..2000} /etc/{1..2}", []string{"sub/**"}},
+		{"for i in {1..40}; do :; done\nfor j in {1..40}; do :; done\ncat '" + root + "'/sub/$i$j", []string{"sub/**"}},
+	} {
+		seen := map[string]bool{}
+		for _, k := range execDeps([]string{c.sh}, true, tmp, root, relCache(root)) {
+			seen[k] = true
+		}
+		if got := keys(seen); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("execDeps(%.60q) outside the repository = %v, want %v", c.sh, got, c.want)
+		}
+	}
+}

@@ -26,7 +26,8 @@ package runner
 //
 // Coverage also counts what re-executions of the test binary ran (the helper-process
 // pattern, exec.Command(os.Args[0], "-test.run=...")): the binary carries an init
-// that hands them the function's coverage directory (see childCoverSource).
+// that hands them the function's coverage directory and a test log of their own (see
+// childSource).
 //
 // When the binary cannot be built with coverage (or the suite command is not a plain
 // `go test`), the package is recorded as a whole: every selected function gets the

@@ -324,7 +324,7 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	var cf commonFlags
 	c.common(&cf)
 	c.withFormat("text", "json")
-	if err := c.parse(args); err != nil {
+	if _, err := c.parseInterspersed(args); err != nil {
 		return err
 	}
 	target, err := c.oneArg("usage: smates why <file or $ENV_VAR>")
@@ -453,7 +453,7 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 	var cf commonFlags
 	c.common(&cf)
 	c.withFormat("text", "json")
-	if err := c.parse(args); err != nil {
+	if _, err := c.parseInterspersed(args); err != nil {
 		return err
 	}
 	arg, err := c.oneArg("usage: smates deps <test file or Go package dir>")
@@ -592,6 +592,12 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 
 const stateRefPrefix = "refs/smates/state/"
 
+const stateCommands = `usage: smates state show [--format json]          print the recorded state
+       smates state path                        print the state file path
+       smates state pull|push [--remote] [--ref] fetch or publish the state
+       smates state merge <file>... [-o file]   merge other state files into the state
+       smates state clear                       delete the state`
+
 func cmdState(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return usageError{errors.New("usage: smates state show|path|pull|push|merge|clear")}
@@ -605,7 +611,12 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	c.withFormat("text", "json")
 	c.deprecatedJSON("show: print JSON (deprecated: use --format json)")
 	out := c.String("o", "", "merge: output file (default: the state file)")
-	if err := c.parse(rest); err != nil {
+	if isHelp(sub) {
+		printGroupHelp(stdout, stateCommands, c)
+		return nil
+	}
+	files, err := c.parseInterspersed(rest)
+	if err != nil {
 		return err
 	}
 	store, err := resolveStore(*dir, *statePath, stderr)
@@ -629,7 +640,7 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		for _, f := range c.Args() {
+		for _, f := range files {
 			o, err := state.Load(f)
 			if err != nil {
 				return fmt.Errorf("%s: %w", f, err)
@@ -691,7 +702,7 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		st.Merge(pulled)
 		return store.Save(st)
 	default:
-		return usageError{fmt.Errorf("unknown state command %q", sub)}
+		return usageError{fmt.Errorf("unknown state command %q\n%s", sub, stateCommands)}
 	}
 	return nil
 }

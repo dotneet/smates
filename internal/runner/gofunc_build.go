@@ -99,7 +99,7 @@ func goIgnoredFiles(rc *RunContext, env, dirs []string) (map[string]bool, bool) 
 	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", "{{.Dir}}{{range .IgnoredGoFiles}}|{{.}}{{end}}", "--")
 	cmd := exec.Command("go", append(args, dirs...)...)
 	cmd.Dir = rc.Dir()
-	cmd.Env = env
+	cmd.Env = withPWD(env, cmd.Dir)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false

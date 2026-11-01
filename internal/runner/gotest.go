@@ -260,6 +260,12 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 			}
 			kept = append(kept, f)
 		}
+		// Re-executions of a test binary (the helper-process pattern) keep test logs of
+		// their own (see childSource).
+		kept, err = childGoFlags(rc, kept, units)
+		if err != nil {
+			return nil, err
+		}
 		flags := strings.TrimSpace(strings.Join(kept, " ") + " -exec=" + exe + " -count=1")
 		env = []string{"GOFLAGS=" + flags, trace.GoExecEnv + "=1", trace.GoFlagsOrigEnv + "=" + orig, trace.GoExecUserEnv + "=" + userExec}
 		// Node and Python processes started by tests are traced too.
@@ -390,11 +396,21 @@ func lastMessage[T string | []byte](out T) T {
 	return out
 }
 
-// addTestLog adds what a Go test log recorded (absolute paths from trace.ParseTestLog:
-// a directory that was listed ends in a separator, an existence check in "?"; and the
-// environment variables looked up) to an observation.
+// addTestLog adds what a Go test log recorded (absolute paths from trace.GoTestLogs:
+// a directory that was listed ends in a separator, an existence check in "?", a tree in
+// "/**"; and the environment variables looked up) to an observation. A tree of a
+// directory enclosing the repository is the repository's.
 func addTestLog(o *Observation, root string, files, env []string) {
+	tree := string(filepath.Separator) + "**"
 	for _, f := range files {
+		if dir, ok := strings.CutSuffix(f, tree); ok {
+			if rel, ok := pathutil.Rel(root, dir); ok {
+				o.AddFile(depkey.Tree(rel))
+			} else if enclosesRoot(dir, root) {
+				o.AddFile(depkey.Tree("."))
+			}
+			continue
+		}
 		kind := depkey.KindContent
 		switch {
 		case strings.HasSuffix(f, string(filepath.Separator)):
@@ -414,6 +430,26 @@ func addTestLog(o *Observation, root string, files, env []string) {
 	for _, name := range env {
 		o.AddFile(depkey.Env(name))
 	}
+}
+
+// enclosesRoot reports whether directory dir is the repository root or encloses it,
+// through symlinks too (the root is resolved; a go command run below /tmp on macOS
+// reports /tmp, not /private/tmp).
+func enclosesRoot(dir, root string) bool {
+	for _, d := range []string{dir, resolvedDir(dir)} {
+		if r, err := filepath.Rel(d, root); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvedDir is dir with its symlinks resolved (dir itself when that fails).
+func resolvedDir(dir string) string {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		return r
+	}
+	return dir
 }
 
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
@@ -702,7 +738,7 @@ func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]s
 	cmd.Dir = rc.Dir()
 	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
 	// flags) must not reach go list.
-	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
+	cmd.Env = withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="}), cmd.Dir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

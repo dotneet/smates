@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -358,7 +359,7 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), env)
+	cmd.Env = withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), env), dir)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
 	err := runCmd(ctx, cmd)
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -372,6 +373,21 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 		return 127, fmt.Errorf("running %s: %w", argv[0], err)
 	}
 	return 0, nil
+}
+
+// withPWD sets PWD in env to dir, the directory a command runs in, as exec.Cmd does
+// itself only for an inherited environment. Programs that trust $PWD when it names
+// their directory (os.Getwd, so the go command) would otherwise see the user's PWD: a
+// path through a symlink (/tmp on macOS) that the repository root, resolved, does not
+// match, or another directory altogether. Windows has no PWD.
+func withPWD(env []string, dir string) []string {
+	if runtime.GOOS == "windows" || dir == "" {
+		return env
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return MergeEnv(env, []string{"PWD=" + abs})
+	}
+	return env
 }
 
 // AgentSecrets are the credentials of every agent provider (see package agent): tests
