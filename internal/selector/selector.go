@@ -51,6 +51,7 @@ const (
 	OrphanNoImpact  = "no-impact" // the agent judged it irrelevant to every test
 	OrphanPolicy    = "policy"    // orphan policy "all": the suites it may affect run in full
 	OrphanIgnored   = "ignored"   // orphan policy "ignore"
+	OrphanUntested  = "untested"  // source code no test reaches (untested: skip)
 )
 
 // Input is everything selection needs.
@@ -111,6 +112,12 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Files maps each test to its test files (the file defining it, for a Go test
+	// function).
+	Files map[string][]string `json:"-"`
+	// Unrecorded is set when some test of the suite has no recorded entry: its
+	// dependencies are known from the static closure only.
+	Unrecorded bool `json:"-"`
 	// Services are the suite's depends_on/serves declarations, expanded at HEAD.
 	Services []*ServiceDeps `json:"-"`
 }
@@ -138,16 +145,38 @@ type ServiceDeps struct {
 // exists).
 func (d *ServiceDeps) Match(f string) bool { return d.match(f) }
 
-// applies reports whether the declaration covers a unit of suite su.
-func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
-	return len(d.Tests) == 0 || pathutil.Match(d.Tests, pathutil.RelTo(unit, su.Root))
+// applies reports whether the declaration covers a unit of suite su whose test files
+// are files.
+func (d *ServiceDeps) applies(su *runner.Suite, unit string, files []string) bool {
+	return len(d.Tests) == 0 || UnitMatches(su, unit, files, d.Tests)
+}
+
+// UnitMatches reports whether the tests globs of a rule or a depends_on declaration
+// (relative to the suite root) select unit, whose test files are files. A Go test
+// function ("dir#TestName") is matched by its package directory, like the package unit
+// it belongs to, and by the test file defining it.
+func UnitMatches(su *runner.Suite, unit string, files, globs []string) bool {
+	if pathutil.Match(globs, pathutil.RelTo(unit, su.Root)) {
+		return true
+	}
+	if dir, _, ok := runner.SplitFuncUnit(unit); ok {
+		if pathutil.Match(globs, pathutil.RelTo(dir, su.Root)) {
+			return true
+		}
+		for _, f := range files {
+			if pathutil.Match(globs, pathutil.RelTo(f, su.Root)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ServiceVia returns the label of the first depends_on/serves declaration through
 // which unit depends on file f ("" when none does).
 func (s *Suite) ServiceVia(unit, f string) string {
 	for _, d := range s.Services {
-		if d.match(f) && d.applies(s.Suite, unit) {
+		if d.match(f) && d.applies(s.Suite, unit, s.Files[unit]) {
 			return d.Label
 		}
 	}
@@ -302,7 +331,12 @@ func Select(in *Input) (*Result, error) {
 
 	globalInputs := expandInputs(in.Config.Inputs, files)
 	if in.Config.Path != "" {
-		globalInputs = append(globalInputs, in.Config.Path)
+		// Every test depends on its suite's settings (ConfigKey), not on the whole
+		// file: a test that reads smates.yml itself records the file's content.
+		globalInputs = append(globalInputs, ConfigKey(in.Config.Path))
+		if changedSet[in.Config.Path] {
+			changedSet[ConfigKey(in.Config.Path)] = true
+		}
 	}
 
 	var baseChanged map[string]bool
@@ -315,10 +349,16 @@ func Select(in *Input) (*Result, error) {
 		for _, f := range list {
 			baseChanged[f] = true
 		}
+		if in.Config.Path != "" && baseChanged[in.Config.Path] {
+			baseChanged[ConfigKey(in.Config.Path)] = true
+		}
 	}
 	covered := map[string]bool{} // union of all D(T)
+	if in.Config.Path != "" {
+		covered[in.Config.Path] = true // explained by ConfigKey
+	}
 	res.Covered = covered
-	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...)
+	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
@@ -344,6 +384,8 @@ func Select(in *Input) (*Result, error) {
 			sr.Inputs[f] = true
 		}
 		st := in.State.Suites[su.Name]
+		mapper, _ := su.Adapter.(runner.StaticMapper)
+		sr.Files = unitFiles
 
 		var staticStarts []string
 		for _, u := range units {
@@ -357,7 +399,7 @@ func Select(in *Input) (*Result, error) {
 			deps := map[string]bool{}
 			via := map[string]string{} // known deps by strongest explanation
 			for _, d := range sr.Services {
-				if d.applies(su, u) {
+				if d.applies(su, u, unitFiles[u]) {
 					deps[d.Key], via[d.Key] = true, ViaService
 					if !slices.Contains(res.declared, d) {
 						res.declared = append(res.declared, d)
@@ -368,14 +410,18 @@ func Select(in *Input) (*Result, error) {
 				}
 			}
 			if config.Bool(su.Static, true) && in.Graph != nil {
-				for _, f := range in.Graph.Closure(unitFiles[u]...) {
+				closure := in.Graph.Closure(unitFiles[u]...)
+				if mapper != nil {
+					closure = mapper.MapStatic(su, u, closure)
+				}
+				for _, f := range closure {
 					deps[f], via[f] = true, ViaImport
 				}
 			}
 			for _, f := range suiteInputs {
 				deps[f], via[f] = true, ViaInput
 			}
-			for _, f := range ruleDeps(su, u, files) {
+			for _, f := range ruleDeps(su, u, unitFiles[u], files) {
 				deps[f], via[f] = true, ViaInput
 			}
 			for _, f := range unitFiles[u] {
@@ -390,6 +436,9 @@ func Select(in *Input) (*Result, error) {
 			var entry *state.Entry
 			if st != nil {
 				entry = st.Tests[u]
+			}
+			if entry == nil {
+				sr.Unrecorded = true
 			}
 			if entry != nil {
 				for f := range entry.Deps {
@@ -420,6 +469,19 @@ func Select(in *Input) (*Result, error) {
 				setFiles = setChangedBase
 			} else {
 				decide(t, res.Mode, entry, dl, hs, suiteChanged)
+			}
+			if in.Config.Path != "" {
+				// The suite's settings key is reported as the file.
+				if i := slices.Index(t.Changed, ConfigKey(in.Config.Path)); i >= 0 {
+					t.Changed = slices.Delete(t.Changed, i, i+1)
+					if !slices.Contains(t.Changed, in.Config.Path) {
+						t.Changed = append(t.Changed, in.Config.Path)
+						sort.Strings(t.Changed)
+						if via[in.Config.Path] == "" {
+							via[in.Config.Path] = ViaInput
+						}
+					}
+				}
 			}
 			explain(t, sr, via, setFiles)
 			sr.Tests = append(sr.Tests, t)
@@ -544,15 +606,18 @@ func IgnoreGlobs(c *config.Config) []string {
 }
 
 // Covers reports how a dependency set explains a change to f ("" when it does not):
-// "content" (f itself), "listing" or "existence" (a directory listing or an existence
+// "content" (f itself), "declarations" (the declarations of Go file f: edits inside
+// function bodies the test did not execute do not select it), "listing" or "existence" (a directory listing or an existence
 // check, which explain f appearing or disappearing but not edits: an edited file only
 // listed or probed may still be read by something tracing cannot see), or "tree" (a
 // command smates cannot see into ran below a directory containing f). A tree at the
 // repository root explains nothing: it would hide every change from the orphan check.
 func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
-	case deps[f]:
+	case deps[f], deps[f+configKeySuffix]:
 		return "content"
+	case deps[depkey.Decls(f)]:
+		return "declarations"
 	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"
 	case existenceChanged && deps[depkey.Existence(f)]:
@@ -611,7 +676,9 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		return
 	case ModeDiff:
 		for _, d := range deps {
-			if changed[d] {
+			// Without a recording, a Go file's declarations change when the file does.
+			f, isFile := depkey.File(d)
+			if changed[d] || (isFile && changed[f]) {
 				t.Changed = append(t.Changed, d)
 			}
 		}
@@ -628,6 +695,9 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 	for _, d := range deps {
 		recorded, ok := entry.Deps[d]
+		if !ok && h.legacyConfig(d, entry.Deps) {
+			continue
+		}
 		if !ok || h.Hash(d) != recorded {
 			t.Changed = append(t.Changed, d)
 		}
@@ -803,11 +873,12 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 	return out
 }
 
-func ruleDeps(su *runner.Suite, unit string, files []string) []string {
+// ruleDeps are the files the suite's rules declare for unit (with test files
+// unitFiles), among files.
+func ruleDeps(su *runner.Suite, unit string, unitFiles, files []string) []string {
 	var out []string
-	rel := pathutil.RelTo(unit, su.Root)
 	for _, r := range su.Rules {
-		if !pathutil.Match(r.Tests, rel) {
+		if !UnitMatches(su, unit, unitFiles, r.Tests) {
 			continue
 		}
 		out = append(out, expandInputs(r.Deps, files)...)
@@ -1047,10 +1118,20 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
 				var why, named []string
+				searched := map[string]bool{}
 				for _, d := range s.Deps[t.ID] {
 					if s.Inputs[d] != (tier == 1) {
 						continue
 					}
+					// The declarations of a Go file are searched as the file itself (one
+					// read for both keys).
+					if f, ok := depkey.File(d); ok {
+						d = f
+					}
+					if searched[d] {
+						continue
+					}
+					searched[d] = true
 					h, ok := hits[d]
 					if !ok {
 						h = map[string]bool{}
@@ -1111,4 +1192,84 @@ func isSourceLike(f string) bool {
 		return true
 	}
 	return false
+}
+
+// staticLangs are the source file extensions each runner's static analysis follows.
+var staticLangs = map[string][]string{
+	"go":     {".go"},
+	"pytest": {".py"},
+	"vitest": jsExts, "jest": jsExts, "node": jsExts, "bun": jsExts,
+}
+
+var jsExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
+
+// Untested returns the orphans that are source code no test can reach: a file in a
+// language whose imports a suite follows statically (Go, Python, JS/TS) under that
+// suite's root. Every test's import closure is part of its dependencies, so such a file
+// is imported by no test, directly or through other code; and no test read or executed
+// it in its last recorded run. Changing it cannot change a test's outcome — unless
+// something outside the repository's tests runs it (a server an e2e suite talks to,
+// which depends_on/rules declare, or a script started by a command smates cannot see
+// into). Tool and runner configuration written as code (vite.config.ts, setup.py, ...)
+// is never counted as untested.
+func (r *Result) Untested(orphans []string) []string {
+	if r.Mode != ModeState {
+		// Without a recorded state D(T) holds the static closure only: files tests
+		// read as data (fixtures, testdata) or import by name are not known yet.
+		return nil
+	}
+	var out []string
+	for _, o := range orphans {
+		if r.untested(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func (r *Result) untested(f string) bool {
+	base := strings.ToLower(path.Base(f))
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if strings.HasSuffix(base, ".d.ts") || strings.Contains(stem, ".config") || strings.HasSuffix(stem, "rc") || untestedExcluded[stem] {
+		return false
+	}
+	for _, seg := range strings.Split(path.Dir(f), "/") {
+		if dataDirs[strings.ToLower(seg)] {
+			return false // source files tests read as data
+		}
+	}
+	// Every suite that may run f's code must have recorded all its tests: a test
+	// with no entry is known by its import closure only, which misses code loaded by
+	// name (a settings module, a plugin) and data reads.
+	for _, s := range r.Suites {
+		if s.Unrecorded && pathutil.Under(f, s.Suite.Root) {
+			return false
+		}
+	}
+	for _, s := range r.Suites {
+		if !config.Bool(s.Suite.Static, true) || !slices.Contains(staticLangs[s.Suite.Runner], ext) {
+			continue
+		}
+		if pathutil.Under(f, s.Suite.Root) && !pathutil.Match(s.Suite.Exclude, pathutil.RelTo(f, s.Suite.Root)) {
+			return true
+		}
+	}
+	return false
+}
+
+// dataDirs are directories whose source files tests use as data (inputs of analyzers
+// and generators, golden files, fixture projects, mocks loaded by the runner).
+var dataDirs = map[string]bool{
+	"testdata": true, "fixtures": true, "fixture": true, "__fixtures__": true, "__mocks__": true,
+	"__snapshots__": true, "golden": true,
+}
+
+// untestedExcluded are file stems of code that configures or drives tools rather than
+// being imported: a change to them is left to the orphan policy.
+var untestedExcluded = map[string]bool{
+	"setup": true, "noxfile": true, "tasks": true, "fabfile": true, "conftest": true, "manage": true,
+	"gulpfile": true, "gruntfile": true, "jakefile": true, "magefile": true, "dangerfile": true,
+	"globalsetup": true, "global-setup": true, "globalteardown": true, "global-teardown": true, "setuptests": true,
+	"setup-tests": true, "test-setup": true, "testsetup": true, "vitest.workspace": true, "jest.preset": true,
 }

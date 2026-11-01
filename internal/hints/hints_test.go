@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func set(xs ...string) map[string]bool {
@@ -181,9 +182,7 @@ func TestTruncation(t *testing.T) {
 func TestRecencyWithinTier(t *testing.T) {
 	root := t.TempDir()
 	for _, f := range []string{"src/cart.ts", "src/price.ts", "src/util/fmt.ts"} {
-		p := filepath.Join(root, filepath.FromSlash(f))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		os.WriteFile(p, []byte("x"), 0o644)
+		testutil.Write(t, root, f, "x")
 	}
 	old := time.Now().Add(-time.Hour)
 	os.Chtimes(filepath.Join(root, "src/price.ts"), old, old)

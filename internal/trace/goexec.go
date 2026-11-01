@@ -138,7 +138,7 @@ func GoExec(args []string) int {
 	if traceDir != "" {
 		cwd, _ := os.Getwd()
 		run := GoRun{Dir: cwd, Exit: code, Ms: time.Since(start).Milliseconds()}
-		run.Files, run.Env = parseTestLog(logFile, cwd)
+		run.Files, run.Env = ParseTestLog(logFile, cwd)
 		if data, err := json.Marshal(run); err == nil {
 			_ = os.WriteFile(filepath.Join(traceDir, fmt.Sprintf("go-%d.json", os.Getpid())), data, 0o644)
 		}
@@ -146,10 +146,10 @@ func GoExec(args []string) int {
 	return code
 }
 
-// parseTestLog reads a Go test log ("# test log" then "open|stat|chdir|getenv <arg>"):
+// ParseTestLog reads a Go test log ("# test log" then "open|stat|chdir|getenv <arg>"):
 // the files the test used and the environment variables it looked up (os.Getenv,
 // os.LookupEnv; the same records go test uses to invalidate its cache).
-func parseTestLog(file, cwd string) (files, env []string) {
+func ParseTestLog(file, cwd string) (files, env []string) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, nil
