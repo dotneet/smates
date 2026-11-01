@@ -367,7 +367,19 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 }
 
 func (p *project) relArg(a string) string {
+	// A Go test function unit (dir#TestName): resolve the directory, keep the name.
+	// pathutil.Rel drops a "#..." suffix, as it does for trace paths.
+	if dir, name, ok := runner.SplitFuncUnit(a); ok && dir != "" && name != "" && !strings.ContainsAny(name, `/\.`) {
+		return p.relArg(dir) + "#" + name
+	}
 	abs := absPath(a)
+	// The repository root itself (pathutil.Rel rejects "."): the root package, whose
+	// Go test function units are ".#TestName".
+	if root := filepath.Clean(p.repo.Root); filepath.Clean(abs) == root {
+		return "."
+	} else if r, err := filepath.EvalSymlinks(abs); err == nil && r == root {
+		return "."
+	}
 	if r, ok := pathutil.Rel(p.repo.Root, abs); ok {
 		return r
 	}

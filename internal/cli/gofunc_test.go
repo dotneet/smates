@@ -272,3 +272,39 @@ func mustRead(t *testing.T, p string) string {
 	}
 	return string(b)
 }
+
+// TestGoFuncDeps: `smates deps` takes a test function unit (dir#TestName), with the
+// directory given relative to the repository or as a path.
+func TestGoFuncDeps(t *testing.T) {
+	r := newGoFuncRepo(t, "go test")
+	deps := func(arg string) (int, string, string) {
+		var out, errb bytes.Buffer
+		code := Main([]string{"deps", "-C", r.g.dir, arg}, &out, &errb)
+		return code, out.String(), errb.String()
+	}
+	for _, arg := range []string{"calc#TestAdd", "./calc#TestAdd", filepath.Join(r.g.dir, "calc") + "#TestAdd"} {
+		code, out, errs := deps(arg)
+		if code != 0 || !strings.Contains(out, "calc/add_test.go") || !strings.Contains(out, "calc/add.go") {
+			t.Errorf("deps %s: exit %d\n%s%s", arg, code, out, errs)
+		}
+	}
+	// A function of the root package (unit ".#TestRoot"), named by an absolute path
+	// to the repository or by ".." from a subdirectory.
+	r.write("root.go", "package fx\n\nfunc Root() int { return 1 }\n")
+	r.write("root_test.go", "package fx\n\nimport \"testing\"\n\nfunc TestRoot(t *testing.T) { _ = Root() }\n")
+	for _, arg := range []string{".#TestRoot", r.g.dir + "#TestRoot"} {
+		if code, out, errs := deps(arg); code != 0 || !strings.Contains(out, "root_test.go") {
+			t.Errorf("deps %s: exit %d\n%s%s", arg, code, out, errs)
+		}
+	}
+
+	// The package directory alone names the functions to pick from.
+	if code, _, errs := deps("calc"); code == 0 || !strings.Contains(errs, "calc#TestAdd") {
+		t.Errorf("deps calc: exit %d\n%s", code, errs)
+	}
+
+	t.Chdir(filepath.Join(r.g.dir, "calc"))
+	if code, out, errs := deps("..#TestRoot"); code != 0 || !strings.Contains(out, "root_test.go") {
+		t.Errorf("deps ..#TestRoot from calc/: exit %d\n%s%s", code, out, errs)
+	}
+}
