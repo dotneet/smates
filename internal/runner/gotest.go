@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -65,20 +66,13 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 // restricted to the tests matching run when it is set; out also receives the output.
 // When recording, observations are keyed by package unit.
 func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, run string, out io.Writer) (*RunResult, error) {
-	var pkgs []string
-	for _, u := range units {
-		pkgs = append(pkgs, pkgArg(rc.Suite, u))
-	}
 	var testArgs []string
 	if all {
 		testArgs = []string{"./..."}
 	} else {
-		testArgs = pkgs
+		testArgs = pkgArgs(rc.Suite, units)
 	}
-	var extra []string
-	if run != "" {
-		extra = []string{"-run", run}
-	}
+	extra := runFlag(run)
 	var env []string
 	if rc.Record {
 		exe, err := goExecWrapper(rc)
@@ -103,9 +97,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		base := suiteEnv(rc.Suite)
-		env = append(env, trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)...)
-		env = append(env, trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)[2:3]...) // PYTHONPATH only
+		env = append(env, childTraceEnv(rc, rc.TraceDir)...)
 	}
 	start := time.Now()
 	// Packages that fail to build never start a test binary; go test reports them as
@@ -133,12 +125,9 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	res.Observations = map[string]*Observation{}
 	for _, r := range runs {
-		unit, ok := pathutil.Rel(rc.Repo.Root, r.Dir)
+		unit, ok := repoDir(rc.Repo.Root, r.Dir)
 		if !ok {
-			if filepath.Clean(r.Dir) != rc.Repo.Root {
-				continue
-			}
-			unit = "."
+			continue
 		}
 		o := res.Observations[unit]
 		if o == nil {
@@ -180,6 +169,51 @@ func pkgArg(s *Suite, unit string) string {
 		return "./" + r
 	}
 	return "."
+}
+
+// pkgArgs is pkgArg of each package directory unit.
+func pkgArgs(s *Suite, units []string) []string {
+	var out []string
+	for _, u := range units {
+		out = append(out, pkgArg(s, u))
+	}
+	return out
+}
+
+// runFlag is the go test flag restricting a run to the tests matching run (none if "").
+func runFlag(run string) []string {
+	if run == "" {
+		return nil
+	}
+	return []string{"-run", run}
+}
+
+// repoDir is the repo-relative form of the absolute package directory dir ("." for
+// the root); ok is false when dir is outside the repository.
+func repoDir(root, dir string) (string, bool) {
+	if rel, ok := pathutil.Rel(root, dir); ok {
+		return rel, true
+	}
+	if filepath.Clean(dir) == root {
+		return ".", true
+	}
+	return "", false
+}
+
+// childTraceEnv is the environment tracing the Node and Python processes a Go test
+// starts, writing their traces under dir.
+func childTraceEnv(rc *RunContext, dir string) []string {
+	base := suiteEnv(rc.Suite)
+	node := trace.NodeEnv(dir, rc.Repo.Root, rc.Shims(), base)
+	return slices.Concat(node, trace.PythonEnv(dir, rc.Repo.Root, rc.Shims(), base)[2:3]) // PYTHONPATH only
+}
+
+// lastMessage keeps the last trace.MaxMessage bytes of a test's output.
+func lastMessage[T string | []byte](out T) T {
+	if len(out) > trace.MaxMessage {
+		return out[len(out)-trace.MaxMessage:]
+	}
+	return out
 }
 
 // addTestLog adds what a Go test log recorded (absolute paths from trace.ParseTestLog:
@@ -233,10 +267,7 @@ func (b *buildFailures) collect(line []byte) {
 			if b.output == nil {
 				b.output = map[string]string{}
 			}
-			out := b.pending
-			if len(out) > trace.MaxMessage {
-				out = out[len(out)-trace.MaxMessage:] // the failures and panics are at the end
-			}
+			out := lastMessage(b.pending) // the failures and panics are at the end
 			b.output[string(m[2])] = trace.JoinMessage(b.output[string(m[2])], string(out))
 		}
 		b.pending = b.pending[:0]
