@@ -37,7 +37,9 @@ func selectionReason(t *selector.Test) string {
 	case len(parts) > 0:
 		return strings.Join(parts, "; ")
 	case t.Detail != "":
-		return t.Reason + ": " + t.Detail
+		// Details do not repeat the reason, but agent decisions cached by older versions
+		// start with "agent: ".
+		return t.Reason + ": " + strings.TrimPrefix(t.Detail, t.Reason+": ")
 	}
 	return t.Reason
 }

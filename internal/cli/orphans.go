@@ -378,7 +378,7 @@ func applyDecision(res *selector.Result, dec *agent.Decision) {
 	if dec.RunAll {
 		var adds []selector.Addition
 		for _, s := range res.Suites {
-			adds = append(adds, selector.Addition{Suite: s.Name, Reason: selector.ReasonAgent, Detail: "agent: " + dec.Summary})
+			adds = append(adds, selector.Addition{Suite: s.Name, Reason: selector.ReasonAgent, Detail: dec.Summary})
 		}
 		res.Apply(adds)
 		return

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/hints"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
@@ -26,11 +27,27 @@ func TestSelectionReason(t *testing.T) {
 			Service: map[string]string{"@set:suite:go": "depends_on suite go"}},
 			"changed: code of depends_on suite go"},
 		{selector.Test{Reason: selector.ReasonFailed, Detail: "last run: fail"}, "failed: last run: fail"},
+		{selector.Test{Reason: selector.ReasonAgent, Detail: "touches the API client"}, "agent: touches the API client"},
+		// A decision cached by an older version, whose details started with "agent: ".
+		{selector.Test{Reason: selector.ReasonAgent, Detail: "agent: possibly affected by an orphan change"}, "agent: possibly affected by an orphan change"},
+		{selector.Test{Reason: selector.ReasonReference, Detail: "references a.json"}, "reference: references a.json"},
+		{selector.Test{Reason: selector.ReasonCaller, Detail: "added by caller"}, "caller: added by caller"},
 		{selector.Test{Reason: selector.ReasonNew}, "new"},
 	} {
 		if got := selectionReason(&c.t); got != c.want {
 			t.Errorf("%+v: got %q, want %q", c.t, got, c.want)
 		}
+	}
+}
+
+// An agent decision to run everything is explained once as the agent's: not
+// "agent: agent: <summary>".
+func TestAgentRunAllReason(t *testing.T) {
+	tt := &selector.Test{ID: "a_test.go"}
+	res := &selector.Result{Suites: []*selector.Suite{{Name: "go", Tests: []*selector.Test{tt}}}}
+	applyDecision(res, &agent.Decision{RunAll: true, Summary: "shared config changed"})
+	if got := selectionReason(tt); got != "agent: shared config changed" {
+		t.Errorf("got %q", got)
 	}
 }
 
