@@ -30,8 +30,13 @@ The dependency set used at selection time is
          ∪ cross-suite deps   declared in smates.yml (depends_on / serves), expanded at HEAD
 
 Every test depends on its suite's settings in smates.yml through the key
-`smates.yml#suite`, which hashes as `ConfigHash`: the suite's own entry and the
-top-level `env_track`, not the file's content. A test that reads smates.yml itself
+`smates.yml#suite`, which hashes as `ConfigHash`: the suite's own entry as written and
+the top-level `env_track`, not the file's content. The defaults smates fills in are not
+part of it (`runner.Suite.Configured`): they depend on the machine (the pytest command
+on whether a virtualenv exists, Go's excludes on `GOWORK`), so a state recorded on CI
+would otherwise rerun every suite on a laptop or in another worktree. An entry recorded
+by an older smates hashed the suite with its defaults; it counts as unchanged while
+those are the same, until the test runs again. A test that reads smates.yml itself
 records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
@@ -79,16 +84,21 @@ Dependency keys:
 | key | hash | recorded when |
 |---|---|---|
 | `path` | blob SHA-1 (`""` = absent) | a file is executed or read |
-| `dir/` | hash of the entry names | a directory is listed (readdir, os.listdir, Bun.Glob) |
+| `dir/` | hash of the entry names (entries git does not list: from disk) | a directory is listed (readdir, os.listdir, Bun.Glob) |
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
-| `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
+| `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: its files on disk) | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 The hashes are those of the snapshot taken before the run. Paths git does not list
 (ignored files such as `.env`, caches, reports, generated code) are read from disk
-instead. Existence checks of them are taken before the first test starts, for the
+instead. So are the entries git does not list of a listed directory (a directory of
+generated fixtures, or ignored files in a tracked one), except vendored entries and
+those the `ignore` globs match, and the files below a `dir/**` tree of a directory git
+ignores entirely (a tree the snapshot lists leaves its ignored files out, as build
+output). A listing without such entries hashes as the snapshot's, so entries recorded
+before stay valid. Existence checks of them are taken before the first test starts, for the
 paths the entries of the suites being run probed (`Hasher.PinBefore`), so a test that
 probes an output directory and then creates it is recorded as having seen it absent
 (it runs once more, then settles on `exists`). A path first probed when the run is
@@ -102,7 +112,11 @@ on FAT, with two-second timestamps, a path created in the first second of the ru
 still look older and be recorded as existing before it. The *content* of such files is
 hashed as the run left it: tests commonly rewrite what they read there (a timestamped
 report, a cache, Go tests creating files in the package), and their state before the
-run would never match again. Known limitation: a git-ignored input edited by hand while
+run would never match again. Listings and trees outside the snapshot are hashed the
+same way: a test that adds a timestamped report to the directory it lists settles after
+one run. The flip side, for both: a test that reads (or lists) what it generates itself
+in an ignored path runs again on every fresh checkout, where the path is absent before
+the run. Known limitation: a git-ignored input edited by hand while
 the run is in progress is recorded with its new content, so the edit selects nothing.
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
@@ -629,7 +643,9 @@ change since the last cycle starts one; a burst that nets out (a temp file come 
 gone) starts none. Changes made while a cycle runs are compared against the tree it
 started from once it ends, so they start exactly one follow-up. Changes never start a
 cycle when they are smates' state (and its temp file), vendored and cache directories,
-coverage and JUnit reports, or editor temp files; anything else does, including files the
+coverage reports (the `coverage/` directory of the repository or of a suite, and report
+files such as `lcov.info` anywhere: a `coverage` package elsewhere is source code),
+JUnit reports, or editor temp files; anything else does, including files the
 orphan check ignores (a test may read them). As a guard against tests that write
 non-ignored files, a change set seen during three runs in a row is taken for test
 output: it stops starting runs (until it changes while idle).

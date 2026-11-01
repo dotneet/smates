@@ -176,6 +176,13 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 	for _, f := range files {
 		via[f] = ViaTest
 	}
+	// Record never writes vendored paths (a committed node_modules file an input glob
+	// matches): as known deps they would count as unrecorded, and changed, forever.
+	for f := range via {
+		if pathutil.IsVendored(f) {
+			delete(via, f)
+		}
+	}
 	return via
 }
 
