@@ -176,6 +176,32 @@ func TestParseGoFlags(t *testing.T) {
 	if g := parseGoFlags(goRC(t, "go test", map[string]string{"GOFLAGS": "-exec=wrap"})); !slices.Equal(g.exec, []string{"wrap"}) {
 		t.Errorf("GOFLAGS exec %q", g.exec)
 	}
+	// Test flags in GOFLAGS reach the binary, before the command's own (which win);
+	// build flags there are left to the go command.
+	g = parseGoFlags(goRC(t, "go test -count=1", map[string]string{"GOFLAGS": "-mod=mod -timeout=3m -short -count=2 -v -failfast -parallel=2 -cpu=1,2"}))
+	if g.why != "" || len(g.build) != 0 {
+		t.Errorf("GOFLAGS: why %q build %q", g.why, g.build)
+	}
+	if want := []string{"-test.timeout=3m", "-test.short", "-test.count=2", "-test.v", "-test.failfast", "-test.parallel=2", "-test.cpu=1,2", "-test.count=1"}; !slices.Equal(g.test, want) {
+		t.Errorf("GOFLAGS test flags %q, want %q", g.test, want)
+	}
+	if g := parseGoFlags(goRC(t, "go test", map[string]string{"GOFLAGS": "-run=TestX"})); !strings.Contains(g.why, "GOFLAGS") {
+		t.Errorf("GOFLAGS -run: why %q", g.why)
+	}
+	// -p bounds the packages recorded at once, from the command or GOFLAGS.
+	for cmd, env := range map[string]string{"go test -p 1": "", "go test": "-p=1", "go test -p=1": "-p=8"} {
+		rc := goRC(t, cmd, map[string]string{"GOFLAGS": env})
+		fr := &funcRecorder{rc: rc, flags: parseGoFlags(rc)}
+		if fr.packages() != 1 {
+			t.Errorf("%q GOFLAGS=%q: %d packages at once, want 1", cmd, env, fr.packages())
+		}
+	}
+	if fr := (&funcRecorder{flags: parseGoFlags(goRC(t, "go test", nil))}); fr.packages() < 1 {
+		t.Errorf("default packages %d", fr.packages())
+	}
+	if g := parseGoFlags(goRC(t, "go test -p 2 -race", nil)); !slices.Equal(g.build, []string{"-p", "2", "-race"}) || g.p != 2 {
+		t.Errorf("-p build %q p %d", g.build, g.p)
+	}
 	for _, cmd := range []string{"go test -run TestX", "go test -c", "go test -test.run=X", "gotestsum --", "make test", "go vet"} {
 		if g := parseGoFlags(goRC(t, cmd, nil)); g.why == "" {
 			t.Errorf("%q: per-function recording should not be possible", cmd)
@@ -250,5 +276,21 @@ func TestAddCoverage(t *testing.T) {
 	}
 	if addCoverage(&Observation{}, repo.Root, gp, filepath.Join(t.TempDir(), "missing")) {
 		t.Error("a missing profile is not certain")
+	}
+}
+
+// --dry-run prints what Run executes: a narrowed suite runs explicit -run invocations
+// even when every unit is selected.
+func TestGoFuncCommandsNarrowed(t *testing.T) {
+	rc := goRC(t, "go test", nil)
+	rc.Units, rc.All = []string{"a#TestA", "b#TestB"}, true
+	cmds, err := goTest{}.Commands(rc)
+	if err != nil || len(cmds) != 1 || !slices.Contains(cmds[0], "./...") {
+		t.Fatalf("whole suite: %q %v", cmds, err)
+	}
+	rc.Suite.Narrowed = true
+	cmds, err = goTest{}.Commands(rc)
+	if err != nil || len(cmds) != 1 || slices.Contains(cmds[0], "./...") || !slices.Contains(cmds[0], "^(TestA|TestB)$") || !slices.Contains(cmds[0], "./a") {
+		t.Errorf("narrowed: %q %v", cmds, err)
 	}
 }

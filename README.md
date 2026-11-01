@@ -142,7 +142,10 @@ coverage, or the suite command is not a plain `go test` (or passes `-run`, `-ski
 `-bench`, `-fuzz`, `-c`), that package is recorded as a whole and says so: each of its
 functions then depends on everything the package does. Recording costs one process per
 function (plus one coverage build per package); functions of one package run one at a
-time, as `go test` runs them, unless `record_jobs` allows more.
+time, as `go test` runs them, unless `record_jobs` allows more, and packages as many at a
+time as `-p` allows (in the command or `GOFLAGS`; default GOMAXPROCS). Test flags such as
+`-timeout`, `-short`, `-count` or `-v`, in the command or in `GOFLAGS`, reach every
+function's process.
 
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are

@@ -194,7 +194,9 @@ main-module packages it links (`go list -deps -test`), lists its tests (`-test.l
 and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
-and the CPU count overall. Its dependencies are the files with an executed block
+and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`).
+Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
+binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
 (blocks placed by `//line` in a file that is not there: every Go file of the package);
 the declarations (`f.go#decls`) of every Go file of the static closure, which is what
 makes this sound: coverage only sees statements inside function bodies, so constants,

@@ -45,6 +45,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -303,7 +304,7 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 	}
 	pkgs, dirs, funcs := splitUnits(rc.Units)
 	var out [][]string
-	if rc.All {
+	if rc.All && !rc.Suite.Narrowed {
 		argv, err := rc.CommandLine(nil, []string{"./..."})
 		return [][]string{argv}, err
 	}
@@ -419,6 +420,7 @@ type goFlags struct {
 	test  []string // -test.* flags for the binary
 	tail  []string // arguments after -args
 	exec  []string // a user -exec program
+	p     int      // -p: packages built and tested at once (0 = the default)
 	// why is set when per-function recording cannot be used with this command.
 	why string
 }
@@ -456,14 +458,27 @@ func parseGoFlags(rc *RunContext) goFlags {
 		g.why = "the suite command is not `go test ...`"
 		return g
 	}
-	if v := userExecFromGOFLAGS(Getenv(suiteEnv(rc.Suite), "GOFLAGS")); v != "" {
-		g.exec = strings.Fields(v)
-	}
+	// GOFLAGS first: flags on the command line come later and win (the binary, like the
+	// flag package, takes the last value of a repeated flag).
 	timeout := false
-	words := argv[2:]
+	g.words(strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS")), true, &timeout)
+	g.words(argv[2:], false, &timeout)
+	if !timeout {
+		g.test = append(g.test, "-test.timeout=10m0s") // go test's default
+	}
+	return g
+}
+
+// words translates go test arguments: from GOFLAGS (fromEnv: one flag per word; build
+// flags are left to the go command, which reads GOFLAGS itself) or from the command.
+func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
+	where := "the suite command"
+	if fromEnv {
+		where = "GOFLAGS"
+	}
 	for i := 0; i < len(words); i++ {
 		w := words[i]
-		if w == "-args" || w == "--args" {
+		if !fromEnv && (w == "-args" || w == "--args") {
 			g.tail = words[i+1:]
 			break
 		}
@@ -472,45 +487,49 @@ func parseGoFlags(rc *RunContext) goFlags {
 		}
 		name, val, hasVal := strings.Cut(strings.TrimLeft(w, "-"), "=")
 		short := strings.TrimPrefix(name, "test.")
-		takesValue := goTestValueFlags[short]
-		if takesValue && !hasVal && i+1 < len(words) {
+		takesValue := goTestValueFlags[short] || (goBuildValueFlags[name] && !strings.HasPrefix(name, "test."))
+		if takesValue && !hasVal && !fromEnv && i+1 < len(words) {
 			i++
 			val, hasVal = words[i], true
 		}
 		if strings.HasPrefix(name, "test.") {
 			switch short {
 			case "run", "skip", "bench", "fuzz", "list":
-				g.why = "the suite command passes -" + name
+				g.why = where + " passes -" + name
 			case "timeout":
-				timeout = true
+				*timeout = true
 			}
 			g.test = append(g.test, "-"+name+suffixValue(val, hasVal))
 			continue
 		}
 		switch {
 		case name == "run" || name == "skip" || name == "bench" || name == "fuzz" || name == "list" || name == "c" || name == "o":
-			g.why = "the suite command passes -" + name
+			g.why = where + " passes -" + name
 		case name == "exec":
 			g.exec = strings.Fields(val)
 		case name == "timeout" || name == "parallel" || name == "cpu" || name == "count" || name == "shuffle":
-			timeout = timeout || name == "timeout"
+			*timeout = *timeout || name == "timeout"
 			g.test = append(g.test, "-test."+name+"="+val)
 		case name == "v" || name == "short" || name == "failfast" || name == "fullpath":
 			g.test = append(g.test, "-test."+name+suffixValue(val, hasVal))
-		case takesValue || goTestBoolFlags[name]:
+		case goTestValueFlags[name] || goTestBoolFlags[name]:
 			// Profiles, -json, coverage settings (smates sets its own), -vet: not used.
 		default:
-			g.build = append(g.build, w)
-			if !hasVal && goBuildValueFlags[name] && i+1 < len(words) {
-				i++
-				g.build = append(g.build, words[i])
+			if name == "p" {
+				if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					g.p = n
+				}
+			}
+			if fromEnv {
+				continue
+			}
+			if hasVal && !strings.Contains(w, "=") {
+				g.build = append(g.build, w, val) // the value was the next word
+			} else {
+				g.build = append(g.build, w)
 			}
 		}
 	}
-	if !timeout {
-		g.test = append(g.test, "-test.timeout=10m0s") // go test's default
-	}
-	return g
 }
 
 func suffixValue(v string, has bool) string {
@@ -518,19 +537,6 @@ func suffixValue(v string, has bool) string {
 		return ""
 	}
 	return "=" + v
-}
-
-// userExecFromGOFLAGS returns the -exec program named in GOFLAGS ("" if none).
-func userExecFromGOFLAGS(goflags string) string {
-	for _, f := range strings.Fields(goflags) {
-		if v, ok := strings.CutPrefix(f, "-exec="); ok {
-			return v
-		}
-		if v, ok := strings.CutPrefix(f, "--exec="); ok {
-			return v
-		}
-	}
-	return ""
 }
 
 // funcRecorder records the functions of the selected packages.
@@ -546,14 +552,25 @@ type funcRecorder struct {
 	fallback map[string]string // package directory -> why it is recorded as a whole
 }
 
+// packages is how many packages are recorded at once: -p, or GOMAXPROCS as in go test.
+func (fr *funcRecorder) packages() int {
+	if fr.flags.p > 0 {
+		return fr.flags.p
+	}
+	return max(1, runtime.GOMAXPROCS(0))
+}
+
 func recordFuncs(ctx context.Context, rc *RunContext, dirs []string, funcs map[string][]string) (*RunResult, error) {
 	start := time.Now()
 	fr := &funcRecorder{rc: rc, flags: parseGoFlags(rc), jobs: 1, res: &RunResult{Observations: map[string]*Observation{}}, fallback: map[string]string{}}
 	if rc.Suite.RecordJobs > 0 {
 		fr.jobs = rc.Suite.RecordJobs
 	}
-	fr.procs = make(chan struct{}, max(runtime.NumCPU(), fr.jobs))
-	pkgSem := make(chan struct{}, max(1, runtime.NumCPU()))
+	// Packages at once: -p as go test takes it (default GOMAXPROCS), so a suite that
+	// runs `go test -p 1` because its packages share a database or a port keeps them
+	// apart while recording too.
+	fr.procs = make(chan struct{}, max(fr.packages(), fr.jobs))
+	pkgSem := make(chan struct{}, fr.packages())
 	var wg sync.WaitGroup
 	var firstErr error
 	for i, d := range dirs {
