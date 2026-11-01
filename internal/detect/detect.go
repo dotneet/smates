@@ -88,14 +88,15 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		test := pj.Scripts["test"]
-		r, command := "", ""
+		r, command, env := "", "", map[string]string(nil)
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
 		case strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
 			// which a bare jest would not see.
-			r, command = "jest", craCommand(repo.Root, d, test)
+			r = "jest"
+			command, env = craCommand(repo.Root, d, test)
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
 		case strings.Contains(test, "bun test"):
@@ -119,12 +120,14 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		jsRoots[d] = r
-		out = append(out, config.Suite{Root: d, Runner: r, Command: command})
+		out = append(out, config.Suite{Root: d, Runner: r, Command: command, Env: env})
 	}
 
 	// Python: one suite per project with pytest configuration or tests. Projects that
 	// show no sign of pytest (no dependency, configuration or conftest.py) use the
-	// standard library's unittest.
+	// standard library's unittest, except Django projects: their TestCase classes need
+	// the settings `manage.py test` sets up, which `python -m unittest` (the only
+	// command the unittest runner drives) does not, so they get no suite.
 	for _, d := range pythonProjects(repo, dirs, dirFiles) {
 		nested := false
 		for _, s := range out {
@@ -138,6 +141,8 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		r := "unittest"
 		if usesPytest(repo, d, dirFiles) {
 			r = "pytest"
+		} else if isDjango(d, dirFiles) {
+			continue
 		}
 		out = append(out, config.Suite{Root: d, Runner: r})
 	}
@@ -174,31 +179,6 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 	}
 	return kept
-}
-
-// craCommand turns a Create React App test script into a suite command: the
-// `react-scripts test` invocation with the script's own arguments (up to the next
-// shell operator), never in watch mode, run through the project's package manager.
-func craCommand(repoRoot, dir, script string) string {
-	args := script[strings.Index(script, "react-scripts test")+len("react-scripts test"):]
-	if k := strings.IndexAny(args, "&|;"); k >= 0 {
-		args = args[:k]
-	}
-	out := []string{"test"}
-	fields := strings.Fields(args)
-	for i := 0; i < len(fields); i++ {
-		switch a := fields[i]; {
-		case a == "--watch" || a == "--watchAll":
-			if i+1 < len(fields) && (fields[i+1] == "true" || fields[i+1] == "false") {
-				i++
-			}
-		case strings.HasPrefix(a, "--watch=") || strings.HasPrefix(a, "--watchAll="):
-		default:
-			out = append(out, a)
-		}
-	}
-	out = append(out, "--watchAll=false")
-	return runner.JSBinCommand(repoRoot, dir, "react-scripts", strings.Join(out, " "))
 }
 
 // pythonProjects returns the Python project directories, sorted (parents before
@@ -246,8 +226,17 @@ func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string
 	for d := range strong {
 		out = append(out, d)
 	}
+	// Test files outside every marked project, sorted so that the ones under a
+	// directory are one range.
+	var unowned []string
+	for _, t := range tests {
+		if !underAny(path.Dir(t), strong) {
+			unowned = append(unowned, t)
+		}
+	}
+	sort.Strings(unowned)
 	for d := range weak {
-		if inFixtureDir(d) || weakProjectIsCovered(d, strong, tests) {
+		if inFixtureDir(d) || underAny(d, strong) || !hasUnder(unowned, d) {
 			continue
 		}
 		out = append(out, d)
@@ -256,31 +245,31 @@ func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string
 	return out
 }
 
-// weakProjectIsCovered reports whether the weakly marked directory d is no project of
-// its own: it is inside a marked project, or every Python test file under it belongs
-// to a marked project below it (or there is none).
-func weakProjectIsCovered(d string, strong map[string]bool, tests []string) bool {
-	for s := range strong {
-		if pathutil.Under(d, s) {
+// underAny reports whether directory d is in set or below a directory of it.
+func underAny(d string, set map[string]bool) bool {
+	for {
+		if set[d] {
 			return true
 		}
-	}
-	for _, t := range tests {
-		if !pathutil.Under(t, d) {
-			continue
-		}
-		owned := false
-		for s := range strong {
-			if pathutil.Under(t, s) {
-				owned = true
-				break
-			}
-		}
-		if !owned {
+		if d == "." || d == "" {
 			return false
 		}
+		d = path.Dir(d)
 	}
-	return true
+}
+
+// hasUnder reports whether the sorted file list has a file under directory d.
+func hasUnder(sorted []string, d string) bool {
+	if d == "." || d == "" {
+		return len(sorted) > 0
+	}
+	i := sort.SearchStrings(sorted, d+"/")
+	return i < len(sorted) && strings.HasPrefix(sorted[i], d+"/")
+}
+
+// isDjango reports whether the project at d is a Django project (manage.py in it).
+func isDjango(d string, dirFiles map[string][]string) bool {
+	return slices.Contains(dirFiles[d], "manage.py")
 }
 
 // inFixtureDir reports whether d is inside a testdata, vendor or fixtures directory,

@@ -1,12 +1,14 @@
 package detect
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/testutil"
 )
 
@@ -295,9 +297,26 @@ func TestDetectPythonWithoutProjectFile(t *testing.T) {
 			want:  []got{{"pytest", "api", "pytest"}},
 		},
 		{
-			name:  "Django manage.py",
+			// `python -m unittest` cannot run Django's TestCase (no settings).
+			name:  "Django project without pytest",
 			files: map[string]string{"manage.py": "", "app/__init__.py": "", "app/tests.py": "from django.test import TestCase\n"},
-			want:  []got{{"unittest", ".", "unittest"}},
+			want:  nil,
+		},
+		{
+			name: "Django project with requirements but without pytest",
+			files: map[string]string{
+				"requirements.txt": "django\n", "manage.py": "", "pyproject.toml": "[project]",
+				"app/__init__.py": "", "app/tests.py": "from django.test import TestCase\n",
+			},
+			want: nil,
+		},
+		{
+			name: "Django project with pytest-django",
+			files: map[string]string{
+				"requirements.txt": "django\npytest-django\n", "manage.py": "",
+				"app/__init__.py": "", "app/test_views.py": "from django.test import TestCase\n",
+			},
+			want: []got{{"pytest", ".", "pytest"}},
 		},
 	}
 	for _, c := range cases {
@@ -326,19 +345,54 @@ func TestCRACommand(t *testing.T) {
 	dir := t.TempDir()
 	testutil.Write(t, dir, "pnpm-lock.yaml", "")
 	testutil.Write(t, dir, "web/node_modules/.bin/react-scripts", "")
-	for script, want := range map[string]string{
-		"react-scripts test": "pnpm exec react-scripts test --watchAll=false",
-		"CI=true react-scripts test --transformIgnorePatterns 'x/(?!y)' && echo": "pnpm exec react-scripts test --transformIgnorePatterns 'x/(?!y)' --watchAll=false",
-		"react-scripts test --env=jsdom --watchAll=false":                        "pnpm exec react-scripts test --env=jsdom --watchAll=false",
-		"react-scripts test --watch --watchAll true --coverage":                  "pnpm exec react-scripts test --coverage --watchAll=false",
-	} {
-		if got := craCommand(dir, ".", script); got != want {
-			t.Errorf("craCommand(%q) = %q, want %q", script, got, want)
+	cases := []struct {
+		script string
+		want   string
+		env    map[string]string
+	}{
+		{"react-scripts test", "pnpm exec react-scripts test --watchAll=false", nil},
+		{
+			"CI=true react-scripts test --transformIgnorePatterns 'x/(?!y)' && echo",
+			`pnpm exec react-scripts test --transformIgnorePatterns 'x/(?!y)' --watchAll=false`,
+			map[string]string{"CI": "true"},
+		},
+		{
+			// Operators inside quotes do not end the command.
+			`react-scripts test --transformIgnorePatterns "node_modules/(?!(axios|lodash-es)/)"`,
+			`pnpm exec react-scripts test --transformIgnorePatterns 'node_modules/(?!(axios|lodash-es)/)' --watchAll=false`,
+			nil,
+		},
+		{
+			"npm run build&&cross-env TZ=UTC NODE_ENV=test react-scripts test --env=jsdom;echo done",
+			"pnpm exec react-scripts test --env=jsdom --watchAll=false",
+			map[string]string{"TZ": "UTC", "NODE_ENV": "test"},
+		},
+		{`react-scripts test --testNamePattern "it's a b"`, `pnpm exec react-scripts test --testNamePattern 'it'\''s a b' --watchAll=false`, nil},
+		{"react-scripts test --env=jsdom --watchAll=false", "pnpm exec react-scripts test --env=jsdom --watchAll=false", nil},
+		{"react-scripts test --watch --watchAll true --coverage", "pnpm exec react-scripts test --coverage --watchAll=false", nil},
+	}
+	for _, c := range cases {
+		got, env := craCommand(dir, ".", c.script)
+		if got != c.want || !reflect.DeepEqual(env, c.env) {
+			t.Errorf("craCommand(%q) = %q %v, want %q %v", c.script, got, env, c.want, c.env)
+		}
+		// The command is one runner can split.
+		if _, err := runner.SplitWords(got); err != nil {
+			t.Errorf("%q: %v", got, err)
 		}
 	}
 	// A locally installed react-scripts is run directly.
-	if got, want := craCommand(dir, "web", "react-scripts test"), "./node_modules/.bin/react-scripts test --watchAll=false"; got != want {
-		t.Errorf("got %q, want %q", got, want)
+	if got, _ := craCommand(dir, "web", "react-scripts test"); got != "./node_modules/.bin/react-scripts test --watchAll=false" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestShellQuoteRoundTrip(t *testing.T) {
+	for _, w := range []string{"plain", "a b", "it's", `"q"`, "x|y", "$HOME", ""} {
+		got, err := runner.SplitWords("cmd " + shellQuote(w))
+		if err != nil || len(got) != 2 || got[1] != w {
+			t.Errorf("shellQuote(%q) = %q, split back to %q (%v)", w, shellQuote(w), got, err)
+		}
 	}
 }
 
@@ -354,5 +408,40 @@ func TestDetectPolyglotRootGoAndRootPytest(t *testing.T) {
 	}
 	if err := (&config.Config{Suites: suites}).Normalize(); err != nil {
 		t.Error(err)
+	}
+}
+
+// BenchmarkPythonProjects measures project detection in a large monorepo: 400 services
+// (half with a project file, half with only a requirements file and a conftest.py) and
+// 32k test files.
+func BenchmarkPythonProjects(b *testing.B) {
+	dirFiles := map[string][]string{".": {"requirements-dev.txt"}}
+	for s := 0; s < 400; s++ {
+		svc := fmt.Sprintf("services/s%d", s)
+		if s%2 == 0 {
+			dirFiles[svc] = []string{"pyproject.toml"}
+		} else {
+			dirFiles[svc] = []string{"requirements.txt", "conftest.py"}
+		}
+		for d := 0; d < 8; d++ {
+			var names []string
+			for f := 0; f < 10; f++ {
+				names = append(names, fmt.Sprintf("test_%d.py", f))
+			}
+			dirFiles[fmt.Sprintf("%s/tests/d%d", svc, d)] = names
+		}
+	}
+	var dirs []string
+	for d := range dirFiles {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	repo := &gitx.Repo{Root: b.TempDir()}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// The services and the root (whose tests are not all in project-file services).
+		if got := pythonProjects(repo, dirs, dirFiles); len(got) != 401 {
+			b.Fatalf("%d projects", len(got))
+		}
 	}
 }
