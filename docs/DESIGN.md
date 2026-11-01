@@ -113,7 +113,9 @@ and that is not ignored is an **orphan**: a Dockerfile, a CI script, an SQL migr
 applied by a service. `Covers` defines "explains": the file itself is a dependency; or a
 listing or existence check of it, but only when the file appeared or disappeared (an
 edited file that tests merely list may still be read by something untraced); or a
-`dir/**` tree other than the repository root.
+`dir/**` tree other than the repository root. With `--suite`, the suites left out still
+explain the changes their tests depend on (`Input.Others`), so a run limited to some
+suites selects what a run over every suite selects for them.
 
 Orphans go through, in order:
 
@@ -428,4 +430,5 @@ not available).
   it runs and checks each cycle's selection and result, that runs do not retrigger it, and
   that SIGINT stops it. Fixtures, scenarios and mutations run in parallel on a pool of
   prepared repositories per fixture; CI splits them into shards of about equal run time
-  (`SMATES_E2E_FIXTURE` takes a list of fixtures, or of `-fixture` exclusions).
+  (`SMATES_E2E_FIXTURE` takes a list of fixtures, or of `-fixture` exclusions), one e2e
+  suite in smates.yml per shard so that smates selects them per fixture.
