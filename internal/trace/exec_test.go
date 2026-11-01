@@ -121,3 +121,93 @@ func TestExecDepsSubstitutionUnresolved(t *testing.T) {
 		}
 	}
 }
+
+// Readers without a path operand read the working directory; paths that do not exist
+// yet are existence dependencies; launchers are analyzed as the command they run;
+// subshells scope cd; awk programs doing their own I/O are opaque.
+func TestExecDepsOperands(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "data.txt", "list.txt", "script.py", "sub/data.txt")
+	testutil.Write(t, root, "prog.awk", `{ getline line < "list.txt"; print line }`)
+	writeScript(t, root, ".venv/bin/pytest", "#!"+root+"/.venv/bin/python\nimport sys\n")
+	writeScript(t, root, ".venv/bin/ruff", "\x7fELF")
+	writeScript(t, root, "node_modules/.bin/eslint", "#!/usr/bin/env node\nrequire('../eslint')\n")
+
+	cases := []struct {
+		name string
+		cmd  string
+		want []string
+	}{
+		// No operand: the working directory.
+		{"ls", "ls", []string{"./"}},
+		{"ls -la", "ls -la", []string{"./"}},
+		{"ls in a subdirectory", "cd sub; ls", []string{"sub/"}},
+		{"ls -R", "ls -lR", []string{"./**"}},
+		{"ls .", "ls .", []string{"./"}},
+		{"rg pattern", "rg pattern", []string{"./**"}},
+		{"rg -e pattern", "rg -e pattern -g '*.py'", []string{"./**"}},
+		{"rg --files", "rg --files", []string{"./**"}},
+		{"grep -r pattern", "grep -rn pattern", []string{"./**"}},
+		{"grep pattern reads stdin", "grep pattern", nil},
+		{"find -name", "find -name x", []string{"./**"}},
+		{"find in a subdirectory", "cd sub; find . -name '*.txt'", []string{"sub/**"}},
+		{"rg pattern path", "rg data sub", []string{"sub/**"}},
+		{"grep -r pattern path", "grep -r --include=*.txt data sub", []string{"sub/**"}},
+
+		// Paths that do not exist yet.
+		{"test -f missing", "test -f plugins/extra.py", []string{"plugins/extra.py?"}},
+		{"[ -f missing ]", "[ -f x ]", []string{"x?"}},
+		{"[ string comparison ]", `[ "$X" = yes ]`, nil},
+		{"cat missing", "cat missing.txt", []string{"missing.txt?"}},
+		{"grep pattern missing", "grep -e data missing.txt data.txt", []string{"data.txt", "missing.txt?"}},
+		{"option arguments are not paths", "head -n 5 data.txt; cut -d, -f1 data.txt; sort -k2 -o out.txt data.txt", []string{"data.txt"}},
+		{"jq filter", "jq -r .x data.txt missing.json", []string{"data.txt", "missing.json?"}},
+		{"output redirection", "cat data.txt > out.txt", []string{"data.txt"}},
+		{"glob without matches", "cat sub/*.log", []string{"sub/"}},
+		{"glob", "cat *.txt", []string{"./", "data.txt", "list.txt"}},
+		{"glob in a directory component", "cat */data.txt", []string{"./**", "sub/data.txt"}},
+		{"opaque command, missing path outside its directory", "cd sub; ./build ../missing.cfg", []string{"missing.cfg?", "sub/**"}},
+		{"opaque command, missing path inside its directory", "make test", []string{"./**"}},
+
+		// Launchers.
+		{"uvx native tool", "uvx ruff check sub", []string{"./**", "sub/**"}},
+		{"uv run native tool", "uv run ruff check sub", []string{"./**", "sub/**"}},
+		{"uv run options --", "uv run --with x --frozen -- ruff check sub", []string{"./**", "sub/**"}},
+		{"uv tool run", "uv tool run ruff check", []string{"./**"}},
+		{"uv --directory", "uv --directory sub run make", []string{"sub/**"}},
+		{"uv run console script", "uv run pytest sub", nil},
+		{"uv run python", "uv run --python 3.12 python -m pytest", nil},
+		{"uv run -m", "uv run -m pytest", nil},
+		{"uv run script.py", "uv run script.py", []string{"script.py"}},
+		{"uv run reader", "uv run cat data.txt", []string{"data.txt"}},
+		{"uv sync", "uv sync", []string{"./**"}},
+		{"bunx node script", "bunx eslint sub", nil},
+		{"bunx unknown tool", "bunx --bun tsc", []string{"./**"}},
+		{"bun x reader", "bun x cat data.txt", []string{"data.txt"}},
+		{"npx is traced", "npx eslint sub", nil},
+
+		// Subshells.
+		{"cd in a subshell", "(cd sub && cat data.txt); cat data.txt", []string{"data.txt", "sub/data.txt"}},
+		{"variables in a subshell", "F=data.txt; (F=sub/data.txt; cat $F); cat $F", []string{"data.txt", "sub/data.txt"}},
+		{"brace group keeps cd", "{ cd sub; }; cat data.txt", []string{"sub/data.txt"}},
+
+		// awk programs.
+		{"awk", `awk '{print $1}' data.txt`, []string{"data.txt"}},
+		{"awk getline", `awk '{ while ((getline l < "list.txt") > 0) print l }' data.txt`, []string{"./**", "data.txt"}},
+		{"awk system", `awk 'BEGIN { system("make") }'`, []string{"./**"}},
+		{"awk print >", `awk '{ print > "out.txt" }' data.txt`, []string{"./**", "data.txt"}},
+		{"awk -f with getline", "awk -F, -f prog.awk data.txt", []string{"./**", "data.txt", "prog.awk"}},
+		{"awk comparison", `awk -v n=1 '$1 > n { print }' data.txt`, []string{"data.txt"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := execKeys(root, []string{c.cmd}, true); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("execDeps(%q) = %v, want %v", c.cmd, got, c.want)
+			}
+		})
+	}
+	// The same launcher as an argv (no shell).
+	if got, want := execKeys(root, []string{"uvx", "ruff", "check", "sub"}, false), []string{"./**", "sub/**"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("argv uvx: %v, want %v", got, want)
+	}
+}

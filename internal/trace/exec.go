@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,7 +16,10 @@ import (
 //
 //   - well-known commands that only read their file arguments (cat, grep, jq, ...)
 //     depend on the repository files and directories named on the command line,
-//     including shell globs;
+//     including shell globs (and the directories they search), on whether the named
+//     paths that do not exist yet exist, and on the working directory when they name no
+//     path (ls lists it, find, rg and grep -r search it);
+//   - launchers (uv run, uvx, bunx) are analyzed as the command they run;
 //   - any other program may read anything below the directory it runs in, so the test
 //     depends on that whole tree ("<dir>/**"), plus the files named on its command line
 //     (the script itself).
@@ -23,10 +27,13 @@ import (
 // This over-approximates on purpose: an opaque command is exactly where a dependency
 // could hide.
 
-// tracedPrograms trace themselves (or only start programs that do).
+// tracedPrograms trace themselves (or only start programs that do). npm, npx, pnpm and
+// yarn are Node programs: the commands they start go through child_process and are
+// analyzed there. Native launchers (uv run, uvx, bunx) execute their command directly
+// and are analyzed as the command they run (launched).
 var tracedPrograms = map[string]bool{
 	"node": true, "nodejs": true, "bun": true, "python": true, "python3": true, "pypy3": true,
-	"npm": true, "npx": true, "pnpm": true, "yarn": true, "bunx": true, "uv": true, "uvx": true,
+	"npm": true, "npx": true, "pnpm": true, "yarn": true,
 }
 
 // readers only read the paths named on their command line (recursively for -r tools).
@@ -43,12 +50,63 @@ var readers = map[string]bool{
 
 // nameOnly commands never open files, whatever their arguments. That includes the
 // system information commands libraries run on their own: platform.processor() runs
-// `uname -p` in every pytest-xdist worker, for example.
+// `uname -p` in every pytest-xdist worker, for example. tr only reads its standard input.
 var nameOnly = map[string]bool{
 	"basename": true, "dirname": true, "pwd": true, "echo": true, "printf": true, "true": true, "false": true,
 	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
-	"getconf": true, "sw_vers": true,
+	"getconf": true, "sw_vers": true, "tr": true,
 }
+
+// scriptFirst readers take a script or pattern as their first operand, unless an option
+// gives one (grep -e, sed -f, awk -f ...).
+var scriptFirst = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "sed": true, "awk": true, "jq": true, "yq": true,
+}
+
+// readerOpts lists, per reader, the options whose arguments are separate words, one
+// letter per argument: 's' an inline script or pattern (the first operand is then a
+// file), 'f' a script or pattern file, 'p' another file the command reads, 'o' anything
+// else (a number, a separator, a name, an output file).
+var readerOpts = map[string]map[string]string{
+	"grep": grepOpts, "egrep": grepOpts, "fgrep": grepOpts,
+	"rg": {
+		"-e": "s", "--regexp": "s", "-f": "f", "--file": "f", "-g": "o", "--glob": "o", "--iglob": "o",
+		"-t": "o", "--type": "o", "-T": "o", "--type-not": "o", "-m": "o", "--max-count": "o",
+		"-A": "o", "-B": "o", "-C": "o", "--context": "o", "-r": "o", "--replace": "o", "-j": "o",
+		"--threads": "o", "-M": "o", "--max-columns": "o", "-E": "o", "--encoding": "o",
+	},
+	"sed":    {"-e": "s", "--expression": "s", "-f": "f", "--file": "f"},
+	"awk":    {"-f": "f", "-v": "o", "-F": "o"},
+	"jq":     {"-f": "f", "--from-file": "f", "--arg": "oo", "--argjson": "oo", "--slurpfile": "op", "--rawfile": "op", "--indent": "o"},
+	"yq":     {"-f": "o", "--from-file": "f", "-o": "o", "--output-format": "o", "-p": "o", "--input-format": "o", "-I": "o", "--indent": "o"},
+	"head":   {"-n": "o", "-c": "o"},
+	"tail":   {"-n": "o", "-c": "o"},
+	"sort":   {"-k": "o", "-t": "o", "-o": "o", "-S": "o", "-T": "o"},
+	"cut":    {"-d": "o", "-f": "o", "-c": "o", "-b": "o"},
+	"uniq":   {"-f": "o", "-s": "o"},
+	"diff":   {"-U": "o", "-C": "o", "-x": "o", "-X": "p"},
+	"cmp":    {"-i": "o", "-n": "o"},
+	"stat":   {"-c": "o"},
+	"shasum": {"-a": "o"},
+	"base64": {"-i": "p", "-o": "o"},
+	"file":   {"-m": "p"},
+}
+
+var grepOpts = map[string]string{
+	"-e": "s", "--regexp": "s", "-f": "f", "--file": "f", "-m": "o", "--max-count": "o",
+	"-A": "o", "-B": "o", "-C": "o", "--context": "o", "-d": "o", "-D": "o",
+	"--include": "o", "--exclude": "o", "--exclude-dir": "o",
+}
+
+// testFileOps are the test/[ operators whose operand is a path.
+var testFileOps = map[string]bool{
+	"-e": true, "-f": true, "-d": true, "-r": true, "-w": true, "-x": true, "-s": true, "-L": true, "-h": true,
+	"-b": true, "-c": true, "-p": true, "-S": true, "-g": true, "-u": true, "-k": true, "-O": true, "-G": true,
+	"-N": true, "-nt": true, "-ot": true, "-ef": true,
+}
+
+// awkIO matches awk programs that read or write files or run commands themselves.
+var awkIO = regexp.MustCompile(`\bgetline\b|\bsystem[ \t]*\(|\bprintf?\b[^;}\n]*[>|]`)
 
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true}
 
@@ -90,6 +148,45 @@ func (a *execAnalysis) opaque(dir string) {
 	}
 }
 
+// listing records that the entries of dir are read.
+func (a *execAnalysis) listing(dir string) {
+	if r, ok := a.rel(dir); ok {
+		a.out = append(a.out, depkey.Listing(r))
+	} else if isRoot(dir, a.root) {
+		a.out = append(a.out, depkey.Listing("."))
+	}
+}
+
+// existence records that a command depends on whether p exists.
+func (a *execAnalysis) existence(p string) {
+	if r, ok := a.rel(p); ok {
+		a.out = append(a.out, depkey.Existence(r))
+	}
+}
+
+// glob records what the matches of a glob pattern (word, relative to cwd) depend on:
+// the entries of the directory holding the pattern, or every file below the directory
+// before the first pattern component when a directory component is a pattern too.
+func (a *execAnalysis) glob(word, cwd string) {
+	word = strings.ReplaceAll(word, literalDollar, "$")
+	if !strings.ContainsAny(word, "*?[") {
+		return
+	}
+	dir := filepath.Dir(filepath.Clean(word))
+	tree := false
+	for strings.ContainsAny(dir, "*?[") {
+		dir, tree = filepath.Dir(dir), true
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	if tree {
+		a.opaque(dir)
+	} else {
+		a.listing(dir)
+	}
+}
+
 // shellText analyzes shell source (a -c string or a script file). script is the path of
 // the script ("" for -c strings), used for $0 and $(dirname "$0").
 func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
@@ -112,7 +209,24 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 		a.opaque(cwd) // backticks or eval: cannot follow
 	}
 	vars := map[string][]string{}
+	// A ( ... ) subshell gets its own working directory and variables.
+	type scope struct {
+		cwd  string
+		vars map[string][]string
+	}
+	var outer []scope
 	for _, seg := range splitShell(text) {
+		switch seg[0] {
+		case subshellOpen:
+			outer = append(outer, scope{cwd, vars})
+			vars = maps.Clone(vars)
+			continue
+		case subshellClose:
+			if n := len(outer); n > 0 {
+				cwd, vars, outer = outer[n-1].cwd, outer[n-1].vars, outer[:n-1]
+			}
+			continue
+		}
 		seg = expandVars(seg, vars)
 		if len(seg) > 0 && isAssignments(seg) {
 			for _, w := range seg {
@@ -235,7 +349,7 @@ func (a *execAnalysis) substitution(inner, cwd, pwd string, depth int) string {
 		return pwd
 	}
 	for _, seg := range splitShell(inner) {
-		if len(seg) == 0 {
+		if len(seg) == 0 || seg[0] == subshellOpen || seg[0] == subshellClose {
 			continue
 		}
 		if readers[filepath.Base(seg[0])] || seg[0] == "cd" {
@@ -327,10 +441,32 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		a.script(seg[0], cwd, depth)
 		return
 	}
+	// A native launcher executes its command itself: analyze that command, which traces
+	// itself only when it runs on Node or Python.
+	if cmd, dir, ok := launched(seg); ok {
+		if strings.Contains(dir, "$") {
+			a.opaque(cwd)
+			return
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		if len(cmd) > 0 {
+			if strings.HasSuffix(cmd[0], ".py") {
+				cmd = append([]string{"python"}, cmd...) // uv run script.py
+			} else if rt := a.scriptRuntime(cmd[0], dir); rt != "" {
+				cmd = append([]string{rt}, cmd[1:]...)
+			}
+			a.command(cmd, dir, depth)
+		}
+		return
+	}
 	traced := tracedPrograms[prog] || strings.HasPrefix(prog, "python3.")
+	grepLike := prog == "grep" || prog == "egrep" || prog == "fgrep"
 	recursive := prog == "rg" || prog == "find"
 	for i, w := range seg[1:] {
-		if w == "-r" || w == "-R" || w == "--recursive" || (prog == "grep" && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.ContainsAny(w, "rR")) {
+		cluster := strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--")
+		if w == "-r" || w == "-R" || w == "--recursive" || (grepLike && cluster && strings.ContainsAny(w, "rR")) || (prog == "ls" && cluster && strings.Contains(w, "R")) {
 			recursive = true
 		}
 		if w == "<" && i+2 < len(seg) && !strings.Contains(seg[i+2], "$") {
@@ -339,27 +475,55 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 			}
 		}
 	}
-	unresolved := false
-	for _, w := range seg[1:] {
-		if strings.HasPrefix(w, "-") || w == "<" || w == ">" || w == ">>" {
-			continue
+	files, script, scriptFiles := operands(prog, seg[1:])
+	// Without a path, ls lists and find, rg and grep -r search the working directory.
+	if len(files) == 0 && !traced {
+		switch {
+		case prog == "ls" && !recursive:
+			a.listing(cwd)
+		case prog == "ls" || prog == "find" || prog == "rg" || (grepLike && recursive):
+			a.opaque(cwd)
 		}
+	}
+	// A script that reads files or runs commands itself (awk's getline and system(),
+	// yq's load) makes the reader opaque; so does an unresolved awk or sed script.
+	scripted := false
+	switch prog {
+	case "awk":
+		scripted = awkIO.MatchString(script)
+		for _, f := range scriptFiles {
+			for _, m := range expand(f, cwd) {
+				if data, err := os.ReadFile(m); err == nil && awkIO.Match(data) {
+					scripted = true
+				}
+			}
+		}
+	case "yq":
+		scripted = strings.Contains(script, "load")
+	}
+	unresolved := (prog == "awk" || prog == "sed") && strings.Contains(script, "$")
+	for _, w := range files {
 		if strings.Contains(w, "$") {
 			unresolved = true
 			continue
 		}
+		a.glob(w, cwd)
 		for _, m := range expand(w, cwd) {
 			fi, err := os.Stat(m)
 			switch {
 			case err != nil:
+				// A path that does not exist (yet): the command behaves differently once
+				// it does. Paths below the directory of an opaque command are covered by
+				// its tree.
+				if !traced && !nameOnly[prog] && (readers[prog] || !within(m, cwd)) {
+					a.existence(m)
+				}
 			case fi.IsDir() && traced:
 				// A runtime given a directory runs code that traces itself.
 			case fi.IsDir() && (recursive || !readers[prog]):
 				a.opaque(m)
 			case fi.IsDir():
-				if r, ok := a.rel(m); ok {
-					a.out = append(a.out, depkey.Listing(r))
-				}
+				a.listing(m)
 			default:
 				a.add(m)
 			}
@@ -370,11 +534,250 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		// The child traces itself.
 	case nameOnly[prog]:
 		// Only manipulates names, never opens files.
-	case readers[prog] && !unresolved:
+	case readers[prog] && !unresolved && !scripted:
 		// Reads only what it names.
 	default:
 		a.opaque(cwd)
 	}
+}
+
+// operands returns the words of a command's arguments that name files (its operands
+// and the file arguments of its options, but not redirection targets), and for a
+// scriptFirst reader its inline script or pattern and the files it reads one from.
+func operands(prog string, args []string) (files []string, script string, scriptFiles []string) {
+	switch prog {
+	case "find":
+		// find [-H|-L|-P] path... expression: the expression names no file to read.
+		for _, w := range args {
+			if w == "-H" || w == "-L" || w == "-P" {
+				continue
+			}
+			if strings.HasPrefix(w, "-") || w == "!" || w == "(" || w == "<" || w == ">" || w == ">>" {
+				break
+			}
+			files = append(files, w)
+		}
+		return files, "", nil
+	case "test", "[":
+		// Only the operands of file operators are paths: [ -f x ], [ a -nt b ].
+		for i, w := range args {
+			if testFileOps[w] && i+1 < len(args) {
+				files = append(files, args[i+1])
+			}
+			if (w == "-nt" || w == "-ot" || w == "-ef") && i > 0 {
+				files = append(files, args[i-1])
+			}
+		}
+		return files, "", nil
+	}
+	opts := readerOpts[prog]
+	needScript := scriptFirst[prog]
+	// take consumes the arguments of an option (kinds, see readerOpts); the first one is
+	// inline when the option word carries it (-n5, --file=x).
+	var i int
+	take := func(kinds, inline string, hasInline bool) {
+		for k, kind := range kinds {
+			arg := inline
+			if k > 0 || !hasInline {
+				if i+1 >= len(args) {
+					return
+				}
+				i++
+				arg = args[i]
+			}
+			switch kind {
+			case 's':
+				needScript = false
+			case 'f':
+				needScript = false
+				files = append(files, arg)
+				scriptFiles = append(scriptFiles, arg)
+			case 'p':
+				files = append(files, arg)
+			}
+		}
+	}
+	end := false
+	for i = 0; i < len(args); i++ {
+		w := args[i]
+		switch {
+		case w == "<" || w == ">" || w == ">>":
+			i++ // standard input (recorded by the caller) or an output
+			continue
+		case end || w == "-" || !strings.HasPrefix(w, "-"):
+		case w == "--":
+			end = true
+			continue
+		case strings.HasPrefix(w, "--"):
+			if prog == "rg" && (w == "--files" || w == "--type-list") {
+				needScript = false
+			}
+			name, val, ok := strings.Cut(w, "=")
+			take(opts[name], val, ok)
+			continue
+		default:
+			// A cluster of short options; the first one taking an argument takes the rest
+			// of the word (-n5) or the next word.
+			for j := 1; j < len(w); j++ {
+				if kinds := opts["-"+w[j:j+1]]; kinds != "" {
+					take(kinds, w[j+1:], j+1 < len(w))
+					break
+				}
+			}
+			continue
+		}
+		switch {
+		case w == "" || w == "-":
+			// BSD sed -i '', standard input
+		case needScript && prog == "yq" && (w == "eval" || w == "e" || w == "eval-all" || w == "ea"):
+		case needScript:
+			needScript = false
+			script = w
+		case prog == "awk" && assign.MatchString(w):
+			// var=value operands set awk variables
+		default:
+			files = append(files, w)
+		}
+	}
+	return files, script, scriptFiles
+}
+
+// launcherOpts are the options of uv (global, run and tool run options) and bun that
+// take a separate argument.
+var launcherOpts = map[string]bool{
+	"--directory": true, "--project": true, "--cache-dir": true, "--config-file": true, "--color": true,
+	"--python": true, "-p": true, "--with": true, "-w": true, "--with-editable": true,
+	"--with-requirements": true, "--from": true, "--package": true, "--extra": true, "--group": true,
+	"--no-group": true, "--only-group": true, "--env-file": true, "--index": true, "--default-index": true,
+	"--index-url": true, "-i": true, "--extra-index-url": true, "--find-links": true, "-f": true,
+	"--index-strategy": true, "--keyring-provider": true, "--resolution": true, "--prerelease": true,
+	"--exclude-newer": true, "--link-mode": true, "--refresh-package": true, "--reinstall-package": true,
+	"--upgrade-package": true, "-P": true, "--config-setting": true, "-C": true,
+	"--no-binary-package": true, "--no-build-package": true, "--allow-insecure-host": true,
+	"--python-preference": true, "--python-platform": true, "--cwd": true,
+}
+
+// launched returns the command a native launcher runs (uv run, uv tool run, uvx, bunx,
+// bun x) and the directory it runs in, relative to the launcher's ("" for the same);
+// ok is false when seg does not start one. uv run --module and --script run Python.
+func launched(seg []string) (cmd []string, dir string, ok bool) {
+	prog, args := filepath.Base(seg[0]), seg[1:]
+	py := ""
+	// options skips the launcher options at the start of args.
+	options := func() {
+		for len(args) > 0 {
+			w := args[0]
+			if w == "--" {
+				args = args[1:]
+				return
+			}
+			if !strings.HasPrefix(w, "-") || w == "-" {
+				return
+			}
+			args = args[1:]
+			name, val, inline := strings.Cut(w, "=")
+			switch {
+			case prog == "uv" && (w == "-m" || w == "--module"):
+				py = "-m"
+			case prog == "uv" && (w == "-s" || w == "--script" || w == "--gui-script"):
+				py = "script"
+			case !launcherOpts[name]:
+			case !inline && len(args) == 0:
+				return
+			default:
+				if !inline {
+					val, args = args[0], args[1:]
+				}
+				if name == "--directory" || name == "--cwd" {
+					dir = filepath.Join(dir, val) // relative to the previous one, or absolute
+					if filepath.IsAbs(val) {
+						dir = val
+					}
+				}
+			}
+		}
+	}
+	switch prog {
+	case "uvx", "bunx":
+	case "uv", "bun":
+		options()
+		switch {
+		case prog == "uv" && len(args) > 0 && args[0] == "run":
+			args = args[1:]
+		case prog == "uv" && len(args) > 1 && args[0] == "tool" && args[1] == "run":
+			args = args[2:]
+		case prog == "bun" && len(args) > 0 && args[0] == "x":
+			args = args[1:]
+		default:
+			return nil, "", false
+		}
+	default:
+		return nil, "", false
+	}
+	options()
+	switch {
+	case len(args) == 0:
+	case py == "-m":
+		args = append([]string{"python", "-m"}, args...)
+	case py == "script":
+		args = append([]string{"python"}, args...)
+	}
+	return args, dir, true
+}
+
+// scriptRuntime returns the runtime ("python", "node", "bun") a launched program runs
+// on when it is a script of one: the program named by path, or else the console script
+// of that name in a .venv/bin or node_modules/.bin from dir up to the repository root.
+// It returns "" for anything else (a native binary, a program it cannot find).
+func (a *execAnalysis) scriptRuntime(name, dir string) string {
+	var cands []string
+	if strings.Contains(name, "/") {
+		if !filepath.IsAbs(name) {
+			name = filepath.Join(dir, name)
+		}
+		cands = append(cands, name)
+	} else {
+		for d := dir; ; {
+			cands = append(cands, filepath.Join(d, ".venv", "bin", name), filepath.Join(d, "node_modules", ".bin", name))
+			parent := filepath.Dir(d)
+			if d == a.root || parent == d || !within(d, a.root) {
+				break
+			}
+			d = parent
+		}
+	}
+	for _, c := range cands {
+		f, err := os.Open(c)
+		if err != nil {
+			continue
+		}
+		head := make([]byte, 1024)
+		n, _ := f.Read(head)
+		f.Close()
+		text := string(head[:n])
+		line, _, _ := strings.Cut(text, "\n")
+		if !strings.HasPrefix(line, "#!") {
+			return ""
+		}
+		for _, rt := range []string{"python", "node", "bun"} {
+			if strings.Contains(line, rt) {
+				return rt
+			}
+		}
+		// Shell wrappers: pnpm's node_modules/.bin shims, uv's trampoline for long paths.
+		switch {
+		case strings.Contains(text, "exec node ") || strings.Contains(text, `/node" `):
+			return "node"
+		case strings.Contains(text, "'''exec'") && strings.Contains(text, "python"):
+			return "python"
+		}
+		return ""
+	}
+	return ""
+}
+
+func within(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
 }
 
 // shellInvocation analyzes a shell started with args (the words after its name):
@@ -563,8 +966,15 @@ func expand(word, cwd string) []string {
 	return []string{p}
 }
 
+// Segments of splitShell that open and close a ( ... ) subshell.
+const (
+	subshellOpen  = "\x02("
+	subshellClose = "\x02)"
+)
+
 // splitShell splits a shell command line into simple commands (on |, ||, &&, ;, &,
-// newlines) and words, honoring quotes. Redirection operators become separate words.
+// newlines) and words, honoring quotes. Redirection operators become separate words;
+// parentheses become subshellOpen and subshellClose segments.
 func splitShell(cmd string) [][]string {
 	var segs [][]string
 	var words []string
@@ -620,7 +1030,14 @@ func splitShell(cmd string) [][]string {
 				op = ">>"
 			}
 			words = append(words, op)
-		case c == '|' || c == ';' || c == '&' || c == '\n' || c == '(' || c == ')':
+		case c == '(' || c == ')':
+			flushSeg()
+			if c == '(' {
+				segs = append(segs, []string{subshellOpen})
+			} else {
+				segs = append(segs, []string{subshellClose})
+			}
+		case c == '|' || c == ';' || c == '&' || c == '\n':
 			flushSeg()
 		case c == '<' || c == '>':
 			// A file descriptor number right before the operator (2>file) is part of it.
