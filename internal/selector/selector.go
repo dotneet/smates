@@ -122,6 +122,10 @@ type Result struct {
 	Suites  []*Suite `json:"suites"`
 	Changed []string `json:"changed"`
 	Orphans []string `json:"orphans"`
+	// LeftOut are the changes no test depends on that only suites left out by --suite
+	// own (see Owned): not orphans of this run (the jobs running those suites handle
+	// them), but tests of this run that name them are still selected (References).
+	LeftOut []string `json:"left_out,omitempty"`
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
 	Notes          []string          `json:"notes,omitempty"`
@@ -200,6 +204,17 @@ func Select(in *Input) (*Result, error) {
 		changedSet, err = changedFiles(in)
 		if err != nil {
 			return nil, err
+		}
+		if len(in.Others) > 0 && len(in.State.Files) > 0 {
+			// A --suite --all run refreshes only the files its suites own (see
+			// cli saveState): a file the suites left out own that the snapshot has
+			// never held is theirs to compare, not a change of this run.
+			all := append(slices.Clip(in.Suites), in.Others...)
+			for f := range changedSet {
+				if _, recorded := in.State.Files[f]; !recorded && in.Snap[f] != "" && !Owned(f, all, len(in.Suites)) {
+					delete(changedSet, f)
+				}
+			}
 		}
 		for f := range changedSet {
 			res.Changed = append(res.Changed, f)
@@ -323,7 +338,6 @@ func Select(in *Input) (*Result, error) {
 
 	if res.Mode != ModeAll {
 		all := append(slices.Clip(in.Suites), in.Others...)
-		leftOut := 0
 		for _, f := range res.Changed {
 			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
 				continue
@@ -331,14 +345,14 @@ func Select(in *Input) (*Result, error) {
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
 			if Covers(covered, f, existenceChanged) == "" {
 				if len(in.Others) > 0 && !Owned(f, all, len(in.Suites)) {
-					leftOut++
+					res.LeftOut = append(res.LeftOut, f)
 					continue
 				}
 				res.Orphans = append(res.Orphans, f)
 			}
 		}
-		if leftOut > 0 {
-			res.Notes = append(res.Notes, fmt.Sprintf("%d unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them", leftOut))
+		if len(res.LeftOut) > 0 {
+			res.Notes = append(res.Notes, fmt.Sprintf("%d unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them", len(res.LeftOut)))
 		}
 	}
 	return res, nil

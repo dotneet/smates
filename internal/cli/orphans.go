@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,13 +19,16 @@ import (
 // the agent or makes the affected suites run in full, as smates.yml says.
 func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectOptions, base string) {
 	res := sel.res
-	if len(res.Orphans) == 0 {
+	if len(res.Orphans) == 0 && len(res.LeftOut) == 0 {
 		return
 	}
 
-	// 1. Deterministic: tests that mention an orphan by name.
-	refs, explained := res.References(p.graph, res.Orphans)
+	// 1. Deterministic: tests that mention an orphan by name. Changes owned by the
+	// suites --suite left out are searched too: a test of this run that names one is
+	// selected, as in a run over every suite.
+	refs, explained := res.References(p.graph, append(slices.Clip(res.Orphans), res.LeftOut...))
 	res.Apply(refs)
+	explained = intersect(explained, res.Orphans)
 	res.HandleOrphans(explained, selector.OrphanReference)
 	remaining := subtract(res.Orphans, explained)
 	if opt.orphanScope != nil {

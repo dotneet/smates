@@ -346,7 +346,7 @@ suites:
     command: "true"
     rules: [{tests: ["*"], deps: ["src/b/**"]}]
 `)
-	write("a/x_check.sh", "")
+	write("a/x_check.sh", "cat ../b/fixtures/users.json\n")
 	write("b/x_check.sh", "")
 	write("src/a/lib", "1")
 	write("src/b/lib", "1")
@@ -390,7 +390,15 @@ suites:
 		t.Errorf("a change under another suite's root: %s, orphans %v", reason, orphans)
 	}
 
-	// --suite a --all records the snapshot: afterwards only new changes count.
+	// A change under b's root that a test of a names is still selected in a's job.
+	write("b/fixtures/users.json", "[]")
+	if reason, orphans := selectA(); reason != "reference" || !reflect.DeepEqual(orphans, []string{"Dockerfile"}) {
+		t.Errorf("a file under b's root named by a's test: %s, orphans %v", reason, orphans)
+	}
+	os.Remove(filepath.Join(g.dir, "b", "fixtures", "users.json"))
+
+	// --suite a --all records the snapshot of the files a owns: afterwards only new
+	// changes count for a, while b's pending change is still seen by a run over b.
 	var out, errb bytes.Buffer
 	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "a", "--all"}, &out, &errb); code != 0 {
 		t.Fatalf("run --suite a --all: %d %s", code, errb.String())
@@ -406,6 +414,20 @@ suites:
 	}
 	if strings.Contains(out.String(), "Dockerfile") {
 		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
+	}
+	if _, ok := st.Files["b/notes.cfg"]; ok {
+		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run")
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "b", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select --suite b: %d %s", code, errb.String())
+	}
+	var jb struct {
+		Orphans []string `json:"orphans"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &jb); err != nil || !reflect.DeepEqual(jb.Orphans, []string{"b/notes.cfg"}) {
+		t.Errorf("b's pending change is lost: %v %s", err, out.String())
 	}
 
 	out.Reset()

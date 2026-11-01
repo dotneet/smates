@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -432,11 +433,28 @@ func (c *cycle) saveState() error {
 		// --fail-fast stopped the run: the repository-wide snapshot stays as it was,
 		// so changes and orphans the tests that did not run would have covered are
 		// seen again next time.
+	case len(p.others) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
+		// Every test of the suites --suite picked ran: the snapshot is brought up to
+		// date for the files they own (selector.Owned). The entries of files only the
+		// suites left out own stay as recorded, so their pending changes are still
+		// seen by a run of those suites on a shared state (locally, after `state
+		// merge`, or in CI without a cache-key per job).
+		all := append(slices.Clip(p.suites), p.others...)
+		n := len(p.suites)
+		if p.state.Files == nil {
+			p.state.Files = map[string]string{}
+		}
+		for f, h := range p.snap {
+			if selector.Owned(f, all, n) {
+				p.state.Files[f] = h
+			}
+		}
+		for f := range p.state.Files {
+			if _, ok := p.snap[f]; !ok && selector.Owned(f, all, n) {
+				delete(p.state.Files, f)
+			}
+		}
 	case res.Mode == selector.ModeAll || c.f.shadow:
-		// Every test ran, or with --suite every test of the suites it picked: a
-		// change the suites left out own is never this run's orphan
-		// (selector.Owned), and a job that runs them keeps its own state, so the
-		// whole snapshot is brought up to date either way.
 		p.state.Files = map[string]string(p.snap)
 		p.state.Commit = p.repo.Head()
 		p.state.Created = c.now
