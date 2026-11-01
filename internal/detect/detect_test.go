@@ -3,6 +3,7 @@ package detect
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -208,6 +209,70 @@ func TestDetectNestedSameRunnerExcludes(t *testing.T) {
 	c := &config.Config{Suites: suites}
 	if err := c.Normalize(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDetectPythonWithoutProjectFile(t *testing.T) {
+	test := "def test_a():\n    pass\n"
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []got
+	}{
+		{
+			name:  "requirements.txt and conftest.py",
+			files: map[string]string{"requirements.txt": "pytest==8.0\n", "conftest.py": "", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "tox.ini with a [pytest] section",
+			files: map[string]string{"tox.ini": "[tox]\nenvlist = py3\n\n[pytest]\naddopts = -q\n", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "conftest.py in tests/ marks the directory above",
+			files: map[string]string{"svc/tests/conftest.py": "", "svc/tests/unit/test_x.py": test, "svc/app.py": ""},
+			want:  []got{{"pytest", "svc", "pytest"}},
+		},
+		{
+			name:  "requirements file without pytest",
+			files: map[string]string{"requirements-dev.txt": "black\n", "tests/test_x.py": "import unittest\n"},
+			want:  []got{{"unittest", ".", "unittest"}},
+		},
+		{
+			name: "requirements above project files do not merge the projects",
+			files: map[string]string{
+				"requirements-dev.txt": "pytest\n", "conftest.py": "",
+				"svc1/pyproject.toml": "", "svc1/tests/test_a.py": test,
+				"svc2/setup.py": "", "svc2/tests/test_b.py": test,
+			},
+			want: []got{{"pytest:svc1", "svc1", "pytest"}, {"pytest:svc2", "svc2", "pytest"}},
+		},
+		{
+			name:  "tox.ini without [pytest] and requirements without tests",
+			files: map[string]string{"tox.ini": "[testenv]\ncommands = make\n", "docs/requirements.txt": "sphinx\n", "src/app.py": ""},
+			want:  nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if g, _ := detect(t, c.files); !reflect.DeepEqual(g, c.want) {
+				t.Errorf("got %v\nwant %v", g, c.want)
+			}
+		})
+	}
+}
+
+func TestDetectCreateReactApp(t *testing.T) {
+	g, suites := detect(t, map[string]string{
+		"package.json":    `{"dependencies":{"react-scripts":"5.0.1"},"scripts":{"test":"react-scripts test"}}`,
+		"src/App.test.js": "",
+	})
+	if want := []got{{"jest", ".", "jest"}}; !reflect.DeepEqual(g, want) {
+		t.Fatalf("got %v, want %v", g, want)
+	}
+	if !strings.Contains(suites[0].Command, "react-scripts test") {
+		t.Errorf("command %q does not run react-scripts", suites[0].Command)
 	}
 }
 

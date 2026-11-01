@@ -88,10 +88,14 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		test := pj.Scripts["test"]
-		r := ""
+		r, command := "", ""
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
+		case strings.Contains(test, "react-scripts test"):
+			// Create React App runs jest with a configuration react-scripts generates,
+			// which a bare jest would not see.
+			r, command = "jest", "npx --no-install react-scripts test --watchAll=false"
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
 		case strings.Contains(test, "bun test"):
@@ -115,17 +119,13 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		jsRoots[d] = r
-		out = append(out, config.Suite{Root: d, Runner: r})
+		out = append(out, config.Suite{Root: d, Runner: r, Command: command})
 	}
 
 	// Python: one suite per project with pytest configuration or tests. Projects that
 	// show no sign of pytest (no dependency, configuration or conftest.py) use the
 	// standard library's unittest.
-	for _, d := range dirs {
-		isProject := has(d, "pyproject.toml") || has(d, "pytest.ini") || has(d, "setup.cfg") || has(d, "setup.py")
-		if !isProject {
-			continue
-		}
+	for _, d := range pythonProjects(repo, dirs, dirFiles) {
 		nested := false
 		for _, s := range out {
 			if (s.Runner == "pytest" || s.Runner == "unittest") && pathutil.Under(d, s.Root) {
@@ -176,7 +176,73 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	return kept
 }
 
+// pythonProjects returns the Python project directories, sorted (parents before
+// children). A project file (pyproject.toml, setup.cfg, setup.py) or a pytest config
+// (pytest.ini, a tox.ini with a [pytest] section) marks its directory. Without any of
+// them in or below it, a directory is also a project when it holds a pip requirements
+// file or a conftest.py; a conftest.py inside a test/ or tests/ directory marks the
+// directory above, the one pytest runs from. Whether a project has tests is checked by
+// the caller.
+func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string) []string {
+	strong, weak := map[string]bool{}, map[string]bool{}
+	for _, d := range dirs {
+		for _, n := range dirFiles[d] {
+			switch {
+			case n == "pyproject.toml", n == "setup.cfg", n == "setup.py", n == "pytest.ini":
+				strong[d] = true
+			case n == "tox.ini":
+				data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(d), n))
+				if err == nil && toxPytestSection.Match(data) {
+					strong[d] = true
+				}
+			case requirementsTxt.MatchString(n):
+				weak[d] = true
+			case n == "conftest.py":
+				weak[conftestProject(d)] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(strong)+len(weak))
+	for d := range strong {
+		out = append(out, d)
+	}
+	for d := range weak {
+		covered := false
+		for s := range strong {
+			if pathutil.Under(s, d) || pathutil.Under(d, s) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, d)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// conftestProject returns the directory a conftest.py in dir marks as a project: the
+// parent of its outermost test/tests directory, or dir itself.
+func conftestProject(dir string) string {
+	segs := strings.Split(dir, "/")
+	for i, s := range segs {
+		if s == "tests" || s == "test" {
+			if i == 0 {
+				return "."
+			}
+			return strings.Join(segs[:i], "/")
+		}
+	}
+	return dir
+}
+
 var (
+	// toxPytestSection is the [pytest] section of a tox.ini that configures pytest.
+	toxPytestSection = regexp.MustCompile(`(?m)^\s*\[pytest\]`)
+	// requirementsTxt is a pip requirements file (requirements.txt, dev-requirements.txt,
+	// requirements-test.txt).
+	requirementsTxt = regexp.MustCompile(`^.*requirements.*\.txt$`)
 	// pytestManifests are manifests, lockfiles and task files whose mention of pytest
 	// means the project uses it.
 	pytestManifests = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|noxfile\.py|Pipfile|Pipfile\.lock|poetry\.lock|pdm\.lock|uv\.lock|.*requirements.*\.(txt|in))$`)
