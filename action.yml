@@ -316,8 +316,11 @@ runs:
     # The Actions cache holds only the release archive, restored into a staging
     # directory that never goes on PATH. The install step copies just the archive out
     # of it, verifies it exactly like a fresh download and unpacks the binary into a
-    # fresh directory, so whoever can write this repository's cache can neither get an
-    # unverified binary run nor plant other executables (git, go, ...) on PATH.
+    # fresh directory: the PATH entry holds only the verified smates binary, and an
+    # entry without the genuine archive fails verification. This does not make the
+    # cache untrusted input: like any actions/cache restore, a crafted entry can write
+    # files outside its path, so whoever can write the cache scope stays trusted (see
+    # "State is input" in docs/ci/github-actions.md).
     - name: Restore smates archive
       id: bin-cache
       if: steps.resolve.outputs.version != 'source' && steps.resolve.outputs.present != 'true'

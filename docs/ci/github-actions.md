@@ -256,9 +256,13 @@ runners, the tool cache) holds only the release archive. It is restored into a s
 directory that is never put on `PATH`; the action copies just the archive out of it and
 puts it through the same checks as a fresh download (`checksums.txt` is fetched again,
 the attestation looked up again), then unpacks the `smates` binary into a new directory
-that holds nothing else and puts that on `PATH`. Anyone who can write the repository's
-cache can at worst make the job fail: not run another binary, and not plant other
-executables (`git`, `go`, ...) on `PATH`.
+that holds nothing else and puts that on `PATH`. So the `PATH` entry holds only the
+verified binary, and a cache entry without the genuine archive fails verification
+instead of being used. This does not make the cache untrusted input: like any
+`actions/cache` restore, a crafted entry can write files outside its own path (the
+restore extracts with absolute paths), for example over the action's own scripts, so
+whoever can write the cache scope a job restores from remains trusted, as for the
+state (see [State is input](#security-model)).
 
 **Cached installs still need network access.** Every run, including a cache hit,
 downloads `checksums.txt` from the release (plus the attestation lookup when `verify`
