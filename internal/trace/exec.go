@@ -128,27 +128,51 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 // execDeps infers dependencies of a child process. It returns repo-relative keys:
 // plain paths (content), "dir/" (listing), "dir/**" (whole tree) and "path?" (existence).
 func execDeps(args []string, shell bool, cwd, root string, rel func(string) (string, bool)) []string {
-	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, bodies: map[string][][]string{}, calling: map[string]bool{}, shell: shell}
+	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, defs: map[string]*funcDef{}, analyzed: map[string]bool{},
+		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, shell: shell}
 	if shell {
 		a.shellText(strings.Join(args, " "), cwd, "", 0)
 	} else {
 		a.command(args, cwd, 0)
 	}
+	a.flush()
 	return a.out
 }
 
 type execAnalysis struct {
-	rel     func(string) (string, bool)
-	root    string
-	out     []string
-	funcs   map[string]bool       // shell functions defined by the analyzed scripts
-	bodies  map[string][][]string // their bodies, analyzed where they are called
-	calling map[string]bool       // functions whose body is being analyzed (recursion)
-	calls   int                   // function bodies analyzed at a call (bounded)
-	shell   bool                  // the words come from shell code (a shell expands their globs)
+	rel  func(string) (string, bool)
+	root string
+	out  []string
+	// Shell functions: the names the analyzed scripts define (funcDefRe), the bodies
+	// found (defs, in order of definition in pending), and those analyzed at least once.
+	funcs    map[string]bool
+	defs     map[string]*funcDef
+	pending  []string
+	analyzed map[string]bool
+	calling  map[string]bool       // functions whose body is being analyzed (recursion)
+	calls    int                   // function bodies analyzed at a call (bounded)
+	memo     map[string]callResult // calls analyzed, by callKey
+	relevant map[string][]string   // the variables a function's body may use (callKey)
+	shell    bool                  // the words come from shell code (a shell expands their globs)
 }
 
-// maxCalls bounds the function calls whose bodies are analyzed; past it a call is opaque.
+// funcDef is a shell function's body and the state and depth where it was defined.
+type funcDef struct {
+	body  [][]string
+	st    *shellState
+	depth int
+}
+
+// callResult is what analyzing a call changed in the caller's state.
+type callResult struct {
+	cwd  string
+	dirs []string
+	vars map[string][]string
+}
+
+// maxCalls bounds the function calls whose bodies are analyzed. Calls in the same state
+// are analyzed once (memo); past the bound, a function's body is analyzed once more in a
+// scope of its own.
 const maxCalls = 200
 
 // shellState is what the next command of a script sees: its working directory, the
@@ -238,31 +262,23 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 		text = strings.ReplaceAll(text, `"$0"`, script)
 	}
 	text = stripComments(text)
-	for _, m := range funcDef.FindAllStringSubmatch(text, -1) {
+	for _, m := range funcDefRe.FindAllStringSubmatch(text, -1) {
 		a.funcs[m[1]] = true
 	}
 	text = a.substitutions(text, cwd, depth)
 	if strings.Contains(text, "`") || strings.Contains(text, "eval ") {
 		a.opaque(cwd) // backticks or eval: cannot follow
 	}
-	segs := splitShell(text)
-	called := map[string]bool{}
-	calledNames(segs, called)
-	a.run(&shellState{cwd: cwd, vars: map[string][]string{}}, segs, called, depth)
+	a.run(&shellState{cwd: cwd, vars: map[string][]string{}}, splitShell(text), depth)
 }
 
-// run analyzes the commands of a script in order. called holds the names the script
-// runs as commands: the body of a function it calls is analyzed at each call, in the
-// caller's state (a cd in it changes the caller's directory, as in the shell); the body
-// of one it never calls by name (a trap, a function for the scripts sourcing this one)
-// where it is defined, in a scope of its own.
-func (a *execAnalysis) run(st *shellState, segs [][]string, called map[string]bool, depth int) {
+// run analyzes the commands of a script in order. The body of a function is analyzed
+// where it is called, in the caller's state (a cd in it changes the caller's directory,
+// as in the shell); flush analyzes the functions no call reached.
+func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 	for k := 0; k < len(segs); k++ {
 		if name, body, next, ok := funcDefAt(segs, k); ok {
-			a.funcs[name], a.bodies[name] = true, body
-			if !called[name] {
-				a.run(st.subshell(), body, called, depth)
-			}
+			a.define(name, body, st, depth)
 			k = next - 1
 			continue
 		}
@@ -280,7 +296,14 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, called map[string]bo
 			}
 			continue
 		}
-		seg = expandVars(braceSeg(seg), st.vars)
+		seg, ok := braceSeg(seg)
+		if ok {
+			seg, ok = expandVars(seg, st.vars)
+		}
+		if !ok {
+			a.opaque(st.cwd) // too many words to follow
+			continue
+		}
 		if len(seg) > 0 && isAssignments(seg) {
 			for _, w := range seg {
 				name, value, _ := strings.Cut(w, "=")
@@ -300,7 +323,7 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, called map[string]bo
 		}
 		if w := trimKeywords(trimAssignments(seg)); len(w) > 0 && (a.funcs[w[0]] || strings.HasSuffix(w[0], "()")) {
 			a.redirects(w, st.cwd)
-			a.call(st, w[0], called, depth)
+			a.call(st, w[0])
 			continue
 		}
 		if a.builtin(seg, st, depth) {
@@ -310,19 +333,111 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, called map[string]bo
 	}
 }
 
-// call analyzes the body of the shell function name called in state st.
-func (a *execAnalysis) call(st *shellState, name string, called map[string]bool, depth int) {
-	body, ok := a.bodies[name]
-	switch {
-	case !ok || a.calling[name]:
-		// Defined where it cannot be followed (its body was analyzed there), or a
-		// recursive call (the body is being analyzed).
-	case a.calls >= maxCalls:
-		a.opaque(st.cwd)
-	default:
-		a.calls++
+// define records the definition of shell function name in state st. A new body
+// invalidates the calls analyzed so far (they may call it).
+func (a *execAnalysis) define(name string, body [][]string, st *shellState, depth int) {
+	a.funcs[name] = true
+	if d := a.defs[name]; d != nil && &d.body[0] == &body[0] && len(d.body) == len(body) {
+		return // the same definition again (a body defining a function, called twice)
+	}
+	a.defs[name] = &funcDef{body: body, st: st.subshell(), depth: depth}
+	a.pending = append(a.pending, name)
+	clear(a.memo)
+	clear(a.relevant)
+}
+
+// call analyzes the body of the shell function name called in state st, applying what
+// it changes to st. A call in a state analyzed before replays its result.
+func (a *execAnalysis) call(st *shellState, name string) {
+	d := a.defs[name]
+	if d == nil || a.calling[name] {
+		// Not defined yet (flush analyzes it), or a recursive call (the body is being
+		// analyzed).
+		return
+	}
+	key := a.callKey(st, name)
+	if r, ok := a.memo[key]; ok {
+		st.cwd, st.dirs = r.cwd, slices.Clone(r.dirs)
+		maps.Copy(st.vars, r.vars)
+		return
+	}
+	a.calling[name] = true
+	defer delete(a.calling, name)
+	a.analyzed[name] = true
+	if a.calls >= maxCalls {
+		if scope := name + "\x00scope"; !a.analyzed[scope] {
+			a.analyzed[scope] = true
+			a.run(st.subshell(), d.body, d.depth)
+		}
+		return
+	}
+	a.calls++
+	before := maps.Clone(st.vars)
+	a.run(st, d.body, d.depth)
+	changed := map[string][]string{}
+	for k, v := range st.vars {
+		if old, ok := before[k]; !ok || !slices.Equal(old, v) {
+			changed[k] = v
+		}
+	}
+	a.memo[key] = callResult{cwd: st.cwd, dirs: slices.Clone(st.dirs), vars: changed}
+}
+
+// callKey identifies the state a call of name is analyzed in: the working directory,
+// the pushd stack and the values of the variables its body (and the functions it calls)
+// may use.
+func (a *execAnalysis) callKey(st *shellState, name string) string {
+	var b strings.Builder
+	b.WriteString(name + "\x00" + st.cwd + "\x00" + strings.Join(st.dirs, "\x1f"))
+	for _, v := range a.relevantVars(name, map[string]bool{}) {
+		vals, ok := st.vars[v]
+		fmt.Fprintf(&b, "\x00%s=%v:%s", v, ok, strings.Join(vals, "\x1f"))
+	}
+	return b.String()
+}
+
+// relevantVars returns the variables the body of function name refers to, also through
+// the functions it calls.
+func (a *execAnalysis) relevantVars(name string, seen map[string]bool) []string {
+	if vs, ok := a.relevant[name]; ok {
+		return vs
+	}
+	d := a.defs[name]
+	if d == nil || seen[name] {
+		return nil
+	}
+	seen[name] = true
+	set := map[string]bool{}
+	for _, seg := range d.body {
+		for _, w := range seg {
+			for _, m := range varRef.FindAllStringSubmatch(w, -1) {
+				set[m[1]+m[2]] = true
+			}
+		}
+		if w := trimKeywords(trimAssignments(seg)); len(w) > 0 && a.defs[w[0]] != nil {
+			for _, v := range a.relevantVars(w[0], seen) {
+				set[v] = true
+			}
+		}
+	}
+	vs := slices.Sorted(maps.Keys(set))
+	a.relevant[name] = vs
+	return vs
+}
+
+// flush analyzes the bodies of the functions no call reached (a trap handler, one
+// called through a variable or a command substitution, a library function for the
+// scripts sourcing it), each in a scope of its own, in the state where it was defined.
+func (a *execAnalysis) flush() {
+	for i := 0; i < len(a.pending); i++ { // analyzing a body may define more
+		name := a.pending[i]
+		if a.analyzed[name] {
+			continue
+		}
+		a.analyzed[name] = true
+		d := a.defs[name]
 		a.calling[name] = true
-		a.run(st, body, called, depth)
+		a.run(d.st.subshell(), d.body, d.depth)
 		delete(a.calling, name)
 	}
 }
@@ -387,21 +502,6 @@ func braceDepth(seg []string) int {
 	return n
 }
 
-// calledNames adds to called the names the segments run as commands (outside function
-// definitions, inside their bodies).
-func calledNames(segs [][]string, called map[string]bool) {
-	for k := 0; k < len(segs); k++ {
-		if _, body, next, ok := funcDefAt(segs, k); ok {
-			calledNames(body, called)
-			k = next - 1
-			continue
-		}
-		if w := trimKeywords(trimAssignments(segs[k])); len(w) > 0 {
-			called[w[0]] = true
-		}
-	}
-}
-
 func trimKeywords(seg []string) []string {
 	for len(seg) > 0 && keywords[seg[0]] {
 		seg = seg[1:]
@@ -421,7 +521,7 @@ func (a *execAnalysis) redirects(seg []string, cwd string) {
 }
 
 var (
-	funcDef = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)`)
+	funcDefRe = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)`)
 	// funcName matches the names of shell functions (bash also allows "-", "." and ":").
 	funcName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.:-]*$`)
 	varRef   = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
@@ -449,33 +549,45 @@ func isAssignments(seg []string) bool {
 }
 
 // expandVars substitutes shell variables assigned earlier in the script; a word using
-// a variable with several values (a for-loop list) becomes several words. Unknown
-// variables are left in place (and make the command unresolved).
-func expandVars(seg []string, vars map[string][]string) []string {
-	var out []string
-	for _, w := range seg {
+// a variable with several values (a for-loop list) becomes a word per value (the same
+// value for every use of the variable in the word). Unknown variables are left in place
+// (and make the command unresolved). ok is false when the command would have more than
+// maxWords words (and more than it had).
+func expandVars(seg []string, vars map[string][]string) (out []string, ok bool) {
+	limit := max(maxWords, len(seg))
+	for i, w := range seg {
 		if !strings.Contains(w, "$") {
 			out = append(out, w)
 			continue
 		}
 		words := []string{w}
+		done := map[string]bool{}
 		for _, m := range varRef.FindAllStringSubmatch(w, -1) {
 			name := m[1] + m[2]
 			vals, ok := vars[name]
-			if !ok {
+			if !ok || done[name] {
 				continue
 			}
+			done[name] = true
 			var next []string
 			for _, cur := range words {
 				for _, v := range vals {
-					next = append(next, strings.Replace(cur, m[0], v, 1))
+					next = append(next, varRef.ReplaceAllStringFunc(cur, func(ref string) string {
+						if r := varRef.FindStringSubmatch(ref); r[1]+r[2] == name {
+							return v
+						}
+						return ref
+					}))
+					if len(out)+len(next)+len(seg)-i-1 > limit {
+						return nil, false
+					}
 				}
 			}
 			words = next
 		}
 		out = append(out, words...)
 	}
-	return out
+	return out, true
 }
 
 // substitutions handles $(...) and `...` command substitutions: their commands are
@@ -526,9 +638,11 @@ func (a *execAnalysis) substitution(inner, cwd, pwd string, depth int) string {
 		if len(seg) == 0 || seg[0] == subshellOpen || seg[0] == subshellClose {
 			continue
 		}
-		seg = braceSeg(seg)
+		seg, ok := braceSeg(seg)
 		w := trimKeywords(trimAssignments(seg))
 		switch {
+		case !ok:
+			a.opaque(cwd)
 		case len(w) == 0:
 		case w[0] == "cd" || w[0] == "pushd":
 			// $(cd "$(dirname "$0")" && pwd) reads nothing; what follows the cd runs there.
@@ -750,14 +864,17 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		if len(roots) == 0 {
 			roots = []string{"."}
 		}
-		if x.dir {
+		switch sub := replacePlaceholder(x.cmd, roots); {
+		case x.dir:
 			for _, r := range roots {
 				for _, d := range expand(r, cwd) {
 					a.command(replacePlaceholder(x.cmd, []string{"."}), d, depth)
 				}
 			}
-		} else {
-			a.command(replacePlaceholder(x.cmd, roots), cwd, depth)
+		case len(sub) > max(maxWords, len(x.cmd)):
+			a.opaque(cwd)
+		default:
+			a.command(sub, cwd, depth)
 		}
 	}
 	// Without a path, ls lists and find, rg and grep -r search the working directory.
@@ -1369,27 +1486,33 @@ var (
 
 func literal(word string) string { return unquoteMarks.Replace(word) }
 
-// maxBraceWords bounds the words one brace expansion makes.
-const maxBraceWords = 1024
+// maxWords bounds the words brace expansion, variables with several values and find's
+// {} make of a command: past it, the command is opaque.
+const maxWords = 1024
 
 // braceSeg brace-expands the words of a command (bash, zsh and ksh do, and /bin/sh is
 // bash on macOS; dash would open a file literally named "{a,b}", which nobody creates).
-// Assignments are not expanded.
-func braceSeg(seg []string) []string {
-	var out []string
+// Assignments are not expanded. ok is false when the command would have more than
+// maxWords words (and more than it had).
+func braceSeg(seg []string) (out []string, ok bool) {
+	limit := max(maxWords, len(seg))
 	for _, w := range seg {
 		if assign.MatchString(w) {
 			out = append(out, w)
-			continue
+		} else {
+			out = append(out, braceExpand(w)...)
 		}
-		out = append(out, braceExpand(w)...)
+		if len(out) > limit {
+			return nil, false
+		}
 	}
-	return out
+	return out, true
 }
 
 // braceExpand expands the unquoted brace expressions of a word, {a,b} and {1..3} or
 // {a..e} (with an increment), as the shell does before any other expansion; "{}", "{x}"
-// and ${...} stay as they are. Quoted braces are marked (see splitShell).
+// and ${...} stay as they are. Quoted braces are marked (see splitShell). It stops past
+// maxWords words.
 func braceExpand(w string) []string {
 	for i := 0; i < len(w); i++ {
 		if w[i] != '{' {
@@ -1410,8 +1533,8 @@ func braceExpand(w string) []string {
 		var out []string
 		for _, alt := range alts {
 			out = append(out, braceExpand(w[:i]+alt+w[j+1:])...)
-			if len(out) >= maxBraceWords {
-				return out[:maxBraceWords]
+			if len(out) > maxWords {
+				return out[:maxWords+1] // too many (see braceSeg)
 			}
 		}
 		return out
@@ -1489,7 +1612,7 @@ func braceAlternatives(body string) []string {
 		width = max(len(m[1]), len(m[2]))
 	}
 	var out []string
-	for v := from; len(out) < maxBraceWords; {
+	for v := from; len(out) <= maxWords; {
 		switch {
 		case letters:
 			out = append(out, string(rune(v)))
@@ -1717,7 +1840,7 @@ func splitShell(cmd string) [][]string {
 			cur.Reset()
 			inWord = false
 			switch n := len(words); {
-			case w == "in" && n >= 3 && words[n-3] == "case":
+			case w == "in" && n >= 3 && words[n-3] == "case" && len(trimKeywords(words[:n-3])) == 0:
 				cases++
 				pattern = true
 			case w == "esac" && cases > 0 && len(trimKeywords(words)) == 0:

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -12,11 +12,11 @@ import (
 	"github.com/dotneet/smates/internal/testutil"
 )
 
-// A selected function that -test.list does not list ran nothing. One in a file this
-// configuration does not compile (build constraints) is not recorded: a pass would hide
-// it from a configuration that compiles it and shares the state. An example without
-// output is compiled and never runs anywhere: it passes.
-func TestRecordFuncsNotListed(t *testing.T) {
+// A test function declared only in a file the suite's configuration does not compile
+// (build constraints: a //go:build tag the suite does not pass, a GOOS file) is not a
+// unit: go test would run nothing for it, and a pass recorded here would hide it from a
+// configuration that compiles it. With the tag (GOFLAGS) it is one.
+func TestFuncUnitsBuildConstraints(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH")
 	}
@@ -27,6 +27,29 @@ func TestRecordFuncsNotListed(t *testing.T) {
 	write("p/p.go", "package p\n\nfunc F() int { return 1 }\n")
 	write("p/p_test.go", "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { F() }\n\nfunc ExampleF() { F() }\n")
 	write("p/tagged_test.go", "//go:build smates_never\n\npackage p\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {}\n")
+	write("p/x_plan9_test.go", "package p\n\nimport \"testing\"\n\nfunc TestPlan9(t *testing.T) {}\n")
+	files := []string{"p/p_test.go", "p/tagged_test.go", "p/x_plan9_test.go"}
+	units := func(goflags string) []string {
+		suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go", Granularity: config.GranularityFunc, Env: map[string]string{"GOFLAGS": goflags}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return goTest{}.Units(suites[0], files)
+	}
+	if got, want := units(""), []string{"p#TestA", "p#ExampleF"}; !slices.Equal(got, want) {
+		t.Errorf("units %v, want %v", got, want)
+	}
+	if got, want := units("-tags=smates_never"), []string{"p#TestA", "p#ExampleF", "p#TestTagged"}; !slices.Equal(got, want) {
+		t.Errorf("with the tag: units %v, want %v", got, want)
+	}
+	// Cached by file stat: the same answer again.
+	if got, want := units(""), []string{"p#TestA", "p#ExampleF"}; !slices.Equal(got, want) {
+		t.Errorf("again: units %v, want %v", got, want)
+	}
+
+	// Recording: an example without output (compiled, never run anywhere) passes; a
+	// function that still reaches recording without being compiled ran nothing and is
+	// not recorded.
 	suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go", Granularity: config.GranularityFunc, Env: map[string]string{"GOFLAGS": ""}}})
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +69,27 @@ func TestRecordFuncsNotListed(t *testing.T) {
 	if o, ok := res.Observations["p#TestTagged"]; ok {
 		t.Errorf("TestTagged recorded although it never ran: %+v", o)
 	}
-	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "TestTagged") {
-		t.Errorf("warnings %q", res.Warnings)
+}
+
+func TestMayBeConstrained(t *testing.T) {
+	root := t.TempDir()
+	for name, want := range map[string]bool{
+		"a_test.go": false, "linux_test.go": false, "a_linux_test.go": true, "a_windows_amd64_test.go": true,
+		"a_arm64_test.go": true, "a_linuxish_test.go": false, "tagged_test.go": true, "plusbuild_test.go": true,
+		"late_test.go": false,
+	} {
+		content := "package p\n"
+		switch name {
+		case "tagged_test.go":
+			content = "// Copyright\n\n//go:build integration\n\npackage p\n"
+		case "plusbuild_test.go":
+			content = "// +build linux\n\npackage p\n"
+		case "late_test.go":
+			content = "package p\n\n//go:build x\n"
+		}
+		testutil.Write(t, root, name, content)
+		if got := mayBeConstrained(root + "/" + name); got != want {
+			t.Errorf("%s: %v, want %v", name, got, want)
+		}
 	}
 }

@@ -188,7 +188,7 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	}
 
 	var built map[string]bool // the functions of the test files this configuration compiles
-	var unbuilt []string
+	builtKnown := false
 	sem := make(chan struct{}, fr.jobs)
 	var wg sync.WaitGroup
 	var firstErr error
@@ -197,19 +197,15 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 		unit := FuncUnit(dir, name)
 		if !listed[name] {
 			if built == nil {
-				built = fr.builtFuncs(ctx, pkg, dir)
+				built, builtKnown = fr.builtFuncs(ctx, pkg, dir)
 			}
-			if built[name] {
-				// Compiled but never run: an example without output, on every platform.
+			// Compiled but never run (an example without output, on every platform), or
+			// go list cannot tell: a pass. A function of a file this configuration does
+			// not compile is not a unit of the suite (excludedTestFiles); one that still
+			// gets here (build flags passed only to this run) ran nothing and is not
+			// recorded.
+			if built[name] || !builtKnown {
 				fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
-			} else {
-				// Not compiled in this configuration (a //go:build linux file on darwin, a
-				// tag the command does not pass): nothing ran, so nothing is recorded. A
-				// pass would hide the function from a configuration that compiles it and
-				// shares the state (a Linux CI job); left unrecorded, the entry such a run
-				// recorded stays, and without one the function is offered again (it costs
-				// no test process here).
-				unbuilt = append(unbuilt, name)
 			}
 			continue
 		}
@@ -232,24 +228,19 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 		}(j, name)
 	}
 	wg.Wait()
-	if len(unbuilt) > 0 {
-		fr.mu.Lock()
-		fr.res.Warnings = append(fr.res.Warnings, fmt.Sprintf("%s: %s not compiled in this configuration (build constraints): not recorded", dir, strings.Join(unbuilt, ", ")))
-		fr.mu.Unlock()
-	}
 	return "", firstErr
 }
 
 // builtFuncs returns the test functions declared by the test files of package pkg
-// (repo-relative directory dir) that go list says this configuration compiles; none
-// when it cannot tell.
-func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) map[string]bool {
+// (repo-relative directory dir) that go list says this configuration compiles; ok is
+// false when it cannot tell.
+func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) (built map[string]bool, ok bool) {
 	rc := fr.rc
 	argv := append(append([]string{"go", "list", "-f", `{{range .TestGoFiles}}{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{.}}{{"\n"}}{{end}}`}, fr.flags.build...), pkg)
 	var out, errb bytes.Buffer
-	built := map[string]bool{}
+	built = map[string]bool{}
 	if code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &errb); err != nil || code != 0 {
-		return built
+		return built, false
 	}
 	for _, f := range strings.Split(out.String(), "\n") {
 		if f = strings.TrimSpace(f); f == "" {
@@ -263,7 +254,7 @@ func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) map[str
 			built[n] = true
 		}
 	}
-	return built
+	return built, true
 }
 
 func (fr *funcRecorder) add(unit string, o *Observation) {

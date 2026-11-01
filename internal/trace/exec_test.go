@@ -1,10 +1,12 @@
 package trace
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dotneet/smates/internal/testutil"
 )
@@ -286,6 +288,17 @@ func TestExecDepsOperands(t *testing.T) {
 		{"function never called", "f() { cd sub; cat data.txt; }; cat list.txt", []string{"list.txt", "sub/data.txt"}},
 		{"function keyword", "function g { cat data.txt; }; if g; then :; fi", []string{"data.txt"}},
 		{"recursive function", "f() { f; cat data.txt; }; f", []string{"data.txt"}},
+		{"mutually recursive functions", "f() { g; }\ng() { f; cat data.txt; }\nf", []string{"data.txt"}},
+		{"trap handler calling a later function", "cleanup() { helper; }\nhelper() { cat data.txt; }\ntrap cleanup EXIT", []string{"data.txt"}},
+		{"uncalled function calling a later one", "a() { b; }\nb() { cat data.txt; }", []string{"data.txt"}},
+		{"function called before its callee is defined", "main() { helper; }\nhelper() { cat data.txt; }\nmain \"$@\"", []string{"data.txt"}},
+		{"function called through a variable", "cmd_test() { run; }\nrun() { cat list.txt; }\n\"cmd_$1\"", []string{"./**", "list.txt"}},
+		{"function called in a subshell", "f() { cd sub; }\n(f)\ncat data.txt", []string{"data.txt"}},
+		{"helper called many times", "f() { echo hi; }\n" + strings.Repeat("f\n", 250) + "cat data.txt", []string{"data.txt"}},
+		{"calls in different directories", "f() { cat data.txt; }\nf\ncd sub\nf", []string{"data.txt", "sub/data.txt"}},
+		{"calls with different variables", "f() { cat $F; }\nF=data.txt; f; F=list.txt; f", []string{"data.txt", "list.txt"}},
+		{"same variable twice in a word", `for i in 1 2; do cat "f$i" "sub/$i$i"; done`, []string{"f1", "f2", "sub/11?", "sub/22?"}},
+		{"case as an argument", "echo case foo in bar; cat data.txt;; cat list.txt", []string{"data.txt", "list.txt"}},
 
 		// case items: patterns are no commands, their ")" closes no subshell.
 		{"case", `case "$1" in a|b) cat data.txt;; (c) make;; esac; cat list.txt`, []string{"./**", "data.txt", "list.txt"}},
@@ -355,6 +368,44 @@ func TestExecDepsOperands(t *testing.T) {
 		}
 		if got := keys(seen); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s: execDeps(%q) in %s = %v, want %v", c.name, c.args, c.cwd, got, c.want)
+		}
+	}
+}
+
+// Expansions and function calls are bounded: execDeps runs while a run's traces are
+// collected, so a script must not make it hang or produce keys by the thousand.
+func TestExecDepsBounded(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "x", "sub/x")
+	hugeFn := "f() {\n" + strings.Repeat("  cat x; cd sub; cd ..\n", 5000) + "}\n" + strings.Repeat("f\n", 300)
+	var chain strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&chain, "f%d() { f%d; cat x; }\n", i, i+1)
+	}
+	chain.WriteString("f300() { cat sub/x; }\nf0\n")
+	for _, c := range []struct {
+		name    string
+		sh      string
+		maxKeys int
+		want    []string
+	}{
+		{"one variable used thrice", `for i in {1..1000}; do cat "$i/$i/$i"; done`, 1000, nil},
+		{"two loops", "for i in {1..1000}; do for j in {1..1000}; do cat $i/$j; done; done", 1, []string{"./**"}},
+		{"huge range", "cat {1..100000}", 1, []string{"./**"}},
+		{"nested braces", "cat " + strings.Repeat("{a,b}", 40), 1, []string{"./**"}},
+		{"find {} over many words", "find sub -exec cat " + strings.Repeat("{}{}{} ", 2000) + `\;`, 2, nil},
+		{"big function called often", hugeFn, 1, []string{"x"}},
+		{"call chain", chain.String(), 2, []string{"sub/x", "x"}},
+	} {
+		done := make(chan []string, 1)
+		go func() { done <- execKeys(root, []string{c.sh}, true) }()
+		select {
+		case got := <-done:
+			if len(got) > c.maxKeys || (c.want != nil && !reflect.DeepEqual(got, c.want)) {
+				t.Errorf("%s: %d keys %.200v, want at most %d (%v)", c.name, len(got), got, c.maxKeys, c.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: execDeps did not return in 5s", c.name)
 		}
 	}
 }

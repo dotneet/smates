@@ -325,7 +325,8 @@ analyzed from their command line when the child starts (`child_process.*` in Nod
   is analyzed as the command it runs);
 - shell scripts are read and analyzed the same way, following `cd`, `pushd`/`popd`,
   `source`, variables, for-loops, brace expansion, `case`, input redirections, the bodies
-  of the functions they call (where they are called), `$(dirname "$0")` and the commands
+  of the functions they call (where they are called, once per state; a function no call
+  reaches, such as a trap handler, where it is defined), `$(dirname "$0")` and the commands
   of command substitutions (`$(<file)` reads the file);
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name), and on
@@ -354,11 +355,14 @@ and runs each selected function in its own process (`-test.run '^Name$'`, a cove
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
 and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`). A
-selected function `-test.list` does not list runs nothing: an example without output
-(compiled, never run anywhere) passes; one in a file this configuration does not compile
-(a `//go:build linux` file recorded on darwin, a tag the command does not pass) is not
-recorded, with a warning, so a shared state keeps what a configuration that compiles it
-recorded (without such an entry it is selected again, but runs no test process).
+function declared only in a test file the suite's configuration does not compile (build
+constraints: a `//go:build linux` file on darwin, a tag neither `GOFLAGS` nor the command
+passes; `go list -find` over the packages of the test files that may be constrained by
+name or a build line, cached by file stat) is not a unit there: go test would run nothing
+for it, and a pass would hide it from a configuration that compiles it. A selected
+function `-test.list` does not list runs nothing: an example without output (compiled,
+never run anywhere) passes, as does any when `go list` fails; one go list says is not
+compiled (build flags passed to this run only) is not recorded.
 Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
 binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
 (blocks placed by `//line` in a file that is not there: every Go file of the package);
