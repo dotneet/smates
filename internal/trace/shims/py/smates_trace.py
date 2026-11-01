@@ -9,6 +9,7 @@ $SMATES_TRACE_DIR/proc-<pid>-0.jsonl, using the same protocol as the Node shim:
     {"k": "dir", "p": "/abs/dir"}          a directory was listed
     {"k": "probe", "p": "/abs/path"}       existence of a path was checked (stat/access)
     {"k": "exec", "args": [...], "shell": false, "cwd": "/abs"}  a child process started
+                                           ("trunc": true: args cut short, see _MAX_ARGV)
     {"k": "env", "p": "NAME"}              an environment variable was read (never its value)
     {"k": "ctx", "id": "test:/abs/file", "t": ms}   attribution context switch
     {"k": "uses", "id": "/abs/test_file", "ctx": ["fixture:..."]}
@@ -36,7 +37,6 @@ when Node is traced, NODE_OPTIONS) added where missing, so they see them in thei
 environment.
 """
 
-import functools
 import os
 import sys
 import threading
@@ -278,7 +278,7 @@ class _Tracer:
             "ppid": os.getppid(),
             "anc": anc,
             "tid": 0,
-            "argv": list(sys.argv) if hasattr(sys, "argv") else [],
+            "argv": _cut_argv(list(sys.argv), _MAX_ARGV)[0] if hasattr(sys, "argv") else [],
             "cwd": _safe_cwd(),
             "t": int(time.time() * 1000),
             "lang": "python",
@@ -339,9 +339,22 @@ class _Tracer:
                 anc = os.environ.get("SMATES_TRACE_PARENT", "")
             finally:
                 self._local.busy = False
-            # The parent's context: one it exported (or inherited), else none of its own
-            # yet (a pool a conftest creates at import), followed from there.
-            pctx = self.exported or "%d-0:%s" % (os.getppid(), self.ctx)
+            # The parent's context: one it exported, else none of its own yet (a pool a
+            # conftest creates at import), followed from there. A context the parent
+            # only inherited is not where this child starts: a long-lived parent (the
+            # forkserver multiprocessing starts during the first test that uses it, a
+            # server a fixture starts) forks children for later tests too. Without one,
+            # smates attributes the child to the context its nearest traced ancestor
+            # with contexts is in when the child starts.
+            own = "%d-0:" % os.getppid()
+            pctx = self.exported or own + self.ctx
+            if not pctx.startswith(own):
+                # Nor where the child's own children start.
+                pctx, self.exported = "", None
+                try:
+                    del os.environ["SMATES_TRACE_CTX"]
+                except KeyError:
+                    pass
             self._pending = (self._start_event(anc, pctx), [])
             mon = getattr(sys, "monitoring", None)
             if mon is not None and self.tool is not None:
@@ -795,30 +808,73 @@ class _Tracer:
             return
         if self._follow is not None:
             self._follow_parent()
+        argv, cut = _cut_argv(argv, _MAX_ARGV)
         if replace and self._pending is not None:
             # A forked child that execs (os.spawn* on POSIX, pty.fork) is that program;
             # a traced one records itself, with the same traced ancestor.
             self._begin(argv, own=False)
-        self.write({"k": "exec", "args": argv, "shell": shell, "cwd": cwd})
+        ev = {"k": "exec", "args": argv, "shell": shell, "cwd": cwd}
+        if cut:
+            ev["trunc"] = True
+        self.write(ev)
 
     def _exit(self):
         self.write({"k": "exit", "code": None, "t": int(time.time() * 1000)})
         self.enabled = False
 
 
+# Command lines are cut to this many characters in exec events (a test may pass
+# megabytes of arguments, to provoke E2BIG say), marked "trunc": smates then takes the
+# command for one that may read anything below its working directory.
+_MAX_ARGV = 256 * 1024
+
+
+def _cut_argv(argv, limit):
+    """Returns argv cut to limit characters in all, and whether it was cut."""
+    n = 0
+    for i, a in enumerate(argv):
+        n += len(a)
+        if n > limit:
+            return argv[:i] + [a[: len(a) - (n - limit)]], True
+    return argv, False
+
+
+def _os_attr(name):
+    """os.<name> (what a pickled _OsFunction becomes)."""
+    return getattr(os, name)
+
+
+class _OsFunction:
+    """A replaced os function. Like the builtin it replaces, it does not bind as a method
+    (pathlib keeps os.stat and others as class attributes before 3.11; functools.partial
+    is a method descriptor from 3.14 and warns about it in 3.13) and pickles by name
+    (multiprocessing sends os.stat to pool workers: Pool().map(os.stat, files))."""
+
+    def __init__(self, name, orig, fn):
+        self._name = name
+        self._fn = fn
+        for attr in ("__name__", "__qualname__", "__doc__", "__module__"):
+            try:
+                setattr(self, attr, getattr(orig, attr))
+            except (AttributeError, TypeError):
+                pass
+        self.__wrapped__ = orig
+        self.__smates__ = True
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+    def __reduce__(self):
+        return (_os_attr, (self._name,))
+
+    def __repr__(self):
+        return repr(self.__wrapped__)
+
+
 def _replace_os(name, orig, fn):
-    """Replaces os.<name> with fn, as a callable that does not bind as a method like the
-    builtin it replaces (pathlib keeps os.stat and others as class attributes before
-    3.11), also in the os.supports_* sets listing the original (shutil picks its rmtree
-    implementation from them)."""
-    new = functools.partial(fn)
-    for attr in ("__name__", "__qualname__", "__doc__", "__module__"):
-        try:
-            setattr(new, attr, getattr(orig, attr))
-        except (AttributeError, TypeError):
-            pass
-    new.__wrapped__ = orig
-    new.__smates__ = True
+    """Replaces os.<name> with fn (as an _OsFunction), also in the os.supports_* sets
+    listing the original (shutil picks its rmtree implementation from them)."""
+    new = _OsFunction(name, orig, fn)
     setattr(os, name, new)
     for s in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks", "supports_effective_ids"):
         funcs = getattr(os, s, None)

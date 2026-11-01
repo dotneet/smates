@@ -653,3 +653,247 @@ print(pathlib.Path("main.py").stat().st_size > 0, pathlib.Path("main.py").exists
 		t.Errorf("the traced run left no trace")
 	}
 }
+
+// tracePytestRun runs pytest with tracing in root, whatever its exit code, and returns
+// the attribution and the status of each unit as smates records it (a results file is
+// final, otherwise the unit's status from the process trace).
+func tracePytestRun(t *testing.T, root string, args ...string) (*Attribution, map[string]string) {
+	t.Helper()
+	py := pytestPython(t)
+	sh, traceDir := extractShims(t)
+	argv := append([]string{py, "-m", "pytest", "-q", "-p", "no:cacheprovider"}, args...)
+	out, code := runPy(t, root, PythonEnv(traceDir, root, sh, os.Environ()), argv...)
+	t.Logf("pytest %v exited %d:\n%s", args, code, out)
+	procs, err := Collect(traceDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := Attribute(procs, unitOfPy, Options{})
+	status := map[string]string{}
+	for id, u := range a.Units {
+		status[id] = u.Status
+	}
+	for f, r := range Results(traceDir, root) {
+		status[f] = r.Status
+	}
+	return a, status
+}
+
+func needPyModule(t *testing.T, py, module string) {
+	t.Helper()
+	if err := exec.Command(py, "-c", "import "+module).Run(); err != nil {
+		t.Skipf("%s has no %s", py, module)
+	}
+}
+
+// The forkserver (the default start method on Linux from Python 3.14) starts during the
+// first test using it and forks the workers of later tests: they belong to the test
+// running when they start, not to the one that started the forkserver.
+func TestPytestForkserverPool(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no fork")
+	}
+	root := shimRepo(t, map[string]string{
+		"helper.py": `import multiprocessing
+import os
+import subprocess
+import sys
+
+
+def path(name):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def work(name):
+    with open(path(name)) as f:
+        f.read()
+    # A child of the worker belongs to the same test.
+    subprocess.run([sys.executable, "-c", "open(%r).read()" % path(name + ".child")], check=True)
+
+
+def run(name):
+    with multiprocessing.get_context("forkserver").Pool(1) as p:
+        return p.apply(work, (name,))
+`,
+		"test_a.py": "import helper\n\n\ndef test_a():\n    helper.run('a.txt')\n",
+		"test_b.py": "import helper\n\n\ndef test_b():\n    helper.run('b.txt')\n",
+		"a.txt":     "", "b.txt": "", "a.txt.child": "", "b.txt.child": "",
+	})
+	a := tracePytest(t, root, "-W", "ignore::DeprecationWarning")
+	checkUnit(t, a, "test_a.py", []string{"a.txt", "a.txt.child"}, []string{"b.txt", "b.txt.child"})
+	checkUnit(t, a, "test_b.py", []string{"b.txt", "b.txt.child"}, []string{"a.txt", "a.txt.child"})
+}
+
+// A pytest session a test runs in a child process is part of that test, also when it
+// runs test files of the suite.
+func TestPytestSubprocessSession(t *testing.T) {
+	root := shimRepo(t, map[string]string{
+		"helper.py": "import os\n\n\ndef load(name):\n    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:\n        return f.read()\n",
+		"data.txt":  "", "suite.txt": "",
+		"test_outer.py": `import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def test_outer():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "test_inner.py"), "w") as f:
+        f.write("import sys\nsys.path.insert(0, %r)\nimport helper\n\n\ndef test_inner():\n    helper.load('data.txt')\n" % HERE)
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", d], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+`,
+		"test_meta.py": `import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def test_meta():
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", os.path.join(HERE, "sub", "test_sub.py")], capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout + r.stderr
+`,
+		"sub/test_sub.py": "import helper\n\n\ndef test_sub():\n    helper.load('suite.txt')\n    assert False\n",
+	})
+	a, status := tracePytestRun(t, root, "test_outer.py", "test_meta.py")
+	checkUnit(t, a, "test_outer.py", []string{"data.txt", "helper.py"}, []string{"suite.txt"})
+	checkUnit(t, a, "test_meta.py", []string{"suite.txt", "helper.py", "sub/test_sub.py"}, []string{"data.txt"})
+	if status["test_outer.py"] != "pass" || status["test_meta.py"] != "pass" {
+		t.Errorf("statuses %v", status)
+	}
+	// The inner session's failing test is not a result of the outer run.
+	if s, ok := status["sub/test_sub.py"]; ok {
+		t.Errorf("sub/test_sub.py: %q", s)
+	}
+}
+
+// A file not all of whose tests ran (-x, --maxfail, pytest.exit()) did not pass.
+func TestPytestStoppedFile(t *testing.T) {
+	root := shimRepo(t, map[string]string{
+		"test_a.py": "def test_1():\n    pass\n\n\ndef test_2():\n    assert False\n\n\ndef test_3():\n    pass\n",
+		"test_b.py": "def test_1():\n    pass\n\n\ndef test_2():\n    pass\n",
+		"test_c.py": "import pytest\n\n\ndef test_1():\n    pytest.exit('stop')\n\n\ndef test_2():\n    assert False\n",
+	})
+	_, status := tracePytestRun(t, root, "-x", "test_b.py", "test_a.py")
+	if status["test_a.py"] != "fail" || status["test_b.py"] != "pass" {
+		t.Errorf("-x: statuses %v", status)
+	}
+	_, status = tracePytestRun(t, root, "test_c.py")
+	if status["test_c.py"] != "unknown" {
+		t.Errorf("pytest.exit(): statuses %v", status)
+	}
+}
+
+// With pytest-xdist and -x, a file whose failing test never ran on its worker is not a
+// pass; a complete run passes the files that passed.
+func TestPytestXdistExitFirst(t *testing.T) {
+	needPyModule(t, pytestPython(t), "xdist")
+	var b strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&b, "def test_%d():\n    import time\n    time.sleep(0.05)\n\n\n", i)
+	}
+	passing := b.String()
+	root := shimRepo(t, map[string]string{
+		"test_a.py": "def test_fail():\n    assert False\n",
+		"test_b.py": passing + "def test_zz():\n    assert False, 'never ran'\n",
+	})
+	_, status := tracePytestRun(t, root, "-n", "2", "-x")
+	if status["test_a.py"] != "fail" || status["test_b.py"] == "pass" {
+		t.Errorf("-x: statuses %v", status)
+	}
+	root = shimRepo(t, map[string]string{"test_a.py": "def test_a():\n    pass\n", "test_b.py": passing})
+	_, status = tracePytestRun(t, root, "-n", "2")
+	if status["test_a.py"] != "pass" || status["test_b.py"] != "pass" {
+		t.Errorf("complete run: statuses %v", status)
+	}
+}
+
+// Test files outside the rootdir (-c cfg/pytest.ini, --rootdir) have node ids relative
+// to the arguments, if anything: results are keyed by the files themselves.
+func TestPytestRootdirOutside(t *testing.T) {
+	root := shimRepo(t, map[string]string{
+		"cfg/pytest.ini":  "[pytest]\n",
+		"tests/test_a.py": "def test_ok():\n    pass\n\n\ndef test_bad():\n    assert False\n",
+		"tests/test_b.py": "def test_ok():\n    pass\n",
+		"other/test_c.py": "def test_ok():\n    pass\n\n\ndef test_bad():\n    assert False\n",
+		"other/test_d.py": "import x_missing_module\n",
+	})
+	want := map[string]string{"tests/test_a.py": "fail", "tests/test_b.py": "pass", "other/test_c.py": "fail", "other/test_d.py": "fail"}
+	for _, args := range [][]string{
+		{"-c", "cfg/pytest.ini", "tests", "other/test_c.py", "other/test_d.py"},
+		{"--rootdir=cfg", "tests", "other/test_c.py", "other/test_d.py"},
+	} {
+		_, status := tracePytestRun(t, root, append(args, "--continue-on-collection-errors")...)
+		for f, s := range want {
+			if status[f] != s {
+				t.Errorf("%v: %s: %q, want %q (statuses %v)", args, f, status[f], s, status)
+			}
+		}
+	}
+}
+
+// A command line too long to keep (a test provoking E2BIG) is cut short in the trace:
+// the command may read anything below its working directory.
+func TestPythonShimHugeExec(t *testing.T) {
+	root := shimRepo(t, map[string]string{
+		"test_a.py": "import subprocess\n\nimport pytest\n\n\ndef test_e2big():\n    with pytest.raises(OSError):\n        subprocess.run(['cat', 'x' * 17_000_000])\n",
+	})
+	a := tracePytest(t, root)
+	checkUnit(t, a, "test_a.py", []string{"./**"}, nil)
+}
+
+// Replaced os functions behave like the builtins: they do not bind as methods (from
+// Python 3.14 functools.partial does, and 3.13 warns about it), and they pickle (sent
+// to pool workers) and copy.
+func TestPythonShimOsFunctions(t *testing.T) {
+	py := testPython(t)
+	root := shimRepo(t, map[string]string{
+		"main.py": `import copy
+import multiprocessing
+import os
+import pickle
+import warnings
+
+warnings.simplefilter("error")
+
+
+class FS:
+    stat = os.stat
+    lstat = os.lstat
+    access = os.access
+    open = os.open
+
+
+def main():
+    fs = FS()
+    print(fs.stat(__file__).st_size > 0, fs.lstat(__file__).st_size > 0, fs.access(__file__, os.R_OK))
+    os.close(fs.open(__file__, os.O_RDONLY))
+    for name in ("stat", "lstat", "access", "open", "execve", "posix_spawn", "posix_spawnp", "spawnve", "_exit"):
+        f = getattr(os, name, None)
+        if f is not None:
+            assert pickle.loads(pickle.dumps(f)) is f, name
+            assert copy.deepcopy(f) is f, name
+    with multiprocessing.get_context("spawn").Pool(1) as p:
+        print([s.st_size > 0 for s in p.map(os.stat, [__file__])])
+
+
+if __name__ == "__main__":
+    main()
+`,
+	})
+	sh, traceDir := extractShims(t)
+	plain, code := runPy(t, root, nil, py, "main.py")
+	if code != 0 {
+		t.Fatal(plain)
+	}
+	traced, code := runPy(t, root, PythonEnv(traceDir, root, sh, os.Environ()), py, "main.py")
+	if code != 0 {
+		t.Fatal(traced)
+	}
+	if traced != plain {
+		t.Errorf("traced:\n%s\nwithout tracing:\n%s", traced, plain)
+	}
+}

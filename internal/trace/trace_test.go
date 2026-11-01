@@ -147,6 +147,65 @@ func TestCollectStreams(t *testing.T) {
 	}
 }
 
+// A line too long to read (an exec event of an old shim with a huge command line) is
+// skipped; the rest of the stream is read. A command line the shim cut short makes the
+// command opaque.
+func TestCollectOverlongLine(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "a.txt", "b.txt", "sub/")
+	td := t.TempDir()
+	abs := func(r string) string { return filepath.Join(root, filepath.FromSlash(r)) }
+	stream(t, td, 100, 0,
+		ev{"k": "start", "pid": 100, "ppid": 1, "cwd": root, "t": 1000, "lang": "python"},
+		ev{"k": "read", "p": abs("a.txt")},
+		ev{"k": "exec", "args": []string{"cat", "b.txt", strings.Repeat("x", maxLine)}, "cwd": root},
+		ev{"k": "exec", "args": []string{"cat", "b.tx"}, "cwd": root, "trunc": true},
+		ev{"k": "exec", "args": []string{"cat", "b.tx"}, "cwd": abs("sub"), "trunc": true},
+		ev{"k": "exec", "args": []string{"cat", "b.tx"}, "cwd": "/definitely/outside", "trunc": true},
+		"{\"k\":\"read\",\"p\":\""+abs("b.txt")+"\"}\r\n",
+		ev{"k": "exit", "code": 0, "t": 1500},
+	)
+	testutil.Write(t, td, "results-x.jsonl", strings.Repeat("y", maxLine+1)+"\n"+`{"k":"result","id":"`+abs("a.txt")+`","status":"pass"}`)
+	procs, err := Collect(td, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(procs) != 1 {
+		t.Fatalf("procs %v", procs)
+	}
+	p := procs[0]
+	if got, want := keys(p.Reads), []string{"./**", "a.txt", "b.txt", "sub/**"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reads %v, want %v", got, want)
+	}
+	if p.End != 1500 || p.Exit == nil {
+		t.Errorf("exit after the long line: %+v", p)
+	}
+	if r := Results(td, root); r["a.txt"].Status != "pass" {
+		t.Errorf("results %v", r)
+	}
+}
+
+func TestEachLine(t *testing.T) {
+	long := strings.Repeat("z", 200)
+	var got []string
+	in := "a\n" + long + "\nb\r\n\nc" // no newline at the end
+	if err := eachLine(strings.NewReader(in), 100, func(l []byte) { got = append(got, string(l)) }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a", "b", "", "c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Lines longer than the reader's buffer.
+	got = nil
+	big := strings.Repeat("w", 100_000)
+	if err := eachLine(strings.NewReader(big+"\n"+big+"x\nd\n"), 100_000, func(l []byte) { got = append(got, string(l[:1])+fmt.Sprint(len(l))) }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"w100000", "d1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestCollectEnv(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "src/config.py", "tests/test_a.py")

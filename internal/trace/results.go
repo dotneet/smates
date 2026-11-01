@@ -1,7 +1,6 @@
 package trace
 
 import (
-	"bufio"
 	"encoding/json"
 	"encoding/xml"
 	"os"
@@ -29,18 +28,15 @@ func Results(traceDir, repoRoot string) map[string]Result {
 		if err != nil {
 			continue
 		}
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
+		_ = eachLine(f, maxLine, func(line []byte) {
 			var ev event
-			if json.Unmarshal(sc.Bytes(), &ev) != nil || ev.K != "result" {
-				continue
+			if json.Unmarshal(line, &ev) != nil || ev.K != "result" {
+				return
 			}
-			r, ok := rel(ev.ID)
-			if !ok {
-				continue
+			if r, ok := rel(ev.ID); ok {
+				addResult(out, r, ev.Status, ev.Ms, ev.Msg)
 			}
-			addResult(out, r, ev.Status, ev.Ms, ev.Msg)
-		}
+		})
 		f.Close()
 	}
 	return out

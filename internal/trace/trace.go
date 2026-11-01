@@ -13,6 +13,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -293,6 +294,7 @@ type event struct {
 	Ms     int64    `json:"ms"`
 	Msg    string   `json:"msg"`
 	Pctx   string   `json:"pctx"`
+	Trunc  bool     `json:"trunc"`
 }
 
 var (
@@ -402,8 +404,6 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		return err
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	ctx, spawn := "", ""
 	add := func(kind, r string) string {
 		key := p.add(ctx, kind, r)
@@ -418,10 +418,10 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		}
 		return key
 	}
-	for sc.Scan() {
+	return eachLine(f, maxLine, func(line []byte) {
 		var ev event
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
-			continue // partial line from a killed process
+		if json.Unmarshal(line, &ev) != nil {
+			return // partial line from a killed process
 		}
 		switch ev.K {
 		case "start":
@@ -451,7 +451,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			}
 		case "env":
 			if ev.P == "" {
-				continue
+				return
 			}
 			key := add("env", ev.P)
 			if by, ok := rel(ev.By); ok && ev.By != "" {
@@ -466,6 +466,14 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			cwd := ev.Cwd
 			if cwd == "" {
 				cwd = p.Cwd
+			}
+			if ev.Trunc {
+				// The shim cut a huge command line short: nothing can be told from what
+				// is left, so the command may read anything below its working directory.
+				if k := opaqueKey(cwd, root, rel); k != "" {
+					add("key", k)
+				}
+				break
 			}
 			for _, k := range execDeps(ev.Args, ev.Shell, cwd, root, rel) {
 				add("key", k)
@@ -492,8 +500,62 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				p.End = ev.T
 			}
 		}
+	})
+}
+
+// maxLine bounds a line of a trace stream or results file. The shims keep theirs far
+// shorter (they cut the command lines of exec events); a longer line is skipped rather
+// than failing the whole collection.
+const maxLine = 16 << 20
+
+// eachLine calls fn with every line of r (without its line ending) of at most limit
+// bytes; longer lines are skipped. fn must not keep the slice.
+func eachLine(r io.Reader, limit int, fn func([]byte)) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var buf []byte
+	skip := false
+	for {
+		chunk, err := br.ReadSlice('\n')
+		n := len(buf) + len(chunk)
+		if err == nil {
+			n-- // the newline
+		}
+		switch {
+		case skip:
+		case n > limit:
+			skip, buf = true, buf[:0]
+		case err == nil && len(buf) == 0:
+			fn(bytes.TrimRight(chunk, "\r\n")) // a whole line in the buffer: no copy
+			continue
+		default:
+			buf = append(buf, chunk...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if !skip && len(buf) > 0 {
+			fn(bytes.TrimRight(buf, "\r\n"))
+		}
+		buf, skip = buf[:0], false
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return sc.Err()
+}
+
+// opaqueKey is the key of everything below dir, a command's working directory ("" when
+// dir is outside the repository).
+func opaqueKey(dir, root string, rel func(string) (string, bool)) string {
+	if r, ok := rel(dir); ok {
+		return depkey.Tree(r)
+	}
+	if isRoot(dir, root) {
+		return depkey.Tree(".")
+	}
+	return ""
 }
 
 // relCtx converts "kind:/abs/path" contexts to "kind:repo/rel"; other forms are kept.

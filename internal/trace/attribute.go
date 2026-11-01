@@ -74,10 +74,23 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		return nil
 	}
 
+	// A process started inside a test of a process with contexts (a script, a pool
+	// worker, a pytest session the test runs in a subprocess) is that test's helper,
+	// also when it executes test files itself (a test running pytest on files of the
+	// suite) or has contexts of its own that belong to no unit (the session's tests are
+	// temporary files).
+	helper := map[*Proc]bool{}
+	for _, p := range procs {
+		sp := byKey[p.SpawnKey]
+		if sp != nil && sp != p && sp.HasContexts() && testContext(p.SpawnCtx) && !(p.HasContexts() && hasUnitContexts(p, unitOf)) {
+			helper[p] = true
+		}
+	}
+
 	// Units each process executed itself.
 	own := map[*Proc][]string{}
 	for _, p := range procs {
-		if p.HasContexts() {
+		if p.HasContexts() || helper[p] {
 			continue
 		}
 		seen := map[string]bool{}
@@ -103,7 +116,7 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		sort.Strings(own[p])
 	}
-	owner := func(p *Proc) bool { return len(own[p]) > 0 || p.HasContexts() }
+	owner := func(p *Proc) bool { return !helper[p] && (len(own[p]) > 0 || p.HasContexts()) }
 
 	// Processes that are ancestors of a unit-owning process are runner infrastructure.
 	infra := map[*Proc]bool{}
@@ -190,6 +203,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		return u
 	}
 	for _, p := range procs {
+		if helper[p] {
+			continue
+		}
 		if p.HasContexts() {
 			attributeContexts(p, unitOf, unit)
 			continue
@@ -257,6 +273,33 @@ func namedUnit(p *Proc, units []string, unitOf func(string) string, rel func(str
 		named = u
 	}
 	return named
+}
+
+// testContext reports whether ctx is a context of a test file, of a test or a fixture.
+func testContext(ctx string) bool {
+	kind, _, _ := strings.Cut(ctx, ":")
+	return kind == "test" || kind == "collect" || kind == "fixture"
+}
+
+// hasUnitContexts reports whether contexts, fixtures used or results of p belong to a
+// unit.
+func hasUnitContexts(p *Proc, unitOf func(string) string) bool {
+	for ctx := range p.Ctx {
+		if kind, file, ok := strings.Cut(ctx, ":"); ok && (kind == "test" || kind == "collect") && unitOf(file) != "" {
+			return true
+		}
+	}
+	for file := range p.Uses {
+		if unitOf(file) != "" {
+			return true
+		}
+	}
+	for file := range p.Results {
+		if unitOf(file) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *Unit) {
