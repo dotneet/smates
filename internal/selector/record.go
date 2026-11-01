@@ -52,6 +52,8 @@ type hashCache struct {
 	lists map[string]string   // memoized listing hashes (see listing)
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
+	// legacy memoizes tree and set hashes without the executable marker (Unchanged).
+	legacy map[string]string
 	// since is when the tests started (see PinBefore); zero when not pinned.
 	since time.Time
 }
@@ -237,16 +239,26 @@ func (h *Hasher) set(key string) string {
 	if v, ok := h.setv[d]; ok {
 		return v
 	}
-	sum := sha1.New()
-	for _, f := range d.Files { // sorted
-		sum.Write([]byte(f + "\x00" + h.file(f) + "\n"))
-	}
-	v := "set:" + hex.EncodeToString(sum.Sum(nil))
+	v := h.setSum(d, false)
 	if h.setv == nil {
 		h.setv = map[*ServiceDeps]string{}
 	}
 	h.setv[d] = v
 	return v
+}
+
+// setSum hashes the files of a set; legacy leaves the executable marker out, as smates
+// before it did.
+func (h *Hasher) setSum(d *ServiceDeps, legacy bool) string {
+	sum := sha1.New()
+	for _, f := range d.Files { // sorted
+		v := h.file(f)
+		if legacy {
+			v = gitx.Blob(v)
+		}
+		sum.Write([]byte(f + "\x00" + v + "\n"))
+	}
+	return "set:" + hex.EncodeToString(sum.Sum(nil))
 }
 
 // EnvHash is the hash recorded for an environment variable: "" when it is not set, so
@@ -439,7 +451,7 @@ func (h *Hasher) decls(p string) string {
 		return v.(string)
 	}
 	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
-	if err != nil || gitx.HashBytes(src) != blob {
+	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
 		return blob
 	}
 	v, ok := golang.DeclsHash(src, strings.HasSuffix(p, "_test.go"))
@@ -460,27 +472,79 @@ func (h *Hasher) tree(dir string) string {
 		return v
 	}
 	var v string
-	if _, listed := h.snapEntries(depkey.Listing(dir)); !listed && h.root != "" && dir != "." && !pathutil.IsVendored(dir) {
+	if files, ok := h.treeFiles(dir); !ok {
 		v = h.diskTree(dir)
 	} else {
-		var files []string
-		for f := range h.snap {
-			if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
-				files = append(files, f)
-			}
-		}
-		sort.Strings(files)
-		sum := sha1.New()
-		for _, f := range files {
-			sum.Write([]byte(f + "\x00" + h.snap[f] + "\n"))
-		}
-		v = "tree:" + hex.EncodeToString(sum.Sum(nil))
+		v = h.treeSum(files, false)
 	}
 	if h.trees == nil {
 		h.trees = map[string]string{}
 	}
 	h.trees[dir] = v
 	return v
+}
+
+// treeFiles lists the snapshot's files a tree of dir hashes, sorted; false when the
+// tree is read from disk instead (see tree).
+func (h *Hasher) treeFiles(dir string) ([]string, bool) {
+	if _, listed := h.snapEntries(depkey.Listing(dir)); !listed && h.root != "" && dir != "." && !pathutil.IsVendored(dir) {
+		return nil, false
+	}
+	var files []string
+	for f := range h.snap {
+		if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	return files, true
+}
+
+// treeSum hashes files with their snapshot hashes; legacy leaves the executable marker
+// out, as smates before it did.
+func (h *Hasher) treeSum(files []string, legacy bool) string {
+	sum := sha1.New()
+	for _, f := range files {
+		v := h.snap[f]
+		if legacy {
+			v = gitx.Blob(v)
+		}
+		sum.Write([]byte(f + "\x00" + v + "\n"))
+	}
+	return "tree:" + hex.EncodeToString(sum.Sum(nil))
+}
+
+// Unchanged reports whether the dependency key, recorded with hash recorded, still has
+// it (see gitx.SameHash for hashes recorded without the executable marker). A tree or
+// set recorded by a smates without the marker hashed its files' blobs alone: it is
+// unchanged while that hash is.
+func (h *Hasher) Unchanged(key, recorded string) bool {
+	cur := h.Hash(key)
+	if gitx.SameHash(recorded, cur) {
+		return true
+	}
+	if recorded == "" || cur == "" {
+		return false
+	}
+	kind, p := depkey.Parse(key)
+	if kind != depkey.KindTree && kind != depkey.KindSet {
+		return false
+	}
+	v, ok := h.legacy[key]
+	if !ok {
+		if kind == depkey.KindTree {
+			if files, listed := h.treeFiles(p); listed {
+				v = h.treeSum(files, true)
+			}
+		} else if d := h.sets[key]; d != nil {
+			v = h.setSum(d, true)
+		}
+		if h.legacy == nil {
+			h.legacy = map[string]string{}
+		}
+		h.legacy[key] = v
+	}
+	return v != "" && recorded == v
 }
 
 // maxDiskTree caps the entries diskTree walks (a variable for tests).
@@ -746,7 +810,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		return false
 	}
 	for k, v := range prev.Deps {
-		if h.Hash(k) != v {
+		if !h.Unchanged(k, v) {
 			return false
 		}
 	}
@@ -759,7 +823,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 		if kind, f := depkey.Parse(k); kind == depkey.KindDecls {
 			// The declarations of a Go file: unchanged if the file is.
-			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && was != h.Hash(f)) {
+			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, h.Hash(f))) {
 				return false
 			}
 			continue
@@ -767,7 +831,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		if depkey.IsPseudo(k) {
 			continue
 		}
-		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && was != v) {
+		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, v)) {
 			return false
 		}
 	}

@@ -159,7 +159,7 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		if !ok && h.legacyConfig(d, entry.Deps) {
 			continue
 		}
-		if !ok || h.Hash(d) != recorded && !h.legacySuite(d, recorded) {
+		if !ok || !h.Unchanged(d, recorded) && !h.legacySuite(d, recorded) {
 			t.Changed = append(t.Changed, d)
 		}
 	}
