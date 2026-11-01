@@ -373,7 +373,7 @@ func IgnoreGlobs(c *config.Config) []string {
 // repository root explains nothing: it would hide every change from the orphan check.
 func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
-	case deps[f]:
+	case deps[f], deps[f+configKeySuffix]:
 		return "content"
 	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"

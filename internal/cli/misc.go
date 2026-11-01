@@ -397,7 +397,7 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 			if _, ok := traced[d]; ok {
 				src = append(src, "recorded")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
+			fmt.Fprintf(stdout, "%s\t%s\n", selector.DisplayKey(d), strings.Join(src, ","))
 		}
 		return nil
 	}

@@ -499,4 +499,16 @@ func TestUntestedCode(t *testing.T) {
 	if _, how, _ := sel(); how["cmd/tool/main.go"] != "policy" {
 		t.Errorf("untested: orphan: handling %v", how)
 	}
+
+	// The suite's settings key is shown as the file: why and deps.
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"why", "-C", g.dir, "smates.yml"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "lib") {
+		t.Errorf("why smates.yml: %d %s %s", code, out.String(), errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"deps", "-C", g.dir, "lib"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "smates.yml\t") || strings.Contains(out.String(), "#suite") {
+		t.Errorf("deps lib: %d %s %s", code, out.String(), errb.String())
+	}
 }

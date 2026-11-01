@@ -140,6 +140,18 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 			in.Direct = fh.p.graph.Direct
 		}
 		h := hints.Compute(in)
+		// The suite's settings key is shown, and diffed, as the config file (once,
+		// when the test also read the file).
+		seen := map[string]bool{}
+		cands := h.Candidates[:0]
+		for _, c := range h.Candidates {
+			c.Path = selector.DisplayKey(c.Path)
+			if !seen[c.Path] {
+				seen[c.Path] = true
+				cands = append(cands, c)
+			}
+		}
+		h.Candidates = cands
 		h.Output = hints.CleanOutput(o.Failure)
 		fh.list = append(fh.list, h)
 		fh.queue(sr, h, o.Failure)

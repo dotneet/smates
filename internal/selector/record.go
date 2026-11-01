@@ -81,7 +81,13 @@ func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 // ConfigKey is the dependency key every test of a suite has on its settings in the
 // configuration file at path (hashed as ConfigHash). Reading the file itself records
 // path, hashed by content as any file.
-func ConfigKey(path string) string { return path + "#suite" }
+func ConfigKey(path string) string { return path + configKeySuffix }
+
+const configKeySuffix = "#suite"
+
+// DisplayKey is the file a dependency key stands for when it is shown or diffed: the
+// configuration file for its settings key (ConfigKey), the key itself otherwise.
+func DisplayKey(key string) string { return strings.TrimSuffix(key, configKeySuffix) }
 
 // legacyConfig reports whether key is the settings key of an entry an older smates
 // recorded, when every test depended on the configuration file's content: the entry

@@ -1031,3 +1031,12 @@ func TestSelectConfigReadByTest(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigKeyDisplay(t *testing.T) {
+	if got := Covers(map[string]bool{ConfigKey("smates.yml"): true}, "smates.yml", false); got != "content" {
+		t.Errorf("Covers via the settings key: %q", got)
+	}
+	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
+		t.Error("DisplayKey")
+	}
+}
