@@ -518,6 +518,8 @@ func reasonLabel(r string) string {
 		return "Never recorded"
 	case selector.ReasonAgent:
 		return "Selected by the agent"
+	case selector.ReasonCaller:
+		return "Added by the caller"
 	case selector.ReasonReference:
 		return "Names a changed file"
 	case selector.ReasonOrphan:
@@ -597,6 +599,8 @@ func (v *view) handling(o string) string {
 		return "orphan policy: runs " + strings.Join(suites, ", ") + " in full"
 	case selector.OrphanIgnored:
 		return "ignored (`orphans: ignore`)"
+	case selector.OrphanSkipped:
+		return "skipped by caller (`--orphans=skip`)"
 	case selector.OrphanUntested:
 		return "untested code: no test reaches it"
 	}

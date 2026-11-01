@@ -104,6 +104,9 @@ left to the job that runs that suite). smates then
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
 4. otherwise runs the suites the orphan can affect in full.
 
+A coding agent that calls smates can decide instead, with `--add` and `--orphans`: see
+[Letting the calling agent decide](#letting-the-calling-agent-decide).
+
 Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
 covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
 100 first-parent commits (`--history N`, `--since rev`) against the current dependency
@@ -359,8 +362,8 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
-| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
+| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
@@ -406,7 +409,7 @@ reported).
 **Stats** (`smates stats`) sum up the runs recorded in the state: how many test units
 ran out of how many (skip rate), the recorded test time the skipped units would have
 taken (the time saved, also extrapolated to 30 days), shadow-mode misses and their rate,
-orphans by how they were handled (reference scan, agent, full suite run), agent calls
+orphans by how they were handled (reference scan, agent, full suite run, skipped by caller), agent calls
 with their tokens and cost (when the backend reports one, e.g. `claude -p`), and flaky
 flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
 the state keeps the last 1000 records within 180 days, and `smates state merge` unions
@@ -513,6 +516,42 @@ ok  	example.com/shop/internal/store	0.170s
   against the real test inventory and cached per change. Any failure falls back to
   running the affected suites in full.
 - Fork pull requests get no secrets: smates simply falls back.
+
+### Letting the calling agent decide
+
+When smates is called by a coding agent (Claude Code, Codex, …), that agent already
+knows what it changed and why: asking another LLM is wasteful, and running whole suites
+is slow. The agent can make the orphan decision itself:
+
+1. `smates select --format json` lists `orphan_candidates`, one per orphan:
+   `path`, `status` (`added`/`modified`/`deleted`), `referenced_by` (tests that name the
+   file, with the `file` that names it and whether the test is already `selected`),
+   `suites` (what the orphan policy would run in full) and `handling` (how this
+   selection handled it: `reference`, `agent`, `no-impact`, `policy`, `ignored`,
+   `skipped`). The other fields of the JSON are unchanged.
+2. `smates run --add <suite>:<unit>` adds tests (repeatable; reason `caller`). The unit
+   may also be a test file (`--add api:tests/test_users.py`, `--add pkg/foo_test.go` for
+   a Go package unit; repository-relative, relative to the current directory, or after
+   `suite:` relative to the suite's root; the suite may be left out when only one has
+   it). A name that matches no test of the run is an error (exit 2).
+3. `--orphans=agent|full|skip` overrides `orphans:` for this run: `agent` is the built-in
+   agent, `full` runs the affected suites in full (`orphans: all`), `skip` applies no
+   orphan policy to what the reference scan did not explain.
+
+```sh
+smates select --format json        # read orphan_candidates
+smates run --orphans=skip --add api:tests/test_users.py --add web:src/app.test.ts
+```
+
+The safety principle stays: the caller can only add tests, never remove any that the
+deterministic selection (or the name-reference scan) picked. `--orphans=skip` is the one
+explicit opt-out, for a caller that judged the changes itself: the log, the job summary
+and the run record (`smates stats`) show those orphans as *skipped by caller*, and like
+any handled orphan they are not reported again on the same branch. Both flags are also
+accepted by `smates select` (to preview the result) and as run flags of the git hook
+(`smates hook install -- --orphans=full`). When orphans make whole suites run and the
+caller decided nothing (for example without an API key), the log says how to decide
+instead.
 
 ## Limitations
 

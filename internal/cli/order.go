@@ -70,7 +70,7 @@ func priorityOf(sr *selector.Suite, t *selector.Test, e *state.Entry, direct fun
 			}
 		}
 		return prioIndirect
-	case selector.ReasonReference, selector.ReasonAgent, selector.ReasonOrphan:
+	case selector.ReasonReference, selector.ReasonAgent, selector.ReasonCaller, selector.ReasonOrphan:
 		return prioIndirect
 	}
 	return prioOther

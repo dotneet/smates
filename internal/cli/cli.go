@@ -147,6 +147,7 @@ type project struct {
 	ci        ciInfo
 	log       io.Writer
 	verbose   bool
+	dir       string // -C
 	// others are the suites --suite left out (they still explain changes, see
 	// selector.Input.Others).
 	others []*runner.Suite
@@ -233,7 +234,7 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	}
 	p := &project{
 		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, state: st, snap: snap, files: files,
-		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
+		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose, dir: cf.dir,
 	}
 	return p, nil
 }
@@ -275,6 +276,10 @@ type selectOptions struct {
 	// orphanScope, when non-nil, limits the orphan policy to these files (`smates
 	// watch`: files changed since the previous cycle).
 	orphanScope map[string]bool
+	// orphans overrides the orphan policy (--orphans: agent, full or skip); adds are
+	// the tests the caller adds (--add).
+	orphans string
+	adds    []string
 }
 
 // selection runs deterministic selection and the orphan policy.
@@ -283,6 +288,12 @@ type selection struct {
 	agentNote  string
 	agentDec   *agent.Decision
 	agentCache bool
+	// mentions are the tests that name a changed file (selector.Mentions).
+	mentions []selector.Mention
+	// candidates describe the orphans for a calling agent (orphanCandidates).
+	candidates []orphanCandidate
+	// hint: suites run in full for orphans the caller has not decided about.
+	hint bool
 }
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {
@@ -309,6 +320,10 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	}
 	sel := &selection{res: res}
 	p.handleOrphans(ctx, sel, opt, base)
+	if err := p.applyCallerAdds(res, opt.adds); err != nil {
+		return nil, err
+	}
+	sel.candidates = p.orphanCandidates(sel)
 	return sel, nil
 }
 

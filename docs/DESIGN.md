@@ -199,6 +199,15 @@ recorded entry yet; so is everything without a recorded state, where `D(T)` hold
 4. **The orphan policy** (default without agent: run the suites the orphan can affect, by
    suite root).
 
+A calling agent (a coding agent running smates) can take the place of steps 2 and 3:
+`smates select --format json` reports `orphan_candidates` (status, the tests that name
+each file from step 1's `selector.Mentions`, the suites `OrphanAll` would run, the
+handling), `--add suite:unit|test-file` adds tests with reason `caller` (through
+`Result.Apply`, so it can only select), and `--orphans=agent|full|skip` overrides the
+policy for one run. `skip` is the one explicit opt-out: the orphans are recorded as
+handled `skipped` ("skipped by caller" in the summary and `smates stats`). Step 1 still
+runs, and nothing the caller passes can deselect a test.
+
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change).
 
