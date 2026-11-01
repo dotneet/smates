@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,7 @@ type runFlags struct {
 	noAgent  bool
 	noRecord bool
 	shadow   bool
+	failFast bool
 	shard    string
 	dryRun   bool
 	explain  bool
@@ -59,6 +61,7 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs.BoolVar(&f.noAgent, "no-agent", false, "do not call the agent for unattributed changes")
 	fs.BoolVar(&f.noRecord, "no-record", false, "run without tracing and without updating the state")
 	fs.BoolVar(&f.shadow, "shadow", false, "run every test but report which failures the selection would have missed")
+	fs.BoolVar(&f.failFast, "fail-fast", false, "start no further test batch after one fails (tests run likeliest-to-fail first)")
 	fs.StringVar(&f.shard, "shard", "", "run shard `I/N` of the selected tests (tests are assigned to shards by a stable hash)")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "print the commands instead of running them")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
@@ -75,6 +78,9 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	}
 	if f.shadow && f.shardN > 1 {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
+	}
+	if f.shadow && f.failFast {
+		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
 	}
 	return &f, nil
 }
@@ -105,12 +111,16 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
-	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, record: !f.noRecord, self: selfPath(), ran: map[string]map[string]string{}}
+	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, record: !f.noRecord, self: selfPath(),
+		ran: map[string]map[string]string{}, started: map[string][]string{}, notRun: map[string][]string{}, results: map[string]*suiteResult{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
+	prioritize(sel.res, p.state, p.direct())
+	batches := c.plan()
+	c.logSkipped()
 	if f.dryRun {
-		c.printCommands()
+		c.printCommands(batches)
 		return 0, nil
 	}
 	if c.record {
@@ -124,13 +134,24 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
 	start := time.Now()
-	for i, sr := range sel.res.Suites {
-		if err := c.runSuite(ctx, i, sr); err != nil {
+	for i, b := range batches {
+		if c.stopped {
+			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+			continue
+		}
+		code, err := c.runBatch(ctx, i, b)
+		if err != nil {
 			return 1, err
 		}
+		if code != 0 && f.failFast && i < len(batches)-1 {
+			c.stopped = true
+			p.logf("--fail-fast: %s failed; starting no further test batch", b.sr.Name)
+		}
 	}
+	hooks.onRan(c.started)
 	c.failures.wait()
 	if c.record {
+		c.recordSuites()
 		if err := c.saveState(); err != nil {
 			return 1, err
 		}
@@ -164,9 +185,13 @@ type cycle struct {
 	failures  *failureHints
 	now       time.Time
 
-	// Accumulated over the suites.
+	// Accumulated over the batches.
 	worst    int
 	ran      map[string]map[string]string // suite -> unit -> status
+	started  map[string][]string          // suite -> units started
+	notRun   map[string][]string          // --fail-fast: suite -> units not started after a failure
+	stopped  bool                         // --fail-fast stopped the run
+	results  map[string]*suiteResult      // suite -> outcomes to record
 	escapes  []string                     // shadow: failing tests the selection would have skipped
 	possible []string                     // shadow: skipped tests failed only by the run's exit code
 	flakes   []flakeReport
@@ -227,71 +252,115 @@ func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runne
 	return rc
 }
 
-// printCommands prints the command each suite would run (--dry-run).
-func (c *cycle) printCommands() {
-	for _, sr := range c.sel.res.Suites {
-		units, full := c.units(sr)
-		if len(units) == 0 {
-			c.p.logf("%s: no tests selected, skipping", sr.Name)
-			continue
-		}
-		rc := c.runContext(sr, units, full)
+// printCommands prints the command each batch would run (--dry-run).
+func (c *cycle) printCommands(batches []*batch) {
+	for _, b := range batches {
+		rc := c.runContext(b.sr, b.units, b.full)
 		argv, _ := rc.CommandLine(nil, rc.RelArgs(""))
 		if rc.All {
 			argv, _ = rc.CommandLine(nil, nil)
 		}
-		fmt.Fprintf(c.stdout, "(cd %s && %s)\n", sr.Suite.Root, strings.Join(argv, " "))
+		fmt.Fprintf(c.stdout, "(cd %s && %s)\n", b.sr.Suite.Root, strings.Join(argv, " "))
 	}
 }
 
-// runSuite runs the units of the i-th suite and records their outcomes.
-func (c *cycle) runSuite(ctx context.Context, i int, sr *selector.Suite) error {
-	p := c.p
-	units, full := c.units(sr)
-	if len(units) == 0 {
-		p.logf("%s: no tests selected, skipping", sr.Name)
-		return nil
-	}
-	rc := c.runContext(sr, units, full)
-	if c.record {
-		rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("suite-%d", i))
-		if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
-			return err
+// logSkipped logs the suites that run nothing.
+func (c *cycle) logSkipped() {
+	for _, sr := range c.sel.res.Suites {
+		if units, _ := c.units(sr); len(units) == 0 {
+			c.p.logf("%s: no tests selected, skipping", sr.Name)
 		}
 	}
-	p.logf("%s: running %d test unit(s) with %s", sr.Name, len(units), sr.Suite.Runner)
+}
+
+// suiteResult collects the outcomes of a suite's batches until they are recorded.
+type suiteResult struct {
+	obs     map[string]*runner.Observation
+	readsBy map[string]map[string]bool
+	retried map[string]*runner.Observation
+	// full: the suite runs every test (its entries are replaced when every batch of it
+	// ran).
+	full bool
+}
+
+// runBatch runs the i-th batch and collects its outcomes. It returns the batch's exit
+// code (after retries of known flaky tests).
+func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
+	p, sr := c.p, b.sr
+	rc := c.runContext(sr, b.units, b.full)
+	if c.record {
+		rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("batch-%d", i))
+		if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
+			return 0, err
+		}
+	}
+	if b.parts > 1 {
+		p.logf("%s: running %d test unit(s) with %s (batch %d of %d: %s)", sr.Name, len(b.units), sr.Suite.Runner, b.part, b.parts, prioLabel(b.prio))
+	} else {
+		p.logf("%s: running %d test unit(s) with %s", sr.Name, len(b.units), sr.Suite.Runner)
+	}
+	c.started[sr.Name] = append(c.started[sr.Name], b.units...)
 	r, err := sr.Suite.Adapter.Run(ctx, rc)
 	if err != nil {
-		return fmt.Errorf("%s: %w", sr.Name, err)
+		return 0, fmt.Errorf("%s: %w", sr.Name, err)
 	}
 	var retried map[string]*runner.Observation
 	if c.record && len(c.f.extra) == 0 {
 		if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	c.worst = max(c.worst, r.ExitCode)
 	for _, w := range r.Warnings {
 		p.logf("%s: %s", sr.Name, w)
 	}
-	settleOutcomes(r, units, c.record, len(c.f.extra) > 0)
-	statuses := map[string]string{}
-	for u, o := range r.Observations {
-		statuses[u] = o.Status
+	settleOutcomes(r, b.units, c.record, len(c.f.extra) > 0)
+	if c.ran[sr.Name] == nil {
+		c.ran[sr.Name] = map[string]string{}
 	}
-	c.ran[sr.Name] = statuses
+	for u, o := range r.Observations {
+		c.ran[sr.Name][u] = o.Status
+	}
 	if c.f.shadow {
 		c.checkShadow(sr, r.Observations)
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
-		if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
+		if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
 		}
-		events := selector.Record(p.state, sr, r.Observations, c.hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(c.f.extra) > 0})
+		res := c.results[sr.Name]
+		if res == nil {
+			res = &suiteResult{obs: map[string]*runner.Observation{}, readsBy: map[string]map[string]bool{}, retried: map[string]*runner.Observation{}}
+			_, res.full = c.units(sr)
+			c.results[sr.Name] = res
+		}
+		maps.Copy(res.obs, r.Observations)
+		maps.Copy(res.retried, retried)
+		for f, keys := range r.ReadsBy {
+			if res.readsBy[f] == nil {
+				res.readsBy[f] = map[string]bool{}
+			}
+			maps.Copy(res.readsBy[f], keys)
+		}
+	}
+	return r.ExitCode, nil
+}
+
+// recordSuites writes the collected outcomes into the state. Units that did not run
+// (--fail-fast) keep their entries, so they stay selected; a suite whose run covered
+// all its tests replaces its entries only when every batch of it ran.
+func (c *cycle) recordSuites() {
+	p := c.p
+	for _, sr := range c.sel.res.Suites {
+		res := c.results[sr.Name]
+		if res == nil {
+			continue
+		}
+		full := res.full && len(c.notRun[sr.Name]) == 0
+		events := selector.Record(p.state, sr, res.obs, c.hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
 	}
-	return nil
 }
 
 // settleOutcomes corrects the outcomes a run reported for its units before they are
@@ -357,8 +426,10 @@ func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observati
 func (c *cycle) saveState() error {
 	p, res := c.p, c.sel.res
 	switch {
-	case p.filtered:
-		// Only some suites ran: the repository-wide snapshot stays as it was.
+	case p.filtered, c.stopped:
+		// Only some suites ran (--suite, or --fail-fast stopped the run): the
+		// repository-wide snapshot stays as it was, so changes and orphans the tests
+		// that did not run would have covered are seen again next time.
 	case res.Mode == selector.ModeAll || c.f.shadow:
 		p.state.Files = map[string]string(p.snap)
 		p.state.Commit = p.repo.Head()
@@ -399,6 +470,8 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 		if len(c.possible) > 0 {
 			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
+	} else if n := countUnits(c.notRun); n > 0 {
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; --fail-fast left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, n)
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.worst)
 	}
@@ -415,6 +488,9 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 			if c.ran[sr.Name][t.ID] == state.Fail {
 				sum.Run.Failed = append(sum.Run.Failed, sr.Name+": "+t.ID)
 			}
+		}
+		for _, u := range c.notRun[sr.Name] {
+			sum.Run.NotRun = append(sum.Run.NotRun, sr.Name+": "+u)
 		}
 	}
 	if sec, ok := flakySection(c.flakes); ok {
@@ -443,7 +519,9 @@ func (c *cycle) writeReport() error {
 		Shadow   bool                         `json:"shadow"`
 		Flaky    []flakeReport                `json:"flaky"`
 		Failures []*hints.Hint                `json:"failure_hints"`
-	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all()}
+		FailFast bool                         `json:"fail_fast"`
+		NotRun   map[string][]string          `json:"not_run"` // --fail-fast: selected units not started
+	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}
