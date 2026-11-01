@@ -131,8 +131,13 @@ func (a *Analyzer) resolveRef(dir string, r ref, add func(string)) {
 		}
 		a.resolvePath(path.Join(dir, spec), add)
 	case refTemplate:
+		// Like cleanSpec for the prefix: `./icons/${n}.svg?raw` loads ./icons/*.svg.
+		suffix := r.suffix
+		if k := strings.IndexAny(suffix, "?#"); k >= 0 {
+			suffix = suffix[:k]
+		}
 		for _, pre := range a.expandPrefix(dir, r.spec, add) {
-			a.matchTemplate(pre, r.suffix, add)
+			a.matchTemplate(pre, suffix, add)
 		}
 	case refGlob:
 		a.matchGlob(dir, r.spec, add)
@@ -164,7 +169,10 @@ func (a *Analyzer) resolveModule(dir, spec string, add func(string)) {
 			a.resolvePath(path.Join(pd, rel), add)
 		}
 	case spec[0] == '#':
+		// package.json "imports" (Node) and tsconfig "paths" (TypeScript and bundlers
+		// check them first; "#lib/*" is a valid key): keep both.
 		a.resolveHashImport(dir, spec, add)
+		a.resolveTSConfig(dir, spec, add)
 	case isExternalScheme(spec):
 	default:
 		a.resolveBare(dir, spec, add)
@@ -175,17 +183,7 @@ func (a *Analyzer) resolveModule(dir, spec string, add func(string)) {
 // tsconfig paths/baseUrl, configured roots and workspace packages. A workspace
 // package's whole-source fallback is used only if nothing else resolved the specifier.
 func (a *Analyzer) resolveBare(dir, spec string, add func(string)) {
-	found := false
-	for _, cd := range a.configDirs(dir) {
-		for _, c := range a.dirConfigs(cd) {
-			if c.resolve(a, spec, add) {
-				found = true
-			}
-		}
-		if found {
-			break
-		}
-	}
+	found := a.resolveTSConfig(dir, spec, add)
 	for _, root := range a.opts.Roots {
 		if a.resolvePath(path.Join(root, spec), add) {
 			found = true
@@ -206,6 +204,23 @@ func (a *Analyzer) resolveBare(dir, spec string, add func(string)) {
 			a.resolveAliasHeuristic(dir, spec, add)
 		}
 	}
+}
+
+// resolveTSConfig resolves a specifier through the tsconfig paths/baseUrl of the
+// nearest config directory that resolves it, and reports whether anything was found.
+func (a *Analyzer) resolveTSConfig(dir, spec string, add func(string)) bool {
+	for _, cd := range a.configDirs(dir) {
+		found := false
+		for _, c := range a.dirConfigs(cd) {
+			if c.resolve(a, spec, add) {
+				found = true
+			}
+		}
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // aliasHeuristics are bundler aliases conventionally configured outside tsconfig
@@ -320,26 +335,12 @@ func (a *Analyzer) expandPrefix(dir, prefix string, add func(string)) []string {
 		if pd, ok := a.nearestPkgDir(dir); ok && pd != "." {
 			push(pd, rel)
 		}
-	case prefix[0] == '#' || isExternalScheme(prefix):
+	case isExternalScheme(prefix):
+	case prefix[0] == '#':
+		// package.json "imports" patterns are not expanded; tsconfig "paths" are.
+		a.expandTSConfig(dir, prefix, push)
 	default:
-		for _, cd := range a.configDirs(dir) {
-			for _, c := range a.dirConfigs(cd) {
-				base := c.pathsBase()
-				for _, r := range c.paths {
-					if !r.star || !strings.HasPrefix(prefix, r.prefix) {
-						continue
-					}
-					for _, t := range r.targets {
-						if k := strings.IndexByte(t, '*'); k >= 0 {
-							push(base, "./"+t[:k]+prefix[len(r.prefix):])
-						}
-					}
-				}
-				if c.hasBase {
-					push(c.baseURL, "./"+prefix)
-				}
-			}
-		}
+		a.expandTSConfig(dir, prefix, push)
 		if name, _ := splitPackage(prefix); len(prefix) > len(name) {
 			for _, d := range a.workspaces()[name] {
 				for _, f := range a.packageFiles(d) {
@@ -355,6 +356,29 @@ func (a *Analyzer) expandPrefix(dir, prefix string, add func(string)) []string {
 		}
 	}
 	return out
+}
+
+// expandTSConfig maps a dynamic specifier prefix through tsconfig "paths" patterns and
+// "baseUrl" of every config at or above dir, passing each (base, relative prefix) to push.
+func (a *Analyzer) expandTSConfig(dir, prefix string, push func(base, p string)) {
+	for _, cd := range a.configDirs(dir) {
+		for _, c := range a.dirConfigs(cd) {
+			for _, r := range c.paths {
+				if !r.star || !strings.HasPrefix(prefix, r.prefix) {
+					continue
+				}
+				for _, t := range r.targets {
+					base, t := c.target(t)
+					if k := strings.IndexByte(t, '*'); k >= 0 {
+						push(base, "./"+t[:k]+prefix[len(r.prefix):])
+					}
+				}
+			}
+			if c.hasBase {
+				push(c.baseURL, "./"+prefix)
+			}
+		}
+	}
 }
 
 // matchTemplate adds files whose path is pre + anything + suffix. The suffix also
