@@ -1,0 +1,95 @@
+package trace
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// runShim runs a script of the repository root with tracing (argv[0] is the interpreter
+// and its tracing flags) and returns the environment variables it was seen to read.
+func runShim(t *testing.T, root, script, code string, argv ...string) []string {
+	t.Helper()
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		t.Skipf("%s not on PATH", argv[0])
+	}
+	sh, err := ExtractShims(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, script), []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	td := t.TempDir()
+	for i, a := range argv {
+		argv[i] = strings.NewReplacer("{node}", sh.Node).Replace(a)
+	}
+	cmd := exec.Command(argv[0], append(argv[1:], script)...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "SMATES_TRACE_DIR="+td, "SMATES_REPO_ROOT="+root, "PYTHONPATH="+sh.Python,
+		"APP_REGION=eu", "APP_COPIED=x", "SET_LATER=outer", "NODE_OPTIONS=", "PYTHONDONTWRITEBYTECODE=1")
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "done") {
+		t.Fatalf("%v: %v\n%s", argv, err, out)
+	}
+	procs, err := Collect(td, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env []string
+	for _, p := range procs {
+		for k := range p.Reads {
+			if name, ok := strings.CutPrefix(k, "$"); ok {
+				env = append(env, name)
+			}
+		}
+	}
+	sort.Strings(env)
+	return env
+}
+
+func TestPythonShimEnv(t *testing.T) {
+	root := repoDir(t)
+	got := runShim(t, root, "t.py", `
+import os
+os.environ.get("APP_REGION")
+"APP_UNSET" in os.environ
+try:
+    os.environ["APP_MISSING"]
+except KeyError:
+    pass
+try:
+    os.getenv(None)  # the caller's TypeError, not one from the shim
+except TypeError:
+    pass
+dict(os.environ)
+os.environ.copy()
+[v for _, v in os.environ.items()]
+os.environ["SET_LATER"] = "inner"
+os.environ["SET_LATER"]
+print("done")
+`, "python3")
+	if want := []string{"APP_MISSING", "APP_REGION", "APP_UNSET"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("read %v, want %v", got, want)
+	}
+}
+
+func TestNodeShimEnv(t *testing.T) {
+	root := repoDir(t)
+	got := runShim(t, root, "t.js", `
+void process.env.APP_REGION;
+void ('APP_UNSET' in process.env);
+const copy = { ...process.env };
+JSON.stringify(process.env);
+Object.keys(process.env);
+process.env.SET_LATER = 'inner';
+void process.env.SET_LATER;
+console.log('done');
+`, "node", "--require={node}")
+	if want := []string{"APP_REGION", "APP_UNSET"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("read %v, want %v", got, want)
+	}
+}

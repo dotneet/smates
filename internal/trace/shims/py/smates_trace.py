@@ -271,14 +271,16 @@ class _Tracer:
             return orig_iter(self_)
 
         def __getitem__(self_, key):
+            # A missing variable (KeyError) is a read too; other errors (a key that is
+            # not a string) are the caller's and propagate unchanged.
             try:
                 value = orig_getitem(self_, key)
             except KeyError:
-                value = None
-                raise
-            finally:
                 if tracer.enabled and not getattr(local, "busy", False):
-                    tracer._env_read(self_, key, value, initial, caller)
+                    tracer._env_read(self_, key, None, initial, caller)
+                raise
+            if tracer.enabled and not getattr(local, "busy", False):
+                tracer._env_read(self_, key, value, initial, caller)
             return value
 
         cls.__iter__ = __iter__

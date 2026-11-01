@@ -386,7 +386,8 @@ ok  	example.com/shop/internal/store	0.170s
   Bun's `Bun.env` / `import.meta.env`), `os.environ` or Go's `os.Getenv`/`os.LookupEnv`.
   What the runtime itself consults (`TZ` for dates, the locale, `GODEBUG`), native code,
   `syscall.Getenv`, and commands smates cannot trace (shell scripts, binaries) are
-  invisible. Values are stored as SHA-256 hashes: a guessable value (a weak password) can
+  invisible. In Go, `t.Setenv` looks the old value up to restore it, so a test that sets
+  a variable still depends on its outer value (it may run more often than needed). Values are stored as SHA-256 hashes: a guessable value (a weak password) can
   be confirmed by whoever reads the state file; list such variables in `env_ignore`.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.

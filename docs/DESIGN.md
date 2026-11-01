@@ -169,7 +169,9 @@ proxied too; vitest's `import.meta.env` reads through `process.env`. Bun's `Bun.
 not configurable and is not traced. Python: `os._Environ.__getitem__` (behind `get`, `in`
 and `os.getenv`) records the name with the nearest repository frame as `by`;
 `__iter__` remembers the frame and instruction that enumerates, and lookups from that
-same instruction are the copy. Go: `getenv` lines of the test log.
+same instruction are the copy. Go: `getenv` lines of the test log; they carry no stack,
+so the lookup `t.Setenv` makes to restore a variable later counts as a read (the test
+depends on the outer value of a variable it sets: more runs, never fewer).
 
 **Python module-level state.** pytest imports a module once per process, and caches
 (`functools.cache`) run once: a read made then belongs to the module that made it
