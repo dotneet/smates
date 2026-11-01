@@ -254,7 +254,11 @@ agent:
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
-selection in a new repository, or permanently on a nightly job.
+selection in a new repository, or permanently on a nightly job. With `--no-record` it
+skips tracing (much cheaper) and leaves the state as it was; escapes are still found for
+runners that report per-file status without tracing: vitest, jest, pytest, `go test`,
+and any runner with a `junit:` report (with the others, unselected tests of a failing
+run are reported as possible escapes).
 
 **Likeliest failures first.** `smates run` starts the selected tests in this order: tests
 that did not pass last time; tests whose own file or a file they import directly changed;
@@ -322,8 +326,9 @@ smates: failure hints for 1 failing test unit(s):
   there are some.
 - Shown in the run log, the step summary (`--summary` / `$GITHUB_STEP_SUMMARY`) and the
   JSON report (`failure_hints`, with the runner's failure output when it reports one:
-  vitest, jest, pytest, `go test`, JUnit). Runs with `--no-record` have no per-test
-  results and no hints.
+  vitest, jest, pytest, `go test`, JUnit). Runs with `--no-record` have them too: those
+  runners report per-file status without tracing; with the others a failing run marks
+  every test it ran as possibly failed.
 - **With the agent** (an API key, not `--no-agent`, `agent.explain_failures` not false),
   up to `agent.explain_max` failures get a one-line probable cause (file, line, reason,
   confidence). It is one tool-less request per failure with the failure output and the

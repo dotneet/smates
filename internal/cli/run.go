@@ -379,6 +379,16 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 			}
 		}
 	}
+	// Without recording nothing is retried from the state: a unit the runner reported
+	// nothing for in a failed run (a startup or global setup error, a runner without
+	// per-file status) may have failed with it, as a traced unit without a status would.
+	if r.ExitCode != 0 && !record {
+		for _, u := range units {
+			if r.Observations[u] == nil {
+				r.Observations[u] = &runner.Observation{Status: state.Fail, Inferred: true}
+			}
+		}
+	}
 	// A failing run in which no unit failed (a crash after the tests, a coverage
 	// threshold, a teardown error) must not record passes.
 	if r.ExitCode != 0 {

@@ -238,6 +238,13 @@ func TestSettleOutcomes(t *testing.T) {
 		t.Errorf("crash after the tests: %+v", o)
 	}
 
+	// Without recording, units a failed run reported nothing for may have failed with it.
+	r = &runner.RunResult{ExitCode: 1, Observations: obs(state.Pass, state.Fail)}
+	settleOutcomes(r, units, false, false)
+	if got := statuses(r); got["a"] != state.Pass || got["b"] != state.Fail || r.Observations["b"].Inferred || got["c"] != state.Fail || !r.Observations["c"].Inferred {
+		t.Errorf("failed run without recording: %v", got)
+	}
+
 	// Arguments passed to the runner may filter tests: no pass is recorded.
 	r = &runner.RunResult{Observations: obs(state.Pass, state.Fail)}
 	settleOutcomes(r, units, true, true)

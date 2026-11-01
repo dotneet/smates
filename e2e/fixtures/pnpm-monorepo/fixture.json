@@ -1,4 +1,5 @@
 {
   "requires": ["node", "pnpm", "sh"],
-  "setup": [["pnpm", "install", "--frozen-lockfile"]]
+  "setup": [["pnpm", "install", "--frozen-lockfile"]],
+  "mutation_no_record": true
 }

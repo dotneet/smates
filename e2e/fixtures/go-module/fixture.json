@@ -1,4 +1,5 @@
 {
   "requires": ["go"],
-  "setup": []
+  "setup": [],
+  "mutation_no_record": true
 }

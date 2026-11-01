@@ -3,5 +3,6 @@
   "setup": [
     ["npm", "ci", "--prefix", "web", "--no-audit", "--no-fund"],
     ["uv", "sync", "--frozen", "--project", "tools"]
-  ]
+  ],
+  "mutation_no_record": true
 }

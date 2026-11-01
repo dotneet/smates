@@ -66,11 +66,12 @@ func (pytest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	var env []string
 	var extra []string
 	if rc.TraceDir != "" {
-		// Without recording the plugin only writes per-file results.
-		env = trace.PytestResultsEnv(rc.TraceDir, rc.Shims(), suiteEnv(rc.Suite))
-	}
-	if rc.Record {
-		env = trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+		if rc.Record {
+			env = trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+		} else {
+			// Without recording the plugin only writes per-file results.
+			env = trace.PytestResultsEnv(rc.TraceDir, rc.Shims(), suiteEnv(rc.Suite))
+		}
 		// One module failing to import would otherwise stop the whole session, leaving
 		// every other test file without a result.
 		if !hasArg(rc, "-x") && !hasArg(rc, "--exitfirst") && !hasArg(rc, "--continue-on-collection-errors") {

@@ -85,6 +85,10 @@ type fixtureSpec struct {
 	MutationSkip []string `json:"mutation_skip"`
 	// MutationOnly, when set, limits the sweep to these globs.
 	MutationOnly []string `json:"mutation_only"`
+	// MutationNoRecord runs the sweep with --no-record: the sweep discards every state it
+	// records, so tracing is wasted when the fixture's runners report per-file status
+	// without it (jest, vitest, pytest, go). SMATES_E2E_MUTATION_RECORD=1 records anyway.
+	MutationNoRecord bool `json:"mutation_no_record"`
 }
 
 // scenario is one entry of fixtures/<name>/scenarios.json.
@@ -136,10 +140,12 @@ type report struct {
 	Tests   map[string][]string          `json:"selected_tests"`
 	Results map[string]map[string]string `json:"results"`
 	Escapes []string                     `json:"escapes"`
-	Exit    int                          `json:"exit_code"`
-	Total   int                          `json:"total"`
-	Sel     int                          `json:"selected"`
-	Hints   []reportHint                 `json:"failure_hints"`
+	// Possible are unselected tests marked failed only because the run failed.
+	Possible []string     `json:"possible_escapes"`
+	Exit     int          `json:"exit_code"`
+	Total    int          `json:"total"`
+	Sel      int          `json:"selected"`
+	Hints    []reportHint `json:"failure_hints"`
 }
 
 // reportHint mirrors hints.Hint.
@@ -462,12 +468,15 @@ func (r *repo) env() []string {
 	return append(env, "CI=", "GITHUB_ACTIONS=", "GITHUB_OUTPUT=", "GITHUB_STEP_SUMMARY=", "PYTHONDONTWRITEBYTECODE=1")
 }
 
-func (r *repo) smates(args ...string) (string, int) {
+func (r *repo) smates(args ...string) (string, int) { return r.smatesEnv(nil, args...) }
+
+// smatesEnv is smates with extra environment variables.
+func (r *repo) smatesEnv(env []string, args ...string) (string, int) {
 	// A stale report from an earlier run must never be mistaken for this run's.
 	os.Remove(r.reportPath())
 	cmd := exec.Command(smatesBin, args...)
 	cmd.Dir = r.dir
-	cmd.Env = r.env()
+	cmd.Env = append(r.env(), env...)
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()
@@ -732,9 +741,22 @@ func TestMutations(t *testing.T) {
 					if err := os.WriteFile(p, m(orig), 0o644); err != nil {
 						t.Fatal(err)
 					}
-					out, _ := r.smates("run", "--shadow", "--no-agent", "--report", r.reportPath())
+					args := []string{"run", "--shadow", "--no-agent", "--report", r.reportPath()}
+					var env []string
+					noRecord := r.spec.MutationNoRecord && os.Getenv("SMATES_E2E_MUTATION_RECORD") == ""
+					if noRecord {
+						// Recording runs go test with -count=1; a cached result would miss a
+						// change to a file outside the module (go does not recheck those).
+						args, env = append(args, "--no-record"), []string{"GOFLAGS=-count=1"}
+					}
+					out, _ := r.smatesEnv(env, args...)
 					rep := r.readReport()
 					failing := rep.failing()
+					if noRecord && len(rep.Possible) > 0 {
+						// Escapes could not be told apart: the runner reported no per-file
+						// status for unselected tests of a failing run.
+						t.Errorf("mutating %s: without recording, unselected tests have no reported status: %v\n%s", f, rep.Possible, tail(out, 60))
+					}
 					mu.Lock()
 					stats = append(stats, fmt.Sprintf("%-50s selected %3d/%-3d failing %3d  orphans %d", f, rep.Sel, rep.Total, len(failing), len(rep.Orphans)))
 					totalSel += rep.Sel
