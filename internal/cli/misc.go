@@ -61,6 +61,20 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		files = append(files, f)
 	}
 	sort.Strings(files)
+	// An existing config is kept unless --force: with --github only the workflow part
+	// runs, on the config's suites.
+	var existing *config.Config
+	if !*print && !*force {
+		if existing, err = config.Load(repo.Root); err != nil {
+			return err
+		}
+		if existing != nil && !*github {
+			return fmt.Errorf("%s already exists (use --force to overwrite, or --github to only generate the workflow from it)", existing.Path)
+		}
+	}
+	if existing != nil {
+		return initWorkflowOnly(repo, existing, files, *patch, asJSON, stdout, stderr)
+	}
 	suites := detect.Suites(repo, files)
 	mk := makefileHints(repo.Root, suites)
 	for _, h := range mk {
@@ -81,9 +95,6 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		return writeJSON(stdout, rep)
 	}
 	path := filepath.Join(repo.Root, "smates.yml")
-	if _, err := os.Stat(path); err == nil && !*force {
-		return fmt.Errorf("smates.yml already exists (use --force to overwrite)")
-	}
 	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
 		return err
 	}
@@ -122,13 +133,46 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		rep.NeedsReview = initReview(repo, suites, files, mk, *github)
 		return writeJSON(stdout, rep)
 	}
-	fmt.Fprint(stdout, `
+	fmt.Fprint(stdout, initNextStepsText)
+	return nil
+}
+
+const initNextStepsText = `
 Next steps:
   smates run --all     # run everything once and record what each test uses
   smates run           # afterwards: run only what your changes can affect
   smates why <file>    # see which tests depend on a file
   smates hook install  # optional: run the affected tests before every git push
-`)
+`
+
+// initWorkflowOnly is `smates init --github` over an existing config (without
+// --force): the config is left untouched and the workflow (or the patch for existing
+// workflows) is generated from its suites.
+func initWorkflowOnly(repo *gitx.Repo, cfg *config.Config, files []string, patch string, asJSON bool, stdout, stderr io.Writer) error {
+	rep := &initReport{Config: cfg.Path, FilesWritten: []string{}, Suites: []initSuite{}, NeedsReview: []reviewItem{}, NextSteps: initNextSteps}
+	for _, s := range cfg.Suites {
+		rep.Suites = append(rep.Suites, initSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Exclude: nonNil(s.Exclude)})
+	}
+	out := stdout
+	if asJSON {
+		out = io.Discard
+	}
+	fmt.Fprintf(out, "%s exists: left unchanged; generating the workflow from its %d suite(s) (use --force to rewrite it)\n", cfg.Path, len(cfg.Suites))
+	wf, err := initGitHub(repo, cfg.Suites, files, false, patch, out, stderr)
+	if err != nil {
+		return err
+	}
+	rep.Workflow = wf
+	if wf.Written {
+		rep.FilesWritten = append(rep.FilesWritten, wf.File)
+	}
+	if wf.PatchFile != "" {
+		rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
+	}
+	if asJSON {
+		rep.NeedsReview = initReview(repo, cfg.Suites, files, nil, true)
+		return writeJSON(stdout, rep)
+	}
 	return nil
 }
 

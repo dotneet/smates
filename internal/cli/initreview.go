@@ -192,11 +192,13 @@ func initReview(repo *gitx.Repo, suites []config.Suite, files []string, mk []mak
 			Reason:   fmt.Sprintf("%s: job %q, step %q runs the tests without smates", st.File, st.Job, st.Step),
 			Evidence: []string{fmt.Sprintf("%s:%d: %s", st.File, st.Line, st.Command)},
 			Action: reviewAction{
-				Description: "replace the step with `uses: " + actSmates + "`: rerun init with --github (and --force, which rewrites smates.yml) for a patch doing it, or edit the workflow by hand",
+				Description: "replace the step with `uses: " + actSmates + "`: write a patch doing it (smates.yml stays as it is), review it, then git apply it",
+				Command:     "smates init --github --patch smates.patch",
 			},
 		}
 		if github {
 			it.Action.Description = "replace the step with `uses: " + actSmates + "`: review workflow.patch (or the --patch file), then git apply it"
+			it.Action.Command = ""
 		}
 		if st.Skip != "" {
 			it.Action = reviewAction{Description: "not patched automatically: " + st.Skip}

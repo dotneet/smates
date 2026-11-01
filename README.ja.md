@@ -163,6 +163,8 @@ smates hook install  # 任意: git push の前に影響するテストを実行
 コメントアウトされた `services:`/`env:` ブロックになります。既存のワークフローがすでにテストを
 実行している場合は 2 つ目のワークフローを書かず(`--force` で書く)、そのステップを smates
 アクションに置き換えるパッチを表示します(`--patch FILE` で `git apply` 用に書き出し)。
+`smates.yml` がすでにある場合、`smates init --github` はそれを変更せず、そのスイートから
+ワークフロー(またはパッチ)だけを生成します(`--force` で `smates.yml` も書き直し)。
 Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml` にコメントの
 `command:`/`env:` ヒントとして書かれます。`smates doctor` も同じ内容に加えて、
 `node_modules` の欠如、`engines.node` を満たさない Node、起動していないサービスを報告します。
@@ -235,7 +237,7 @@ notice を出してスキップし、ジョブは失敗させません。シャ�
 | `smates flaky` | flaky と判明したテストと根拠: `--format text\|json`、`--clear [test...]` |
 | `smates stats` | 記録された実行の効果と選択の信頼性: `--since 30d\|2026-01-02`、`--branch`、`--ci`、`--format text\|json` |
 | `smates orphans` | 直近のコミットを再生し、どのテストも説明しない変更に `ignore:` グロブ(と `inputs:`/`rules:`)を提案: `--history N`、`--since rev`、`--format text\|json`、`--suite`。`--apply` で提案した glob だけを `ignore:` に追記、`--apply --dry-run` で差分を表示 |
-| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | YAML を手で編集せずに `smates.yml` を変更: トップレベルの `ignore:`/`inputs:` へ重複なく追記、またはスカラー値(`orphans`、`state`、`agent.model`、`flaky.retry` など)を設定。コメントとレイアウトは保たれ、書き込む前に検証されます。`--dry-run` で差分表示、`--format json` |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | YAML を手で編集せずに `smates.yml` を変更: トップレベルの `ignore:`/`inputs:` へ重複なく追記、またはスカラー値(`orphans`、`untested`、`state`、`agent.model`、`flaky.retry` など)を設定。コメントとレイアウトは保たれ、書き込む前に検証されます。`--dry-run` で差分表示、`--format json` |
 | `smates state show\|pull\|push\|merge\|clear` | state の確認と移動(`show --format json`。`--json` は非推奨の別名) |
 | `smates hook install\|uninstall\|status` | 影響するテストを実行する git フック |
 

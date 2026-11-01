@@ -162,7 +162,9 @@ the setup.
 in the code, and variables from `.env.example` the code reads, become commented-out
 `services:`/`env:` blocks to check and enable. If an existing workflow already runs the
 tests, it writes no second one (unless `--force`) and prints a patch replacing those
-steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+steps with the smates action (`--patch FILE` writes it for `git apply`). When
+`smates.yml` already exists, `smates init --github` leaves it untouched and only generates
+the workflow (or the patch) from its suites; `--force` rewrites it. Flags and
 variables of a Makefile `test` target become commented `command:`/`env:` hints in
 `smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
 version outside `engines.node`, and services that are not running. smates never lets
@@ -333,7 +335,7 @@ declare none of `depends_on`, `serves` or `rules`.
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
 | `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite`; `--apply` adds the suggested globs to `ignore:` (nothing else), `--apply --dry-run` prints the diff |
-| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `untested`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 

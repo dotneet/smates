@@ -162,7 +162,7 @@ func addGlobs(path, display, key string, globs []string, dryRun bool) (*configEd
 
 const configUsage = `usage: smates config add-ignore <glob>...   add changes that never require tests (top-level ignore:)
        smates config add-input <glob>...    add files every test depends on (top-level inputs:)
-       smates config set <key> <value>      set a scalar key (orphans, state, agent.model, flaky.retry, ...)
+       smates config set <key> <value>      set a scalar key (orphans, untested, state, agent.model, flaky.retry, ...)
 flags: --dry-run (print the diff, write nothing), --format text|json, -C dir, --config file`
 
 func cmdConfig(args []string, stdout, stderr io.Writer) error {

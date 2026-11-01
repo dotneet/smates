@@ -320,7 +320,7 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 			continue
 		}
 		r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates).about(subject).
-			fix(doctorFix{Doc: docURL + "#github-actions"}) // init refuses to run again over an existing smates.yml without --force
+			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "#github-actions"})
 	}
 }
 
