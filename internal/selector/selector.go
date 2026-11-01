@@ -1117,10 +1117,20 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
 				var why, named []string
+				searched := map[string]bool{}
 				for _, d := range s.Deps[t.ID] {
 					if s.Inputs[d] != (tier == 1) {
 						continue
 					}
+					// The declarations of a Go file are searched as the file itself (one
+					// read for both keys).
+					if f, ok := depkey.File(d); ok {
+						d = f
+					}
+					if searched[d] {
+						continue
+					}
+					searched[d] = true
 					h, ok := hits[d]
 					if !ok {
 						h = map[string]bool{}
