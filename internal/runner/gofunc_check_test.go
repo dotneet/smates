@@ -15,6 +15,7 @@ import (
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/testutil"
+	"github.com/dotneet/smates/internal/trace"
 )
 
 // goModule writes a Go module into a fresh repository and returns its func-granularity
@@ -168,7 +169,7 @@ func TestChildCoverFlags(t *testing.T) {
 	if err := json.Unmarshal(data, &ov); err != nil {
 		t.Fatal(err)
 	}
-	src := filepath.Join(work, "smates_cover_test.go")
+	src := filepath.Join(work, "smates_p_test.go")
 	want := map[string]string{filepath.Join(goDir, "p/gen.go"): filepath.Join(goDir, "gen/p.go"), filepath.Join(pkgDir, "zz_smates_cover1_test.go"): src}
 	if len(ov.Replace) != len(want) {
 		t.Errorf("overlay %v, want %v", ov.Replace, want)
@@ -178,7 +179,7 @@ func TestChildCoverFlags(t *testing.T) {
 			t.Errorf("overlay %v, want %v", ov.Replace, want)
 		}
 	}
-	if b, _ := os.ReadFile(src); !strings.Contains(string(b), "package p\n") || !strings.Contains(string(b), childCoverEnv) {
+	if b, _ := os.ReadFile(src); !strings.Contains(string(b), "package p\n") || !strings.Contains(string(b), childCoverEnv) || !strings.Contains(string(b), trace.GoChildLogEnv) {
 		t.Errorf("source:\n%s", b)
 	}
 	// An -overlay only in GOFLAGS is merged too.

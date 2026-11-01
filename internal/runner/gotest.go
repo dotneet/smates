@@ -260,6 +260,12 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 			}
 			kept = append(kept, f)
 		}
+		// Re-executions of a test binary (the helper-process pattern) keep test logs of
+		// their own (see childSource).
+		kept, err = childGoFlags(rc, kept, units)
+		if err != nil {
+			return nil, err
+		}
 		flags := strings.TrimSpace(strings.Join(kept, " ") + " -exec=" + exe + " -count=1")
 		env = []string{"GOFLAGS=" + flags, trace.GoExecEnv + "=1", trace.GoFlagsOrigEnv + "=" + orig, trace.GoExecUserEnv + "=" + userExec}
 		// Node and Python processes started by tests are traced too.
@@ -390,11 +396,21 @@ func lastMessage[T string | []byte](out T) T {
 	return out
 }
 
-// addTestLog adds what a Go test log recorded (absolute paths from trace.ParseTestLog:
-// a directory that was listed ends in a separator, an existence check in "?"; and the
-// environment variables looked up) to an observation.
+// addTestLog adds what a Go test log recorded (absolute paths from trace.GoTestLogs:
+// a directory that was listed ends in a separator, an existence check in "?", a tree in
+// "/**"; and the environment variables looked up) to an observation. A tree of a
+// directory enclosing the repository is the repository's.
 func addTestLog(o *Observation, root string, files, env []string) {
+	tree := string(filepath.Separator) + "**"
 	for _, f := range files {
+		if dir, ok := strings.CutSuffix(f, tree); ok {
+			if rel, ok := pathutil.Rel(root, dir); ok {
+				o.AddFile(depkey.Tree(rel))
+			} else if r, err := filepath.Rel(dir, root); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+				o.AddFile(depkey.Tree("."))
+			}
+			continue
+		}
 		kind := depkey.KindContent
 		switch {
 		case strings.HasSuffix(f, string(filepath.Separator)):
