@@ -188,11 +188,12 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 	c.withFormat("text", "json")
 	c.bareFormatError = true
 	clear := c.Bool("clear", false, "forget the flake evidence of the given units (all when none is given)")
-	if err := c.parse(args); err != nil {
+	units, err := c.parseInterspersed(args)
+	if err != nil {
 		return err
 	}
-	if !*clear && c.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v (units are only taken with --clear)", c.Args())}
+	if !*clear && len(units) > 0 {
+		return usageError{fmt.Errorf("unexpected arguments %v (units are only taken with --clear)", units)}
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
@@ -204,7 +205,7 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 	}
 	if *clear {
 		only := map[string]bool{}
-		for _, a := range c.Args() {
+		for _, a := range units {
 			only[p.relArg(a)] = true
 		}
 		n := 0

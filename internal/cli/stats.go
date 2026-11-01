@@ -21,13 +21,15 @@ import (
 // ---- recording ----
 
 // runRecord summarizes this cycle for `smates stats`. A sharded run counts the units
-// its shard owns, so the records of all shards add up to the whole selection.
+// its shard owns, so the records of all shards add up to the whole selection. Its exit
+// code is the run's (exitCode): a run whose runner could not start counts as failed
+// even when no runner exited non-zero.
 func (c *cycle) runRecord(elapsed time.Duration, watch bool) state.Run {
 	p, res := c.p, c.sel.res
 	r := state.Run{
 		ID: newRunID(), At: c.now, Commit: p.repo.Head(), Branch: first(os.Getenv("SMATES_BRANCH"), p.ci.Branch, p.repo.CurrentBranch()),
 		CI: p.ci.Name, Watch: watch, Mode: string(res.Mode), Shadow: c.f.shadow,
-		ElapsedMs: elapsed.Milliseconds(), ExitCode: c.worst,
+		ElapsedMs: elapsed.Milliseconds(), ExitCode: c.exitCode(nil),
 		Escapes: len(c.escapes), Possible: len(c.possible), Flaky: len(c.flakes), NotRun: countUnits(c.notRun),
 	}
 	if c.f.shardN > 1 {

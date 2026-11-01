@@ -71,7 +71,7 @@ func TestToDecision(t *testing.T) {
 	wantAdd := []selector.Addition{
 		{Suite: "web", Test: "src/db.test.ts", Reason: selector.ReasonAgent, Detail: "runs scripts/seed.sh"},
 		{Suite: "go", Test: "", Reason: selector.ReasonAgent, Detail: "whole suite"},
-		{Suite: "py", Test: "tests/test_api.py", Reason: selector.ReasonAgent, Detail: "agent: possibly affected by an orphan change"},
+		{Suite: "py", Test: "tests/test_api.py", Reason: selector.ReasonAgent, Detail: "possibly affected by an orphan change"},
 	}
 	if !reflect.DeepEqual(d.Add, wantAdd) {
 		t.Errorf("Add = %+v\nwant %+v", d.Add, wantAdd)

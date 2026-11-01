@@ -627,3 +627,48 @@ func TestUntestedCode(t *testing.T) {
 		t.Errorf("deps lib: %d %s %s", code, out.String(), errb.String())
 	}
 }
+
+// -h and --help print the usage and exit 0: of a command (its flags, on stderr as the
+// flag package prints them) and of a command with subcommands (the subcommands and their
+// flags, on stdout); `smates hook <sub> -h` lists only that subcommand's flags.
+func TestCommandHelp(t *testing.T) {
+	for _, c := range []struct {
+		args        []string
+		out, errOut []string // substrings of stdout and stderr
+		notErr      string
+	}{
+		{args: []string{"why", "-h"}, errOut: []string{"-format"}},
+		{args: []string{"run", "--help"}, errOut: []string{"-explain"}},
+		{args: []string{"config", "-h"}, out: []string{"smates config add-ignore", "smates config set", "-dry-run"}},
+		{args: []string{"config", "add-ignore", "-h"}, errOut: []string{"-dry-run"}},
+		{args: []string{"state", "-h"}, out: []string{"smates state show", "smates state merge", "-remote"}},
+		{args: []string{"state", "--help"}, out: []string{"smates state pull|push"}},
+		{args: []string{"hook", "-h"}, out: []string{"smates hook install", "smates hook status", "-append", "-claude"}},
+		{args: []string{"hook", "install", "--help"}, errOut: []string{"-append", "-agent", "-claude"}},
+		{args: []string{"hook", "uninstall", "--help"}, errOut: []string{"-claude"}, notErr: "-append"},
+		{args: []string{"hook", "status", "-h"}, errOut: []string{"-hook"}, notErr: "-agent"},
+		{args: []string{"hook", "run", "-h"}, out: []string{"smates hook run pre-push|pre-commit"}},
+		{args: []string{"hook", "claude-stop", "-h"}, out: []string{"smates hook claude-stop"}},
+	} {
+		var out, errb bytes.Buffer
+		code := Main(c.args, &out, &errb)
+		bad := code != 0 || strings.Contains(errb.String(), "unknown") || strings.Contains(errb.String(), "help requested") ||
+			c.notErr != "" && strings.Contains(errb.String(), c.notErr)
+		for _, s := range c.out {
+			bad = bad || !strings.Contains(out.String(), s)
+		}
+		for _, s := range c.errOut {
+			bad = bad || !strings.Contains(errb.String(), s)
+		}
+		if bad {
+			t.Errorf("smates %s: exit %d\n%s\n--- stderr\n%s", strings.Join(c.args, " "), code, out.String(), errb.String())
+		}
+	}
+	// Without a subcommand, or with an unknown one, it is still a usage error.
+	for _, args := range [][]string{{"config"}, {"state"}, {"hook"}, {"config", "nope"}, {"hook", "nope"}} {
+		var out, errb bytes.Buffer
+		if code := Main(args, &out, &errb); code != ExitUsage {
+			t.Errorf("smates %s: exit %d, want %d", strings.Join(args, " "), code, ExitUsage)
+		}
+	}
+}

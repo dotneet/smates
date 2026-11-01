@@ -44,6 +44,12 @@ type hookTarget struct {
 	manager string
 }
 
+const hookCommands = `usage: smates hook install [flags] [-- run flags]  run the affected tests from a git hook
+       smates hook uninstall [flags]               remove what install wrote
+       smates hook status [flags]                  show whether the hooks are installed
+  --claude installs, removes or shows a Claude Code Stop hook instead of a git hook.
+  The installed hooks call 'smates hook run pre-push|pre-commit' and 'smates hook claude-stop'.`
+
 func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
 		return 2, usageError{errors.New("usage: smates hook install|uninstall|status [--claude]|run|claude-stop")}
@@ -55,23 +61,35 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "claude-stop":
 		return hookClaudeStop(ctx, rest, stdin, stdout, stderr)
 	}
-	fs := flag.NewFlagSet("hook "+sub, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("C", "", "run as if started in `dir`")
-	kind := fs.String("hook", "pre-push", "git hook: pre-push or pre-commit")
-	appendTo := fs.Bool("append", false, "install: add smates to the end of an existing hook script")
-	useAgent := fs.Bool("agent", false, "install: let the hook call the agent for unattributed changes")
-	claude := fs.Bool("claude", false, "a Claude Code Stop hook in .claude/settings.json instead of a git hook")
-	user := fs.Bool("user", false, "with --claude: in ~/.claude/settings.json (every project with a smates.yml)")
-	if err := fs.Parse(rest); err != nil {
-		return 2, usageError{err}
+	help := isHelp(sub)
+	if !help && !slices.Contains([]string{"install", "uninstall", "status"}, sub) {
+		return 2, usageError{fmt.Errorf("unknown hook command %q\n%s", sub, hookCommands)}
+	}
+	c := newCommand("hook "+sub, stderr)
+	dir := c.String("C", "", "run as if started in `dir`")
+	kind := c.String("hook", "pre-push", "git hook: pre-push or pre-commit")
+	// --append and --agent only apply to install (-h lists every flag).
+	appendTo, useAgent := new(bool), new(bool)
+	if sub == "install" || help {
+		c.BoolVar(appendTo, "append", false, "install: add smates to the end of an existing hook script")
+		c.BoolVar(useAgent, "agent", false, "install: let the hook call the agent for unattributed changes")
+	}
+	claude := c.Bool("claude", false, "a Claude Code Stop hook in .claude/settings.json instead of a git hook")
+	user := c.Bool("user", false, "with --claude: in ~/.claude/settings.json (every project with a smates.yml)")
+	if help {
+		printGroupHelp(stdout, hookCommands, c)
+		return 0, nil
+	}
+	runArgs, err := c.parseInterspersed(rest)
+	if err != nil {
+		return 2, err
 	}
 	if *user && !*claude {
 		return 2, usageError{errors.New("--user applies to --claude")}
 	}
 	if *claude {
 		var bad []string
-		fs.Visit(func(f *flag.Flag) {
+		c.Visit(func(f *flag.Flag) {
 			if f.Name == "hook" || f.Name == "append" {
 				bad = append(bad, "--"+f.Name)
 			}
@@ -79,7 +97,7 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		if len(bad) > 0 {
 			return 2, usageError{fmt.Errorf("%s applies to git hooks, not --claude", strings.Join(bad, " and "))}
 		}
-		return claudeHookCmd(sub, *dir, *user, *useAgent, fs.Args(), stdout)
+		return claudeHookCmd(sub, *dir, *user, *useAgent, runArgs, stdout)
 	}
 	if !slices.Contains(hookKinds, *kind) {
 		return 2, usageError{fmt.Errorf("unsupported --hook %q (want %s)", *kind, strings.Join(hookKinds, " or "))}
@@ -100,11 +118,9 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "install":
 		// Without the agent a hook never makes API calls; unattributed changes then run
 		// the affected suites in full. Further `smates run` flags follow `--`.
-		var runArgs []string
 		if !*useAgent {
-			runArgs = append(runArgs, "--no-agent")
+			runArgs = append([]string{"--no-agent"}, runArgs...)
 		}
-		runArgs = append(runArgs, fs.Args()...)
 		err = installHook(h, runArgs, *appendTo, stdout, stderr)
 	case "uninstall":
 		err = uninstallHook(h, stdout)
@@ -373,8 +389,13 @@ func hookStatus(h *hookTarget, stdout io.Writer) error {
 
 // hookRun is what the installed hook calls: `smates hook run <hook> [-- run flags]`.
 func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	usage := fmt.Sprintf("usage: smates hook run %s [-- run flags]", strings.Join(hookKinds, "|"))
+	if len(args) > 0 && isHelp(args[0]) {
+		fmt.Fprintln(stdout, usage)
+		return 0, nil
+	}
 	if len(args) == 0 || !slices.Contains(hookKinds, args[0]) {
-		return 2, usageError{fmt.Errorf("usage: smates hook run %s [-- run flags]", strings.Join(hookKinds, "|"))}
+		return 2, usageError{errors.New(usage)}
 	}
 	kind, runArgs := args[0], args[1:]
 	if len(runArgs) > 0 && runArgs[0] == "--" {
