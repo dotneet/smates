@@ -376,6 +376,39 @@ histories and flake evidence (flip counts take the maximum, since both sides usu
 a past). Outcome histories and flake evidence are optional fields, so state files from
 before them still load and the format version is unchanged.
 
+**Worktrees.** The state is per working tree by default. A linked worktree (its git dir
+differs from the common dir) without a state is seeded on first use (`stateStore` in
+`internal/cli/statestore.go`): from the main worktree's state file (the first entry of
+`git worktree list --porcelain`), else from the remote state ref, fetched under the
+hook's once-an-hour stamp (refs live in the common dir, so one worktree's fetch serves
+all). Per-test entries are valid in any tree (each one is re-checked against its own
+dependency hashes), but the full-tree snapshot is not: the snapshot of another branch
+would report that branch's differences as orphans here. So the seeded snapshot is kept
+only when its commit is an ancestor of HEAD; otherwise it is dropped and changed files
+come from the merge base with the default branch, as for a state without a snapshot. A
+`.state.json.gz.seeded` marker records the source (for `state show`) and keeps a cleared
+state from being seeded again; `state_seed: false` / `SMATES_NO_STATE_SEED` turn it off.
+
+With `state_shared: true` the state is split by what it describes. The entries, the
+agent cache and the run records describe the code and are shared: one file,
+`<git common dir>/smates/state.json.gz`. The snapshot (with its commit and time)
+describes one working tree and stays in it: `.smates/state.snapshot.json.gz`, read in
+place of the shared file's snapshot (a worktree without one has none, and judges changed
+files against the default branch). Writes are load-merge-save under an exclusive lock
+file (`O_CREATE|O_EXCL`, portable to every OS and file system git runs on; a lock older
+than two minutes is stale, since a save takes seconds). Inside the lock the shared file
+is re-read and `State.MergeChanges(base, ours)` applies this process's changes, where
+`base` is the shared state as this process last read or wrote it: an entry ours left
+unchanged keeps the disk's version (another worktree may have updated it); an entry only
+ours changed replaces it outright (so `flaky --clear` is not undone by a merge); an entry
+both changed is combined like `state merge` (newer `At` wins, histories and flake evidence
+unioned). Agent answers and run records are unioned. Entries are never deleted (smates
+never prunes them, and a test missing on one branch may exist on another). The shared
+file also carries the last writer's snapshot, so it stays a complete state for
+`state push` (which in shared mode pushes the entries with this worktree's snapshot) and
+for older smates versions. `state pull` in shared mode merges into the shared entries
+instead of replacing them.
+
 The state also keeps a short record of each `smates run` (`runs`: selection mode, units
 selected/total, recorded duration of the skipped units, exit code, shadow misses, orphan
 handling, agent usage, flaky flips) for `smates stats`. Records carry a random ID, so

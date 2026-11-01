@@ -366,25 +366,106 @@ func (s *State) Merge(other *State) {
 	for name, osu := range other.Suites {
 		su := s.Suite(name)
 		for id, e := range osu.Tests {
-			cur, ok := su.Tests[id]
-			if !ok {
-				su.Tests[id] = e
-				continue
-			}
-			newer, older := cur, e
-			if e.At.After(cur.At) {
-				newer, older = e, cur
-			}
-			merged := *newer
-			merged.History = mergeHistory(newer.History, older.History)
-			merged.Flaky = mergeFlake(newer.Flaky, older.Flaky)
-			su.Tests[id] = &merged
+			su.Tests[id] = mergeEntry(su.Tests[id], e)
 		}
 	}
 	for k, v := range other.AgentCache {
 		s.AgentCache[k] = v
 	}
 	s.Runs = mergeRuns(s.Runs, other.Runs)
+}
+
+// mergeEntry combines two records of one unit: the newer one (by At) wins, outcome
+// histories and flake evidence are combined.
+func mergeEntry(cur, e *Entry) *Entry {
+	if cur == nil {
+		return e
+	}
+	if e == nil {
+		return cur
+	}
+	newer, older := cur, e
+	if e.At.After(cur.At) {
+		newer, older = e, cur
+	}
+	merged := *newer
+	merged.History = mergeHistory(newer.History, older.History)
+	merged.Flaky = mergeFlake(newer.Flaky, older.Flaky)
+	return &merged
+}
+
+// MergeChanges applies to s (typically the state just re-read from disk) the changes
+// ours made to the per-test entries since it was loaded as base (nil: everything in
+// ours counts as a change). An entry ours changed replaces the one in s unless s's
+// entry changed too since base, a concurrent update: then the two are combined like
+// Merge does (newer wins, histories and flake evidence combined). Entries ours left
+// alone keep s's version (or are added when s lacks them). Agent cache entries and run
+// records are unioned. The snapshot (Files, Commit, Created) is left to the caller: it
+// describes one working tree, not the shared entries.
+func (s *State) MergeChanges(base, ours *State) {
+	for name, osu := range ours.Suites {
+		su := s.Suite(name)
+		var bsu *Suite
+		if base != nil {
+			bsu = base.Suites[name]
+		}
+		for id, o := range osu.Tests {
+			var b *Entry
+			if bsu != nil {
+				b = bsu.Tests[id]
+			}
+			d := su.Tests[id]
+			switch {
+			case b != nil && SameEntry(b, o): // unchanged by ours
+				if d == nil {
+					su.Tests[id] = o
+				}
+			case d == nil || (b != nil && SameEntry(d, b)): // changed by ours only
+				su.Tests[id] = o
+			default: // changed on both sides
+				su.Tests[id] = mergeEntry(d, o)
+			}
+		}
+	}
+	for k, v := range ours.AgentCache {
+		s.AgentCache[k] = v
+	}
+	s.Runs = mergeRuns(s.Runs, ours.Runs)
+	if ours.Tool != "" {
+		s.Tool = ours.Tool
+	}
+}
+
+// SameEntry reports whether two entries record the same thing (times compared to the
+// precision the disk format keeps).
+func SameEntry(a, b *Entry) bool {
+	if a == b {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Status != b.Status || a.DurationMs != b.DurationMs || a.Commit != b.Commit || !a.At.Equal(b.At) ||
+		len(a.Deps) != len(b.Deps) || len(a.History) != len(b.History) || (a.Flaky == nil) != (b.Flaky == nil) {
+		return false
+	}
+	for k, v := range a.Deps {
+		if w, ok := b.Deps[k]; !ok || w != v {
+			return false
+		}
+	}
+	for i, x := range a.History {
+		y := b.History[i]
+		if x.Status != y.Status || x.Fingerprint != y.Fingerprint || x.At.Unix() != y.At.Unix() || x.Inferred != y.Inferred {
+			return false
+		}
+	}
+	if f, g := a.Flaky, b.Flaky; f != nil {
+		if f.Count != g.Count || !f.First.Equal(g.First) || !f.Last.Equal(g.Last) || f.Commit != g.Commit || f.Flip != g.Flip {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeHistory unions two outcome histories (both usually share a common past),

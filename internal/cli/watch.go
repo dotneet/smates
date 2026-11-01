@@ -157,9 +157,15 @@ func watchIgnore(p *project) func(string) bool {
 		"**/*___jb_tmp___", "**/*___jb_old___", "**/.vitest-cache/**", "**/.vite/**", "**/coverage/**",
 		"**/.nyc_output/**", "**/*.pyc",
 	}
-	if rel, err := filepath.Rel(p.repo.Root, p.statePath); err == nil && !strings.HasPrefix(rel, "..") {
-		rel = filepath.ToSlash(rel)
-		globs = append(globs, rel, path.Join(path.Dir(rel), ".state-*")) // and state.Save's temp file
+	statePaths := []string{p.statePath}
+	if p.store != nil && p.store.snapPath != "" {
+		statePaths = append(statePaths, p.store.snapPath) // shared mode: this worktree's snapshot
+	}
+	for _, sp := range statePaths {
+		if rel, err := filepath.Rel(p.repo.Root, sp); err == nil && !strings.HasPrefix(rel, "..") {
+			rel = filepath.ToSlash(rel)
+			globs = append(globs, rel, path.Join(path.Dir(rel), ".state-*")) // and state.Save's temp file
+		}
 	}
 	for _, s := range p.suites {
 		if s.Junit != "" {

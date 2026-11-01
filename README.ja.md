@@ -182,6 +182,33 @@ smates は push されるコミットではなく作業ツリーの内容で判�
 正確に判定したいときは、先にコミットするか stash してください。`smates hook uninstall` は
 smates が書いた部分だけを削除し、`smates hook status` はフックの場所を表示します。
 
+### 並行する worktree
+
+コーディングエージェントは複数の `git worktree` で同時に作業することがよくあります。
+state は worktree ごとの `.smates/state.json.gz` なので、新しい worktree は記録がない状態から
+始まってしまいます。そこで、state のないリンクされた worktree では、state を必要とする最初の
+コマンドが次の順で state を用意し(シード)、その出どころを 1 行表示します。
+
+1. メインの worktree に state があれば、それをコピーします。
+2. なければリモートの state(`smates state push`)を使います。fetch はフックと同じく
+   1 時間に 1 回までで、別の worktree が取得済みの state ref は fetch せずに使います。
+
+シードしたスナップショットは、この worktree の履歴にあるコミットで記録されたものだけを残します。
+そうでなければテストごとの記録だけを引き継ぎ、変更ファイルはスナップショットがないときと
+同じくデフォルトブランチと比べて判定します。シードは worktree ごとに 1 回だけで、
+`smates state clear` の後は再シードしません。`smates.yml` の `state_seed: false` または
+`SMATES_NO_STATE_SEED=1` で無効にできます。
+
+どの worktree で学んだことも全 worktree で共有するには `state_shared: true` を設定します。
+テストごとの記録、エージェントの回答、実行記録は git の共通ディレクトリにある 1 つのファイル
+(`.git/smates/state.json.gz`。`smates state path` で表示)に置かれ、各 worktree は自分の
+ファイル全体のスナップショット(`.smates/state.snapshot.json.gz`)だけを持ちます。そのため、
+あるブランチでの実行が別のブランチの変更をこちらの変更に見せることはありません。保存時は
+共有 state の隣のロックファイルを取り、ディスク上の内容にこの実行の変更をマージするので、
+複数の worktree で同時に動く smates が互いの結果を失いません(同じテストを両方が実行した
+場合は新しい結果を採用し、結果の履歴は統合します)。クラッシュしたプロセスが残したロックは
+2 分後に引き継ぎます。`smates state show` は state の場所、共有かどうか、シード元を表示します。
+
 ### GitHub Actions
 
 ```yaml

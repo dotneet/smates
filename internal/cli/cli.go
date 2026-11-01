@@ -140,6 +140,7 @@ type project struct {
 	cfg       *config.Config
 	suites    []*runner.Suite
 	statePath string
+	store     *stateStore
 	state     *state.State
 	snap      gitx.Snapshot
 	files     []string
@@ -219,11 +220,9 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 		}
 		suites = keep
 	}
-	statePath := cf.state
-	if statePath == "" {
-		statePath = filepath.Join(repo.Root, filepath.FromSlash(cfg.State))
-	}
-	st, err := state.Load(statePath)
+	store := openStore(repo, cfg, cf.state, log)
+	statePath := store.path
+	st, err := store.Load()
 	if errors.Is(err, state.ErrUnreadable) {
 		fmt.Fprintf(log, "smates: ignoring unreadable state at %s (%v); starting cold\n", statePath, err)
 		st, err = state.New(), nil
@@ -232,7 +231,7 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 		return nil, err
 	}
 	p := &project{
-		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, state: st, snap: snap, files: files,
+		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, store: store, state: st, snap: snap, files: files,
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
 	}
 	return p, nil
