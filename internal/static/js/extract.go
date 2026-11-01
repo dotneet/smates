@@ -2,6 +2,7 @@ package js
 
 import (
 	"bytes"
+	"path"
 	"strings"
 )
 
@@ -31,12 +32,16 @@ type ref struct {
 	suffix string
 	// recursive is whether a refContext includes subdirectories.
 	recursive bool
+	// mock is whether a refModule is mocked (jest.mock("./x")), so a manual mock in
+	// an adjacent __mocks__ directory may be loaded instead of (or besides) it.
+	mock bool
 }
 
-// mockFns are the methods of vi / jest / vitest that take a module specifier.
+// mockFns are the methods of vi / jest / vitest that take a module specifier, mapped
+// to whether they may load a manual mock from __mocks__.
 var mockFns = map[string]bool{
 	"mock": true, "doMock": true, "unmock": true, "doUnmock": true,
-	"importActual": true, "importMock": true, "requireActual": true, "requireMock": true,
+	"importActual": false, "importMock": true, "requireActual": false, "requireMock": true,
 	"createMockFromModule": true, "genMockFromModule": true, "setMock": true,
 }
 
@@ -59,12 +64,17 @@ func scanSource(src []byte) []ref {
 				refs = p.appendArg(refs, i+2)
 			case p.literal(i + 1): // import "x"
 				refs = p.appendArg(refs, i+1)
-			case p.punct(i+1, '.') && p.ident(i+2, "meta") && p.punct(i+3, '.') && p.punct(i+5, '('):
+			case p.punct(i+1, '.') && p.ident(i+2, "meta") && p.punct(i+3, '.'):
+				// import.meta.glob<{ default: string }>("./x/*.ts")
+				j := p.typeArgs(i + 5)
+				if !p.punct(j, '(') {
+					continue
+				}
 				switch {
 				case p.ident(i+4, "glob") || p.ident(i+4, "globEager"):
-					refs = p.appendGlobs(refs, i+6)
+					refs = p.appendGlobs(refs, j+1)
 				case p.ident(i+4, "resolve"):
-					refs = p.appendArg(refs, i+6)
+					refs = p.appendArg(refs, j+1)
 				}
 			}
 		case "from":
@@ -84,9 +94,17 @@ func scanSource(src []byte) []ref {
 				refs = append(refs, ref{kind: refContext, spec: p.text(i + 4), recursive: recursive})
 			}
 		case "vi", "jest", "vitest":
-			if p.punct(i+1, '.') && p.punct(i+3, '(') && p.toks[i+2].kind == tIdent &&
-				mockFns[string(src[p.toks[i+2].s:p.toks[i+2].e])] {
-				refs = p.appendArg(refs, i+4)
+			if !p.punct(i+1, '.') || p.at(i+2).kind != tIdent {
+				continue
+			}
+			mock, ok := mockFns[string(src[p.toks[i+2].s:p.toks[i+2].e])]
+			// jest.requireActual<typeof import("./x")>("./x")
+			if j := p.typeArgs(i + 3); ok && p.punct(j, '(') {
+				n := len(refs)
+				refs = p.appendArg(refs, j+1)
+				if mock && len(refs) > n && refs[n].kind == refModule {
+					refs[n].mock = true
+				}
 			}
 		case "URL":
 			// new URL("./file", import.meta.url)
@@ -129,6 +147,44 @@ func (p *parser) literal(i int) bool {
 	return t.kind == tString || (t.kind == tTemplate && !t.expr)
 }
 
+// typeArgs returns the index after a TypeScript type argument list <...> starting at
+// token i, or i if there is none (or it is not closed within a short distance). The
+// '>' of an arrow (=>) inside the list does not close it.
+func (p *parser) typeArgs(i int) int {
+	if !p.punct(i, '<') {
+		return i
+	}
+	depth, braces := 0, 0 // braces: depth of object types ({ a: string; b: number })
+	for j := i; j < len(p.toks) && j < i+256; j++ {
+		t := p.toks[j]
+		if t.kind != tPunct {
+			continue
+		}
+		switch t.c {
+		case '<':
+			depth++
+		case '>':
+			if prev := p.at(j - 1); prev.kind == tPunct && prev.c == '=' && prev.e == t.s {
+				continue
+			}
+			if depth--; depth == 0 {
+				return j + 1
+			}
+		case '{':
+			braces++
+		case '}':
+			if braces--; braces < 0 {
+				return i
+			}
+		case ';':
+			if braces == 0 {
+				return i
+			}
+		}
+	}
+	return i
+}
+
 // text returns the cooked value of the literal at i.
 func (p *parser) text(i int) string {
 	t := p.at(i)
@@ -138,9 +194,12 @@ func (p *parser) text(i int) string {
 // appendArg appends the specifier at token i, if it is a literal, a template literal
 // with a static prefix, or a concatenation starting with a literal ("./x/" + name).
 // A leading __dirname or import.meta.dirname counts as the static prefix "."
-// (`${__dirname}/x/${n}.js`, __dirname + "/x/" + n).
+// (`${__dirname}/x/${n}.js`, __dirname + "/x/" + n, path.join(__dirname, "x", n)).
 func (p *parser) appendArg(refs []ref, i int) []ref {
 	t := p.at(i)
+	if r, ok := p.pathJoin(i); ok {
+		return append(refs, r)
+	}
 	switch {
 	case p.literal(i) && p.punct(i+1, '+'):
 		return append(refs, ref{kind: refTemplate, spec: p.text(i), suffix: p.concatSuffix(i + 2)})
@@ -165,6 +224,76 @@ func (p *parser) appendArg(refs []ref, i int) []ref {
 		}
 	}
 	return refs
+}
+
+// pathJoin returns the reference of a path.join or path.resolve call at token i (or a
+// bare join/resolve, as imported from "path") whose first argument is __dirname or
+// import.meta.dirname: path.join(__dirname, "../src", "a") is "../src/a". Arguments
+// after the first non-literal one are unknown, so the literals before it become the
+// static prefix of a template (path.join(__dirname, "fixtures", name) loads any file
+// under ./fixtures/); without a literal before it (path.join(__dirname, name)) the call
+// is left to tracing. An absolute segment (which path.resolve restarts at) is refused.
+func (p *parser) pathJoin(i int) (ref, bool) {
+	j := i
+	if p.ident(j, "path") && p.punct(j+1, '.') {
+		j += 2
+	} else if p.punct(i-1, '.') {
+		return ref{}, false // obj.join(...)
+	}
+	if !(p.ident(j, "join") || p.ident(j, "resolve")) || !p.punct(j+1, '(') {
+		return ref{}, false
+	}
+	k := p.dirname(j + 2)
+	if k == j+2 {
+		return ref{}, false
+	}
+	segs := []string{"."}
+	joined := func() string {
+		s := path.Join(segs...)
+		if !isRelative(s) {
+			s = "./" + s
+		}
+		return s
+	}
+	for {
+		if p.punct(k, ')') {
+			if len(segs) == 1 {
+				return ref{}, false // the directory itself
+			}
+			return ref{kind: refModule, spec: joined()}, true
+		}
+		if !p.punct(k, ',') {
+			return ref{}, false
+		}
+		k++
+		if p.punct(k, ')') {
+			continue // trailing comma
+		}
+		lit := p.literal(k)
+		if lit && strings.HasPrefix(p.text(k), "/") {
+			return ref{}, false
+		}
+		if lit && (p.punct(k+1, ',') || p.punct(k+1, ')')) {
+			segs = append(segs, p.text(k))
+			k++
+			continue
+		}
+		// A non-literal argument, or a concatenation starting with a literal.
+		if lit && p.punct(k+1, '+') {
+			segs = append(segs, p.text(k))
+			return ref{kind: refTemplate, spec: joined()}, true
+		}
+		if len(segs) == 1 {
+			// Nothing static after the directory (path.join(__dirname, name)): every
+			// file next to the importing one would match, which says nothing.
+			return ref{}, false
+		}
+		pre := joined()
+		if !strings.HasSuffix(pre, "/") {
+			pre += "/"
+		}
+		return ref{kind: refTemplate, spec: pre}, true
+	}
 }
 
 // dirname returns the index after a __dirname or import.meta.dirname expression at

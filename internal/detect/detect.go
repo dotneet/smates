@@ -27,6 +27,16 @@ type packageJSON struct {
 	Jest            json.RawMessage   `json:"jest"`
 }
 
+// jestHasKey reports whether the "jest" object of a package.json sets key.
+func jestHasKey(raw json.RawMessage, key string) bool {
+	var m map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	_, ok := m[key]
+	return ok
+}
+
 func (p *packageJSON) has(dep string) bool {
 	_, a := p.Dependencies[dep]
 	_, b := p.DevDependencies[dep]
@@ -89,20 +99,29 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 		test := pj.Scripts["test"]
 		r, command, env := "", "", map[string]string(nil)
+		var tests []string
+		_, craAt, craBin := craTest(test)
+		nodeCommand, nodeEnv, isNodeTest := nodeTest(test)
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
-		case strings.Contains(test, "react-scripts test"):
+		case craAt >= 0 || strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
-			// which a bare jest would not see.
+			// which a bare jest would not see: only src/ is searched for tests, unless
+			// package.json overrides testMatch (which smates then reads itself) or a
+			// wrapper's configuration (craco.config.js, config-overrides.js) may.
 			r = "jest"
 			command, env = craCommand(repo.Root, d, test)
+			if !jestHasKey(pj.Jest, "testMatch") && (craBin == "react-scripts" || craBin == "" || !hasMatch(d, craWrapperConfig)) {
+				tests = craTests
+			}
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
 		case strings.Contains(test, "bun test"):
 			r = "bun"
-		case strings.Contains(test, "node --test") || strings.Contains(test, "node --experimental-test"):
+		case isNodeTest || strings.Contains(test, "node --experimental-test"):
 			r = "node"
+			command, env = nodeCommand, nodeEnv
 		case has(d, "bun.lock") || has(d, "bun.lockb") || has(d, "bunfig.toml"):
 			r = "bun"
 		}
@@ -120,7 +139,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		jsRoots[d] = r
-		out = append(out, config.Suite{Root: d, Runner: r, Command: command, Env: env})
+		out = append(out, config.Suite{Root: d, Runner: r, Command: command, Env: env, Tests: tests})
 	}
 
 	// Python: one suite per project with pytest configuration or tests. Projects that
@@ -183,8 +202,10 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 
 // pythonProjects returns the Python project directories, sorted (parents before
 // children). A project file (pyproject.toml, setup.cfg, setup.py) or a pytest config
-// (pytest.ini, a tox.ini with a [pytest] section) marks its directory; whether that
-// project has tests is checked by the caller.
+// (pytest.ini, a tox.ini with a [pytest] section) marks its directory unless it is
+// inside a testdata or vendor directory (as go.mod does; fixture directories, which
+// hold sample projects other suites may well run, still count); whether that project
+// has tests is checked by the caller.
 //
 // Weaker signs mark a directory too: a pip requirements file (*requirements*.txt, or
 // any .txt/.in in a requirements/ directory, which marks the directory above), a
@@ -199,6 +220,11 @@ func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string
 	strong, weak := map[string]bool{}, map[string]bool{}
 	var tests []string // Python test files outside fixture directories
 	for _, d := range dirs {
+		if underTestdata(d) {
+			// Like Go modules there: testdata and vendor hold data of other tests and
+			// third-party code, never a project of this repository.
+			continue
+		}
 		fixture := inFixtureDir(d)
 		for _, n := range dirFiles[d] {
 			switch {

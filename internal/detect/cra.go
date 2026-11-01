@@ -10,33 +10,90 @@ import (
 // envAssign is a leading VAR=value word of a shell command.
 var envAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
+// craBins are the commands that run jest with the configuration Create React App
+// generates: react-scripts itself and the wrappers that patch it (CRACO,
+// react-app-rewired).
+var craBins = []string{"react-scripts", "craco", "react-app-rewired"}
+
+// craTests are the test patterns of Create React App's jest configuration (roots
+// <rootDir>/src and its testMatch), relative to the package.
+var craTests = []string{"src/**/__tests__/**/*.{js,jsx,ts,tsx}", "src/**/*.{spec,test}.{js,jsx,ts,tsx}"}
+
+// craWrapperConfig matches the configuration files of CRA wrappers, which may change
+// the jest roots and testMatch react-scripts uses (craco.config.js jest.configure,
+// react-app-rewired's config-overrides.js).
+var craWrapperConfig = regexp.MustCompile(`^(craco\.config\.(js|ts|cjs|mjs)|\.cracorc(\.(js|ts|json|ya?ml))?|config-overrides\.(js|cjs|mjs))$`)
+
+// nestedCommands returns the simple commands of an npm script and, recursively, of its
+// words that hold a command line themselves: the quoted arguments of sh -c,
+// concurrently, npm-run-all and the like.
+func nestedCommands(script string) [][]string {
+	var out [][]string
+	var walk func(s string, depth int)
+	walk = func(s string, depth int) {
+		for _, cmd := range scriptCommands(s) {
+			out = append(out, cmd)
+			if depth >= 3 {
+				continue
+			}
+			for _, w := range cmd {
+				if strings.ContainsAny(w, " \t\n") {
+					walk(w, depth+1)
+				}
+			}
+		}
+	}
+	walk(script, 0)
+	return out
+}
+
+// craTest finds the `<bin> test` invocation of a Create React App wrapper in an npm
+// script (also inside a quoted argument: concurrently "react-scripts test", sh -c '…'):
+// the command, the index of the bin word in it, and the bin's name.
+func craTest(script string) (cmd []string, at int, bin string) {
+	for _, cmd := range nestedCommands(script) {
+		for i := 0; i+1 < len(cmd); i++ {
+			if cmd[i+1] != "test" {
+				continue
+			}
+			for _, b := range craBins {
+				if cmd[i] == b || strings.HasSuffix(cmd[i], "/"+b) {
+					return cmd, i, b
+				}
+			}
+		}
+	}
+	return nil, -1, ""
+}
+
+// cmdEnv returns the VAR=value assignments among words (those before a command,
+// directly or through cross-env/env), or nil if there are none.
+func cmdEnv(words []string) map[string]string {
+	var env map[string]string
+	for _, w := range words {
+		if envAssign.MatchString(w) {
+			if env == nil {
+				env = map[string]string{}
+			}
+			k, v, _ := strings.Cut(w, "=")
+			env[k] = v
+		}
+	}
+	return env
+}
+
 // craCommand turns a Create React App test script into a suite command and
-// environment: the `react-scripts test` invocation with the script's own arguments (up
-// to the next shell operator), never in watch mode, run through the project's package
-// manager, and the VAR=value assignments before it (directly or through cross-env/env).
+// environment: the `react-scripts test` (or `craco test`, `react-app-rewired test`)
+// invocation with the script's own arguments (up to the next shell operator), never in
+// watch mode, run through the project's package manager, and the VAR=value
+// assignments before it (directly or through cross-env/env).
 func craCommand(repoRoot, dir, script string) (string, map[string]string) {
 	var env map[string]string
 	args := []string{"test"}
-	for _, cmd := range scriptCommands(script) {
-		at := -1
-		for i := 0; i+1 < len(cmd); i++ {
-			if strings.HasSuffix(cmd[i], "react-scripts") && cmd[i+1] == "test" {
-				at = i
-				break
-			}
-		}
-		if at < 0 {
-			continue
-		}
-		for _, w := range cmd[:at] {
-			if envAssign.MatchString(w) {
-				if env == nil {
-					env = map[string]string{}
-				}
-				k, v, _ := strings.Cut(w, "=")
-				env[k] = v
-			}
-		}
+	bin := "react-scripts"
+	if cmd, at, b := craTest(script); at >= 0 {
+		bin = b
+		env = cmdEnv(cmd[:at])
 		rest := cmd[at+2:]
 		for i := 0; i < len(rest); i++ {
 			switch a := rest[i]; {
@@ -49,10 +106,81 @@ func craCommand(repoRoot, dir, script string) (string, map[string]string) {
 				args = append(args, shellQuote(a))
 			}
 		}
-		break
 	}
 	args = append(args, "--watchAll=false")
-	return runner.JSBinCommand(repoRoot, dir, "react-scripts", strings.Join(args, " ")), env
+	return runner.JSBinCommand(repoRoot, dir, bin, strings.Join(args, " ")), env
+}
+
+// nodeValueOpts are node options whose value may be the next word.
+var nodeValueOpts = map[string]bool{
+	"--import": true, "--loader": true, "--experimental-loader": true, "-r": true, "--require": true,
+	"--env-file": true, "--env-file-if-exists": true, "-C": true, "--conditions": true,
+	"--test-reporter": true, "--test-reporter-destination": true, "--test-name-pattern": true,
+	"--test-skip-pattern": true, "--test-concurrency": true, "--test-timeout": true, "--test-shard": true,
+	"--test-isolation": true, "--test-coverage-include": true, "--test-coverage-exclude": true,
+	"--test-global-setup": true, "--input-type": true, "--experimental-specifier-resolution": true,
+	"--disable-warning": true, "--redirect-warnings": true, "--title": true, "--inspect-port": true,
+	"--experimental-policy": true, "--localstorage-file": true,
+}
+
+// nodeTest finds a `node [options] --test` invocation in an npm script (also inside a
+// quoted argument). command is the invocation up to --test when node gets other
+// options before it (node --import tsx --test), so that the suite runs test files the
+// way the script does; it is "" for a plain `node --test`, the runner's default. Watch
+// options are dropped (the suite must exit), and so are file arguments after --test:
+// smates passes test files itself. A node that runs a script (node scripts/run.js
+// --test) is not a test run.
+func nodeTest(script string) (command string, env map[string]string, ok bool) {
+	for _, cmd := range nestedCommands(script) {
+		for i, w := range cmd {
+			if w != "node" && !strings.HasSuffix(w, "/node") {
+				continue
+			}
+			opts, ok := nodeTestOptions(cmd[i+1:])
+			if !ok {
+				continue
+			}
+			env = cmdEnv(cmd[:i])
+			if len(opts) == 0 {
+				return "", env, true
+			}
+			words := []string{shellQuote(w)}
+			for _, a := range opts {
+				words = append(words, shellQuote(a))
+			}
+			return strings.Join(words, " ") + " --test", env, true
+		}
+	}
+	return "", nil, false
+}
+
+// nodeTestOptions returns the options before --test among node's arguments (without
+// watch options), or false if node runs no tests: no --test before the first
+// positional word (the script node runs).
+func nodeTestOptions(args []string) ([]string, bool) {
+	var opts []string
+	for k := 0; k < len(args); k++ {
+		a := args[k]
+		name, _, hasValue := strings.Cut(a, "=")
+		switch {
+		case a == "--test":
+			return opts, true
+		case !strings.HasPrefix(a, "-"):
+			return nil, false
+		case name == "--watch" || name == "--watch-preserve-output":
+		case name == "--watch-path":
+			if !hasValue {
+				k++
+			}
+		default:
+			opts = append(opts, a)
+			if nodeValueOpts[name] && !hasValue && k+1 < len(args) {
+				k++
+				opts = append(opts, args[k])
+			}
+		}
+	}
+	return nil, false
 }
 
 // scriptCommands splits an npm script into its simple commands, each a list of

@@ -12,6 +12,7 @@ package js
 
 import (
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ type Analyzer struct {
 	tsConfigs memo[[]*tsConfig] // config dir -> configs that apply there
 	wsSpecs   memo[wsResult]    // bare specifier -> workspace resolution
 	pkgFiles  memo[[]string]    // package dir -> its source files
+	mocks     memo[[]string]    // dir -> root __mocks__ dirs that apply there
 }
 
 // Options configure the analyzer.
@@ -119,7 +121,18 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 func (a *Analyzer) resolveRef(dir string, r ref, add func(string)) {
 	switch r.kind {
 	case refModule:
-		a.resolveModule(dir, r.spec, add)
+		if r.mock {
+			a.resolveMocked(dir, r.spec, add)
+		} else {
+			a.resolveModule(dir, r.spec, add)
+		}
+		if spec := cleanSpec(r.spec); isBare(spec) {
+			// Jest uses <root>/__mocks__/<pkg> for a node_modules package automatically;
+			// Jest and Vitest use it for any bare specifier mocked without a factory.
+			for _, md := range a.mockDirs(dir) {
+				a.resolvePath(path.Join(md, spec), add)
+			}
+		}
 	case refFile:
 		spec := cleanSpec(r.spec)
 		if spec == "" || strings.Contains(spec, "://") || strings.HasPrefix(spec, "data:") {
@@ -151,6 +164,43 @@ func (a *Analyzer) resolveRef(dir string, r ref, add func(string)) {
 			}
 		}
 	}
+}
+
+// resolveMocked resolves the specifier of jest.mock / vi.mock (and the like) made from
+// a file in dir: the module itself and, for every file it resolves to, a manual mock
+// of the same name in the adjacent __mocks__ directory (src/__mocks__/util.ts for
+// src/util.ts), which a mock without a factory loads instead.
+func (a *Analyzer) resolveMocked(dir, spec string, add func(string)) {
+	var resolved []string
+	a.resolveModule(dir, spec, func(f string) {
+		resolved = append(resolved, f)
+		add(f)
+	})
+	for _, f := range resolved {
+		base := path.Base(f)
+		a.resolvePath(path.Join(path.Dir(f), "__mocks__", strings.TrimSuffix(base, path.Ext(base))), add)
+	}
+}
+
+// mockDirs returns the root-level __mocks__ directories that apply to a file in dir:
+// those of its nearest package and of the repository root, when they have files.
+func (a *Analyzer) mockDirs(dir string) []string {
+	return a.mocks.get(dir, func() []string {
+		var out []string
+		pd, _ := a.nearestPkgDir(dir)
+		for _, d := range []string{path.Join(pd, "__mocks__"), "__mocks__"} {
+			if !slices.Contains(out, d) && len(a.under(d+"/")) > 0 {
+				out = append(out, d)
+			}
+		}
+		return out
+	})
+}
+
+// isBare reports whether a cleaned specifier names a package (or Node builtin)
+// rather than a path, an import map entry or an external URL.
+func isBare(spec string) bool {
+	return spec != "" && !isRelative(spec) && spec[0] != '/' && spec[0] != '#' && !isExternalScheme(spec)
 }
 
 // resolveModule resolves a module specifier imported from a file in dir.

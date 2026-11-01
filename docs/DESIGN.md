@@ -385,10 +385,12 @@ transitively). Granularity is the module: a test that imports a module depends o
 that module reads.
 
 Static analysis (fast Go scanners, no toolchain): JS/TS imports, requires, dynamic imports
-with literal or template prefixes, `new URL(…, import.meta.url)`, mocks; tsconfig paths and
-workspace packages (falling back to the whole package when unresolvable). Python imports
-including relative, dynamic with literal prefixes, conftest chains. Go imports, embeds, and
-package directories named in test string literals (`go run ../../cmd/tool`).
+with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, import.meta.url)`,
+mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
+back to the whole package when unresolvable). Python imports including relative, dynamic
+with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
+on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
+package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
 
 ## 3. Status and shadow mode
 
