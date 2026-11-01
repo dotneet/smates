@@ -85,6 +85,9 @@ type Test struct {
 	Duration int64             `json:"duration_ms,omitempty"`
 	// Shard is the shard owning the test when the selection is sharded (1-based).
 	Shard int `json:"shard,omitempty"`
+	// Priority is how early `smates run` starts the test (1 = first; see
+	// cli.prioritize), set on the tests a run starts.
+	Priority int `json:"priority,omitempty"`
 }
 
 // Suite is the decision for one suite.

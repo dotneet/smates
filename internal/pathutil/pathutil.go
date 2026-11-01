@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -20,7 +21,7 @@ func Rel(root, p string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		p = u.Path
+		p = fileURLPath(u.Path, runtime.GOOS == "windows")
 	}
 	if i := strings.IndexAny(p, "?#"); i >= 0 && !fileExists(p) {
 		p = p[:i]
@@ -34,6 +35,18 @@ func Rel(root, p string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+// fileURLPath turns the path of a file:// URL into a file path. On Windows the URL path
+// of a drive-letter path has a leading slash ("/C:/repo/a.ts"), which is not absolute.
+func fileURLPath(p string, windows bool) string {
+	if !windows {
+		return p
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' && ('a' <= p[1]|0x20 && p[1]|0x20 <= 'z') {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
 }
 
 // resolve evaluates symlinks in p. For a path that does not exist (a probe of a file

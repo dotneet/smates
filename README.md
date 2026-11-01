@@ -104,10 +104,35 @@ smates run --all     # run everything once and record what each test uses
 smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
+smates hook install  # optional: run the affected tests before every git push
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
+
+### Git hook
+
+`smates hook install` writes a `pre-push` hook (`--hook pre-commit` for a pre-commit
+one) that runs `smates run --no-agent` and stops the push when a selected test fails.
+Without the agent the hook makes no API calls (changes no test is known to depend on run
+the affected suites in full); `--agent` keeps it, and `smates run` flags can follow `--`
+(`smates hook install -- --explain`). The hook:
+
+- honours `core.hooksPath` and is shared by all worktrees of the repository;
+- never overwrites a hook it did not write: it stops and prints the line to add, or
+  appends itself to a shell hook with `--append`. With husky or lefthook it prints the
+  snippet for `.husky/pre-push` or `lefthook.yml` instead;
+- pulls the shared state (`smates state pull`) when there is none locally, and merges in
+  the remote one when the local state is older than a week or was recorded on a commit
+  outside the current history (fetching at most once an hour);
+- is skipped with `git push --no-verify` or `SMATES_SKIP_HOOK=1`, and lets the push
+  through with a warning when `smates` is not on `PATH`.
+
+smates hashes the working tree, not the commits being pushed: uncommitted (pre-commit:
+unstaged) changes and untracked files are part of what is tested. The hook warns when
+there are any, and when the pushed branch is not the one checked out; commit or stash
+them first for an exact result. `smates hook uninstall` removes only what smates wrote;
+`smates hook status` shows where the hook lives.
 
 ### GitHub Actions
 
@@ -178,7 +203,7 @@ ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
 flaky:
-  retry: 0            # re-run a failing, already known flaky test up to N times (default 0: never hide a failure)
+  retry: 0            # re-run a suite run whose failures are all known flaky tests, up to N times (default 0: never hide a failure)
 agent:
   provider: auto      # auto (from the API key that is set) | anthropic | openai | openrouter
   # model: gpt-6-luna   # default depends on the provider (see "The agent")
@@ -194,17 +219,33 @@ agent:
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
-| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
+| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
+| `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
+
+**Likeliest failures first.** `smates run` starts the selected tests in this order: tests
+that did not pass last time; tests whose own file or a file they import directly changed;
+tests reached through an indirect dependency (a transitive import, traced data,
+configuration, a file-name reference, the agent); then new tests and the rest. Within a
+group, the shortest recorded duration goes first. Suites run in the order of their best
+test, and each runner gets its files in that order (pytest and `go test` start them in
+that order; vitest and jest use their own sequencers, which also put previously failed
+files first). With **`--fail-fast`**, each suite is split into one runner call per group
+and the calls run group by group across suites; after a call fails, no further call
+starts (the running one finishes). Tests that did not start are not recorded, so they
+stay selected; the log, the summary and `--report` (`not_run`) list them. Extra runner
+start-ups are the price, so the split only happens with `--fail-fast`. It cannot be
+combined with `--shadow`.
 
 **Flaky tests** are detected by proof, not by heuristics. smates knows the content hash of
 every input of every test, so when a test's outcome flips between pass and fail while none
@@ -214,9 +255,21 @@ smates cannot see (time, network, environment variables, files outside the repos
 `smates run` reports such tests in its log, in `--report` (`flaky`), in the job summary and
 in the `flaky` / `flaky-tests` outputs, and remembers the evidence (number of flips, last
 commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure still
-fails the run and is still selected next time. With `flaky: {retry: 1}`, a failing test
-that is *already known* to be flaky is re-run once, and if it then passes the run does not
-fail (only when every failure of that suite run is such a test; the flip is reported).
+fails the run and is still selected next time. With `flaky: {retry: 1}`, when every
+failure of a suite run is a test *already known* to be flaky, the suite run is repeated
+once with the same tests, and if it then passes the run does not fail (the flip is
+reported).
+
+**Stats** (`smates stats`) sum up the runs recorded in the state: how many test units
+ran out of how many (skip rate), the recorded test time the skipped units would have
+taken (the time saved, also extrapolated to 30 days), shadow-mode misses and their rate,
+orphans by how they were handled (reference scan, agent, full suite run), agent calls
+with their tokens and cost (when the backend reports one, e.g. `claude -p`), and flaky
+flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
+the state keeps the last 1000 records within 180 days, and `smates state merge` unions
+them, so the stats of a state restored on CI cover the runs that state went through. A
+sharded run leaves one record per shard (its orphans are counted by shard 1 only). The job summary shows the cumulative time saved
+in one line.
 
 ## Failure hints
 
@@ -285,6 +338,8 @@ ok  	example.com/shop/internal/store	0.170s
 - Keys (when stdin is a terminal): `a` runs every test, `f` reruns the tests that have not
   passed, `Enter` reruns the last selection, `q` quits. Ctrl-C stops the running tests
   (their whole process tree) and exits.
+- `smates watch --fail-fast` runs every cycle with `smates run --fail-fast`: the
+  likeliest failures run first and nothing more starts once one fails.
 - Unattributed changes follow the orphan policy, but only for files changed while
   watching, and the agent is not called unless you pass `--agent`: with `orphans: agent`,
   an unattributed change runs the suites it can affect in full instead, as with

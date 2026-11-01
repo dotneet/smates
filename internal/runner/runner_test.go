@@ -217,6 +217,9 @@ func TestResolve(t *testing.T) {
 	if py.Command != "python3 -m pytest" {
 		t.Errorf("py %q", py.Command)
 	}
+	if web.Narrowed || !app.Narrowed || gos.Narrowed {
+		t.Errorf("narrowed when tests or exclude are configured: web=%v app=%v go=%v", web.Narrowed, app.Narrowed, gos.Narrowed)
+	}
 	// The configured suites are not modified in place (defaults go to copies).
 	cs := []config.Suite{{Name: "x", Runner: "go", Exclude: make([]string, 0, 10)}}
 	r1, _ := Resolve(repo, cs)
@@ -486,6 +489,24 @@ func TestExecAndBatches(t *testing.T) {
 	code, _ = runBatches(context.Background(), rc, nil, []string{"7"}, nil)
 	if code != 0 {
 		t.Errorf("All runs once without test arguments: %d", code)
+	}
+}
+
+func TestCustomRunAllPassesFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	// A custom command has no discovery: a full run still passes every test file.
+	repo := tempRepo(t, "a_test.sh", "b_test.sh")
+	var out bytes.Buffer
+	su := &Suite{Suite: config.Suite{Root: ".", Command: `sh -c 'echo "$#:$*"; exit 3' sh {tests}`}, Adapter: custom{}}
+	rc := &RunContext{Repo: repo, Suite: su, Units: []string{"a_test.sh", "b_test.sh"}, All: true, Stdout: &out, Stderr: &out}
+	res, err := custom{}.Run(context.Background(), rc)
+	if err != nil || res.ExitCode != 3 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "2:a_test.sh b_test.sh" {
+		t.Errorf("output %q", got)
 	}
 }
 
