@@ -140,18 +140,7 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 			in.Direct = fh.p.graph.Direct
 		}
 		h := hints.Compute(in)
-		// The suite's settings key is shown, and diffed, as the config file (once,
-		// when the test also read the file).
-		seen := map[string]bool{}
-		cands := h.Candidates[:0]
-		for _, c := range h.Candidates {
-			c.Path = selector.DisplayKey(c.Path)
-			if !seen[c.Path] {
-				seen[c.Path] = true
-				cands = append(cands, c)
-			}
-		}
-		h.Candidates = cands
+		h.Candidates = displayCandidates(h.Candidates)
 		h.Output = hints.CleanOutput(o.Failure)
 		fh.list = append(fh.list, h)
 		fh.queue(sr, h, o.Failure)
@@ -397,4 +386,28 @@ func shortSHA(s string) string {
 func mdEscape(s string) string {
 	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "\n", " ", "`", "'")
 	return r.Replace(s)
+}
+
+// displayCandidates shows the suite's settings key (selector.ConfigKey) as the config
+// file. Its hashes are settings fingerprints, not blobs: they are cleared so a diff
+// uses the base revision, and a candidate for the file's own content wins over it.
+func displayCandidates(in []hints.Candidate) []hints.Candidate {
+	content := map[string]bool{}
+	for _, c := range in {
+		if selector.DisplayKey(c.Path) == c.Path {
+			content[c.Path] = true
+		}
+	}
+	out := in[:0]
+	for _, c := range in {
+		if p := selector.DisplayKey(c.Path); p != c.Path {
+			if content[p] {
+				continue
+			}
+			c.Path, c.Old, c.New = p, "", ""
+			content[p] = true
+		}
+		out = append(out, c)
+	}
+	return out
 }
