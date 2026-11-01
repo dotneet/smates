@@ -47,6 +47,12 @@ type runFlags struct {
 	// --shard (0/0 when not sharded).
 	extra          []string
 	shardI, shardN int
+	// budget is --budget; heartbeat the progress interval of failures mode (0: none).
+	budget    time.Duration
+	heartbeat time.Duration
+	// skipEmpty returns right after the selection when it runs nothing (no state
+	// update): the Claude Code Stop hook's fast path.
+	skipEmpty bool
 }
 
 func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -86,10 +92,12 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs.StringVar(&f.output, "output", "", "`mode`: full streams the runner output; failures prints only the output of failing tests, then a short summary with a command that reruns them (default: $SMATES_OUTPUT, where agent means failures, else full)")
 	fs.Var(&f.only, "only", "run exactly the test unit `SUITE:UNIT` (repeatable; recorded as usual)")
 	fs.StringVar(&f.markdown, "markdown", "", "write the summary as Markdown to `file`, e.g. for a pull request comment")
+	fs.DurationVar(&f.budget, "budget", defaultBudget, "print how to split the run when the recorded durations of the selected tests add up to more than this (0: never)")
 	if err := fs.Parse(args); err != nil {
 		return nil, usageError{err}
 	}
 	f.extra = fs.Args()
+	f.heartbeat = heartbeatInterval()
 	var err error
 	fs.Visit(func(fl *flag.Flag) { f.outputFlag = f.outputFlag || fl.Name == "output" })
 	if f.output, err = parseOutputMode(f.output, stderr); err != nil {
@@ -162,8 +170,8 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	printSelection(p, sel, stderr, f.explain)
 
 	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
-		quiet: f.output == outputFailures,
-		ran:   map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, results: map[string]*suiteResult{}}
+		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
+		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, results: map[string]*suiteResult{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
@@ -173,6 +181,16 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if f.dryRun {
 		c.printCommands(batches)
 		return 0, nil
+	}
+	if f.skipEmpty && len(batches) == 0 {
+		return 0, nil
+	}
+	if hooks == nil {
+		c.hintLongRun(batches)
+	}
+	c.total = 0
+	for _, b := range batches {
+		c.total += len(b.units)
 	}
 	if c.record {
 		cleanup, err := c.prepareTrace()
@@ -185,6 +203,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
 	start := time.Now()
+	c.start = start
 	for i, b := range batches {
 		if c.stopped {
 			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
@@ -238,10 +257,14 @@ type cycle struct {
 	reportOut io.Writer
 	// quiet is --output failures: runner output is buffered per batch and printed only
 	// when the batch fails, and smates logs only the essentials.
-	quiet  bool
-	record bool // trace the run and update the state
-	runAll bool // run every test of every suite, whatever was selected
-	self   string
+	quiet bool
+	// heartbeat is how often failures mode reports progress while a batch runs.
+	heartbeat time.Duration
+	start     time.Time // when the first batch started
+	total     int       // units the batches run
+	record    bool      // trace the run and update the state
+	runAll    bool      // run every test of every suite, whatever was selected
+	self      string
 
 	traceRoot string
 	shimDir   string
@@ -378,7 +401,9 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		return 0, envError{fmt.Errorf("%s: %w", sr.Name, err)}
 	}
 	c.started[sr.Name] = append(c.started[sr.Name], b.units...)
+	stop := c.startHeartbeat(sr.Name, countUnits(c.started), c.total, c.start)
 	r, err := sr.Suite.Adapter.Run(ctx, rc)
+	stop()
 	if err != nil {
 		if buf != nil {
 			c.printFailedBatch(sr, b, buf, nil)

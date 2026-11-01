@@ -143,6 +143,8 @@ smates run           # 以後は変更の影響を受けるテストだけ実行
 smates why src/pricing.ts     # このファイルに依存するテストは?
 smates deps src/cart.test.ts  # このテストは何に依存している?
 smates hook install  # 任意: git push の前に影響するテストを実行
+smates hook install --claude  # 任意: Claude Code が終了前に失敗したテストを直すようにする
+smates guide         # コーディングエージェント向けの使い方(docs/AGENTS.md)
 ```
 
 `init --github` は `mise.toml`/`.tool-versions`(`jdx/mise-action` を使用)、
@@ -343,6 +345,11 @@ ok  	example.com/shop/internal/store	0.170s
 
 ## AI コーディングエージェントから使う
 
+**[docs/AGENTS.md](docs/AGENTS.md)** は、smates を使うリポジトリで作業するエージェント向けの
+1 ページのガイドです(英語。`smates guide` で表示)。リポジトリに `AGENTS.md` か `CLAUDE.md`
+があると、`smates init` はそこへ追記する短いセクションを提案します(`smates init --agents-md`
+で一度だけ追記)。
+
 エージェントはコマンドの出力をすべて読むため、`smates run --output failures`(または
 環境変数 `SMATES_OUTPUT=agent`。フラグが優先)で出力を小さく保てます。
 
@@ -364,6 +371,27 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 `--only suite:unit`(複数指定可)は指定したテスト単位(テストファイル、Go ではパッケージ
 ディレクトリ)だけを実行し、通常どおり記録します。他のテストや変更は次回の実行に残ります。
 `--report -` は JSON レポートを標準出力に書き、それ以外の出力はすべて標準エラーに出します。
+
+**長時間の実行。** failures モードでは、出力のない状態が 30 秒続くたびに
+`smates: still running <suite> (...)` という進捗行を出します(`SMATES_HEARTBEAT=10s` で間隔を
+変更、`0` で無効)。ツールのタイムアウトが無出力の実行を停止と誤認しないためです。選択された
+テストの記録済み実行時間の合計が `--budget`(既定 90s、`0` で無効)を超えると、`smates run` は
+開始前に分割の仕方を表示します。スイートごとに実行する(`--suite`)か、`--report file.json`
+を付けてバックグラウンドで実行します。
+
+**Claude Code の Stop フック。** `smates hook install --claude` は `.claude/settings.json`
+(`--user` なら `~/.claude/settings.json`。`smates.yml` のあるプロジェクトでのみ動作)に Stop
+フックを追加します。Claude がターンを終えようとすると `smates hook claude-stop` が影響する
+テストを実行し(`--output failures --no-agent`、`--` の後に追加のフラグ)、失敗があれば
+`{"decision": "block", "reason": "<失敗したテストと再実行コマンド>"}` を出力して終了コード 0
+で終わります。これは Claude Code が文書化している Stop フックの JSON 出力で、Claude は終了せず
+reason を読んでテストを直します。フック入力の `stop_hook_active` が true(すでに Stop フックに
+よって続行中)のときは決してブロックせず、何も選択されなければすぐに終わり、smates 自身の
+エラー(`smates run` の終了コード 3/4)はブロックせず終了コード 1 でユーザーに表示します。
+既存の設定にマージされ(他のキーやフックは保持、再インストールしても重複しない)、
+`smates hook uninstall --claude` は smates のエントリだけを削除し、`smates hook status` で
+状態を確認できます。`SMATES_SKIP_HOOK=1` でスキップでき、`smates` が未インストールの環境では
+何もしません。
 
 **終了コード**で「コードを直す」のか「環境・設定を直す」のかを区別できます。
 

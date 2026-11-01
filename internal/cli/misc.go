@@ -38,6 +38,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	print := fs.Bool("stdout", false, "print the config instead of writing it")
 	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
 	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
+	agentsMD := fs.Bool("agents-md", false, "add a short smates section to AGENTS.md (or CLAUDE.md) for coding agents")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -48,6 +49,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	repo, err := gitx.Open(d)
 	if err != nil {
 		return err
+	}
+	// --agents-md alone in a repository that already has smates.yml only adds the section.
+	if _, err := os.Stat(filepath.Join(repo.Root, "smates.yml")); err == nil && *agentsMD && !*force && !*print && !*github {
+		fmt.Fprintln(stdout, "smates.yml already exists; left unchanged")
+		return agentInstructions(repo.Root, true, stdout)
 	}
 	snap, err := repo.Snapshot()
 	if err != nil {
@@ -97,6 +103,64 @@ Next steps:
   smates why <file>    # see which tests depend on a file
   smates hook install  # optional: run the affected tests before every git push
 `)
+	return agentInstructions(repo.Root, *agentsMD, stdout)
+}
+
+// The lines that delimit the section `smates init --agents-md` adds to AGENTS.md.
+const (
+	agentsBegin = "<!-- smates:begin (added by `smates init --agents-md`) -->"
+	agentsEnd   = "<!-- smates:end -->"
+)
+
+// agentsSnippet is the section for AGENTS.md / CLAUDE.md.
+const agentsSnippet = agentsBegin + `
+## Tests
+
+- After changing code, run ` + "`smates run --output failures`" + `: it runs only the tests your change can affect. Exit 0 passed, 1 tests failed, 2-4 a usage, configuration or environment problem.
+- To fix failures, rerun the ` + "`smates run ... --only SUITE:UNIT`" + ` command its summary prints until it passes.
+- ` + "`smates guide`" + ` explains the rest (orphans, ` + "`smates why <file>`" + `, long runs).
+` + agentsEnd + "\n"
+
+// agentInstructions suggests the smates section for the repository's agent instructions
+// file (AGENTS.md, else CLAUDE.md), or appends it when write is set. Without either
+// file it does nothing unless write is set, which then creates AGENTS.md.
+func agentInstructions(root string, write bool, stdout io.Writer) error {
+	name := ""
+	for _, n := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if _, err := os.Stat(filepath.Join(root, n)); err == nil {
+			name = n
+			break
+		}
+	}
+	if name == "" && !write {
+		return nil
+	}
+	if name == "" {
+		name = "AGENTS.md"
+	}
+	path := filepath.Join(root, name)
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	content := string(data)
+	if strings.Contains(content, agentsBegin) {
+		if write {
+			fmt.Fprintf(stdout, "\n%s already has the smates section\n", name)
+		}
+		return nil
+	}
+	if !write {
+		fmt.Fprintf(stdout, "\nFor coding agents, add this to %s (or run `smates init --agents-md`):\n\n%s", name, agentsSnippet)
+		return nil
+	}
+	if content != "" {
+		content = strings.TrimRight(content, "\n") + "\n\n"
+	}
+	if err := os.WriteFile(path, []byte(content+agentsSnippet), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "\nadded the smates section to %s\n", name)
 	return nil
 }
 

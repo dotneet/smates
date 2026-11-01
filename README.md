@@ -139,6 +139,8 @@ smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
 smates hook install  # optional: run the affected tests before every git push
+smates hook install --claude  # optional: Claude Code fixes failing tests before it stops
+smates guide         # how a coding agent should use smates (docs/AGENTS.md)
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
@@ -311,18 +313,24 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--budget 90s`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
-| `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
+| `smates init [--github] [--agents-md]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup; `--agents-md` adds a short smates section to `AGENTS.md`/`CLAUDE.md`) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
 | `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
-| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags`; `--claude [--user]` for a Claude Code Stop hook |
+| `smates guide` | the guide for coding agents ([docs/AGENTS.md](docs/AGENTS.md)) |
 
 ### For AI coding agents
+
+**[docs/AGENTS.md](docs/AGENTS.md)** is a one-page guide for an agent working in a
+repository that uses smates (`smates guide` prints it). `smates init` suggests a short
+section that points an agent at it when the repository has `AGENTS.md` or `CLAUDE.md`
+(`smates init --agents-md` appends it, once).
 
 An agent reads everything a command prints, so `smates run --output failures` (or
 `SMATES_OUTPUT=agent` in its environment; the flag wins) keeps the output small:
@@ -346,6 +354,27 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 `--only suite:unit` (repeatable) runs exactly those test units (a test file, or a package
 directory for Go) and records them as usual; the other tests and changes are left for the
 next run. `--report -` writes the JSON report to stdout and everything else to stderr.
+
+**Long runs.** In failures mode smates prints `smates: still running <suite> (n of m test
+unit(s) started, 1m 30s)` after every 30 s without output (`SMATES_HEARTBEAT=10s` changes
+it, `0` turns it off), so a tool timeout does not take a silent run for a hang. When the
+recorded durations of the selected tests add up to more than `--budget` (default 90s;
+`0` turns it off), `smates run` first prints how to split it: one suite at a time
+(`--suite`), or in the background with `--report file.json`.
+
+**Claude Code Stop hook.** `smates hook install --claude` adds a Stop hook to
+`.claude/settings.json` (`--user`: `~/.claude/settings.json`, active in projects that have
+a `smates.yml`). When Claude ends its turn the hook runs `smates hook claude-stop`, which
+runs the affected tests (`--output failures --no-agent`; more run flags after `--`). When
+some fail it prints `{"decision": "block", "reason": "<failing tests and the rerun
+command>"}` and exits 0, Claude Code's documented way to keep Claude going: it reads the
+reason and fixes the tests. It never blocks when the hook input has `stop_hook_active`
+(Claude is already continuing because of a Stop hook), returns at once when nothing is
+selected, and reports smates' own errors (exit 3/4 of `smates run`) to the user with
+exit 1 instead of blocking. The entry is merged into the existing settings (other keys
+and hooks are kept, install is idempotent); `smates hook uninstall --claude` removes only
+it, `smates hook status` shows it, and `SMATES_SKIP_HOOK=1` skips it. The command does
+nothing where `smates` is not installed.
 
 **Exit codes** tell "fix the code" from "fix the setup":
 
