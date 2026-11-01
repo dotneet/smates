@@ -25,15 +25,25 @@ A process switching contexts exports the current one to its children as
 SMATES_TRACE_CTX="<pid>-0:<context>", and a child records the value it inherited as
 "pctx": smates attributes the child to the context it was started in, even when the child
 starts up later (a server a session fixture starts without waiting for it). A forked child
-(multiprocessing's fork start method) records into a file of its own, as a new process.
+(multiprocessing's fork start method) records into a file of its own, as a new process
+(once it does more than run code before an exec), and follows the contexts of the process
+that forked it through shared memory: {"k": "pctx", "id": "<pid>-0:<context>"} starts the
+events recorded while the parent was in that context.
+
+Children started with an environment of their own (subprocess's env=, os.execve,
+os.posix_spawn) get the tracing variables (SMATES_*, the shim directory on PYTHONPATH and,
+when Node is traced, NODE_OPTIONS) added where missing, so they see them in their
+environment.
 """
 
+import functools
 import os
 import sys
 import threading
 import time
 
 _state = None
+_os_open = os.open  # unwrapped (the shim writes its own files with it)
 
 
 class _Tracer:
@@ -51,6 +61,10 @@ class _Tracer:
         self.enabled = True
         self.tool = None
         self.exported = None  # the SMATES_TRACE_CTX value children get
+        self._shared = None  # memory forked children read the current context from
+        self._follow = None  # a forked child: its parent's shared memory
+        self._gen = 0  # the generation of the parent's context last seen in _follow
+        self._pending = None  # a forked child that has not written its start event yet
         self._real = {}
         self._code_real = {}
         self._seen_codes = {}  # sys.setprofile: code object -> context it was recorded in
@@ -63,10 +77,36 @@ class _Tracer:
 
     # -- output -------------------------------------------------------------
     def write(self, obj):
+        pending = self._pending
+        if pending is not None:
+            # A forked child that only ran code so far may be about to exec (preexec_fn,
+            # os.spawn* on POSIX, pty.fork): that code is the parent's business.
+            if obj["k"] in ("code", "pctx") and len(pending[1]) < 1000:
+                pending[1].append(obj)
+                return
+            self._begin()
+        self._write(obj)
+
+    def _begin(self, argv=None, own=True):
+        """Writes a forked child's start event and what it buffered. argv: the program
+        the child execs; own: whether its children have it as their traced ancestor."""
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        start, buffered = pending
+        if argv is not None:
+            start["argv"] = argv
+        self._write(start)
+        for obj in buffered:
+            self._write(obj)
+        if own:
+            os.environ["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
+
+    def _write(self, obj):
         line = self._json.dumps(obj) + "\n"
         try:
             # os.open/os.write do not raise "open" audit events for our own file.
-            fd = os.open(self.out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            fd = _os_open(self.out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
             try:
                 os.write(fd, line.encode("utf-8", "surrogateescape"))
             finally:
@@ -119,6 +159,8 @@ class _Tracer:
         real = self._norm(p, kind == "dir")
         if real is None:
             return
+        if self._follow is not None:
+            self._follow_parent()
         # Which repository source file did this? Modules read data (and import other
         # modules) once per process, at import time or behind a cache; smates gives
         # those reads to every test that depends on the reading module.
@@ -170,6 +212,53 @@ class _Tracer:
                 os.putenv("SMATES_TRACE_CTX", self.exported)
             except (OSError, ValueError):
                 pass
+            self._publish(self.exported)
+        mon = getattr(sys, "monitoring", None)
+        if mon is not None and self.tool is not None:
+            mon.restart_events()
+
+    # Forked children (a pool of workers some test or fixture starts, then used by later
+    # tests) keep following the context of the process that forked them: it is published
+    # in an anonymous shared mapping (inherited across fork) as a generation counter
+    # (8 bytes, odd while being written), a length (4 bytes) and the value.
+    _SHARED = 4096
+
+    def _publish(self, value):
+        m = self._shared
+        if m is None:
+            if not hasattr(os, "fork"):
+                return
+            try:
+                import mmap
+
+                m = self._shared = mmap.mmap(-1, self._SHARED)
+            except Exception:
+                self._shared = False
+                return
+        elif m is False:
+            return
+        data = value.encode("utf-8", "surrogateescape")[: self._SHARED - 12]
+        gen = int.from_bytes(m[0:8], "little")
+        m[0:8] = (gen + 1).to_bytes(8, "little")
+        m[8:12] = len(data).to_bytes(4, "little")
+        m[12 : 12 + len(data)] = data
+        m[0:8] = (gen + 2).to_bytes(8, "little")
+
+    def _follow_parent(self):
+        m = self._follow
+        gen = int.from_bytes(m[0:8], "little")
+        if gen == self._gen or gen & 1:
+            return
+        n = int.from_bytes(m[8:12], "little")
+        value = bytes(m[12 : 12 + n]).decode("utf-8", "surrogateescape")
+        if int.from_bytes(m[0:8], "little") != gen:
+            return  # changing: next time
+        self._gen = gen
+        # The parent is in another context: what this child does now belongs to that one.
+        with self.lock:
+            self.seen = set()
+            self._seen_codes.clear()
+            self.write({"k": "pctx", "id": value})
         mon = getattr(sys, "monitoring", None)
         if mon is not None and self.tool is not None:
             mon.restart_events()
@@ -182,30 +271,28 @@ class _Tracer:
         self.switch(self.stack.pop() if self.stack else "")
 
     # -- hooks --------------------------------------------------------------
-    def _start(self, anc, pctx):
-        self.write(
-            {
-                "k": "start",
-                "pid": os.getpid(),
-                "ppid": os.getppid(),
-                "anc": anc,
-                "tid": 0,
-                "argv": list(sys.argv) if hasattr(sys, "argv") else [],
-                "cwd": _safe_cwd(),
-                "t": int(time.time() * 1000),
-                "lang": "python",
-                "pctx": pctx,
-            }
-        )
-        # Children started through a shell still find their traced ancestor.
-        os.environ["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
+    def _start_event(self, anc, pctx):
+        return {
+            "k": "start",
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "anc": anc,
+            "tid": 0,
+            "argv": list(sys.argv) if hasattr(sys, "argv") else [],
+            "cwd": _safe_cwd(),
+            "t": int(time.time() * 1000),
+            "lang": "python",
+            "pctx": pctx,
+        }
 
     def install(self):
         env = os.environ
         # Children of a process that does not switch contexts belong to the context the
         # process itself was started in: they inherit its SMATES_TRACE_CTX unchanged.
         self.exported = env.get("SMATES_TRACE_CTX") or None
-        self._start(env.get("SMATES_TRACE_PARENT", ""), self.exported or "")
+        self.write(self._start_event(env.get("SMATES_TRACE_PARENT", ""), self.exported or ""))
+        # Children started through a shell still find their traced ancestor.
+        env["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
         # What a child given an environment of its own needs to be traced (child_env).
         here = os.path.dirname(os.path.abspath(__file__))
         self._child_vars = [("SMATES_TRACE_DIR", self.trace_dir), ("SMATES_REPO_ROOT", self.repo_root)]
@@ -231,17 +318,26 @@ class _Tracer:
         # A forked child (multiprocessing's fork start method, os.fork) is a process of
         # its own: it records into its own file, from scratch (what the parent recorded
         # does not cover what the child does later, for a later test), and belongs to
-        # the context it was forked in, as do its children (they inherit SMATES_TRACE_CTX
-        # as the parent exported it). The context stays the child's current one, so a
-        # child that switches contexts itself (pytest-forked runs each test's hooks in
-        # one) returns to it.
+        # the contexts its parent is in while it works (_follow_parent); its children
+        # inherit SMATES_TRACE_CTX as the parent exported it. The context stays the
+        # child's current one, so a child that switches contexts itself (pytest-forked
+        # runs each test's hooks in one) returns to it. The start event waits for the
+        # first event other than executed code (see write).
         try:
-            pctx = "%d-0:%s" % (os.getppid(), self.ctx)
             self.lock = threading.RLock()  # another thread may have held it
             self.out = os.path.join(self.trace_dir, "proc-%d-0.jsonl" % os.getpid())
             self.seen = set()
             self._seen_codes.clear()
-            self._start("%d-0" % os.getppid(), pctx)
+            if self._shared:
+                self._follow, self._shared = self._shared, None
+            if self._follow is not None:
+                self._gen = int.from_bytes(self._follow[0:8], "little")
+            self._local.busy = True  # not a read of the program
+            try:
+                anc = os.environ.get("SMATES_TRACE_PARENT", "")
+            finally:
+                self._local.busy = False
+            self._pending = (self._start_event(anc, self.exported or ""), [])
             mon = getattr(sys, "monitoring", None)
             if mon is not None and self.tool is not None:
                 mon.restart_events()  # code the parent ran is disabled
@@ -313,6 +409,7 @@ class _Tracer:
         # os.path.exists/isfile/isdir and pathlib call these at run time; the import
         # system uses its own bound copies, so imports are not affected.
         tracer = self
+        local = self._local
 
         def wrap(name):
             orig = getattr(os, name, None)
@@ -320,21 +417,36 @@ class _Tracer:
                 return
 
             def probe(path, *args, **kwargs):
-                # record() guards against re-entry (realpath calls os.lstat).
-                if not isinstance(path, int):
+                # record() guards against re-entry (realpath calls os.lstat). A path
+                # relative to dir_fd (shutil.rmtree) is not one relative to the cwd.
+                if not isinstance(path, int) and (kwargs.get("dir_fd") is None or os.path.isabs(path)):
                     try:
                         tracer.record("probe", os.fspath(path))
                     except TypeError:
                         pass
                 return orig(path, *args, **kwargs)
 
-            probe.__smates__ = True
-            probe.__wrapped__ = orig
             tracer._probes[name] = orig
             _replace_os(name, orig, probe)
 
         for name in ("stat", "lstat", "access"):
             wrap(name)
+
+        orig_open = os.open
+        if not getattr(orig_open, "__smates__", False):
+
+            def open_(path, *args, **kwargs):
+                # The "open" audit event does not tell a path relative to dir_fd.
+                if kwargs.get("dir_fd") is None or isinstance(path, int) or os.path.isabs(path):
+                    return orig_open(path, *args, **kwargs)
+                outer = getattr(local, "dir_fd", False)
+                local.dir_fd = True
+                try:
+                    return orig_open(path, *args, **kwargs)
+                finally:
+                    local.dir_fd = outer
+
+            _replace_os("open", orig_open, open_)
 
     def _wrap_spawn(self):
         # A child given an environment of its own (subprocess's env=, os.execve,
@@ -351,8 +463,6 @@ class _Tracer:
                     kwargs["env"] = tracer.child_env(kwargs["env"])
                 return orig(*args, **kwargs)
 
-            spawn.__smates__ = True
-            spawn.__wrapped__ = orig
             return spawn
 
         # os.execle/execlpe/execvpe and, on POSIX, os.spawn*e call os.execve.
@@ -363,6 +473,18 @@ class _Tracer:
             if name == "spawnve" and not isinstance(orig, type(os.getpid)):
                 continue  # Python code calling os.execve (POSIX)
             _replace_os(name, orig, with_env(orig, i))
+
+        orig_exit = os._exit
+        if not getattr(orig_exit, "__smates__", False):
+
+            def _exit(*args, **kwargs):
+                # Forked workers (multiprocessing's) end with os._exit: one that only ran
+                # code reports it still.
+                if tracer._pending is not None and tracer._pending[1]:
+                    tracer._begin()
+                return orig_exit(*args, **kwargs)
+
+            _replace_os("_exit", orig_exit, _exit)
 
         def patch(subprocess):
             cls = getattr(subprocess, "Popen", None)
@@ -393,23 +515,43 @@ class _Tracer:
 
     def child_env(self, env):
         """Returns env, a child's own environment, with the variables that trace the
-        child added where missing (as a copy; env itself when nothing is missing)."""
+        child added where missing (as a copy; env itself when nothing is missing). The
+        child sees them: SMATES_TRACE_DIR, SMATES_REPO_ROOT, SMATES_TRACE_PARENT,
+        SMATES_TRACE_CTX, the shim directory first on PYTHONPATH and, when Node is
+        traced, the shim's --require in NODE_OPTIONS (and NODE_V8_COVERAGE)."""
+        local = self._local
+        outer = getattr(local, "busy", False)
+        local.busy = True  # these lookups (env may be os.environ) are no reads of the program
+        try:
+            return self._child_env(env)
+        finally:
+            local.busy = outer
+
+    def _child_env(self, env):
         try:
             if env is None or not self.enabled:
                 return env
             keys = list(env.keys())
             enc = os.fsencode if keys and isinstance(keys[0], bytes) else str
+            # Names are case-insensitive on Windows.
+            fold = (lambda k: os.fsdecode(k).upper()) if os.name == "nt" else os.fsdecode
+            actual = {fold(k): k for k in keys}
+
+            def get(name):
+                k = actual.get(fold(name))
+                return None if k is None else os.fsdecode(env[k])
+
             add = {}
             for name, value in self._child_vars + [("SMATES_TRACE_PARENT", "%d-0" % os.getpid())]:
-                if enc(name) not in env:
+                if fold(name) not in actual:
                     add[name] = value
-            if self.exported is not None and env.get(enc("SMATES_TRACE_CTX")) != enc(self.exported):
+            if self.exported is not None and get("SMATES_TRACE_CTX") != self.exported:
                 add["SMATES_TRACE_CTX"] = self.exported
-            cur = os.fsdecode(env.get(enc("PYTHONPATH")) or "")
+            cur = get("PYTHONPATH") or ""
             if self._pythonpath not in cur.split(os.pathsep):
                 add["PYTHONPATH"] = self._pythonpath + (os.pathsep + cur if cur else "")
             if self._node_shim is not None:
-                cur = os.fsdecode(env.get(enc("NODE_OPTIONS")) or "")
+                cur = get("NODE_OPTIONS") or ""
                 if self._node_shim not in cur:
                     shim = self._node_shim
                     if any(c in shim for c in " \t\"'\\"):
@@ -419,7 +561,7 @@ class _Tracer:
                 return env
             out = dict(env)
             for name, value in add.items():
-                out[enc(name)] = enc(value)
+                out[actual.get(fold(name), enc(name))] = enc(value)
             return out
         except Exception:
             return env
@@ -507,6 +649,8 @@ class _Tracer:
                 return
             if self.ctx.startswith("fixture:"):
                 by = None
+            if self._follow is not None:
+                self._follow_parent()
             k = (self.ctx, "env", name, by)
             if k in self.seen:
                 return
@@ -529,7 +673,7 @@ class _Tracer:
             return
         if event == "open":
             path, mode, flags = args[0], args[1], args[2]
-            if isinstance(path, int):
+            if isinstance(path, int) or getattr(self._local, "dir_fd", False):
                 return
             # os.open reports no mode, only flags: opening write-only is not a read.
             if isinstance(flags, int) and (flags & 3) == os.O_WRONLY:
@@ -550,9 +694,10 @@ class _Tracer:
             if event == "os.posix_spawn" and getattr(self._local, "popen", False):
                 return
             try:
-                self.exec_event(list(args[2] if event == "os.spawn" else args[1]), False, None)
+                argv = list(args[2] if event == "os.spawn" else args[1])
             except (TypeError, IndexError):
-                pass
+                return
+            self.exec_event(argv, False, None, event == "os.exec")
         elif event == "sqlite3.connect":
             self._sqlite(args[0] if args else None)
         elif event in ("os.listdir", "os.scandir"):
@@ -567,7 +712,26 @@ class _Tracer:
                 caller = ""
             if caller.startswith("<frozen importlib") or caller.startswith(self._importlib):
                 return
-            self.record("dir", args[0] if args and args[0] is not None else ".")
+            path = args[0] if args and args[0] is not None else "."
+            # Libraries scanning sys.path for distributions or modules (pkg_resources,
+            # the importlib_metadata backport) list it the same way; `python -m pytest`
+            # puts the repository root on it.
+            if ("/site-packages/" in caller or "/dist-packages/" in caller) and self._on_sys_path(path):
+                return
+            self.record("dir", path)
+
+    def _on_sys_path(self, path):
+        local = self._local
+        if isinstance(path, int) or getattr(local, "busy", False):
+            return False
+        local.busy = True  # realpath calls the wrapped os.lstat
+        try:
+            real = self._norm(path, True)
+            return real is not None and any(self._norm(e or ".", True) == real for e in list(sys.path))
+        except Exception:
+            return False
+        finally:
+            local.busy = False
 
     def _sqlite(self, db):
         # A database file that exists when connected to is an input; one the connection
@@ -596,7 +760,8 @@ class _Tracer:
             return
         self.record("read", db)
 
-    def exec_event(self, argv, shell, cwd):
+    def exec_event(self, argv, shell, cwd, replace=False):
+        """Records a child process; replace: this process execs it (os.exec*)."""
         if not self.enabled:
             return
         try:
@@ -604,6 +769,12 @@ class _Tracer:
             cwd = os.path.abspath(os.fsdecode(cwd)) if cwd else _safe_cwd()
         except Exception:
             return
+        if self._follow is not None:
+            self._follow_parent()
+        if replace and self._pending is not None:
+            # A forked child that execs (os.spawn* on POSIX, pty.fork) is that program;
+            # a traced one records itself, with the same traced ancestor.
+            self._begin(argv, own=False)
         self.write({"k": "exec", "args": argv, "shell": shell, "cwd": cwd})
 
     def _exit(self):
@@ -611,9 +782,19 @@ class _Tracer:
         self.enabled = False
 
 
-def _replace_os(name, orig, new):
-    """Replaces os.<name>, also in the os.supports_* sets listing the original (shutil
-    picks its rmtree implementation from them)."""
+def _replace_os(name, orig, fn):
+    """Replaces os.<name> with fn, as a callable that does not bind as a method like the
+    builtin it replaces (pathlib keeps os.stat and others as class attributes before
+    3.11), also in the os.supports_* sets listing the original (shutil picks its rmtree
+    implementation from them)."""
+    new = functools.partial(fn)
+    for attr in ("__name__", "__qualname__", "__doc__", "__module__"):
+        try:
+            setattr(new, attr, getattr(orig, attr))
+        except (AttributeError, TypeError):
+            pass
+    new.__wrapped__ = orig
+    new.__smates__ = True
     setattr(os, name, new)
     for s in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks", "supports_effective_ids"):
         funcs = getattr(os, s, None)
@@ -621,9 +802,32 @@ def _replace_os(name, orig, new):
             funcs.add(new)
 
 
+class _PatchingLoader:
+    """Runs a module with its own loader, then patches it."""
+
+    def __init__(self, loader, patch):
+        self._loader = loader
+        self._patch = patch
+
+    def create_module(self, spec):
+        create = getattr(self._loader, "create_module", None)
+        return create(spec) if create is not None else None
+
+    def exec_module(self, module):
+        self._loader.exec_module(module)
+        try:
+            self._patch(module)
+        except Exception:
+            pass
+
+    def __getattr__(self, name):  # get_source, get_code, ...
+        return getattr(self._loader, name)
+
+
 class _ImportPatcher:
     """A meta path finder that finds nothing itself: it has the other finders find one
-    module, and patches the module once it has run."""
+    module and returns that spec with a loader that patches the module once it has run
+    (again when it is reloaded or imported anew)."""
 
     def __init__(self, name, patch):
         self.name = name
@@ -632,48 +836,33 @@ class _ImportPatcher:
     def find_spec(self, fullname, path=None, target=None):
         if fullname != self.name:
             return None
-        try:
-            sys.meta_path.remove(self)
-        except ValueError:
-            pass
-        import importlib.util
-
-        spec = importlib.util.find_spec(fullname)
-        loader = getattr(spec, "loader", None)
-        orig = getattr(loader, "exec_module", None)
-        if orig is None:
+        for finder in list(sys.meta_path):
+            find = getattr(finder, "find_spec", None)
+            if finder is self or find is None:
+                continue
+            spec = find(fullname, path, target)
+            if spec is not None:
+                break
+        else:
+            return None
+        if not hasattr(spec.loader, "exec_module"):
             return spec
-        patch = self.patch
+        import copy
 
-        def exec_module(module):
-            try:
-                del loader.exec_module
-            except AttributeError:
-                pass
-            orig(module)
-            if getattr(module, "__name__", None) == fullname:
-                try:
-                    patch(module)
-                except Exception:
-                    pass
-
-        try:
-            loader.exec_module = exec_module
-        except Exception:
-            pass
+        spec = copy.copy(spec)
+        spec.loader = _PatchingLoader(spec.loader, self.patch)
         return spec
 
 
 def _on_import(name, patch):
-    """Calls patch(module) once module name is imported (now, if it already is)."""
+    """Calls patch(module) whenever module name is imported (now, if it already is)."""
+    sys.meta_path.insert(0, _ImportPatcher(name, patch))
     mod = sys.modules.get(name)
-    if mod is None:
-        sys.meta_path.insert(0, _ImportPatcher(name, patch))
-        return
-    try:
-        patch(mod)
-    except Exception:
-        pass
+    if mod is not None:
+        try:
+            patch(mod)
+        except Exception:
+            pass
 
 
 def _safe_cwd():

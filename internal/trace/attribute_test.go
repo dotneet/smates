@@ -258,10 +258,14 @@ func TestAttributeChildSpawnContext(t *testing.T) {
 	server.p.SpawnKey, server.p.SpawnCtx = "100-0", "fixture:server@"
 	other := mkProc(201, 100, 0).times(60, 0).read("other.txt") // exported by another process
 	other.p.SpawnKey, other.p.SpawnCtx = "99-0", "test:test_a.py"
-	a := attr(Options{}, py, server, other)
+	// A worker test_a forked, used by test_b later: it followed the parent's contexts.
+	worker := mkProc(202, 100, 0).times(20, 0).code("helper.py").read("a.txt", "b.txt")
+	worker.p.SpawnKey, worker.p.SpawnCtx = "100-0", "test:test_a.py"
+	worker.p.SpawnFiles = map[string]map[string]bool{"test:test_a.py": {"a.txt": true}, "test:test_b.py": {"b.txt": true}}
+	a := attr(Options{}, py, server, other, worker)
 	for id, want := range map[string][]string{
-		"test_a.py": {"served.txt", "server.py"},
-		"test_b.py": {"other.txt", "served.txt", "server.py"},
+		"test_a.py": {"a.txt", "helper.py", "served.txt", "server.py"},
+		"test_b.py": {"b.txt", "other.txt", "served.txt", "server.py"},
 	} {
 		if got := unitFiles(a, id); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: got %v, want %v", id, got, want)

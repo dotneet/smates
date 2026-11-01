@@ -163,6 +163,9 @@ type Proc struct {
 	// when it started this process (or a traced ancestor of it), through the environment
 	// (SMATES_TRACE_CTX="<key>:<context>").
 	SpawnKey, SpawnCtx string
+	// SpawnFiles maps contexts of SpawnKey to the keys this process recorded while
+	// SpawnKey was in them: SpawnCtx first, then those a forked child followed ("pctx").
+	SpawnFiles map[string]map[string]bool
 }
 
 // Span is a context switch.
@@ -385,7 +388,20 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	ctx := ""
+	ctx, spawn := "", ""
+	add := func(kind, r string) string {
+		key := p.add(ctx, kind, r)
+		if p.SpawnKey != "" {
+			if p.SpawnFiles == nil {
+				p.SpawnFiles = map[string]map[string]bool{}
+			}
+			if p.SpawnFiles[spawn] == nil {
+				p.SpawnFiles[spawn] = map[string]bool{}
+			}
+			p.SpawnFiles[spawn][key] = true
+		}
+		return key
+	}
 	for sc.Scan() {
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) != nil {
@@ -394,15 +410,20 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		switch ev.K {
 		case "start":
 			p.Ppid, p.Anc, p.Argv, p.Cwd, p.Lang, p.Start = ev.Ppid, ev.Anc, ev.Argv, ev.Cwd, ev.Lang, ev.T
-			if key, c, ok := strings.Cut(ev.Pctx, ":"); ok && key != "" {
+			if key, c, ok := strings.Cut(ev.Pctx, ":"); ok && key != "" && p.SpawnKey == "" {
 				p.SpawnKey, p.SpawnCtx = key, relCtx(c, rel)
+				spawn = p.SpawnCtx
+			}
+		case "pctx": // a forked child follows its parent into another context
+			if key, c, ok := strings.Cut(ev.ID, ":"); ok && key == p.SpawnKey {
+				spawn = relCtx(c, rel)
 			}
 		case "read", "code", "dir", "probe", "tree":
 			key := ""
 			if r, ok := rel(ev.P); ok {
-				key = p.add(ctx, ev.K, r)
+				key = add(ev.K, r)
 			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
-				key = p.add(ctx, ev.K, ".")
+				key = add(ev.K, ".")
 			}
 			if by, ok := rel(ev.By); ok && key != "" && ev.By != "" {
 				m := p.ReadsBy[by]
@@ -416,7 +437,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			if ev.P == "" {
 				continue
 			}
-			key := p.add(ctx, "env", ev.P)
+			key := add("env", ev.P)
 			if by, ok := rel(ev.By); ok && ev.By != "" {
 				m := p.ReadsBy[by]
 				if m == nil {
@@ -431,7 +452,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				cwd = p.Cwd
 			}
 			for _, k := range execDeps(ev.Args, ev.Shell, cwd, root, rel) {
-				p.add(ctx, "key", k)
+				add("key", k)
 			}
 		case "ctx":
 			ctx = relCtx(ev.ID, rel)
