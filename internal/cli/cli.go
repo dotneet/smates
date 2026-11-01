@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dotneet/smates/docs"
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/detect"
@@ -35,7 +36,7 @@ Usage:
   smates run [flags] [-- runner args]   select tests, run them with tracing, update state
   smates select [flags]                 print the selection without running anything
   smates watch [flags] [-- runner args] rerun the affected tests on every change
-  smates init [--github] [--format json] write smates.yml for this repository
+  smates init [--github] [--agents-md] [--format json] write smates.yml for this repository
   smates why <file> [--format json]     tests that depend on a file
   smates deps <test> [--format json]    files a test depends on
   smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
@@ -45,6 +46,8 @@ Usage:
   smates config add-ignore|add-input <glob>... | set <key> <value> [--dry-run]  edit smates.yml safely
   smates state show [--format json]|path|pull|push|merge|clear
   smates hook install|uninstall|status  run the affected tests from a git pre-push hook
+                                        (--claude: from a Claude Code Stop hook)
+  smates guide                          how a coding agent should use smates
   smates doctor [--format json]         check setup
   smates version
 
@@ -60,6 +63,7 @@ Exit codes:
 
 For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
 of failing tests, then a short summary with the command that reruns just those tests.
+'smates guide' has the rest.
 
 Run 'smates <command> -h' for flags. Docs: https://github.com/dotneet/smates
 `
@@ -104,6 +108,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		code, err = cmdHook(ctx, rest, os.Stdin, stdout, stderr)
 	case "doctor":
 		code, err = cmdDoctor(rest, stdout, stderr)
+	case "guide":
+		_, err = io.WriteString(stdout, docs.Agents)
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "smates", Version)
 	case "help", "-h", "--help":

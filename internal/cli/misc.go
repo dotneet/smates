@@ -36,6 +36,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	print := fs.Bool("stdout", false, "print the config instead of writing it")
 	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
 	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
+	agentsMD := fs.Bool("agents-md", false, "add a short smates section to AGENTS.md (or CLAUDE.md) for coding agents")
 	format := formatFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
@@ -68,12 +69,12 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		if existing, err = config.Load(repo.Root); err != nil {
 			return err
 		}
-		if existing != nil && !*github {
-			return fmt.Errorf("%s already exists (use --force to overwrite, or --github to only generate the workflow from it)", existing.Path)
+		if existing != nil && !*github && !*agentsMD {
+			return fmt.Errorf("%s already exists (use --force to overwrite, --github to only generate the workflow from it, or --agents-md to only add the section for coding agents)", existing.Path)
 		}
 	}
 	if existing != nil {
-		return initWorkflowOnly(repo, existing, files, *patch, asJSON, stdout, stderr)
+		return initExisting(repo, existing, files, *patch, *github, *agentsMD, asJSON, stdout, stderr)
 	}
 	suites := detect.Suites(repo, files)
 	mk := makefileHints(repo.Root, suites)
@@ -129,11 +130,15 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 			rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
 		}
 	}
+	if err := rep.addAgentsMD(repo.Root, *agentsMD); err != nil {
+		return err
+	}
 	if asJSON {
 		rep.NeedsReview = initReview(repo, nil, suites, files, mk, *github)
 		return writeJSON(stdout, rep)
 	}
 	fmt.Fprint(stdout, initNextStepsText)
+	rep.AgentsMD.print(stdout)
 	return nil
 }
 
@@ -145,10 +150,11 @@ Next steps:
   smates hook install  # optional: run the affected tests before every git push
 `
 
-// initWorkflowOnly is `smates init --github` over an existing config (without
-// --force): the config is left untouched and the workflow (or the patch for existing
-// workflows) is generated from its suites.
-func initWorkflowOnly(repo *gitx.Repo, cfg *config.Config, files []string, patch string, asJSON bool, stdout, stderr io.Writer) error {
+// initExisting is `smates init --github` and/or `--agents-md` over an existing config
+// (without --force): the config is left untouched; --github generates the workflow (or
+// the patch for existing workflows) from its suites, --agents-md adds the section for
+// coding agents.
+func initExisting(repo *gitx.Repo, cfg *config.Config, files []string, patch string, github, agentsMD, asJSON bool, stdout, stderr io.Writer) error {
 	rep := &initReport{Config: cfg.Path, FilesWritten: []string{}, Suites: []initSuite{}, NeedsReview: []reviewItem{}, NextSteps: initNextSteps}
 	for _, s := range cfg.Suites {
 		rep.Suites = append(rep.Suites, initSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Exclude: nonNil(s.Exclude)})
@@ -157,22 +163,30 @@ func initWorkflowOnly(repo *gitx.Repo, cfg *config.Config, files []string, patch
 	if asJSON {
 		out = io.Discard
 	}
-	fmt.Fprintf(out, "%s exists: left unchanged; generating the workflow from its %d suite(s) (use --force to rewrite it)\n", cfg.Path, len(cfg.Suites))
-	wf, err := initGitHub(repo, cfg.Suites, files, false, patch, out, stderr)
-	if err != nil {
+	if github {
+		fmt.Fprintf(out, "%s exists: left unchanged; generating the workflow from its %d suite(s) (use --force to rewrite it)\n", cfg.Path, len(cfg.Suites))
+		wf, err := initGitHub(repo, cfg.Suites, files, false, patch, out, stderr)
+		if err != nil {
+			return err
+		}
+		rep.Workflow = wf
+		if wf.Written {
+			rep.FilesWritten = append(rep.FilesWritten, wf.File)
+		}
+		if wf.PatchFile != "" {
+			rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
+		}
+	} else {
+		fmt.Fprintf(out, "%s exists: left unchanged\n", cfg.Path)
+	}
+	if err := rep.addAgentsMD(repo.Root, agentsMD); err != nil {
 		return err
 	}
-	rep.Workflow = wf
-	if wf.Written {
-		rep.FilesWritten = append(rep.FilesWritten, wf.File)
-	}
-	if wf.PatchFile != "" {
-		rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
-	}
 	if asJSON {
-		rep.NeedsReview = initReview(repo, cfg, cfg.Suites, files, nil, true)
+		rep.NeedsReview = initReview(repo, cfg, cfg.Suites, files, nil, github)
 		return writeJSON(stdout, rep)
 	}
+	rep.AgentsMD.print(stdout)
 	return nil
 }
 

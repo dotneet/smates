@@ -214,6 +214,8 @@ smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
 smates hook install  # optional: run the affected tests before every git push
+smates hook install --claude  # optional: Claude Code fixes failing tests before it stops
+smates guide         # how a coding agent should use smates (docs/AGENTS.md)
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
@@ -456,10 +458,10 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--budget 90s`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
-| `smates init [--github]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
+| `smates init [--github] [--agents-md]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup; `--agents-md`: add a short smates section to `AGENTS.md`/`CLAUDE.md`; over an existing config either one runs alone). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
 | `smates list` / `doctor` | suites, test units and where the test patterns come from (`tests_source`, `test_patterns`, `discovery_warning` in JSON); setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable): `--format text\|json` |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
@@ -467,9 +469,15 @@ declare none of `depends_on`, `serves` or `rules`.
 | `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite`; `--apply` adds the suggested globs to `ignore:` (nothing else), `--apply --dry-run` prints the diff |
 | `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `untested`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
-| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags`; `--claude [--user]` for a Claude Code Stop hook |
+| `smates guide` | the guide for coding agents ([docs/AGENTS.md](docs/AGENTS.md)) |
 
 ### For AI coding agents
+
+**[docs/AGENTS.md](docs/AGENTS.md)** is a one-page guide for an agent working in a
+repository that uses smates (`smates guide` prints it). `smates init` suggests a short
+section that points an agent at it when the repository has `AGENTS.md` or `CLAUDE.md`
+(`smates init --agents-md` appends it, once).
 
 An agent reads everything a command prints, so `smates run --output failures` (or
 `SMATES_OUTPUT=agent` in its environment; the flag wins) keeps the output small:
@@ -494,6 +502,32 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 directory for Go) and records them as usual; the other tests and changes are left for the
 next run. `--report -` writes the JSON report to stdout and everything else to stderr.
 
+**Long runs.** In failures mode smates prints `smates: still running <suite> (n of m test
+unit(s) started, 1m 30s)` after every 30 s without output (`SMATES_HEARTBEAT=10s` changes
+it, `0` turns it off), so a tool timeout does not take a silent run for a hang. When the
+recorded durations of the selected tests add up to more than `--budget` (default 90s;
+`0` turns it off), `smates run` first prints how to split it: one suite at a time
+(`--suite`), or in the background with `--report file.json`.
+
+**Claude Code Stop hook.** `smates hook install --claude` adds a Stop hook to
+`.claude/settings.json` (`--user`: `~/.claude/settings.json`, active in projects that have
+a `smates.yml`). When Claude ends its turn the hook runs `smates hook claude-stop`, which
+runs the affected tests (`--output failures --no-agent`; more run flags after `--`). When
+some fail it prints `{"decision": "block", "reason": "<failing tests and the rerun
+command>"}` and exits 0, Claude Code's documented way to keep Claude going: it reads the
+reason and fixes the tests. It never blocks when the hook input has `stop_hook_active`
+(Claude is already continuing because of a Stop hook), returns at once when nothing is
+selected (without writing the state, also with `state_shared: true`, where it runs per
+worktree), and reports smates' own errors (what makes `smates run` exit 2, 3 or 4) to
+the user with exit 1 instead of blocking; failing tests still block when the state could
+not be saved. The entry is spliced into the file's text, so everything else (other keys
+and hooks, their order and formatting) stays byte for byte, and installing again changes
+nothing; `smates hook uninstall --claude` removes exactly that text (and a `Stop` or
+`hooks` it leaves empty). A file smates cannot edit unambiguously (invalid JSON, a
+duplicate key, `hooks` that is not an object or `Stop` that is not an array) is reported
+and left alone. `smates hook status` shows the hook, and `SMATES_SKIP_HOOK=1` skips it. The command does
+nothing where `smates` is not installed.
+
 **Exit codes** tell "fix the code" from "fix the setup":
 
 | code | meaning |
@@ -502,7 +536,7 @@ next run. `--report -` writes the JSON report to stdout and everything else to s
 | 1 | tests failed (whatever code the runner exited with; `--report` has it in `exit_code`) |
 | 2 | usage error: invalid command line |
 | 3 | configuration error: invalid `smates.yml`, unknown runner, a suite command that cannot be parsed, a suite or test named on the command line (`--suite`, `--only`) that the configuration does not define, no suites at all |
-| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4 |
+| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4; a state that cannot be saved (e.g. the shared state's lock is held by another worktree's run), reported after the summary, or 1 when tests failed |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the

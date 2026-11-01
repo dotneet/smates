@@ -31,6 +31,7 @@ suites:
       - tests: ["."]
         deps: &core
           - "cmd/**"
+          - "docs/*.go"
           - "internal/{agent,cli,config,depkey,detect,gitx,hints,pathutil,selector,state}/**"
           - "internal/summary/*.go"
           - "internal/static/*.go"

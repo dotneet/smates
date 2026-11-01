@@ -46,11 +46,14 @@ type hookTarget struct {
 
 func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
-		return 2, usageError{errors.New("usage: smates hook install|uninstall|status|run")}
+		return 2, usageError{errors.New("usage: smates hook install|uninstall|status [--claude]|run|claude-stop")}
 	}
 	sub, rest := args[0], args[1:]
-	if sub == "run" {
+	switch sub {
+	case "run":
 		return hookRun(ctx, rest, stdin, stdout, stderr)
+	case "claude-stop":
+		return hookClaudeStop(ctx, rest, stdin, stdout, stderr)
 	}
 	fs := flag.NewFlagSet("hook "+sub, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -58,8 +61,25 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	kind := fs.String("hook", "pre-push", "git hook: pre-push or pre-commit")
 	appendTo := fs.Bool("append", false, "install: add smates to the end of an existing hook script")
 	useAgent := fs.Bool("agent", false, "install: let the hook call the agent for unattributed changes")
+	claude := fs.Bool("claude", false, "a Claude Code Stop hook in .claude/settings.json instead of a git hook")
+	user := fs.Bool("user", false, "with --claude: in ~/.claude/settings.json (every project with a smates.yml)")
 	if err := fs.Parse(rest); err != nil {
 		return 2, usageError{err}
+	}
+	if *user && !*claude {
+		return 2, usageError{errors.New("--user applies to --claude")}
+	}
+	if *claude {
+		var bad []string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "hook" || f.Name == "append" {
+				bad = append(bad, "--"+f.Name)
+			}
+		})
+		if len(bad) > 0 {
+			return 2, usageError{fmt.Errorf("%s applies to git hooks, not --claude", strings.Join(bad, " and "))}
+		}
+		return claudeHookCmd(sub, *dir, *user, *useAgent, fs.Args(), stdout)
 	}
 	if !slices.Contains(hookKinds, *kind) {
 		return 2, usageError{fmt.Errorf("unsupported --hook %q (want %s)", *kind, strings.Join(hookKinds, " or "))}
@@ -89,7 +109,9 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	case "uninstall":
 		err = uninstallHook(h, stdout)
 	case "status":
-		err = hookStatus(h, stdout)
+		if err = hookStatus(h, stdout); err == nil {
+			claudeHookStatus(repo, stdout)
+		}
 	default:
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}

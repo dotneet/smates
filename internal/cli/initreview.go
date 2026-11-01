@@ -26,9 +26,12 @@ type initReport struct {
 	FilesWritten []string    `json:"files_written"`
 	Suites       []initSuite `json:"suites"`
 	// Workflow: what --github did (absent without --github).
-	Workflow    *initWorkflow `json:"workflow,omitempty"`
-	NeedsReview []reviewItem  `json:"needs_review"`
-	NextSteps   []string      `json:"next_steps"`
+	Workflow *initWorkflow `json:"workflow,omitempty"`
+	// AgentsMD: the section for AGENTS.md / CLAUDE.md (absent when the repository has
+	// neither and --agents-md was not given).
+	AgentsMD    *agentsMDReport `json:"agents_md,omitempty"`
+	NeedsReview []reviewItem    `json:"needs_review"`
+	NextSteps   []string        `json:"next_steps"`
 }
 
 type initSuite struct {
