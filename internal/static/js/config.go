@@ -435,11 +435,13 @@ func (p *cfgParser) object(i int) (*Object, int) {
 		case p.literal(i):
 			key = p.text(i)
 		default:
-			// Computed key ([k]: v) or something unexpected: skip the member.
+			// Computed key ([k]: v) or something unexpected (a stray ';' or ')'): skip
+			// the member. Keys after it may have been missed, so none reads as absent.
 			o.Spread = true
-			i = p.skip(i)
-			if p.punct(i, '[') || p.punct(i, ']') { // malformed; avoid looping
-				i++
+			if j := p.skip(i); j > i {
+				i = j
+			} else {
+				i++ // malformed; avoid looping
 			}
 			continue
 		}
@@ -461,17 +463,40 @@ func (p *cfgParser) object(i int) (*Object, int) {
 	return o, i + 1
 }
 
-// skipMember skips a method definition (name(...) {...}) starting at i.
+// skipMember skips a method definition (name(...) {...}) starting at i. Parameters and
+// body are skipped as balanced brackets: the ',' and ';' inside them do not end the
+// member.
 func (p *cfgParser) skipMember(i int) int {
-	for i < len(p.toks) && !p.punct(i, '{') && !p.end(i) {
-		if p.punct(i, '(') {
-			i = p.skip(i+1) + 1
+	start := i
+	for i < len(p.toks) && !p.end(i) {
+		switch {
+		case p.punct(i, '{'):
+			return p.closing(i)
+		case p.punct(i, '('), p.punct(i, '['):
+			i = p.closing(i)
+		default:
+			i++
+		}
+	}
+	return max(i, start+1)
+}
+
+// closing returns the index after the bracket closing the one at i (or the end).
+func (p *cfgParser) closing(i int) int {
+	depth := 0
+	for ; i < len(p.toks); i++ {
+		t := p.toks[i]
+		if t.kind != tPunct {
 			continue
 		}
-		i++
-	}
-	if p.punct(i, '{') {
-		i = p.skip(i+1) + 1
+		switch t.c {
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			if depth--; depth <= 0 {
+				return i + 1
+			}
+		}
 	}
 	return i
 }
@@ -491,13 +516,14 @@ func (p *cfgParser) array(i int) ([]any, int) {
 			i = j
 			continue
 		}
+		start := i
 		var v any
 		v, i = p.value(i)
 		out = append(out, v)
 		if !p.end(i) {
 			i = p.skip(i)
 		}
-		if p.punct(i, '}') || p.punct(i, ')') { // malformed
+		if i == start || p.punct(i, '}') || p.punct(i, ')') { // malformed (a stray ';' or ')')
 			i++
 		}
 	}

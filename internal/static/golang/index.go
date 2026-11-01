@@ -33,6 +33,25 @@ type index struct {
 	modules  map[string][]string // module path -> repo-relative module directories
 	modDirs  map[string]bool     // directories containing a go.mod
 	workDirs map[string]bool     // directories containing a go.work
+	vendored map[string]bool     // directories containing a vendor/modules.txt
+}
+
+// vendorDirs returns the vendor directories `go build` may read for code in dir: the
+// one of the enclosing module and the one of the enclosing workspace (go work vendor),
+// each only when it has a vendor/modules.txt. Since Go 1.14 such a directory turns on
+// -mod=vendor by default; older go directives and -mod flags are not evaluated, so
+// both are returned whenever they exist.
+func (ix *index) vendorDirs(dir string) []string {
+	var out []string
+	if m, ok := enclosing(dir, ix.modDirs); ok && ix.vendored[m] {
+		out = append(out, joinRel(m, "vendor"))
+	}
+	if w, ok := enclosing(dir, ix.workDirs); ok && ix.vendored[w] {
+		if v := joinRel(w, "vendor"); len(out) == 0 || out[0] != v {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // pkgFiles returns the compiled files of the package in dir, or nil if dir holds none.
@@ -54,6 +73,7 @@ func (a *Analyzer) buildIndex() *index {
 		modules:  map[string][]string{},
 		modDirs:  map[string]bool{},
 		workDirs: map[string]bool{},
+		vendored: map[string]bool{},
 	}
 	var mods, works []string
 	for f := range a.h.Files() {
@@ -72,6 +92,9 @@ func (a *Analyzer) buildIndex() *index {
 		case base == "go.work":
 			ix.workDirs[dir] = true
 			works = append(works, f)
+			continue
+		case base == "modules.txt" && path.Base(dir) == "vendor":
+			ix.vendored[dirOf(dir)] = true
 			continue
 		case strings.HasPrefix(base, "_"), strings.HasPrefix(base, "."):
 			continue // ignored by the go command

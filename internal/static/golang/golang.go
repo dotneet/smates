@@ -4,10 +4,11 @@
 // Go compiles whole packages, so dependencies are tracked at package granularity: a
 // file depends on every other compiled file of its own package directory, on every
 // compiled file of each package it imports (resolved through the repository's go.mod
-// files), on the files its //go:embed directives name, and on the go.mod/go.sum (and
-// go.work/go.work.sum) that pin its module's dependency versions. The result
-// over-approximates what `go build` would read: build constraints are not evaluated,
-// so files for every GOOS/GOARCH and tag combination are included.
+// files, or through vendor/ when the module or workspace vendors its dependencies), on
+// the files its //go:embed directives name, and on the go.mod/go.sum (and
+// go.work/go.work.sum, vendor/modules.txt) that pin its module's dependency versions.
+// The result over-approximates what `go build` would read: build constraints are not
+// evaluated, so files for every GOOS/GOARCH and tag combination are included.
 package golang
 
 import (
@@ -80,12 +81,16 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 		}
 	}
 
-	// Dependency versions of the enclosing module and workspace.
+	// Dependency versions of the enclosing module and workspace, and the manifest of
+	// their vendor directories.
 	if m, ok := enclosing(dir, ix.modDirs); ok {
 		out = append(out, joinRel(m, "go.mod"), joinRel(m, "go.sum"))
 	}
 	if w, ok := enclosing(dir, ix.workDirs); ok {
 		out = append(out, joinRel(w, "go.work"), joinRel(w, "go.work.sum"))
+	}
+	for _, v := range ix.vendorDirs(dir) {
+		out = append(out, joinRel(v, "modules.txt"))
 	}
 
 	if src == nil {
@@ -198,9 +203,29 @@ func importPaths(name string, src []byte) []string {
 	return out
 }
 
-// resolve maps an import path to the compiled files of the package it names. Standard
-// library and third-party packages resolve to nothing.
+// resolve maps an import path to the compiled files of the package it names, including
+// third-party packages vendored into the enclosing module or workspace. The standard
+// library and packages of the module cache resolve to nothing.
 func (a *Analyzer) resolve(imp, fromDir string) []string {
+	files := a.resolveRepo(imp, fromDir)
+	if imp == "C" || strings.HasPrefix(imp, ".") {
+		return files
+	}
+	// In vendor mode `go build` compiles vendor/<imp> for every import outside the
+	// main modules, replaced modules included. Main-module packages have no copy there,
+	// so the vendored package, when there is one, is simply added.
+	ix := a.index()
+	for _, v := range ix.vendorDirs(fromDir) {
+		if vf := ix.pkgFiles(joinRel(v, imp)); len(vf) > 0 {
+			files = append(append([]string{}, files...), vf...)
+		}
+	}
+	return files
+}
+
+// resolveRepo maps an import path to the compiled files of the package of a repository
+// module (or GOPATH-style root) it names.
+func (a *Analyzer) resolveRepo(imp, fromDir string) []string {
 	if imp == "C" { // cgo pseudo-package
 		return nil
 	}

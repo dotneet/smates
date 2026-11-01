@@ -21,7 +21,7 @@ func (pytest) Defaults(repo *gitx.Repo, root string) Defaults {
 	dir := filepath.Join(repo.Root, filepath.FromSlash(root))
 	return Defaults{
 		Tests:   []string{"**/test_*.py", "**/*_test.py"},
-		Exclude: []string{"**/.venv/**", "**/venv/**", "**/site-packages/**", "**/node_modules/**", "**/build/**", "**/.tox/**", "**/.nox/**"},
+		Exclude: pytestExclude(pytestNoRecurse, nil),
 		Inputs: []string{
 			"pyproject.toml", "uv.lock", "setup.cfg", "setup.py", "pytest.ini", "tox.ini", "requirements*.txt", ".python-version",
 			"/pyproject.toml", "/uv.lock", "/.python-version", "/requirements*.txt", "/pytest.ini", "/.tool-versions",
