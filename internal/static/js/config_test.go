@@ -89,6 +89,52 @@ export default config;`,
 			ok: true,
 		},
 		{
+			name: "wrapper with a trailing comma; member callee",
+			src:  `export default vitest.defineProject({ test: { dir: 'src' } },)`,
+			want: obj(map[string]any{"test": obj(map[string]any{"dir": "src"})}),
+			ok:   true,
+		},
+		{
+			name: "mergeConfig is not unwrapped",
+			src:  `export default mergeConfig(base, defineConfig({ test: { include: ['a/**'] } }))`,
+			want: Unknown("mergeConfig(base, defineConfig({ test: { include: ['a/**'] } }))"),
+			ok:   true,
+		},
+		{
+			name: "unknown single-argument call is not unwrapped",
+			src:  `module.exports = withPreset({ testMatch: ['x'] })`,
+			want: Unknown("withPreset({ testMatch: ['x'] })"),
+			ok:   true,
+		},
+		{
+			name: "wrapper with two arguments is not unwrapped",
+			src:  `export default defineConfig({ test: {} }, extra)`,
+			want: Unknown("defineConfig({ test: {} }, extra)"),
+			ok:   true,
+		},
+		{
+			name: "binding read but not changed",
+			src: `const config = { testMatch: ['**/*.spec.ts'] };
+if (config.testMatch.length === 0 || config.verbose == null) console.log(config['roots']);
+const n = config.testMatch.length <= 1 ? config.x : config.y;
+module.exports = config;`,
+			want: obj(map[string]any{"testMatch": []any{"**/*.spec.ts"}}),
+			ok:   true,
+		},
+		{
+			name: "nested declaration is not the binding",
+			src: `function f() { const config = { testMatch: ['nested'] }; return config }
+export default config;`,
+			want: Unknown("config"),
+			ok:   true,
+		},
+		{
+			name: "module.exports inside a block is not the export",
+			src:  `if (process.env.CI) { module.exports = { testMatch: ['ci'] } }`,
+			ok:   false,
+		},
+		{name: "no export", src: `const a = { testMatch: [] }`, ok: false},
+		{
 			name: "function body is not followed",
 			src:  `export default defineConfig(() => { return { test: {} } })`,
 			want: Unknown("defineConfig(() => { return { test: {} } })"),
@@ -100,7 +146,6 @@ export default config;`,
 			want: Unknown("async () => ({ testMatch: ['x'] })"),
 			ok:   true,
 		},
-		{name: "no export", src: `const a = { testMatch: [] }`, ok: false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -135,5 +180,39 @@ func TestDecodeJSONObject(t *testing.T) {
 	want := obj(map[string]any{"testMatch": []any{"a/**"}, "roots": []any{"src"}, "nested": obj(map[string]any{"x": 1.0})})
 	if !reflect.DeepEqual(o, want) {
 		t.Errorf("got %#v", o)
+	}
+}
+
+// TestConfigObjectMutated checks that a binding or module.exports changed after its
+// declaration is not read as its literal.
+func TestConfigObjectMutated(t *testing.T) {
+	decl := "const config = { testMatch: ['**/*.spec.ts'], roots: ['src'] };\n"
+	for _, c := range []struct{ name, src string }{
+		{"member assignment", decl + "config.testMatch = ['x'];\nmodule.exports = config;"},
+		{"nested member assignment", decl + "config.a.b = 1;\nexport default config;"},
+		{"computed member", decl + "config['testMatch'] = ['x'];\nexport default config;"},
+		{"computed member with a variable", decl + "const k = 'roots'; config[k] = [];\nexport default config;"},
+		{"push", decl + "config.roots.push('lib');\nexport default config;"},
+		{"optional chaining push", decl + "config.roots?.push('lib');\nexport default config;"},
+		{"splice", decl + "config.testMatch.splice(0, 1);\nexport default config;"},
+		{"Object.assign", decl + "Object.assign(config, { testMatch: [] });\nexport default config;"},
+		{"compound assignment", decl + "config.verbose ||= true;\nexport default config;"},
+		{"delete", decl + "delete config.roots;\nexport default config;"},
+		{"reassignment", "let config = { testMatch: ['a'] };\nconfig = { testMatch: ['b'] };\nexport default config;"},
+		{"inside a function", decl + "if (process.env.CI) { config.testMatch = ['ci'] }\nexport default defineConfig(config);"},
+		{"after the export", decl + "export default config;\nconfig.testMatch = ['x'];"},
+		{"module.exports member", "module.exports = { testMatch: ['a'] };\nmodule.exports.testMatch = ['b'];"},
+		{"module.exports computed member", "module.exports = { testMatch: ['a'] };\nmodule.exports['roots'] = ['b'];"},
+		{"exports member", "module.exports = { testMatch: ['a'] };\nexports.roots = ['b'];"},
+		{"module.exports push", "module.exports = { testMatch: ['a'] };\nmodule.exports.testMatch.push('b');"},
+		{"module.exports reassigned", "module.exports = { testMatch: ['a'] };\nmodule.exports = require('./other');"},
+		{"Object.assign module.exports", "module.exports = { testMatch: ['a'] };\nObject.assign(module.exports, other);"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			v, ok := ConfigObject([]byte(c.src))
+			if _, unknown := v.(Unknown); !ok || !unknown {
+				t.Errorf("got %#v, %v; want Unknown", v, ok)
+			}
+		})
 	}
 }

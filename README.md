@@ -376,8 +376,8 @@ statically (config files are never executed):
 | `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
 
 A JS/TS config is read when it exports an object literal (`module.exports = {...}`,
-`export default {...}`, `defineConfig({...})`, or a `const` it names) and the options are
-string, array or regex literals. Anything else (a function, `testMatch: dirs.map(...)`, a
+`export default {...}`, `defineConfig({...})`, or a top-level `const` it names) and the options are
+string, array or regex literals. Anything else (a function, another call such as `mergeConfig(base, ...)`, `testMatch: dirs.map(...)`, a `const` the module changes later such as `config.roots.push(...)`, a
 `...spread` that may set the option, `jest` `projects`, a `testRegex` with lookaround Go's
 `regexp` lacks) falls back to the default globs, and `smates list` / `smates doctor` warn
 with the reason: set `tests:` (and `exclude:`) in `smates.yml` then. A vitest workspace is

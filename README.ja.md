@@ -233,8 +233,8 @@ smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを�
   起動したときだけのため)。
 
 JS/TS の設定は、オブジェクトリテラルを export していて(`module.exports = {...}`、
-`export default {...}`、`defineConfig({...})`、またはそれが指す `const`)、値が文字列・配列・
-正規表現のリテラルのときに読めます。それ以外(関数、`testMatch: dirs.map(...)`、オプションを
+`export default {...}`、`defineConfig({...})`、またはそれが指すトップレベルの `const`)、値が文字列・配列・
+正規表現のリテラルのときに読めます。それ以外(関数、`mergeConfig(base, ...)` などほかの関数呼び出し、`testMatch: dirs.map(...)`、後から `config.roots.push(...)` などで変更される `const`、オプションを
 設定しうる `...spread`、jest の `projects`、Go の `regexp` にない先読みを使う `testRegex` など)
 は既定の glob にフォールバックし、`smates list` / `smates doctor` が理由とともに警告します。
 その場合は `smates.yml` に `tests:`(と `exclude:`)を書いてください。

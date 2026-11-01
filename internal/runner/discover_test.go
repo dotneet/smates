@@ -171,6 +171,19 @@ export default config;`),
 			source: SourceDefaults, warn: "does not export an object literal", tests: defaults,
 		},
 		{
+			name: "config changed after its declaration falls back", suite: jest,
+			files: with(jsFiles, "jest.config.js", `const config = { testMatch: ['<rootDir>/e2e/**/*.ts'] };
+if (process.env.CI) config.testMatch.push('<rootDir>/lib/**/*.js');
+module.exports = config;`),
+			source: SourceDefaults, warn: "jest.config.js does not export an object literal (config, changed after its declaration)", tests: defaults,
+		},
+		{
+			name: "module.exports changed later falls back", suite: jest,
+			files: with(jsFiles, "jest.config.js", `module.exports = { testMatch: ['<rootDir>/e2e/**/*.ts'] };
+module.exports.testMatch = ['**/*.test.js'];`),
+			source: SourceDefaults, warn: "(module.exports, changed later)", tests: defaults,
+		},
+		{
 			name: "spread may set testMatch", suite: jest,
 			files:  with(jsFiles, "jest.config.js", `const base = require('../jest.base'); module.exports = { ...base, verbose: true };`),
 			source: SourceDefaults, warn: "may come from a ...spread", tests: defaults,
@@ -254,6 +267,14 @@ export default defineConfig({
 				"packages/q/vitest.config.ts", `export default mergeConfig(base, { test: { include: ['x'] } })`),
 			source: "vitest.workspace.json (2 projects)", warn: "packages/q/vitest.config.ts does not export an object literal",
 			tests: []string{"packages/p/src/p.test.ts", "packages/q/test/q.spec.ts"},
+		},
+		{
+			name: "mergeConfig falls back", suite: vitest,
+			files: with(jsFiles, "vitest.config.ts", `import base from './vite.config';
+export default mergeConfig(base, defineConfig({ test: { include: ['e2e/**/*.ts'] } }))`),
+			source: SourceDefaults, warn: "vitest.config.ts does not export an object literal (mergeConfig(",
+			tests: []string{"e2e/home.test.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "packages/q/test/q.spec.ts",
+				"src/__fixtures__/data.test.ts", "src/a.test.ts", "src/b.spec.js"},
 		},
 		{
 			name: "non-literal include falls back", suite: vitest,
