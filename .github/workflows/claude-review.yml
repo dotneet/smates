@@ -3,7 +3,7 @@
 # Runs when a pull request is opened, updated or marked ready for review, and posts
 # inline comments on specific lines plus one summary comment.
 #
-# Requires the ANTHROPIC_API_KEY repository secret. Secrets are not available to pull
+# Requires the CLAUDE_CODE_OAUTH_TOKEN repository secret. Secrets are not available to pull
 # requests from forks, so those are skipped.
 name: Claude review
 
@@ -34,7 +34,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           prompt: |
             REPO: ${{ github.repository }}
