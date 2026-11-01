@@ -46,10 +46,12 @@ func Results(traceDir, repoRoot string) map[string]Result {
 	return out
 }
 
+// addResult adds a result for file; a file reported several times (by several workspace
+// projects, or test cases of a JUnit report) keeps the worst status.
 func addResult(m map[string]Result, file, status string, ms int64, msg string) {
 	prev, seen := m[file]
-	if seen && prev.Status == state.Fail {
-		status = state.Fail
+	if seen {
+		status = worse(prev.Status, status)
 	}
 	m[file] = Result{Status: status, Ms: prev.Ms + ms, Message: JoinMessage(prev.Message, msg)}
 }

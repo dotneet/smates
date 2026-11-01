@@ -118,6 +118,27 @@ func TestAttributeSharedProcess(t *testing.T) {
 	if a.SharedProcs != 1 {
 		t.Errorf("shared procs %d", a.SharedProcs)
 	}
+	if a.Units["a.test.ts"].Status != "pass" {
+		t.Errorf("a shared process that passed passes its units: %+v", a.Units["a.test.ts"])
+	}
+}
+
+// One process running several test files (node --test --test-isolation=none) that fails
+// does not tell which of them failed: the units get no status of their own (the overall
+// exit code infers it), while a process of its own still decides for its unit.
+func TestAttributeSharedProcessFailing(t *testing.T) {
+	a := attr(Options{},
+		mkProc(10, 1, 0).code("a.test.ts", "b.test.ts", "src/a.ts").exit(1),
+		mkProc(11, 1, 0).code("c.test.ts").exit(1),
+	)
+	for _, id := range []string{"a.test.ts", "b.test.ts"} {
+		if u := a.Units[id]; u == nil || u.Status != "" {
+			t.Errorf("%s: %+v", id, u)
+		}
+	}
+	if u := a.Units["c.test.ts"]; u == nil || u.Status != "fail" {
+		t.Errorf("c: %+v", u)
+	}
 }
 
 func TestAttributeChildrenAndThreads(t *testing.T) {

@@ -212,7 +212,10 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			if len(units) == 1 && p.End > p.Start && p.Start > 0 {
 				u.Ms += p.End - p.Start
 			}
-			if p.Exit != nil {
+			// A process that ran several units (node --test --test-isolation=none) failing
+			// does not say which of them failed: they are left to the overall exit code
+			// (an inferred failure, run again next time).
+			if p.Exit != nil && (*p.Exit == 0 || len(units) == 1) {
 				st := state.Pass
 				if *p.Exit != 0 {
 					st = state.Fail

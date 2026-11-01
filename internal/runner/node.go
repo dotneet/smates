@@ -1,12 +1,15 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +27,18 @@ func init() {
 
 var jsTestExts = "{js,mjs,cjs,jsx,ts,mts,cts,tsx}"
 
+// nodeTestExts are the extensions of node --test's default patterns.
+var nodeTestExts = "{js,mjs,cjs,ts,mts,cts}"
+
+// jsExclude are the default excludes of bun suites.
 var jsExclude = []string{"**/node_modules/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.next/**", "**/out/**"}
+
+// jsOutputExclude are the default excludes of vitest, jest and node --test suites. These
+// runners collect test files everywhere but node_modules (and, before Vitest 4, dist and
+// a few tool directories): a test under a build/, out/ or coverage/ directory git tracks
+// (src/build/compile.test.ts) runs, so it is a test. Output git ignores is never seen
+// anyway. dist/ stays excluded as where compiled copies of the tests go (tsc's outDir).
+var jsOutputExclude = []string{"**/node_modules/**", "**/dist/**"}
 
 // runNode runs a Node-based runner, tracing it when recording, and hands the V8
 // coverage to a NODE_V8_COVERAGE the user set.
@@ -76,7 +90,7 @@ func (vitest) Defaults(repo *gitx.Repo, root string) Defaults {
 	dir := filepath.Join(repo.Root, filepath.FromSlash(root))
 	return Defaults{
 		Tests:   []string{"**/*.{test,spec}." + jsTestExts},
-		Exclude: jsExclude,
+		Exclude: jsOutputExclude,
 		Inputs: append([]string{
 			"vitest.config.*", "vite.config.*", "vitest.workspace.*", "vitest.setup.*", "/vitest.config.*", "/vitest.workspace.*",
 		}, jsLockInputs(root)...),
@@ -236,7 +250,7 @@ func (jest) Defaults(repo *gitx.Repo, root string) Defaults {
 	dir := filepath.Join(repo.Root, filepath.FromSlash(root))
 	return Defaults{
 		Tests:   []string{"**/__tests__/**/*." + jsTestExts, "**/*.{test,spec}." + jsTestExts},
-		Exclude: append([]string{"**/__tests__/**/__fixtures__/**", "**/__tests__/**/fixtures/**", "**/__mocks__/**"}, jsExclude...),
+		Exclude: append([]string{"**/__tests__/**/__fixtures__/**", "**/__tests__/**/fixtures/**", "**/__mocks__/**"}, jsOutputExclude...),
 		Inputs: append([]string{
 			"jest.config.*", "/jest.config.*", "jest.setup.*", "babel.config.*", ".babelrc", ".babelrc.*", "/babel.config.*", ".swcrc",
 		}, jsLockInputs(root)...),
@@ -352,12 +366,13 @@ func (nodeTest) Name() string { return "node" }
 
 func (nodeTest) Defaults(repo *gitx.Repo, root string) Defaults {
 	return Defaults{
-		// Node's default patterns, plus TypeScript variants (type stripping).
+		// Node's default patterns, with the TypeScript extensions Node adds to every one of
+		// them when it strips types (23.6+).
 		Tests: []string{
-			"**/*.test.{js,mjs,cjs,ts,mts,cts}", "**/*-test.{js,mjs,cjs,ts,mts,cts}", "**/*_test.{js,mjs,cjs,ts,mts,cts}",
-			"**/test-*.{js,mjs,cjs,ts,mts,cts}", "**/test.{js,mjs,cjs}", "**/test/**/*.{js,mjs,cjs}",
+			"**/*.test." + nodeTestExts, "**/*-test." + nodeTestExts, "**/*_test." + nodeTestExts,
+			"**/test-*." + nodeTestExts, "**/test." + nodeTestExts, "**/test/**/*." + nodeTestExts,
 		},
-		Exclude: append([]string{"**/test/**/fixtures/**", "**/test/**/helpers/**", "**/test/**/_*"}, jsExclude...),
+		Exclude: append([]string{"**/test/**/fixtures/**", "**/test/**/helpers/**", "**/test/**/_*"}, jsOutputExclude...),
 		Inputs:  jsLockInputs(root),
 		Command: "node --test",
 	}
@@ -369,7 +384,99 @@ func (nodeTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// node --test runs every file in its own process: exit codes are per file. Files are
 	// always passed explicitly: node's own discovery would also run helpers that smates
 	// does not consider tests (test/helpers/*.js) as if they were test files.
+	esc := nodeArgEscaper(ctx, rc)
+	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
+		// --test-isolation=none runs every file in one process: run each file on its own
+		// while recording.
+		return runIsolatedNode(ctx, rc, func(u string) []string {
+			return []string{esc(relToSuite(rc.Suite, u))}
+		}, traceOptions{trustProcStatus: true})
+	}
 	explicit := *rc
 	explicit.All = false
-	return runNode(ctx, &explicit, nil, rc.RelArgs(""), traceOptions{trustProcStatus: true})
+	args := rc.RelArgs("")
+	for i, a := range args {
+		args[i] = esc(a)
+	}
+	return runNode(ctx, &explicit, nil, args, traceOptions{trustProcStatus: true})
+}
+
+// nodeGlobChars are the characters that make a path a pattern of Node's glob.
+const nodeGlobChars = `[]*?(){}+@\`
+
+// nodeArgEscaper returns how test files are passed to node --test. Node 21+ expands its
+// file arguments as globs, so a path with glob syntax (Next.js app/[slug]/page.test.js)
+// would match other files or none, and the run would pass without running it; such
+// paths are escaped there. The version is asked of the suite command's node (or the one
+// on PATH) only when a path needs it; when it cannot be told, paths are escaped: on an
+// older Node that fails loudly (file not found) instead of passing silently.
+func nodeArgEscaper(ctx context.Context, rc *RunContext) func(string) string {
+	same := func(p string) string { return p }
+	if !slices.ContainsFunc(rc.Units, func(u string) bool { return strings.ContainsAny(u, nodeGlobChars) }) {
+		return same
+	}
+	if major := nodeMajor(ctx, rc); major > 0 && major < 21 {
+		return same
+	}
+	return escapeNodeGlob
+}
+
+// nodeMajor returns the major version of the node the suite command runs (the command
+// itself when it starts with node, else node on PATH), 0 if unknown.
+func nodeMajor(ctx context.Context, rc *RunContext) int {
+	bin := "node"
+	if words, err := SplitWords(rc.Suite.Command); err == nil {
+		for _, w := range words {
+			if isAssignment(w) {
+				continue
+			}
+			if strings.TrimSuffix(filepath.Base(w), ".exe") == "node" {
+				bin = w
+			}
+			break
+		}
+	}
+	var out bytes.Buffer
+	if code, err := rc.ExecIn(ctx, rc.Dir(), []string{bin, "--version"}, nil, &out, io.Discard); err != nil || code != 0 {
+		return 0
+	}
+	major, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(out.String()), "v"), ".")
+	n, _ := strconv.Atoi(major)
+	return n
+}
+
+// escapeNodeGlob makes a path a pattern of Node's glob (minimatch, without negation and
+// with backslashes as path separators) that matches only itself: special characters go
+// into character classes. Two cannot be escaped that way: a backslash (a separator to
+// Node's glob) becomes "?" outside Windows, and braces holding a comma or ".." are
+// expanded before classes are read, so in a path with braces commas become "?" and the
+// second dot of ".." is put in a class. "?" can only over-match a file named like the
+// test but for that character.
+func escapeNodeGlob(p string) string {
+	braces := strings.ContainsAny(p, "{}")
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		if seg == "." || seg == ".." {
+			continue
+		}
+		var b strings.Builder
+		prev := rune(0)
+		for _, c := range seg {
+			switch {
+			case strings.ContainsRune(`[]*?(){}+@`, c):
+				b.WriteString("[" + string(c) + "]")
+			case c == '\\' && runtime.GOOS != "windows":
+				b.WriteByte('?')
+			case braces && c == ',':
+				b.WriteByte('?')
+			case braces && c == '.' && prev == '.':
+				b.WriteString("[.]")
+			default:
+				b.WriteRune(c)
+			}
+			prev = c
+		}
+		segs[i] = b.String()
+	}
+	return strings.Join(segs, "/")
 }
