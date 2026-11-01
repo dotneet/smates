@@ -27,7 +27,8 @@ import (
 // (recorded when a test lists a directory, so added or removed files are noticed); a
 // path with a trailing "?" meaning "whether this path exists" (recorded for existence
 // checks, including of paths that do not exist yet); or "$NAME", the value of an
-// environment variable as the tests of a suite see it (see ForSuite).
+// environment variable as the tests of a suite see it (see ForSuite). The kinds of key
+// are defined in package depkey.
 type Hasher struct {
 	snap   gitx.Snapshot
 	ignore []string
@@ -65,9 +66,10 @@ func (h *Hasher) WithRoot(root string) *Hasher {
 	return h
 }
 
-// WithConfig makes the hasher hash the configuration file (c.Path) of a suite (see
-// ForSuite) as ConfigHash instead of its content, so edits that cannot change how the
-// suite's tests run (the ignore list, the agent, another suite) select nothing.
+// WithConfig makes the hasher hash the settings key (depkey.Config) of the
+// configuration file (c.Path) of a suite (see ForSuite) as ConfigHash, so edits that
+// cannot change how the suite's tests run (the ignore list, the agent, another suite)
+// select nothing.
 func (h *Hasher) WithConfig(c *config.Config) *Hasher {
 	h.cfg = c
 	return h
@@ -83,22 +85,17 @@ func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 	return &c
 }
 
-// ConfigKey is the dependency key every test of a suite has on its settings in the
-// configuration file at path (hashed as ConfigHash). Reading the file itself records
-// path, hashed by content as any file.
-func ConfigKey(path string) string { return path + configKeySuffix }
-
-const configKeySuffix = "#suite"
-
-// DisplayKey is the file a dependency key stands for when it is shown or diffed: the
-// configuration file for its settings key (ConfigKey), the key itself otherwise.
-func DisplayKey(key string) string { return strings.TrimSuffix(key, configKeySuffix) }
+// isConfig reports whether key is the settings key (depkey.Config) of the
+// configuration file the hasher was given (WithConfig).
+func (h *Hasher) isConfig(key string) bool {
+	return h.cfg != nil && h.cfg.Path != "" && key == depkey.Config(h.cfg.Path)
+}
 
 // legacyConfig reports whether key is the settings key of an entry an older smates
 // recorded, when every test depended on the configuration file's content: the entry
 // then holds the file's hash instead, and it counts as unchanged while the file is.
 func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
-	if h.cfg == nil || h.cfg.Path == "" || key != ConfigKey(h.cfg.Path) {
+	if !h.isConfig(key) {
 		return false
 	}
 	old, ok := recorded[h.cfg.Path]
@@ -214,13 +211,15 @@ func (h *Hasher) Hash(key string) string {
 			}
 		}
 		return "absent"
-	case depkey.KindContent:
-		if h.cfg != nil && h.cfg.Path != "" && key == ConfigKey(h.cfg.Path) {
-			if h.suite == nil {
-				return ""
-			}
-			return ConfigHash(h.cfg, &h.suite.Suite)
+	case depkey.KindConfig:
+		if !h.isConfig(key) {
+			return h.file(key) // another configuration file's settings: hashed as a path
 		}
+		if h.suite == nil {
+			return ""
+		}
+		return ConfigHash(h.cfg, &h.suite.Suite)
+	case depkey.KindContent:
 		return h.file(key)
 	case depkey.KindDecls:
 		return h.decls(p)
@@ -528,7 +527,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		if depkey.IsEnv(k) {
 			return false // no recorded environment to compare a newly read variable with
 		}
-		if f, ok := depkey.File(k); ok && f != k {
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls {
 			// The declarations of a Go file: unchanged if the file is.
 			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && was != h.Hash(f)) {
 				return false

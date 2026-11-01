@@ -443,7 +443,7 @@ func (v *view) expand(key string) []string {
 	switch kind {
 	case depkey.KindExistence, depkey.KindDecls:
 		return []string{p}
-	case depkey.KindContent, depkey.KindListing, depkey.KindEnv:
+	case depkey.KindContent, depkey.KindConfig, depkey.KindListing, depkey.KindEnv:
 		return []string{key}
 	}
 	prefix := p + "/"

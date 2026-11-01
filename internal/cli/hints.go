@@ -13,6 +13,7 @@ import (
 
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/hints"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
@@ -391,19 +392,19 @@ func mdEscape(s string) string {
 	return r.Replace(s)
 }
 
-// displayCandidates shows the suite's settings key (selector.ConfigKey) as the config
+// displayCandidates shows the suite's settings key (depkey.Config) as the config
 // file. Its hashes are settings fingerprints, not blobs: they are cleared so a diff
 // uses the base revision, and a candidate for the file's own content wins over it.
 func displayCandidates(in []hints.Candidate) []hints.Candidate {
 	content := map[string]bool{}
 	for _, c := range in {
-		if selector.DisplayKey(c.Path) == c.Path {
+		if depkey.Display(c.Path) == c.Path {
 			content[c.Path] = true
 		}
 	}
 	out := in[:0]
 	for _, c := range in {
-		if p := selector.DisplayKey(c.Path); p != c.Path {
+		if p := depkey.Display(c.Path); p != c.Path {
 			if content[p] {
 				continue
 			}

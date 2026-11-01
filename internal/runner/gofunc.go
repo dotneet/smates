@@ -801,8 +801,8 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 		known = rc.Known(unit)
 	}
 	for _, k := range known {
-		f, ok := depkey.File(k)
-		if !ok || f == k {
+		kind, f := depkey.Parse(k)
+		if kind != depkey.KindDecls {
 			continue
 		}
 		// Bodies coverage cannot vouch for: packages the binary does not link (built or
@@ -931,6 +931,8 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 				for _, k := range rc.Known(unit) {
 					if f, ok := depkey.File(k); ok {
 						o.AddFile(f)
+					} else if depkey.KindOf(k) == depkey.KindConfig {
+						o.AddFile(k) // the suite's settings, recorded as they are
 					}
 				}
 			}

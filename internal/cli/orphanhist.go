@@ -366,7 +366,7 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, r
 				blocked[p] = true
 				block(p)
 			}
-		case depkey.KindContent, depkey.KindExistence:
+		case depkey.KindContent, depkey.KindConfig, depkey.KindExistence:
 			block(p)
 		}
 	}
@@ -376,7 +376,7 @@ func suggestGlobs(ranked []orphanFile, tree []string, covered map[string]bool, r
 	}
 	var unexplained []string // files below a candidate directory that a test may name
 	for _, f := range tree {
-		if selector.Covers(covered, f, false) != "" || affectsExecution(f) != "" {
+		if depkey.Covers(covered, f, false) != depkey.CoverNone || affectsExecution(f) != "" {
 			block(f)
 			continue
 		}

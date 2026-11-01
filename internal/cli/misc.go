@@ -327,45 +327,45 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			}
 			// The same rule the selector uses; existence changes are assumed so that
 			// listings and existence checks are shown too.
-			kind := selector.Covers(deps, target, true)
+			kind := depkey.Covers(deps, target, true)
 			// depends_on/serves: one key stands for the declaration's files.
 			service := s.ServiceVia(t.ID, target)
-			if kind == "" && service != "" {
-				kind = "content"
+			if kind == depkey.CoverNone && service != "" {
+				kind = depkey.CoverContent
 			}
-			if kind == "" {
+			if kind == depkey.CoverNone {
 				continue
 			}
 			var how []string
 			switch kind {
-			case "content":
+			case depkey.CoverContent:
 				if service != "" {
 					how = append(how, service)
-				} else if slices.Contains(s.Known[t.ID], target) || slices.Contains(s.Known[t.ID], selector.ConfigKey(target)) {
+				} else if slices.Contains(s.Known[t.ID], target) || slices.Contains(s.Known[t.ID], depkey.Config(target)) {
 					how = append(how, "static/inputs")
 				}
 				if st != nil && st.Tests[t.ID] != nil {
 					_, ok := st.Tests[t.ID].Deps[target]
-					_, okCfg := st.Tests[t.ID].Deps[selector.ConfigKey(target)]
+					_, okCfg := st.Tests[t.ID].Deps[depkey.Config(target)]
 					if ok || okCfg {
 						how = append(how, "recorded")
 					}
 				}
-			case "declarations":
+			case depkey.CoverDecls:
 				how = append(how, "static: its declarations (edits inside function bodies count only where the test executed them)")
 				if st != nil && st.Tests[t.ID] != nil {
 					if _, ok := st.Tests[t.ID].Deps[target]; ok {
 						how = append(how, "executed")
 					}
 				}
-			case "listing":
+			case depkey.CoverListing:
 				how = append(how, "lists its directory (only additions/removals count)")
-			case "existence":
+			case depkey.CoverExistence:
 				how = append(how, "checks whether it exists (only additions/removals count)")
-			case "tree":
+			case depkey.CoverTree:
 				how = append(how, "runs a command below its directory that smates cannot see into")
 			}
-			rep.Tests = append(rep.Tests, whyTest{Suite: s.Name, Test: t.ID, Kind: kind, How: nonNil(how)})
+			rep.Tests = append(rep.Tests, whyTest{Suite: s.Name, Test: t.ID, Kind: string(kind), How: nonNil(how)})
 		}
 	}
 	if *format == "json" {
@@ -458,7 +458,7 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		var order []string
 		srcs := map[string]*source{}
 		for _, d := range deps {
-			name := selector.DisplayKey(d)
+			name := depkey.Display(d)
 			if srcs[name] == nil {
 				order = append(order, name)
 				srcs[name] = &source{}
