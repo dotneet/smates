@@ -215,6 +215,12 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	c.now = time.Now().UTC()
 	start := time.Now()
 	c.start = start
+	// Files git does not list are recorded as they were before the tests ran.
+	var ran []string
+	for _, sr := range sel.res.Suites {
+		ran = append(ran, sr.Name)
+	}
+	c.hasher.PinBefore(p.state, ran, start)
 	for i, b := range batches {
 		if c.stopped {
 			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)

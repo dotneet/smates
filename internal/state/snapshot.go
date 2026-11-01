@@ -95,6 +95,13 @@ func (v SnapValue) Unrecorded() bool { return v.kind != snapHash }
 // the snapshot holds no entry for it.
 func (v SnapValue) Absent() bool { return v.kind == snapHash && v.hash == "" }
 
+// Existed reports whether the file existed as far as v tells: v holds a content hash, or
+// a marker's suites saw one, other than absent. An entry no suite has compared ("?")
+// does not tell and counts as existing.
+func (v SnapValue) Existed() bool {
+	return v.kind == snapUnrecorded || v.hash != ""
+}
+
 // SeenHash returns the hash the marker's suites saw ("" = absent) and whether v is
 // Unrecorded (a bare "?" has seen the absent file, by no suite).
 func (v SnapValue) SeenHash() (string, bool) {

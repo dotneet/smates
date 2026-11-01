@@ -42,11 +42,11 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 			return &Lock{path: path}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
-			// Windows reports a lock file being deleted by its owner as access denied.
-			if _, serr := os.Stat(path); serr == nil || !errors.Is(serr, os.ErrNotExist) {
-				if time.Now().After(deadline) {
-					return nil, err
-				}
+			// Windows reports a lock file being deleted by its owner as access denied:
+			// retried while the file is there. Without one the error is the file system's
+			// (a read-only file system, a directory without write permission).
+			if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) || time.Now().After(deadline) {
+				return nil, err
 			}
 		} else if fi, serr := os.Stat(path); serr == nil && time.Since(fi.ModTime()) > stale {
 			// Left behind by a process that died while holding it. (Two processes may

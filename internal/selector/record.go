@@ -46,10 +46,22 @@ type Hasher struct {
 // hashCache is shared by the hashers derived from one with ForSuite.
 type hashCache struct {
 	disk  map[string]string // memoized hashes of files outside the snapshot
+	exist map[string]string // memoized existence checks of paths outside the snapshot
 	dirs  map[string][]string
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
+	// since is shortly before the tests started (see PinBefore); zero when not pinned.
+	since time.Time
 }
+
+// Unsettled is the hash of a path outside the snapshot that changed while the tests ran
+// and whose state before the run is not known: it matches no hash, so the tests that
+// depend on it run again (and then record the state it had before that run).
+const Unsettled = "unsettled"
+
+// settleMargin widens the window in which a modification time counts as during the
+// run, for file systems with coarse timestamps (FAT: two seconds).
+const settleMargin = 2 * time.Second
 
 // NewHasher indexes a snapshot. Files matching ignore globs (docs, editor settings) are
 // left out of "dir/**" tree hashes, so editing a README does not re-run every test that
@@ -64,6 +76,56 @@ func NewHasher(snap gitx.Snapshot, ignore ...string) *Hasher {
 func (h *Hasher) WithRoot(root string) *Hasher {
 	h.root = root
 	return h
+}
+
+// PinBefore makes the hasher hash the paths outside the snapshot as they were before
+// the tests ran, like the snapshot itself: Record hashes after the run, and tests may
+// write git-ignored files (caches, generated code, .env) or create paths they probed.
+// It is called before the first test starts (at start) and reads now what the entries
+// of the given suites depend on outside the snapshot. A path first read later that was
+// modified at or after start (give or take settleMargin) may have been written by the
+// tests and hashes as Unsettled; one absent when read is taken to have been absent.
+func (h *Hasher) PinBefore(st *state.State, suites []string, start time.Time) {
+	if h.root == "" {
+		return
+	}
+	for _, name := range suites {
+		su := st.Suites[name]
+		if su == nil {
+			continue
+		}
+		for _, e := range su.Tests {
+			for k := range e.Deps {
+				h.pin(k)
+			}
+		}
+	}
+	h.since = start.Add(-settleMargin)
+}
+
+// pin reads what key depends on outside the snapshot, if anything, into the caches.
+func (h *Hasher) pin(key string) {
+	if _, ok := h.snap[key]; ok {
+		return // most keys: a file of the snapshot
+	}
+	switch kind, p := depkey.Parse(key); kind {
+	case depkey.KindContent:
+		h.file(key)
+	case depkey.KindConfig:
+		if !h.isConfig(key) {
+			h.file(key)
+		}
+	case depkey.KindDecls:
+		h.file(p)
+	case depkey.KindExistence:
+		h.Hash(key)
+	}
+}
+
+// modifiedDuringRun reports whether a path outside the snapshot, read for the first
+// time, was modified since the tests started (PinBefore).
+func (h *Hasher) modifiedDuringRun(fi os.FileInfo) bool {
+	return !h.since.IsZero() && !fi.ModTime().Before(h.since)
 }
 
 // WithConfig makes the hasher hash the settings key (depkey.Config) of the
@@ -104,15 +166,17 @@ func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
 
 // ConfigHash fingerprints the settings of smates.yml that can change how the tests of
 // su run or what they are recorded to depend on: the suite's own entry and the
-// top-level env_track. The rest (ignore, orphans, agent, flaky, state, inputs,
-// env_ignore, full_run_branches, other suites) cannot change a test's outcome: input
-// globs and rules add dependency keys of their own, ignore globs change the "dir/**"
-// hashes they affect, and env_ignore applies when comparing.
+// top-level env_track and env_ignore (a variable env_ignore lists is not recorded, so
+// taking it out of the list must run the tests again to record who reads it). The rest
+// (ignore, orphans, agent, flaky, state, inputs, full_run_branches, other suites)
+// cannot change a test's outcome: input globs and rules add dependency keys of their
+// own, and ignore globs change the "dir/**" hashes they affect.
 func ConfigHash(c *config.Config, su *config.Suite) string {
 	data, err := json.Marshal(struct {
-		Suite    *config.Suite
-		EnvTrack []string
-	}{su, c.EnvTrack})
+		Suite     *config.Suite
+		EnvTrack  []string
+		EnvIgnore []string `json:",omitempty"`
+	}{su, c.EnvTrack, c.EnvIgnore})
 	if err != nil {
 		return ""
 	}
@@ -179,11 +243,38 @@ func (h *Hasher) file(p string) string {
 	if v, ok := h.disk[p]; ok {
 		return v
 	}
-	v, _ := gitx.HashFile(filepath.Join(h.root, filepath.FromSlash(p)))
+	abs := filepath.Join(h.root, filepath.FromSlash(p))
+	v, _ := gitx.HashFile(abs)
+	if fi, err := os.Lstat(abs); v != "" && err == nil && h.modifiedDuringRun(fi) {
+		v = Unsettled
+	}
 	if h.disk == nil {
 		h.disk = map[string]string{}
 	}
 	h.disk[p] = v
+	return v
+}
+
+// exists hashes an existence check of p, a path outside the snapshot, from disk:
+// "exists", "absent", or Unsettled when p was created or modified while the tests ran.
+func (h *Hasher) exists(p string) string {
+	if h.root == "" {
+		return "absent"
+	}
+	if v, ok := h.exist[p]; ok {
+		return v
+	}
+	v := "absent"
+	if fi, err := os.Lstat(filepath.Join(h.root, filepath.FromSlash(p))); err == nil {
+		v = "exists"
+		if h.modifiedDuringRun(fi) {
+			v = Unsettled
+		}
+	}
+	if h.exist == nil {
+		h.exist = map[string]string{}
+	}
+	h.exist[p] = v
 	return v
 }
 
@@ -202,15 +293,16 @@ func (h *Hasher) Hash(key string) string {
 	case depkey.KindSet:
 		return h.set(key)
 	case depkey.KindExistence:
-		if _, isFile := h.snap[p]; isFile || h.Hash(depkey.Listing(p)) != "" || p == "." {
-			return "exists"
+		v := "exists"
+		if _, isFile := h.snap[p]; !isFile && h.Hash(depkey.Listing(p)) == "" && p != "." {
+			v = h.exists(p)
 		}
-		if h.root != "" {
-			if _, err := os.Lstat(filepath.Join(h.root, filepath.FromSlash(p))); err == nil {
-				return "exists"
-			}
+		if blob, ok := h.snap[key]; ok {
+			// A file whose name ends in "?" (see depkey): the key is its content or an
+			// existence check of p, so it hashes as both.
+			return blob + "+" + v
 		}
-		return "absent"
+		return v
 	case depkey.KindConfig:
 		if !h.isConfig(key) {
 			return h.file(key) // another configuration file's settings: hashed as a path

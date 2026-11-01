@@ -31,11 +31,12 @@ The dependency set used at selection time is
 
 Every test depends on its suite's settings in smates.yml through the key
 `smates.yml#suite`, which hashes as `ConfigHash`: the suite's own entry and the
-top-level `env_track`, not the file's content. A test that reads smates.yml itself
-records the file and depends on its content as usual. The other
+top-level `env_track` and `env_ignore` (a variable the list ignores is not recorded, so
+taking it out must run the tests again), not the file's content. A test that reads
+smates.yml itself records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
-they affect, input globs and rules add keys of their own, `env_ignore` applies when
-comparing), so editing them selects nothing. Diff mode (no recorded state) still
+they affect, input globs and rules add keys of their own), so editing them selects
+nothing. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
 hash instead of the key; it counts as unchanged while the file is, until the test runs
 again.
@@ -86,6 +87,15 @@ Dependency keys:
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
+The hashes are those of the snapshot taken before the run, also for files git does not
+list (ignored files such as `.env`, caches, generated code), which are read from disk:
+what the entries of the suites being run depend on outside the snapshot is read before
+the first test starts (`Hasher.PinBefore`). A path first read when the run is recorded
+that was created or modified since the run started may have been written by the tests,
+so its state before the run is unknown: it is recorded as `unsettled`, which matches no
+hash, and the test runs again next time (recording the path as it was before that run);
+a path absent then is taken to have been absent.
+
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
 is the same — modulo nondeterminism and inputs outside the repository (services, network),
@@ -131,8 +141,10 @@ toolchain locations (`GOPATH`, `VIRTUAL_ENV`, `npm_*`) and the variables smates 
 test that touches one of them on the first local run, which defeats pulling the state.
 They are therefore ignored by default (`config.DefaultEnvIgnore`); `env_ignore` adds to
 the list, `env_track` takes names out of it (top level or per suite), and the ignore list
-is applied both when recording and when comparing, so adding a name stops it from
-selecting tests at once, without a new recording. What remains tracked are the variables
+is applied both when recording and when comparing, so a recorded variable added to it
+selects nothing from then on. Both lists are part of the suites' settings
+(`smates.yml#suite`): a name taken out of the ignore list was never recorded, so
+editing either list runs the suite's tests once to record who reads what. What remains tracked are the variables
 a project defines (`DATABASE_URL`, `APP_*`), `TZ`, `NODE_ENV` and the like. When one of
 them differs between CI and a laptop, the tests reading it do run locally — they may
 behave differently there, which is the point — and only those tests.
