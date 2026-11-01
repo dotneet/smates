@@ -84,42 +84,51 @@ func flakySection(flakes []flakeReport) (sec summary.Section, ok bool) {
 	return summary.Section{Title: fmt.Sprintf(":game_die: %d flaky test unit(s)", len(flakes)), Body: b.String()}, true
 }
 
-// retryFlaky re-runs failing units of a suite run that are already known to be flaky
+// retryFlaky re-runs a suite run whose failures are all units already known to be flaky
 // (flaky.retry). It does nothing unless every failure is such a unit, reported for the
-// unit itself: any other failure fails the run as usual. It returns the result with the
-// retries' observations merged in, and the first attempts of the retried units (for
-// Record). The exit code becomes 0 only when every retried unit passed.
+// unit itself: any other failure fails the run as usual. The retry runs the same units
+// as the failed run, not only the failing ones: a run can also fail for reasons no unit
+// reports (an unhandled error, teardown, a crash), and only a whole re-run shows they
+// are gone. It returns the result with the retries' observations and exit code, and
+// the first failed attempts of the units that failed (for Record).
 func retryFlaky(ctx context.Context, p *project, rc *runner.RunContext, sr *selector.Suite, r *runner.RunResult) (*runner.RunResult, map[string]*runner.Observation, error) {
 	if p.cfg.Flaky.Retry <= 0 || r.ExitCode == 0 || len(r.Observations) == 0 {
 		return r, nil, nil
 	}
 	known := p.state.Suites[sr.Name]
-	var failing []string
-	for _, u := range rc.Units {
-		o := r.Observations[u]
-		if o == nil {
-			return r, nil, nil // no outcome for a unit of a failed run: not explained by flakes
+	// flakyFailures lists the failing units of a failed run, ok only when every one of
+	// them is known to be flaky.
+	flakyFailures := func(res *runner.RunResult) (failing []string, ok bool) {
+		for _, u := range rc.Units {
+			o := res.Observations[u]
+			if o == nil {
+				return nil, false // no outcome for a unit of a failed run: not explained by flakes
+			}
+			if o.Status == state.Pass {
+				continue
+			}
+			if o.Status != state.Fail || o.Inferred || known == nil || known.Tests[u] == nil || known.Tests[u].Flaky == nil {
+				return nil, false
+			}
+			failing = append(failing, u)
 		}
-		if o.Status == state.Pass {
-			continue
-		}
-		if o.Status != state.Fail || o.Inferred || known == nil || known.Tests[u] == nil || known.Tests[u].Flaky == nil {
-			return r, nil, nil
-		}
-		failing = append(failing, u)
+		// No failing unit: the run failed for another reason (teardown, coverage, crash).
+		return failing, len(failing) > 0
 	}
-	if len(failing) == 0 {
-		return r, nil, nil // the run failed for another reason (teardown, coverage, crash)
+	failing, ok := flakyFailures(r)
+	if !ok {
+		return r, nil, nil
 	}
-	sort.Strings(failing)
 	first := map[string]*runner.Observation{}
-	for _, u := range failing {
-		first[u] = r.Observations[u]
-	}
-	for n := 1; n <= p.cfg.Flaky.Retry && len(failing) > 0; n++ {
-		p.logf("%s: retrying %d known flaky test unit(s) (attempt %d of %d): %s", sr.Name, len(failing), n, p.cfg.Flaky.Retry, strings.Join(limit(failing, 8), ", "))
+	for n := 1; n <= p.cfg.Flaky.Retry; n++ {
+		sort.Strings(failing)
+		for _, u := range failing {
+			if first[u] == nil {
+				first[u] = r.Observations[u]
+			}
+		}
+		p.logf("%s: retrying after %d known flaky test unit(s) failed (attempt %d of %d): %s", sr.Name, len(failing), n, p.cfg.Flaky.Retry, strings.Join(limit(failing, 8), ", "))
 		again := *rc
-		again.Units, again.All = failing, false
 		if rc.TraceDir != "" {
 			again.TraceDir = fmt.Sprintf("%s-retry%d", rc.TraceDir, n)
 			if err := os.MkdirAll(again.TraceDir, 0o755); err != nil {
@@ -142,21 +151,15 @@ func retryFlaky(ctx context.Context, p *project, rc *runner.RunContext, sr *sele
 				r.ReadsBy[by][k] = true
 			}
 		}
-		var still []string
-		for _, u := range failing {
-			o := r2.Observations[u]
-			if o != nil && o.Status == state.Pass && !o.Inferred {
-				r.Observations[u] = o
-				continue
-			}
-			if o != nil {
-				r.Observations[u] = o
-			}
-			still = append(still, u)
+		for u, o := range r2.Observations {
+			r.Observations[u] = o
 		}
-		failing = still
-		if len(failing) == 0 && r2.ExitCode == 0 {
-			r.ExitCode = 0
+		r.ExitCode = r2.ExitCode
+		if r.ExitCode == 0 {
+			break
+		}
+		if failing, ok = flakyFailures(r2); !ok {
+			break
 		}
 	}
 	return r, first, nil

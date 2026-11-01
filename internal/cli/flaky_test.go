@@ -59,6 +59,10 @@ for f in files:
     cases.append('<testcase file="%s" name="%s">%s</testcase>' % (f, f, "" if ok else "<failure/>"))
 os.makedirs(".smates", exist_ok=True)
 open(".smates/junit.xml", "w").write("<testsuite>" + "".join(cases) + "</testsuite>")
+# An error no test file reports (e.g. an unhandled error after a's tests) while the
+# marker exists.
+leak = os.environ["SMATES_COIN"] + ".leak"
+failed = failed or ("tests/a_check.py" in files and os.path.exists(leak))
 sys.exit(1 if failed else 0)
 `)
 	write("tests/a_check.py", "assert 1 + 1 == 2\n")
@@ -161,9 +165,17 @@ assert not v.startswith("fail"), v
 	if f := flakesIn(); len(f) != 1 || f[0].Flip != "fail->pass" || !f[0].Retried || f[0].Count != 3 {
 		t.Fatalf("flakes after retry %+v\n%s", f, errs)
 	}
-	if !strings.Contains(errs, "retrying 1 known flaky test unit(s)") {
+	if !strings.Contains(errs, "retrying after 1 known flaky test unit(s) failed") {
 		t.Errorf("run log:\n%s", errs)
 	}
+	// The retry re-runs the whole run: an error the units do not report is not hidden
+	// by a flaky unit that passes on retry.
+	os.WriteFile(coin, []byte("fail-once"), 0o644)
+	os.WriteFile(coin+".leak", nil, 0o644)
+	if code, _, errs = run("run", "--all", "--report", report); code == 0 {
+		t.Fatalf("an error outside the flaky unit must fail the run\n%s", errs)
+	}
+	os.Remove(coin + ".leak")
 	// A failure that persists through the retry still fails the run.
 	os.WriteFile(coin, []byte("fail"), 0o644)
 	if code, _, errs = run("run", "--all", "--report", report); code == 0 {

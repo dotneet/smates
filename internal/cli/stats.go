@@ -32,7 +32,7 @@ func (c *cycle) runRecord(elapsed time.Duration, watch bool) state.Run {
 		ID: newRunID(), At: c.now, Commit: p.repo.Head(), Branch: first(os.Getenv("SMATES_BRANCH"), p.ci.Branch, p.repo.CurrentBranch()),
 		CI: p.ci.Name, Watch: watch, Mode: string(res.Mode), Shadow: c.f.shadow,
 		ElapsedMs: elapsed.Milliseconds(), ExitCode: c.worst,
-		Escapes: len(c.escapes), Possible: len(c.possible), Flaky: len(c.flakes),
+		Escapes: len(c.escapes), Possible: len(c.possible), Flaky: len(c.flakes), NotRun: countUnits(c.notRun),
 	}
 	if c.f.shardN > 1 {
 		r.Shard = fmt.Sprintf("%d/%d", c.f.shardI, c.f.shardN)

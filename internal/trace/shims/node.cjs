@@ -33,6 +33,7 @@
   // loses nothing, without reopening the file for every event.
   const openSync0 = fs.openSync;
   const writeSync0 = fs.writeSync;
+  const statSync0 = fs.statSync;
   const out = path.join(traceDir, `proc-${process.pid}-${threadId}.jsonl`);
   let fd = -1;
   const write = (obj) => {
@@ -79,7 +80,10 @@
     if (typeof orig !== 'function' || orig.__smates) return;
     const wrapped = function (p, flags) {
       try {
-        if (typeof p !== 'number' && (!isOpen || isReadFlags(flags))) record(kind, p);
+        if (typeof p !== 'number' && (!isOpen || isReadFlags(flags))) {
+          if (typeof kind === 'function') kind.apply(null, arguments);
+          else record(kind, p);
+        }
       } catch (_) {}
       return orig.apply(this, arguments);
     };
@@ -110,6 +114,22 @@
   // A test whose outcome depends on whether a file exists depends on that file's
   // existence (even when it does not exist yet).
   for (const name of ['existsSync', 'exists', 'statSync', 'stat', 'lstatSync', 'lstat', 'accessSync', 'access']) wrap(fs, name, 'probe');
+  // Copying reads the source: a test that copies a fixture into a temporary directory
+  // depends on the fixture. A recursive cp of a directory may read everything below it
+  // (cp is native from Node 22 on, so nothing else would be seen). statSync0 is the
+  // un-wrapped function, so this records no probe of its own.
+  for (const name of ['copyFileSync', 'copyFile']) wrap(fs, name, 'read');
+  const recordCp = (src, _dest, opts) => {
+    let isDir = false;
+    try {
+      const s = toPath(src);
+      isDir = Boolean(s) && statSync0(s).isDirectory();
+    } catch (_) {}
+    // A non-recursive cp of a directory fails: only the directory's existence matters.
+    if (isDir) record(opts && typeof opts === 'object' && opts.recursive ? 'tree' : 'probe', src);
+    else record('read', src);
+  };
+  for (const name of ['cpSync', 'cp']) wrap(fs, name, recordCp);
   const fsp = fs.promises;
   if (fsp) {
     wrap(fsp, 'readFile', 'read');
@@ -117,12 +137,18 @@
     wrap(fsp, 'readdir', 'dir');
     wrap(fsp, 'opendir', 'dir');
     for (const name of ['stat', 'lstat', 'access']) wrap(fsp, name, 'probe');
+    wrap(fsp, 'copyFile', 'read');
+    wrap(fsp, 'cp', recordCp);
   }
   // Child processes: Node and Python children trace themselves; for anything else
   // (shell scripts, grep, make...) smates infers dependencies from the command line.
   try {
     const cp = require('child_process');
-    const cwdOf = (o) => path.resolve((o && typeof o === 'object' && o.cwd && String(o.cwd)) || process.cwd());
+    // cwd may be a string, a file: URL (string or object) or a Buffer.
+    const cwdOf = (o) => {
+      const c = o && typeof o === 'object' && o.cwd;
+      return path.resolve((c && (toPath(c) || String(c))) || process.cwd());
+    };
     const execEv = (args, shell, opts) => {
       try {
         write({ k: 'exec', args: args.map(String), shell: Boolean(shell), cwd: cwdOf(opts) });

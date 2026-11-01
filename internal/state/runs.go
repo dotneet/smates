@@ -45,6 +45,8 @@ type Run struct {
 	Agent   *AgentCall     `json:"agent,omitempty"`
 	// Flaky counts the units whose outcome flipped with unchanged inputs in this run.
 	Flaky int `json:"flaky,omitempty"`
+	// NotRun counts the selected units --fail-fast did not start after a failure.
+	NotRun int `json:"not_run,omitempty"`
 }
 
 // AgentCall is the agent's part in a run. Cached decisions cost nothing.

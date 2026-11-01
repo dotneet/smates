@@ -49,6 +49,7 @@ type Run struct {
 	Failed   []string // "suite: test" of units that failed
 	Escapes  []string // shadow mode: failed but would not have been selected
 	Possible []string // shadow mode: unselected, failure only inferred
+	NotRun   []string // --fail-fast: selected but not started after a failure
 }
 
 // Section is an extra block of the summary.
@@ -246,6 +247,10 @@ func (v *view) run(b *strings.Builder) {
 		} else {
 			b.WriteString(".\n")
 		}
+	}
+	if len(r.NotRun) > 0 {
+		fmt.Fprintf(b, "\n**Fail fast:** %s not started after the first failure (still selected next time):\n", plural(len(r.NotRun), "selected test unit"))
+		list(b, r.NotRun, maxItems)
 	}
 	if !r.Shadow {
 		return

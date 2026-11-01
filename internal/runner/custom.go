@@ -22,6 +22,10 @@ func (custom) Defaults(repo *gitx.Repo, root string) Defaults { return Defaults{
 func (custom) Units(s *Suite, testFiles []string) []string { return unitsAreFiles(testFiles) }
 
 func (custom) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
+	// A custom command has no discovery of its own: test files are always passed.
+	explicit := *rc
+	explicit.All = false
+	rc = &explicit
 	var env []string
 	if rc.Record {
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {

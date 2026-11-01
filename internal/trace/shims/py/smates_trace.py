@@ -342,13 +342,14 @@ class _Tracer:
             self._cwd = None
             return
         if event == "open":
-            path, mode = args[0], args[1]
+            path, mode, flags = args[0], args[1], args[2]
             if isinstance(path, int):
                 return
-            if mode is None or "r" in mode or "+" in mode:
-                self.record("read", path)
-            elif isinstance(args[2], int) and (args[2] & 3) != os.O_WRONLY:
-                self.record("read", path)
+            # os.open reports no mode, only flags: opening write-only is not a read.
+            if isinstance(flags, int) and (flags & 3) == os.O_WRONLY:
+                if mode is None or not ("r" in mode or "+" in mode):
+                    return
+            self.record("read", path)
         elif event == "subprocess.Popen":
             _exe, cmd, cwd, _env = args
             shell = isinstance(cmd, (str, bytes))
@@ -359,8 +360,11 @@ class _Tracer:
         elif event in ("os.listdir", "os.scandir"):
             # The import system lists directories to find modules; that is covered by
             # the import itself, not a dependency on the directory's contents.
+            # listdir/scandir are C functions without a frame: frame 1 (this hook's
+            # caller) is the code that called them, e.g. importlib's FileFinder or a
+            # module body, which itself runs below importlib frames while imported.
             try:
-                caller = sys._getframe(2).f_code.co_filename
+                caller = sys._getframe(1).f_code.co_filename
             except ValueError:
                 caller = ""
             if "importlib" in caller:

@@ -31,6 +31,9 @@ type runHooks struct {
 	// selected is called with the selection before it is printed and run; it may
 	// change it. The project's state is updated in place by the run.
 	selected func(*project, *selection)
+	// started is set by the run to the units it started (suite -> units); nil when it
+	// started none (a dry run, an error before running).
+	started map[string][]string
 }
 
 func (h *runHooks) scope() map[string]bool {
@@ -46,12 +49,19 @@ func (h *runHooks) onSelected(p *project, sel *selection) {
 	}
 }
 
+func (h *runHooks) onRan(started map[string][]string) {
+	if h != nil {
+		h.started = started
+	}
+}
+
 type watchFlags struct {
 	commonFlags
 	interval time.Duration
 	debounce time.Duration
 	agent    bool
 	clear    bool
+	failFast bool
 }
 
 // Kinds of watch cycles.
@@ -79,6 +89,7 @@ func cmdWatch(ctx context.Context, args []string, stdin *os.File, stdout, stderr
 	fs.DurationVar(&f.debounce, "debounce", 300*time.Millisecond, "wait until no file changed for this long before running")
 	fs.BoolVar(&f.agent, "agent", false, "ask the agent about unattributed changes (default: apply the orphan policy without it)")
 	fs.BoolVar(&f.clear, "clear", false, "clear the screen before each run")
+	fs.BoolVar(&f.failFast, "fail-fast", false, "in each run, start no further test batch after one fails")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -490,9 +501,15 @@ func (c *watchCycles) run(ctx context.Context, req cycleReq) {
 		if len(ran) > 0 || req.kind != cycleChange {
 			c.last = ran
 		}
-		c.footer(p, ran, code, err, time.Since(start))
+		// With --fail-fast, what ran is less than the selection.
+		started, notStarted := ran, 0
+		if hooks.started != nil {
+			started = hooks.started
+			notStarted = countUnits(ran) - countUnits(started)
+		}
+		c.footer(p, started, notStarted, code, err, time.Since(start))
 	} else {
-		c.footer(nil, nil, code, err, time.Since(start))
+		c.footer(nil, nil, 0, code, err, time.Since(start))
 	}
 }
 
@@ -518,12 +535,13 @@ func (c *watchCycles) header(req cycleReq) {
 func (c *watchCycles) runFlags(req cycleReq) *runFlags {
 	return &runFlags{
 		commonFlags: c.f.commonFlags, selectOn: true, explain: true, noAgent: !c.f.agent,
-		all: req.kind == cycleAll, extra: c.extra,
+		all: req.kind == cycleAll, extra: c.extra, failFast: c.f.failFast,
 	}
 }
 
-// footer prints the outcome of a cycle from the recorded statuses.
-func (c *watchCycles) footer(p *project, ran map[string][]string, code int, err error, took time.Duration) {
+// footer prints the outcome of a cycle from the recorded statuses. notStarted counts
+// the selected units --fail-fast did not start.
+func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, code int, err error, took time.Duration) {
 	var failed, unknown []string
 	passed := 0
 	for suite, units := range ran {
@@ -564,6 +582,9 @@ func (c *watchCycles) footer(p *project, ran map[string][]string, code int, err 
 	if len(unknown) > 0 {
 		parts = append(parts, fmt.Sprintf("%d without a result: %s", len(unknown), strings.Join(limit(unknown, 4), ", ")))
 	}
+	if notStarted > 0 {
+		parts = append(parts, fmt.Sprintf("%d not started (--fail-fast)", notStarted))
+	}
 	parts = append(parts, took.Round(100*time.Millisecond).String())
 	fmt.Fprintf(c.stderr, "── %s\n", strings.Join(parts, " · "))
 	if c.hasKeys {
@@ -590,6 +611,14 @@ func ranUnits(res *selector.Result) map[string][]string {
 		}
 	}
 	return out
+}
+
+func countUnits(m map[string][]string) int {
+	n := 0
+	for _, units := range m {
+		n += len(units)
+	}
+	return n
 }
 
 // narrow replaces the selection with the tests keep accepts.
