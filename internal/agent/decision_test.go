@@ -64,7 +64,10 @@ func TestToDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := toDecision(sub, req)
+	d, err := toDecision(sub, req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantAdd := []selector.Addition{
 		{Suite: "web", Test: "src/db.test.ts", Reason: selector.ReasonAgent, Detail: "runs scripts/seed.sh"},
 		{Suite: "go", Test: "", Reason: selector.ReasonAgent, Detail: "whole suite"},
@@ -145,4 +148,33 @@ func TestParseCommandOutput(t *testing.T) {
 
 func quote(s string) string {
 	return string(mustJSON(s))
+}
+
+// A decision that asks for tests but names none that exist is rejected, so the caller
+// falls back to the orphan policy instead of handling the orphans with nothing selected.
+func TestToDecisionRejectsEmptyTests(t *testing.T) {
+	f := newFixture(t)
+	req := f.request(testConfig())
+	for _, in := range []string{
+		`{"decision":"tests","tests":[{"suite":"web","test":"ghost.test.ts","why":"x"}],"no_impact":[],"summary":"s"}`,
+		`{"decision":"none","tests":[{"suite":"nope","test":"*","why":"x"}],"no_impact":[],"summary":"s"}`,
+		`{"decision":"tests","tests":[],"no_impact":[],"summary":"s"}`,
+	} {
+		sub, err := parseSubmission([]byte(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d, err := toDecision(sub, req); err == nil {
+			t.Errorf("toDecision(%s) = %+v, want an error", in, d)
+		}
+	}
+	for _, in := range []string{
+		`{"decision":"none","tests":[],"no_impact":["scripts/seed.sh"],"summary":"s"}`,
+		`{"decision":"run_all","tests":[{"suite":"web","test":"ghost.test.ts","why":"x"}],"no_impact":[],"summary":"s"}`,
+	} {
+		sub, _ := parseSubmission([]byte(in))
+		if d, err := toDecision(sub, req); err != nil {
+			t.Errorf("toDecision(%s) = %+v, %v", in, d, err)
+		}
+	}
 }

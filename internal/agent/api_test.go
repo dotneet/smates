@@ -363,6 +363,21 @@ func TestAPICorrectsUnknownTests(t *testing.T) {
 	}
 }
 
+// A second submission whose tests still do not exist fails the run (the CLI then
+// applies the orphan policy) instead of being accepted with nothing selected.
+func TestAPIRejectsUncorrectedUnknownTests(t *testing.T) {
+	f := newFixture(t)
+	bad := `{"decision":"tests","tests":[{"suite":"web","test":"src/seed.test.ts","why":"guess"}],"no_impact":[],"summary":"s"}`
+	b, _ := newTestBackend(t,
+		reply("tool_use", toolUse("s1", "submit_selection", bad)),
+		reply("tool_use", toolUse("s2", "submit_selection", bad)),
+	)
+	d, err := b.Decide(context.Background(), f.request(testConfig()))
+	if err == nil || !strings.Contains(err.Error(), "src/seed.test.ts") {
+		t.Fatalf("Decide = %+v, %v; want an error", d, err)
+	}
+}
+
 func TestAPIRunAllAndBearerToken(t *testing.T) {
 	f := newFixture(t)
 	fake := &fakeAPI{t: t, replies: []fakeReply{reply("tool_use", toolUse("s", "submit_selection", `{"decision":"run_all","tests":[],"no_impact":[],"summary":"CI runner image changed"}`))}}

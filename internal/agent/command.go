@@ -89,7 +89,10 @@ func (c *commandBackend) Decide(ctx context.Context, req *Request) (*Decision, e
 	if err != nil {
 		return nil, fmt.Errorf("agent command: %w", err)
 	}
-	d := toDecision(sub, req)
+	d, err := toDecision(sub, req)
+	if err != nil {
+		return nil, fmt.Errorf("agent command: %w", err)
+	}
 	d.Usage = usage
 	d.Model = "command"
 	logf(log, "%s in %s", describe(d), time.Since(started).Round(time.Millisecond))
