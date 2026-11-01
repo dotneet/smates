@@ -23,8 +23,11 @@ jobs:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional
 ```
 
+Replace `vX.Y.Z` with a release (`v1.2.3`), or use `@v1` to follow the newest v1.x
+release (see [Pin the version](#pin-the-version)).
+
 A complete, commented workflow is in
-[`.github/workflows/smates.yml`](../../.github/workflows/smates.yml).
+[`.github/workflows/smates.yml`](https://github.com/dotneet/smates/blob/main/.github/workflows/smates.yml).
 `smates init --github` generates one for your project; when an existing workflow already
 runs the tests, it prints (or, with `--patch FILE`, writes) a patch that replaces those
 steps with the action instead of adding a second workflow.
@@ -56,17 +59,19 @@ new pull request starts from it. On other branches it selects. Override with
 
 A state entry says "test T passed when its inputs had these content hashes". Reusing
 an entry from another branch can only skip T if every input of T is byte-identical to
-what that run saw, so any state is safe to start from; branch scoping just maximizes
-hits. What matters is who may *write* state that others read: GitHub scopes caches so a
-pull request can read the default branch's cache, but nothing outside that pull
-request can read what it saves. Pull requests from forks cannot affect the default
-branch's state.
+what that run saw. So any state is safe to start from; branch scoping just maximizes
+hits.
+
+What matters is who may *write* state that others read. GitHub scopes caches so that a
+pull request can read the default branch's cache, but nothing outside that pull request
+can read what it saves. Pull requests from forks cannot affect the default branch's
+state.
 
 ## Inputs
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | action ref | Release to install (`v1.2.3`), `latest`, or `source`. Defaults to the ref in `uses:` when it is a release tag or the commit of one, otherwise `latest`. |
+| `version` | action ref | Release to install (`v1.2.3`), `latest`, or `source`. By default it follows the ref in `uses:`: a release tag (or the commit of one) installs that release, a moving tag such as `v1` or `v1.2` the newest release of that line, any other ref `latest`. |
 | `verify` | `auto` | How the download is verified: `auto`, `attestation` or `checksum` ([below](#verification)). |
 | `command` | `run` | Subcommand. `select` defaults to `--format github`. |
 | `args` | | Extra arguments, shell-parsed: `--shard 1/4 -- --reporter=dot`. Do not interpolate untrusted values (PR titles, branch names). |
@@ -101,8 +106,10 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 
 ## Patterns
 
-**Pin the version.** `uses: dotneet/smates@v1.2.3` installs exactly v1.2.3. Let
-Dependabot (`package-ecosystem: github-actions`) bump it.
+### Pin the version
+
+`uses: dotneet/smates@v1.2.3` installs exactly v1.2.3; `@v1` installs the newest v1.x
+release. Let Dependabot (`package-ecosystem: github-actions`) bump a pinned version.
 
 To pin by commit, as many security policies require, use the commit of a release tag;
 Dependabot and Renovate keep the comment in sync:
@@ -119,7 +126,9 @@ binary; with an attestation, it must name that commit. A commit that is not a re
 (or carries several release tags) is built from source, with a notice, and needs Go
 (`actions/setup-go`) on the runner.
 
-**Skip expensive setup when nothing is affected.** Run `select` first in the same job:
+### Skip expensive setup when nothing is affected
+
+Run `select` first in the same job:
 
 ```yaml
       - id: select
@@ -132,7 +141,9 @@ binary; with an attestation, it must name that commit. A commit that is not a re
         uses: dotneet/smates@vX.Y.Z
 ```
 
-**Gate a whole job** on a cheap selection job:
+### Gate a whole job on the selection
+
+Run the selection in a cheap job of its own:
 
 ```yaml
 jobs:
@@ -157,7 +168,9 @@ jobs:
 Use this only if a skipped job is acceptable for your required status checks (GitHub
 treats a skipped job as passing).
 
-**Shards and matrices.** `--shard I/N` assigns every test to a shard by a stable hash
+### Shards and matrices
+
+`--shard I/N` assigns every test to a shard by a stable hash
 of its suite and ID, so a test always lands in the same shard and every shard agrees,
 whatever state each one restored. Give each shard its own `cache-key`, so jobs do not
 overwrite each other's state:
@@ -177,26 +190,33 @@ overwrite each other's state:
 The same applies to a matrix over, say, Node versions (`cache-key: node-${{ matrix.node }}`).
 The runner OS is already part of the key.
 
-Sharded runs do not ask the orphan-file agent: each shard would ask on its own and could
-get a different answer, and a test picked only by one shard's answer may be owned by
-another shard. Without an agent decision cached in the state they restored, the shards
-apply the fallback (the affected suites run, each shard its share). To use the agent
-with shards, run `smates select` once before them (unsharded) and have every shard
-restore the state it saved: they then reuse its cached decision.
+Sharded runs do not ask the agent ([why](../guides/agent.md#sharded-runs)): each shard
+applies the orphan policy to its share. To use the agent with shards, run
+`smates select` once before them (unsharded) and have every shard restore the state it
+saved: they then reuse its cached decision.
 
-**Monorepos.** A single smates step covers every suite of the repository (smates.yml
-at the repository root lists them). If you split suites across jobs, use `args: --suite
-<name>` and a distinct `cache-key` per job. Each job then selects what a single step would
-select for its suites: a change another suite's tests depend on is not an orphan in it,
-nor is a change under the root of a suite the job leaves out (the job running that suite
-handles it). `--suite <name> --all` on the default branch records the snapshot as a full
-run does, so pull requests only see what changed since.
+### Monorepos
 
-**Shadow mode.** `args: --shadow` runs the full suite and reports what selection would
-have done, to build confidence before trusting it.
+A single smates step covers every suite of the repository (`smates.yml` at the
+repository root lists them). To split suites across jobs, give each job
+`args: --suite <name>` and a distinct `cache-key`. Each job then selects what a single
+step would select for its suites:
 
-<a id="pull-request-comment"></a>
-**Pull request comment.** `comment: true` tells reviewers what the change affects and
+- a change another suite's tests depend on is not an orphan in it;
+- nor is a change under the root of a suite the job leaves out (the job running that
+  suite handles it);
+- `--suite <name> --all` on the default branch records the snapshot as a full run does,
+  so pull requests only see what changed since.
+
+### Shadow mode
+
+`args: --shadow` runs the full suite and reports what selection would have done, to
+build confidence before trusting it. See
+[Shadow mode](../guides/trust.md#shadow-mode) for a rollout plan.
+
+### Pull request comment { #pull-request-comment }
+
+`comment: true` tells reviewers what the change affects and
 why, in one comment that every push updates:
 
 ```yaml
@@ -212,13 +232,19 @@ jobs:
           comment: true
 ```
 
-The comment says how many test units in which suites are affected, and how much
-recorded test time the skipped ones would have taken; for each changed file, which
-tests it selected and how they depend on it (static import, a read traced in their last
-run, a suite input, a directory listing, ...); tests selected for other reasons
-(failing last time, never recorded, picked by the agent); how each change no test
-depends on was handled (named by a test, the agent, the `orphans` policy); and, for
-`run`, the result and, in shadow mode, any escapes. Long lists are cut with counts.
+The comment says:
+
+- how many test units in which suites are affected, and how much recorded test time the
+  skipped ones would have taken;
+- for each changed file, which tests it selected and how they depend on it (static
+  import, a read traced in their last run, a suite input, a directory listing, ...);
+- tests selected for other reasons (failing last time, never recorded, picked by the
+  agent);
+- how each change no test depends on was handled (named by a test, the agent, the
+  `orphans` policy);
+- for `run`, the result and, in shadow mode, any escapes.
+
+Long lists are cut with counts. Details:
 
 - It works with `command: run` and `command: select`. The comment is found again by a
   hidden marker (`<!-- smates-summary -->`), so there is one per pull request.
@@ -237,11 +263,12 @@ depends on was handled (named by a test, the agent, the `orphans` policy); and, 
 - Outside the action, `smates run --markdown file` and `smates select --format
   markdown` produce the same text.
 
-**Your own storage.** `cache: false` and manage `.smates/` yourself, e.g. with
+### Your own storage
+
+Set `cache: false` and manage `.smates/` yourself, e.g. with
 `smates state pull` / `smates state push` (see [other CI systems](other-ci.md)).
 
-<a id="verification"></a>
-## Verification
+## Verification { #verification }
 
 Release archives and `checksums.txt` carry a [build provenance
 attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
@@ -249,10 +276,15 @@ signed by smates' release workflow. Unlike `checksums.txt`, which is downloaded 
 same release as the archive, it cannot be produced by someone who can only edit the
 release: it is signed with a short-lived certificate for `dotneet/smates`'
 `.github/workflows/release.yml`, run on a GitHub-hosted runner for the release's tag.
-The action checks it with `gh attestation verify` (`--repo dotneet/smates
---signer-workflow dotneet/smates/.github/workflows/release.yml --source-ref
-refs/tags/<version> --deny-self-hosted-runners`, plus `--source-digest <commit>` when
-pinned by commit) using `github-token`.
+
+The action checks it with `gh attestation verify`, using `github-token`:
+
+```bash
+gh attestation verify <archive> --repo dotneet/smates \
+  --signer-workflow dotneet/smates/.github/workflows/release.yml \
+  --source-ref refs/tags/<version> --deny-self-hosted-runners
+  # plus --source-digest <commit> when the action is pinned by commit
+```
 
 | `verify` | Behaviour |
 |---|---|
@@ -264,23 +296,25 @@ An attestation that exists but does not verify always fails the job, as does a c
 mismatch; the action never falls back to another method or to a source build after a
 failed verification. `version: source` downloads nothing, so there is nothing to verify.
 
-**The binary cache does not skip verification.** The cache entry (and, on self-hosted
-runners, the tool cache) holds only the release archive. It is restored into a staging
-directory that is never put on `PATH`; the action copies just the archive out of it and
-puts it through the same checks as a fresh download (`checksums.txt` is fetched again,
-the attestation looked up again), then unpacks the `smates` binary into a new directory
-that holds nothing else and puts that on `PATH`. So the `PATH` entry holds only the
-verified binary, and a cache entry without the genuine archive fails verification
-instead of being used. This does not make the cache untrusted input: like any
-`actions/cache` restore, a crafted entry can write files outside its own path (the
-restore extracts with absolute paths), for example over the action's own scripts, so
-whoever can write the cache scope a job restores from remains trusted, as for the
-state (see [State is input](#security-model)).
+**Cached installs are verified too, and need network access.** Every run, including a
+cache hit, downloads `checksums.txt` from the release (plus the attestation lookup when
+`verify` is not `checksum`), so a cache hit does not work offline; the cost is one small
+request per run.
 
-**Cached installs still need network access.** Every run, including a cache hit,
-downloads `checksums.txt` from the release (plus the attestation lookup when `verify`
-is not `checksum`), so a cache hit does not work offline; the cost is one small request
-per run.
+??? note "Details: how the binary cache is verified"
+    The cache entry (and, on self-hosted runners, the tool cache) holds only the release
+    archive. It is restored into a staging directory that is never put on `PATH`; the
+    action copies just the archive out of it and puts it through the same checks as a
+    fresh download, then unpacks the `smates` binary into a new directory that holds
+    nothing else and puts that on `PATH`. So the `PATH` entry holds only the verified
+    binary, and a cache entry without the genuine archive fails verification instead of
+    being used.
+
+    This does not make the cache untrusted input: like any `actions/cache` restore, a
+    crafted entry can write files outside its own path (the restore extracts with
+    absolute paths), for example over the action's own scripts. Whoever can write the
+    cache scope a job restores from remains trusted, as for the state (see
+    [State is input](#security-model)).
 
 ## Notes
 

@@ -66,7 +66,7 @@ For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only 
 of failing tests, then a short summary with the command that reruns just those tests.
 'smates guide' has the rest.
 
-Run 'smates <command> -h' for flags. Docs: https://github.com/dotneet/smates
+Run 'smates <command> -h' for flags. Docs: https://dotneet.github.io/smates/
 `
 
 // Main runs the CLI and returns the process exit code.

@@ -20,7 +20,7 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 )
 
-// Action versions used in generated workflows (keep README.md and docs/ci in sync).
+// Action versions used in generated workflows (keep docs/ in sync).
 const (
 	actCheckout    = "actions/checkout@v5"
 	actSetupNode   = "actions/setup-node@v4"

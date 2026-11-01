@@ -11,13 +11,12 @@ curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The script detects OS and architecture, downloads the release archive, verifies its
-SHA-256 against the release's `checksums.txt` (with `SMATES_VERIFY=attestation`, also
-its build provenance attestation, using the `gh` CLI) and installs `smates`. Without `-b` it
-installs to `/usr/local/bin` when writable (typical in containers running as root),
-else `~/.local/bin`. Pin a version in CI; without one it resolves the latest release.
-`SMATES_VERSION` and `SMATES_INSTALL_DIR` work as alternatives to the arguments.
-Alternatively: `go install github.com/dotneet/smates/cmd/smates@v1.2.3`.
+Pin a version in CI; without one, the script installs the latest release. It verifies
+the archive against the release's `checksums.txt`. Without `-b` it installs to
+`/usr/local/bin` when writable (typical in containers running as root), else
+`~/.local/bin`. Every option, including `SMATES_VERIFY=attestation`, is on
+[Install](../getting-started/install.md#install-script-linux-macos);
+`go install github.com/dotneet/smates/cmd/smates@v1.2.3` works too.
 
 ## Carrying the state
 
@@ -37,10 +36,15 @@ Two ways to do that:
 
 - **The CI's own cache**, keyed by branch with a default-branch fallback (GitLab,
   CircleCI). No credentials needed.
-- **A git ref** with `smates state pull` / `smates state push`, which store the file
-  under `refs/smates/state` in the repository (any CI, also local machines). Pushing
-  needs credentials with write access to the repository, so by default only the
-  default branch pushes; every pipeline pulls.
+- **A git ref** with `smates state pull` / `smates state push` (any CI, also local
+  machines). `push` stores the file under `refs/smates/state/<branch>` in the
+  repository; `pull` fetches the current branch's ref and falls back to the default
+  branch's. Pushing needs credentials with write access to the repository, so by
+  default only the default branch pushes; every pipeline pulls.
+
+The branch is `$SMATES_BRANCH`, else the branch the CI reports, else the checked-out
+branch. On a detached HEAD without any of these, `smates state push` needs `--ref`.
+
 
 Default branch detection: `smates run` runs everything on the default branch, detected
 from the CI environment or `origin/HEAD`. If your CI checks out without that
@@ -80,9 +84,10 @@ branches are trusted), or use the git-ref approach below for the fallback.
 Markdown summary for reviewers: what the change affects, why each test was selected,
 how unattributed changes were handled and how much test time was skipped (see
 [the GitHub Actions comment](github-actions.md#pull-request-comment)). Write it outside
-the checkout, where it cannot count as a change. Posting it is up to the CI; on GitLab,
-with a project access token (`api` scope) in `SMATES_GITLAB_TOKEN`, this keeps one note
-per merge request up to date:
+the checkout, where it cannot count as a change.
+
+Posting it is up to the CI. On GitLab, with a project access token (`api` scope) in
+`SMATES_GITLAB_TOKEN`, this keeps one note per merge request up to date:
 
 ```yaml
   script:
@@ -215,20 +220,17 @@ which already gives per-branch reuse; `state pull` adds the default branch's sta
 
 ## Per-branch state in a git ref (optional)
 
-If pull requests are trusted (no fork contributions) and have push credentials, each
-branch can keep its own ref, falling back to the default branch's:
+If pull requests are trusted (no fork contributions) and have push credentials, let
+every branch push its own state, not only the default branch:
 
 ```sh
-ref="refs/smates/branches/$BRANCH"
-if git ls-remote --exit-code origin "$ref" >/dev/null 2>&1; then
-  smates state pull --ref "$ref"
-else
-  smates state pull || true
-fi
+smates state pull || true   # refs/smates/state/<branch>, else the default branch's
 status=0
 smates run || status=$?
-smates state push --ref "$ref"
+smates state push           # refs/smates/state/<branch>
 exit "$status"
 ```
 
-Delete the ref when the branch is merged: `git push origin --delete "$ref"`.
+No extra logic is needed for the fallback: `smates state pull` tries the branch's ref
+first and the default branch's ref next. Delete a branch's ref when the branch is
+merged: `git push origin --delete refs/smates/state/<branch>`.

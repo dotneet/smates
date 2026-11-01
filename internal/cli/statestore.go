@@ -16,7 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/state"
 )
 
-// stateStore is where a working tree's state lives (README "Parallel worktrees",
+// stateStore is where a working tree's state lives (docs/guides/worktrees.md,
 // DESIGN.md §4):
 //
 //   - by default one file per working tree, cfg.State under its root;

@@ -21,7 +21,7 @@ const (
 	checkFail = "fail"
 )
 
-const docURL = "https://github.com/dotneet/smates"
+const docURL = "https://dotneet.github.io/smates/"
 
 // doctorReport is the JSON schema of `smates doctor --format json`.
 type doctorReport struct {
@@ -109,7 +109,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 	}
 	p, err := load(cf, io.Discard)
 	if err != nil {
-		r.add(checkFail, "project-load", "%v", err).fix(doctorFix{Doc: docURL + "#configuration-smatesyml"})
+		r.add(checkFail, "project-load", "%v", err).fix(doctorFix{Doc: docURL + "guides/configuration/"})
 		return r
 	}
 	r.add(checkOK, "repository", "repository %s", p.repo.Root)
@@ -119,25 +119,25 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkWarn, "config", "no smates.yml: using auto-detected suites (run `smates init` to pin them)").fix(doctorFix{Command: "smates init"})
 	}
 	if len(p.suites) == 0 {
-		r.add(checkFail, "suites-detected", "no test suites detected").fix(doctorFix{Command: "smates init", Doc: docURL + "#configuration-smatesyml"})
+		r.add(checkFail, "suites-detected", "no test suites detected").fix(doctorFix{Command: "smates init", Doc: docURL + "guides/configuration/"})
 	}
 	runners := map[string]bool{}
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
 		if len(units) == 0 {
 			r.add(checkWarn, "suite-units", "suite %s (%s): no test files match %v (tests from %s)", s.Name, s.Runner, s.TestPatterns(), s.TestsSource).about(s.Name).
-				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "#configuration-smatesyml"})
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "guides/configuration/"})
 		} else {
 			r.add(checkOK, "suite-units", "suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command).about(s.Name)
 			r.add(checkOK, "suite-tests-source", "suite %s: tests from %s: %s", s.Name, s.TestsSource, strings.Join(s.TestPatterns(), " ")).about(s.Name)
 		}
 		if s.DiscoveryWarning != "" {
 			r.add(checkWarn, "suite-test-discovery", "suite %s: %s", s.Name, s.DiscoveryWarning).about(s.Name).
-				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "#which-files-are-tests"})
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "guides/configuration/#which-files-are-tests"})
 		}
 		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
-				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "#tests-that-exercise-a-server"})
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "guides/servers/"})
 		}
 		runners[s.Runner] = true
 	}
@@ -186,7 +186,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 	doctorProject(p, func() string { return tool("node", "--version") }, r)
 	if p.state.Empty() {
 		r.add(checkWarn, "state-recorded", "no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath).
-			fix(doctorFix{Command: "smates run --all", Doc: docURL + "#quick-start"})
+			fix(doctorFix{Command: "smates run --all", Doc: docURL + "getting-started/quickstart/"})
 	} else {
 		n := 0
 		for _, s := range p.state.Suites {
@@ -204,7 +204,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkOK, "agent", "agent: %s available for unattributed changes (orphans: %s)", agent.Describe(p.cfg.Agent), p.cfg.Orphans)
 	} else if p.cfg.Orphans == config.OrphansAgent {
 		r.add(checkWarn, "agent", "agent unavailable (%s): unattributed changes run the affected suites in full", why).
-			fix(doctorFix{Command: "smates config set orphans all", Config: &configFix{Key: "orphans", Value: config.OrphansAll}, Doc: docURL + "#the-agent"})
+			fix(doctorFix{Command: "smates config set orphans all", Config: &configFix{Key: "orphans", Value: config.OrphansAll}, Doc: docURL + "guides/agent/"})
 	}
 	if ci := detectCI(); ci.Name != "" {
 		full, b := fullRunBranch(ci, p.repo, p.cfg.FullRunBranches)
@@ -286,7 +286,7 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 		if reachable(port) {
 			r.add(checkOK, "service-reachable", "service %s (%s, from %s): localhost:%d is reachable", h.Name, h.Image, h.Source, port).about(h.Name)
 		} else {
-			f := doctorFix{Command: "docker run -d -p " + fmt.Sprintf("%d:%d", port, port) + " " + h.Image, Doc: docURL + "#github-actions"}
+			f := doctorFix{Command: "docker run -d -p " + fmt.Sprintf("%d:%d", port, port) + " " + h.Image, Doc: docURL + "ci/github-actions/"}
 			if strings.HasPrefix(h.Source, "docker-compose") || strings.HasPrefix(h.Source, "compose") {
 				f.Command = "docker compose up -d " + h.Name
 			}
@@ -298,7 +298,7 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 			r.add(checkOK, "local-server-reachable", "%s calls %s: reachable", l.File, l.URL).about(l.URL)
 		} else {
 			r.add(checkWarn, "local-server-reachable", "%s calls %s, but nothing listens on port %d: tests using it need that server running", l.File, l.URL, l.Port).about(l.URL).
-				fix(doctorFix{Doc: docURL + "#tests-that-exercise-a-server"})
+				fix(doctorFix{Doc: docURL + "guides/servers/"})
 		}
 	}
 	for _, e := range in.Env {
@@ -317,11 +317,11 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 		subject := st.File + ":" + st.Job + ":" + st.Step
 		if st.Skip != "" {
 			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, st.Skip).about(subject).
-				fix(doctorFix{Doc: docURL + "#github-actions"})
+				fix(doctorFix{Doc: docURL + "ci/github-actions/"})
 			continue
 		}
 		r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates).about(subject).
-			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "#github-actions"})
+			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/"})
 	}
 }
 

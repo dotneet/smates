@@ -1,0 +1,140 @@
+# トラブルシューティング { #troubleshooting }
+
+よくある問題への答えを、状況を確かめるコマンドとともにまとめたページです。まずは `smates doctor` から始めてください。
+
+## まずは smates doctor { #start-here-smates-doctor }
+
+```text
+$ smates doctor
+smates 1.2.3
+  ok    repository /home/me/shop
+  ok    config smates.yml
+  ok    suite web (vitest, root packages/web): 42 test units; command: vitest run
+  FAIL  suite e2e: no node_modules (or Yarn PnP loader) from e2e up to the repository root: ...
+  warn  agent unavailable (no credentials: set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN), ...
+```
+
+失敗したチェックがあると終了コード 1 になります。`smates doctor --format json` では、各チェックに安定した `id` と `fix`（実行するコマンド、設定の変更、リンク）が付きます。チェックの一覧は [`smates doctor`](cli.md#smates-doctor) にあります。
+
+## 毎回実行されるテストがある { #a-test-runs-every-time }
+
+なぜ選択されたのかを smates に尋ねます。
+
+```bash
+smates run --explain          # または: smates select --explain
+```
+
+| 理由 | 意味 | 対処 |
+|---|---|---|
+| `failed: last run: fail` | 前回成功しなかった。 | 直します。再実行で通るなら `smates flaky` を確認します。 |
+| `new: no recorded run` | このテストの記録がステートにない。 | ステートが復元されているか確認します（[後述](#everything-runs-on-every-ci-run)）。 |
+| `changed: <file>` | 前回成功してからその入力が変わった。 | そのファイルが毎回変わるなら、下の項目を見てください。 |
+| `env changed: <VAR>` | 読んでいる変数の値が違う。 | 実行やマシンごとに値が違うなら `env_ignore` に追加します。 |
+
+次に、テストが何に依存しているかを確認します。
+
+```bash
+smates deps src/cart.test.ts
+```
+
+いつまでも落ち着かないテストのよくある原因:
+
+- **テストが毎回作り直すファイル。** git-ignored のパスにある、テスト（やビルド）が毎回書き直すファイルを読むテストは、そのたびに新しい内容に依存します。git-ignored のパスの存在を確かめてから作成するテストは、もう 1 回だけ実行されて落ち着きます。自分で生成したものを読むテストは、新しくチェックアウトするたびに実行されます。
+- **`dir/**` への依存。** smates が中を見られないコマンド（`make`、バイナリ）を使うと、テストはそのディレクトリ配下のすべてのファイルに依存します。本当の入力を `rules` で宣言してツールを直接呼ぶか、余分な実行を受け入れてください。
+- **ログの警告。** `N test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time` は、smates が使ったものを保存する前にテストプロセスが終了したことを示します（テスト内の `process.exit()`、強制終了されたワーカーなど）。
+- **ランナーへの引数。** `--` 以降に引数を付けた実行では、テストを成功として記録しません。常に使うフラグはスイートの `command` に移してください。
+- **pytest 向けに書かれた unittest のモジュール。** 状態が不明のままなので毎回実行されます。ログで `runner: pytest` が提案されます。
+- **flaky なテスト。** `smates flaky` は、入力が変わらないのに結果が反転したテストを一覧します。[シャドーモード・flaky・統計](../guides/trust.md) を参照してください。
+
+## 実行されるべきテストがスキップされた { #a-test-that-should-have-run-was-skipped }
+
+1. 依存マップを確認します。`smates why <変更したファイル>` はそのファイルに依存するテストを、`smates deps <test>` はテストの依存を一覧します。
+2. その変更が無視されたオーファン（どのテストにも紐づかない変更）だったかを確認します。ログには `ignored N unattributed change(s) (orphans: ignore)` や `skipped by caller`（`--orphans=skip`）と出るか、テストされていないコードの変更（`untested: skip`）として一覧されます。[どのテストにも紐づかない変更](../guides/orphans.md) を参照してください。
+3. [制限事項](limitations.md) を確認します。別プロセスのサーバー、列挙による環境の読み取り、ブラウザで動くコードは既知の死角で、それぞれ対処法があります。
+4. 測定します。`smates run --shadow` はすべてを実行し、選択していたら見逃していた失敗テストを報告します。`smates stats` は見逃し率の推移を表示します。
+
+どれにも当てはまらなければ、`smates run --explain`、`smates why <file>`、`smates deps <test>` の出力を添えて [issue を作成](https://github.com/dotneet/smates/issues) してください。
+
+## 同じファイルが毎回オーファンになる { #the-same-files-are-orphans-on-every-commit }
+
+`.env.example`、デプロイの設定、どのスイートもカバーしないフロントエンドなどのファイルが、スイート全体を実行させ（あるいはエージェントを呼ばせ）続けることがあります。smates に探させましょう。
+
+```bash
+smates run --all                    # 先に: 実際の依存を記録する
+smates orphans                      # 直近 100 コミットを再生し、ignore: のグロブを提案
+smates orphans --apply --dry-run    # smates.yml への変更を表示
+smates orphans --apply              # 書き込む
+```
+
+テストの動き方を変えうるファイル（CI のワークフロー、Makefile、Dockerfile、ツールチェーンのバージョン指定）は、代わりに `inputs:` や `rules:` の候補として提案されます。グロブを 1 つ手で追加するなら `smates config add-ignore 'deploy/**'` です。[どのテストにも紐づかない変更](../guides/orphans.md) を参照してください。
+
+## 新しいテストファイルが拾われない { #a-new-test-file-is-not-picked-up }
+
+smates は、どのファイルがテストかをランナーの設定から読みます。読めない場合（関数で組み立てる設定、`mergeConfig(...)`、スプレッド構文など）はデフォルトのパターンにフォールバックし、警告を出します。
+
+```bash
+smates list -v        # 各スイートのパターンの出どころ、パターン、すべてのユニット
+```
+
+新しいファイルが一覧になければ、`smates.yml` でそのスイートに `tests:`（と `exclude:`）を設定してください。`smates doctor` も同じ警告（`suite-test-discovery`）を出します。[スイートの設定](../guides/configuration.md) を参照してください。
+
+## 終了コード 4: ランナーを起動できない { #exit-code-4-the-runner-cannot-start }
+
+```text
+smates: web: the runner exited with code 127 before any test reported a result: ...
+```
+
+スイートのコマンドがインストールされていない、`PATH` にない、または実行できません。`smates doctor` はスイートと、インストールのためのコマンドを示します。smates は `npx` や `bunx` にランナーをダウンロードさせないので、先にプロジェクトの依存をインストールしてください（`npm ci`、`pnpm install`、`uv sync` など）。[終了コード](exit-codes.md#4-environment-problem) を参照してください。
+
+## CI で毎回すべてが実行される { #everything-runs-on-every-ci-run }
+
+ステートが復元されておらず、すべてのテストが新規扱いになっている可能性が高いです。
+
+- **GitHub Actions:** 「Restore smates state」ステップのログでキャッシュがヒットしたか確認します。`state-path` は `smates.yml` の `state` と一致している必要があります。異なるテストを実行するジョブ（マトリクスの各エントリ、シャード、ジョブに分けたスイート）には、それぞれ別の `cache-key` が必要です。[GitHub Actions](../ci/github-actions.md) を参照してください。
+- **その他の CI:** `smates run` の前に `.smates/` を復元し、後で保存します。テストが失敗したときも保存してください。[その他の CI](../ci/other-ci.md) を参照してください。
+- **確認:** `smates state show` はステートの場所と記録内容を表示します。`smates doctor` は `no recorded state` と警告します。
+- **初回の実行:** ステートがまったくないとき、smates はベースブランチと比較します。これには履歴が必要です（`fetch-depth: 0`）。履歴がなければ、1 回目はすべてを実行します。
+
+デフォルトブランチでは、ステートを更新するために意図的にすべてのテストを実行します。`--select` で変えられます。
+
+## 新しい worktree が空から、または別のステートから始まる { #a-new-worktree-starts-cold-or-from-the-wrong-state }
+
+ステートのないリンクされた git worktree は、メイン worktree のステート、なければリモートのステートから 1 回だけシードされます。`smates state show` には `seeded: from ...` と表示されます。スナップショットは、その worktree の履歴にあるコミットで記録されたものだけを残し、そうでなければ変更されたファイルをデフォルトブランチと比べて判断します。
+
+- シードを止める: `state_seed: false` または `SMATES_NO_STATE_SEED=1`
+- 各 worktree が学んだことを共有する: `state_shared: true`
+- いつでもリモートのステートから始める: `smates state pull`。worktree がシードされるのは 1 回だけで、ステートの隣のマーカー（`.smates/.state.json.gz.seeded`）がそれを覚えています。`smates state clear` の後も同様です。
+
+`state_shared: true` では、保存時に別の worktree の実行がロックを手放すのを最大 1 分待ち、それでも取れなければ終了コード 4 で諦めます（テストの結果は報告されます）。クラッシュしたプロセスが残したロックは、2 分経つと引き継がれます。[並行する worktree](../guides/worktrees.md) を参照してください。
+
+## 記録が遅い { #recording-is-slow }
+
+記録（初回の実行、`--all`、デフォルトブランチでのすべての実行）は、選択的な実行より時間がかかります。よくある原因:
+
+- **Python 3.8〜3.11** は `sys.setprofile` でトレースします。Python 3.12 以降は `sys.monitoring` を使い、はるかに軽くなります。
+- **Go の `granularity: func`** はテスト関数ごとに 1 プロセスで記録します。関数どうしが状態を共有しないなら、`record_jobs` を上げて 1 つのパッケージの関数を同時に記録できます。
+- **`isolate: true`** は記録中にファイルごとにランナーを起動します。共有ワーカーで動くファイルの依存を正確にする必要がなければ、オフのままにしてください。
+- **`record_jobs` が小さい**と、ファイルごとに 1 プロセスで記録するランナー（bun、`isolate`）が遅くなります。
+
+プルリクエストでの選択的な実行には影響しません。選択されたテストだけを起動するからです。
+
+## エージェントが呼ばれない { #the-agent-is-not-called }
+
+理由はログに出ます。たとえば `agent unavailable (...); running affected suites in full` です。`smates doctor` も同じ内容を報告します（`agent` チェック）。
+
+| 原因 | 対処 |
+|---|---|
+| 環境に API キーがない | `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`OPENROUTER_API_KEY` のいずれかを設定します（[smates が読む環境変数](environment-variables.md#agent-credentials)）。 |
+| `agent.enabled: never`、または `orphans:` が `agent` でない | `smates.yml` を変えます。 |
+| `--no-agent` | git フックは `--agent` 付きでインストールしない限りこれを渡します。`smates watch` には `--agent` が必要です。 |
+| シャード実行（`--shard`） | シャードは、同じ変更に対してシャードなしの `smates select` や `smates run` がキャッシュした判断を再利用するだけです。 |
+| フォークからのプルリクエスト | フォークにはシークレットが渡らないので、`orphans` のフォールバックが適用されます。 |
+| オーファンがない | エージェントが呼ばれるのは、どのテストにも紐づかない変更があるとき（と失敗の説明）だけです。 |
+
+[LLM エージェント](../guides/agent.md) を参照してください。
+
+## 関連項目 { #see-also }
+
+- [終了コード](exit-codes.md)
+- [制限事項](limitations.md)
+- [コマンド](cli.md)
