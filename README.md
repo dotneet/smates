@@ -226,7 +226,7 @@ with their tokens and cost (when the backend reports one, e.g. `claude -p`), and
 flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
 the state keeps the last 1000 records within 180 days, and `smates state merge` unions
 them, so the stats of a state restored on CI cover the runs that state went through. A
-sharded run leaves one record per shard. The job summary shows the cumulative time saved
+sharded run leaves one record per shard (its orphans are counted by shard 1 only). The job summary shows the cumulative time saved
 in one line.
 
 ## Failure hints

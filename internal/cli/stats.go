@@ -37,19 +37,13 @@ func (c *cycle) runRecord(elapsed time.Duration, watch bool) state.Run {
 	if c.f.shardN > 1 {
 		r.Shard = fmt.Sprintf("%d/%d", c.f.shardI, c.f.shardN)
 	}
-	countUnits(&r, res, c.f.shardI, c.f.shardN)
+	countSelection(&r, res, c.f.shardI, c.f.shardN)
 	for _, statuses := range c.ran {
 		for _, st := range statuses {
 			if st == state.Fail {
 				r.Failed++
 			}
 		}
-	}
-	for _, how := range res.OrphanHandling {
-		if r.Orphans == nil {
-			r.Orphans = map[string]int{}
-		}
-		r.Orphans[how]++
 	}
 	if dec := c.sel.agentDec; dec != nil {
 		a := &state.AgentCall{Model: dec.Model, Cached: c.sel.agentCache}
@@ -62,9 +56,18 @@ func (c *cycle) runRecord(elapsed time.Duration, watch bool) state.Run {
 	return r
 }
 
-// countUnits counts the selected and skipped units of a selection (only those shard i
-// of n owns when sharded) and the recorded time of the skipped ones.
-func countUnits(r *state.Run, res *selector.Result, shardI, shardN int) {
+// countSelection counts the selected and skipped units of a selection (only those shard
+// i of n owns when sharded), the recorded time of the skipped ones, and the orphans by
+// handling. Every shard sees the same orphans: only the first shard records them.
+func countSelection(r *state.Run, res *selector.Result, shardI, shardN int) {
+	if shardN <= 1 || shardI == 1 {
+		for _, how := range res.OrphanHandling {
+			if r.Orphans == nil {
+				r.Orphans = map[string]int{}
+			}
+			r.Orphans[how]++
+		}
+	}
 	for _, sr := range res.Suites {
 		for _, t := range sr.Tests {
 			if shardN > 1 && t.Shard != 0 && t.Shard != shardI {
@@ -142,7 +145,7 @@ type statsReport struct {
 	SkipRate  float64 `json:"skip_rate"`
 	SavedMs   int64   `json:"saved_ms"`
 	Untimed   int     `json:"skipped_untimed_units"`
-	ElapsedMs int64   `json:"elapsed_ms"`
+	ElapsedMs int64   `json:"elapsed_ms"` // time the non-shadow runs took
 	// SavedPer30d extrapolates SavedMs to 30 days over the period (0 when the period
 	// is shorter than a day).
 	SavedPer30d int64 `json:"saved_per_30d_ms,omitempty"`
@@ -219,7 +222,6 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 		if r.ExitCode != 0 {
 			rep.FailedRuns++
 		}
-		rep.ElapsedMs += r.ElapsedMs
 		if r.Shadow {
 			rep.ByMode["shadow"]++
 			s := &rep.Shadow
@@ -236,6 +238,7 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 			rep.Total += r.Total
 			rep.SavedMs += r.SkippedMs
 			rep.Untimed += r.Untimed
+			rep.ElapsedMs += r.ElapsedMs
 		}
 		if len(r.Orphans) > 0 {
 			rep.Orphans.Runs++
@@ -269,8 +272,10 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 	if rep.Shadow.Failed > 0 {
 		rep.Shadow.MissRate = float64(rep.Shadow.Escapes) / float64(rep.Shadow.Failed)
 	}
+	// The period starts with the first recorded run: --since may reach further back
+	// than the history (adoption, records trimmed by the limits).
 	start := rep.From
-	if !f.since.IsZero() {
+	if f.since.After(start) {
 		start = f.since
 	}
 	if span := now.Sub(start); rep.Runs > 0 && span >= 24*time.Hour {

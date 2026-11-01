@@ -31,21 +31,27 @@ func TestParseSince(t *testing.T) {
 	}
 }
 
-func TestCountUnits(t *testing.T) {
-	res := &selector.Result{Suites: []*selector.Suite{{Name: "s", Tests: []*selector.Test{
+func TestCountSelection(t *testing.T) {
+	res := &selector.Result{OrphanHandling: map[string]string{"x": selector.OrphanAgent, "y": selector.OrphanReference}, Suites: []*selector.Suite{{Name: "s", Tests: []*selector.Test{
 		{ID: "a", Selected: true, Duration: 100, Shard: 1},
 		{ID: "b", Duration: 2000, Shard: 1},
 		{ID: "c", Shard: 1},
 		{ID: "d", Duration: 5000, Shard: 2}, // another shard's: not counted by shard 1
 	}}}}
 	var r state.Run
-	countUnits(&r, res, 1, 2)
-	if r.Total != 3 || r.Selected != 1 || r.SkippedMs != 2000 || r.Untimed != 1 {
+	countSelection(&r, res, 1, 2)
+	if r.Total != 3 || r.Selected != 1 || r.SkippedMs != 2000 || r.Untimed != 1 || len(r.Orphans) != 2 {
 		t.Errorf("shard 1/2: %+v", r)
 	}
+	// The orphans of a sharded run are recorded by its first shard only.
 	r = state.Run{}
-	countUnits(&r, res, 0, 0)
-	if r.Total != 4 || r.SkippedMs != 7000 {
+	countSelection(&r, res, 2, 2)
+	if r.Total != 1 || r.SkippedMs != 5000 || r.Orphans != nil {
+		t.Errorf("shard 2/2: %+v", r)
+	}
+	r = state.Run{}
+	countSelection(&r, res, 0, 0)
+	if r.Total != 4 || r.SkippedMs != 7000 || r.Orphans[selector.OrphanAgent] != 1 {
 		t.Errorf("unsharded: %+v", r)
 	}
 }
@@ -59,7 +65,7 @@ func statsSample() *state.State {
 			Orphans: map[string]int{selector.OrphanReference: 1, selector.OrphanAgent: 2}, Agent: &state.AgentCall{Turns: 3, InputTokens: 1500, OutputTokens: 200, CostUSD: 0.02}},
 		{ID: "3", At: t0.AddDate(0, 0, 2), Branch: "feat", CI: "github", Mode: "state", Shard: "1/2", Selected: 1, Total: 5, SkippedMs: 20_000, ExitCode: 1, Failed: 1,
 			Orphans: map[string]int{selector.OrphanAgent: 1}, Agent: &state.AgentCall{Cached: true}, Flaky: 1},
-		{ID: "4", At: t0.AddDate(0, 0, 3), Branch: "feat", Mode: "state", Shadow: true, Selected: 1, Total: 10, SkippedMs: 50_000, ExitCode: 1, Failed: 4, Escapes: 1, Possible: 1},
+		{ID: "4", At: t0.AddDate(0, 0, 3), Branch: "feat", Mode: "state", Shadow: true, Selected: 1, Total: 10, SkippedMs: 50_000, ElapsedMs: 300_000, ExitCode: 1, Failed: 4, Escapes: 1, Possible: 1},
 		{ID: "5", At: t0.AddDate(0, 0, 4), Branch: "feat", Watch: true, Mode: "state", Selected: 0, Total: 10, SkippedMs: 30_000},
 	}
 	st.Suite("s").Tests["x"] = &state.Entry{Flaky: &state.Flake{Count: 2}}
@@ -83,9 +89,13 @@ func TestAggregateStats(t *testing.T) {
 	if rep.Selected != 13 || rep.Total != 35 || rep.SavedMs != 90_000 || rep.Untimed != 1 {
 		t.Errorf("selection: %d/%d saved %d untimed %d", rep.Selected, rep.Total, rep.SavedMs, rep.Untimed)
 	}
-	// 90s over the 30 days since the first run.
-	if rep.SavedPer30d != 90_000 {
-		t.Errorf("per 30 days: %d", rep.SavedPer30d)
+	// 90s over the 30 days since the first run; shadow runs take no part in the time spent.
+	if rep.SavedPer30d != 90_000 || rep.ElapsedMs != 69_000 {
+		t.Errorf("per 30 days: %d, elapsed %d", rep.SavedPer30d, rep.ElapsedMs)
+	}
+	// --since before the first recorded run: the pace is measured from that run.
+	if r := aggregateStats(st, statsFilter{since: now.AddDate(0, 0, -90)}, now); r.SavedPer30d != 90_000 {
+		t.Errorf("per 30 days with an early --since: %d", r.SavedPer30d)
 	}
 	if s := rep.Shadow; s.Runs != 1 || s.RunsWithEscapes != 1 || s.Escapes != 1 || s.Failed != 4 || s.MissRate != 0.25 {
 		t.Errorf("shadow: %+v", s)

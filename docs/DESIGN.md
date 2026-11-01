@@ -197,8 +197,8 @@ selected/total, recorded duration of the skipped units, exit code, shadow misses
 handling, agent usage, flaky flips) for `smates stats`. Records carry a random ID, so
 `smates state merge` unions them without double counting what both sides inherited; the
 list is bounded to the newest 1000 records within 180 days of the newest one. It is an
-optional field too. A sharded run records only the units its shard owns, so the records
-of all shards add up to one selection. Records describe the state's own lineage: a state
+optional field too. A sharded run records only the units its shard owns (and only shard 1 records the
+orphans, which every shard sees), so the records of all shards add up to one selection. Records describe the state's own lineage: a state
 restored from the default branch carries the default branch's records forward.
 
 ### Summaries for reviewers
