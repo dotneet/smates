@@ -3,7 +3,6 @@ package cli
 // `smates doctor`: setup checks as structured results, printed as text or JSON.
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os/exec"
@@ -85,24 +84,16 @@ func (r *doctorReport) printText(w io.Writer) {
 }
 
 func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("doctor", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	format := formatFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return 2, usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c.common(&cf)
+	c.withFormat("text", "json")
+	if err := c.parse(args); err != nil {
 		return 2, err
 	}
 	r := runDoctor(&cf)
-	if *format == "json" {
-		if err := writeJSON(stdout, r); err != nil {
-			return 1, err
-		}
-	} else {
-		r.printText(stdout)
+	if err := c.emit(stdout, r, func() { r.printText(stdout) }); err != nil {
+		return 1, err
 	}
 	if !r.OK {
 		return 1, nil
