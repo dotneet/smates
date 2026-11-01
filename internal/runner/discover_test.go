@@ -478,3 +478,22 @@ func TestMicromatchToGlob(t *testing.T) {
 		}
 	}
 }
+
+// pytest's default norecursedirs has neither vendor nor testdata: pytest collects test
+// files there (they are units, recorded when run), but not in build, node_modules or
+// virtualenvs.
+func TestPytestDefaultsCollectVendorAndTestdata(t *testing.T) {
+	repo := tempRepo(t, "pyproject.toml")
+	s, err := NewSuite(repo, config.Suite{Root: ".", Runner: "pytest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for f, want := range map[string]bool{
+		"test_a.py": true, "vendor/lib/tests/test_x.py": true, "pkg/testdata/proj/test_z.py": true,
+		"build/test_b.py": false, "node_modules/x/test_n.py": false, ".venv/lib/test_v.py": false,
+	} {
+		if got := s.IsTestFile(f); got != want {
+			t.Errorf("IsTestFile(%s) = %v, want %v", f, got, want)
+		}
+	}
+}

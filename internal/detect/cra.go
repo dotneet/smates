@@ -117,8 +117,11 @@ var nodeValueOpts = map[string]bool{
 	"--env-file": true, "--env-file-if-exists": true, "-C": true, "--conditions": true,
 	"--test-reporter": true, "--test-reporter-destination": true, "--test-name-pattern": true,
 	"--test-skip-pattern": true, "--test-concurrency": true, "--test-timeout": true, "--test-shard": true,
-	"--test-isolation": true, "--test-coverage-include": true, "--test-coverage-exclude": true,
-	"--test-global-setup": true, "--input-type": true, "--experimental-specifier-resolution": true,
+	"--test-isolation": true, "--experimental-test-isolation": true, "--test-coverage-include": true,
+	"--test-coverage-exclude": true, "--test-coverage-lines": true, "--test-coverage-branches": true,
+	"--test-coverage-functions": true, "--test-random-seed": true, "--test-rerun-failures": true,
+	"--experimental-test-tag-filter": true, "--test-global-setup": true, "--experimental-config-file": true,
+	"--unhandled-rejections": true, "--input-type": true, "--experimental-specifier-resolution": true,
 	"--disable-warning": true, "--redirect-warnings": true, "--title": true, "--inspect-port": true,
 	"--experimental-policy": true, "--localstorage-file": true,
 }
