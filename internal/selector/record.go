@@ -78,11 +78,20 @@ func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 	return &c
 }
 
-// legacyConfig reports whether recorded is the content hash an older smates recorded for
-// the configuration file key and the file still has that content.
-func (h *Hasher) legacyConfig(key, recorded string) bool {
-	return h.cfg != nil && h.suite != nil && key == h.cfg.Path && key != "" &&
-		recorded != "" && !strings.HasPrefix(recorded, "config:") && recorded == h.file(key)
+// ConfigKey is the dependency key every test of a suite has on its settings in the
+// configuration file at path (hashed as ConfigHash). Reading the file itself records
+// path, hashed by content as any file.
+func ConfigKey(path string) string { return path + "#suite" }
+
+// legacyConfig reports whether key is the settings key of an entry an older smates
+// recorded, when every test depended on the configuration file's content: the entry
+// then holds the file's hash instead, and it counts as unchanged while the file is.
+func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
+	if h.cfg == nil || h.cfg.Path == "" || key != ConfigKey(h.cfg.Path) {
+		return false
+	}
+	old, ok := recorded[h.cfg.Path]
+	return ok && old != "" && old == h.file(h.cfg.Path)
 }
 
 // ConfigHash fingerprints the settings of smates.yml that can change how the tests of
@@ -155,7 +164,10 @@ func (h *Hasher) Hash(key string) string {
 		}
 		return "absent"
 	case depkey.KindContent:
-		if h.cfg != nil && h.suite != nil && h.cfg.Path != "" && key == h.cfg.Path {
+		if h.cfg != nil && h.cfg.Path != "" && key == ConfigKey(h.cfg.Path) {
+			if h.suite == nil {
+				return ""
+			}
 			return ConfigHash(h.cfg, &h.suite.Suite)
 		}
 		return h.file(key)

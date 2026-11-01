@@ -210,7 +210,12 @@ func Select(in *Input) (*Result, error) {
 
 	globalInputs := expandInputs(in.Config.Inputs, files)
 	if in.Config.Path != "" {
-		globalInputs = append(globalInputs, in.Config.Path)
+		// Every test depends on its suite's settings (ConfigKey), not on the whole
+		// file: a test that reads smates.yml itself records the file's content.
+		globalInputs = append(globalInputs, ConfigKey(in.Config.Path))
+		if changedSet[in.Config.Path] {
+			changedSet[ConfigKey(in.Config.Path)] = true
+		}
 	}
 
 	var baseChanged map[string]bool
@@ -223,8 +228,14 @@ func Select(in *Input) (*Result, error) {
 		for _, f := range list {
 			baseChanged[f] = true
 		}
+		if in.Config.Path != "" && baseChanged[in.Config.Path] {
+			baseChanged[ConfigKey(in.Config.Path)] = true
+		}
 	}
 	covered := map[string]bool{} // union of all D(T)
+	if in.Config.Path != "" {
+		covered[in.Config.Path] = true // explained by ConfigKey
+	}
 	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
@@ -307,6 +318,19 @@ func Select(in *Input) (*Result, error) {
 				decide(t, ModeDiff, nil, dl, hs, baseChanged)
 			} else {
 				decide(t, res.Mode, entry, dl, hs, changedSet)
+			}
+			if in.Config.Path != "" {
+				// The suite's settings key is reported as the file.
+				if i := slices.Index(t.Changed, ConfigKey(in.Config.Path)); i >= 0 {
+					t.Changed = slices.Delete(t.Changed, i, i+1)
+					if !slices.Contains(t.Changed, in.Config.Path) {
+						t.Changed = append(t.Changed, in.Config.Path)
+						sort.Strings(t.Changed)
+						if via[in.Config.Path] == "" {
+							via[in.Config.Path] = ViaInput
+						}
+					}
+				}
 			}
 			for _, c := range t.Changed {
 				if t.Via == nil {
@@ -406,7 +430,10 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 	for _, d := range deps {
 		recorded, ok := entry.Deps[d]
-		if !ok || (h.Hash(d) != recorded && !h.legacyConfig(d, recorded)) {
+		if !ok && h.legacyConfig(d, entry.Deps) {
+			continue
+		}
+		if !ok || h.Hash(d) != recorded {
 			t.Changed = append(t.Changed, d)
 		}
 	}
@@ -610,6 +637,11 @@ var jsExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cj
 // into). Tool and runner configuration written as code (vite.config.ts, setup.py, ...)
 // is never counted as untested.
 func (r *Result) Untested(orphans []string) []string {
+	if r.Mode != ModeState {
+		// Without a recorded state D(T) holds the static closure only: files tests
+		// read as data (fixtures, testdata) or import by name are not known yet.
+		return nil
+	}
 	var out []string
 	for _, o := range orphans {
 		if r.untested(o) {
@@ -626,15 +658,27 @@ func (r *Result) untested(f string) bool {
 	if strings.HasSuffix(base, ".d.ts") || strings.Contains(stem, ".config") || strings.HasSuffix(stem, "rc") || untestedExcluded[stem] {
 		return false
 	}
+	for _, seg := range strings.Split(path.Dir(f), "/") {
+		if dataDirs[strings.ToLower(seg)] {
+			return false // source files tests read as data
+		}
+	}
 	for _, s := range r.Suites {
 		if !config.Bool(s.Suite.Static, true) || !slices.Contains(staticLangs[s.Suite.Runner], ext) {
 			continue
 		}
-		if pathutil.Under(f, s.Suite.Root) {
+		if pathutil.Under(f, s.Suite.Root) && !pathutil.Match(s.Suite.Exclude, pathutil.RelTo(f, s.Suite.Root)) {
 			return true
 		}
 	}
 	return false
+}
+
+// dataDirs are directories whose source files tests use as data (inputs of analyzers
+// and generators, golden files, fixture projects, mocks loaded by the runner).
+var dataDirs = map[string]bool{
+	"testdata": true, "fixtures": true, "fixture": true, "__fixtures__": true, "__mocks__": true,
+	"__snapshots__": true, "golden": true,
 }
 
 // untestedExcluded are file stems of code that configures or drives tools rather than

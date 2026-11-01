@@ -91,8 +91,9 @@ tests of the other suites count too). smates then
    test imports, directly or through other code, and that no test executed (a `main`
    package, a component without tests). No test can be affected, so nothing runs; the
    summary and the pull request comment list these files as "changes to untested code".
-   Tool configuration written as code (`vite.config.ts`, `setup.py`, setup files) is not
-   counted. Code another process runs (a server an e2e suite talks to) needs `rules` so its
+   Tool configuration written as code (`vite.config.ts`, `setup.py`, setup files), files
+   under `testdata/`, `fixtures/` or `__mocks__/`, and files a suite excludes are not
+   counted, and without a recorded state (when only imports are known) nothing is. Code another process runs (a server an e2e suite talks to) needs `rules` so its
    tests are selected; `untested: orphan` hands these files to the
    next steps instead;
 3. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or

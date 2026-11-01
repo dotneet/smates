@@ -16,6 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 func TestParseShard(t *testing.T) {
@@ -438,7 +439,7 @@ func TestUntestedCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	cfg := "version: 1\norphans: all\nsuites:\n  - name: go\n    runner: go\n"
+	cfg := "version: 1\norphans: all\nsuites:\n  - name: go\n    runner: go\n    command: \"true\"\n" // runs nothing: only the selection matters
 	write("smates.yml", cfg)
 	write("go.mod", "module example.com/m\n\ngo 1.22\n")
 	write("lib/lib.go", "package lib\n\nfunc F() int { return 1 }\n")
@@ -448,7 +449,11 @@ func TestUntestedCode(t *testing.T) {
 	base := g.commit("fixture")
 	sel := func() (orphans []string, handling map[string]string, reason string) {
 		var out, errb bytes.Buffer
-		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--base", base, "--format", "json"}, &out, &errb); code != 0 {
+		args := []string{"select", "-C", g.dir, "--no-agent", "--format", "json"}
+		if _, err := os.Stat(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil {
+			args = append(args, "--base", base)
+		}
+		if code := Main(args, &out, &errb); code != 0 {
 			t.Fatalf("select: %d %s", code, errb.String())
 		}
 		var js struct {
@@ -466,13 +471,32 @@ func TestUntestedCode(t *testing.T) {
 		return js.Orphans, js.OrphanHandling, js.Suites[0].Tests[0].Reason
 	}
 	write("cmd/tool/main.go", "package main\n\nfunc main() { println() }\n")
-	if orphans, how, reason := sel(); !reflect.DeepEqual(orphans, []string{"cmd/tool/main.go"}) || how["cmd/tool/main.go"] != "untested" || reason != "unaffected" {
+	// Without a recorded state (diff mode) only the static closure is known: the
+	// orphan policy still applies.
+	if _, how, _ := sel(); how["cmd/tool/main.go"] != "policy" {
+		t.Errorf("diff mode: handling %v", how)
+	}
+	// Record the snapshot (the command runs nothing), then give the package a passing
+	// entry, as a real recording would: the selection is now made against the state.
+	var out, errb bytes.Buffer
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --all: %d %s", code, errb.String())
+	}
+	statePath := filepath.Join(g.dir, ".smates", "state.json.gz")
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Suites["go"] = &state.Suite{Tests: map[string]*state.Entry{"lib": {Deps: map[string]string{"lib/lib.go": st.Files["lib/lib.go"]}, Status: state.Pass}}}
+	if err := st.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	write("cmd/tool/main.go", "package main\n\nfunc main() { println(1) }\n")
+	if orphans, how, reason := sel(); !reflect.DeepEqual(orphans, []string{"cmd/tool/main.go"}) || how["cmd/tool/main.go"] != "untested" || reason == "orphan" {
 		t.Errorf("untested: skip: orphans %v, handling %v, reason %s", orphans, how, reason)
 	}
 	write("smates.yml", cfg+"untested: orphan\n")
-	// (smates.yml itself changed too: without a recorded state, diff mode compares
-	// files by content.)
-	if _, how, reason := sel(); how["cmd/tool/main.go"] != "policy" || reason == "unaffected" {
-		t.Errorf("untested: orphan: handling %v, reason %s", how, reason)
+	if _, how, _ := sel(); how["cmd/tool/main.go"] != "policy" {
+		t.Errorf("untested: orphan: handling %v", how)
 	}
 }

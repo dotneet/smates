@@ -27,13 +27,15 @@ The dependency set used at selection time is
                               configured globs, smates.yml (hashed as the suite's settings)
          ∪ rule deps          declared in smates.yml
 
-smates.yml is a dependency of every test, but its key hashes as `ConfigHash`: the
-suite's own entry and the top-level `env_track`, not the file's content. The other
+Every test depends on its suite's settings in smates.yml through the key
+`smates.yml#suite`, which hashes as `ConfigHash`: the suite's own entry and the
+top-level `env_track`, not the file's content. A test that reads smates.yml itself
+records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
 comparing), so editing them selects nothing. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
-hash instead; it is compared with the file's content as before until the test runs
+hash instead of the key; it counts as unchanged while the file is, until the test runs
 again.
 
 A key present in `D(T)` but absent from the recorded hashes counts as changed, so a newly
@@ -137,8 +139,11 @@ Orphans go through, in order:
    test, directly or transitively (every test's import closure is in its `D(T)`), and
    was neither read nor executed by any test in its last run. No test can be affected,
    so it selects nothing and is reported as a change to untested code. Code configuring
-   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`) is excluded, and
-   code run by another process must be declared (rules), as for any dependency tracing
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
+   directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
+   are left out; so is everything without a recorded state, where `D(T)` holds only the
+   import closure and files tests read as data are not known yet. Code run by another
+   process must be declared (rules), as for any dependency tracing
    cannot see.
 3. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
    adds tests or requests a full run. It can never remove deterministic selections, so a

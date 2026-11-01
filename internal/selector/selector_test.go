@@ -958,7 +958,8 @@ func TestUntested(t *testing.T) {
 	mk := func(runner_, root string, static bool) *Suite {
 		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
 	}
-	r := &Result{Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	r := &Result{Mode: ModeState, Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	r.Suites[0].Suite.Exclude = []string{"e2e/**"}
 	got := r.Untested([]string{
 		"cmd/tool/main.go",   // Go code under the go suite
 		"web/src/Button.tsx", // TS under the vitest suite
@@ -970,9 +971,18 @@ func TestUntested(t *testing.T) {
 		"web/setup-tests.ts", // setup file
 		"Dockerfile",         // not code
 		"web/src/data.json",  // not code
+		"pkg/testdata/in.go", // read as data by tests
+		"web/__mocks__/a.ts", // mocks
+		"e2e/fixture/x/x.go", // excluded from the go suite
+		"e2e/new/x.go",       // excluded from the go suite
 	})
 	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Untested = %v, want %v", got, want)
+	}
+	// Without a recorded state only the static closure is known.
+	r.Mode = ModeDiff
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("diff mode: %v", got)
 	}
 }
 
@@ -983,6 +993,7 @@ func TestSelectLegacyConfigHash(t *testing.T) {
 	st := f.record(nil, nil)
 	blob := f.snap()["smates.yml"]
 	for _, e := range st.Suites["web"].Tests {
+		delete(e.Deps, ConfigKey("smates.yml"))
 		e.Deps["smates.yml"] = blob
 	}
 	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
@@ -991,5 +1002,32 @@ func TestSelectLegacyConfigHash(t *testing.T) {
 	f.write("smates.yml", "version: 1\n#")
 	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != ReasonChanged {
 		t.Errorf("legacy hash, file changed: %v", d)
+	}
+}
+
+// A test that reads smates.yml itself depends on the file's content.
+func TestSelectConfigReadByTest(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"smates.yml"}}, nil)
+	f.write("smates.yml", "version: 1\n# comment")
+	want := map[string]string{"web/src/a.test.ts": "-unaffected", "web/src/b.test.ts": "-unaffected", "web/src/c.test.ts": ReasonChanged, "web/db/q.test.ts": "-unaffected"}
+	res := f.sel(st, nil)
+	if d := decisions(res); !reflect.DeepEqual(d, want) {
+		t.Errorf("got %v want %v", d, want)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("smates.yml is not an orphan: %v", res.Orphans)
+	}
+	// The suite's settings changing reports the file, not the internal key.
+	f.suites[0].Env = map[string]string{"TZ": "UTC"}
+	for _, s := range f.sel(st, nil).Suites {
+		for _, tt := range s.Tests {
+			if tt.ID == "web/src/c.test.ts" {
+				continue // also read the edited file: traced
+			}
+			if !reflect.DeepEqual(tt.Changed, []string{"smates.yml"}) || tt.Via["smates.yml"] != ViaInput {
+				t.Errorf("%s: changed %v via %v", tt.ID, tt.Changed, tt.Via)
+			}
+		}
 	}
 }
