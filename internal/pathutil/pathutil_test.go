@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func TestRel(t *testing.T) {
@@ -14,9 +16,10 @@ func TestRel(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.MkdirAll(filepath.Join(root, "src", "sub"), 0o755)
-	os.WriteFile(filepath.Join(root, "src", "a.ts"), []byte("x"), 0o644)
+	testutil.Write(t, root, "src/a.ts", "x")
+	// Not a valid file name on Windows: the write may fail there.
 	os.WriteFile(filepath.Join(root, "src", "q?x.ts"), []byte("x"), 0o644)
-	os.WriteFile(filepath.Join(root, "my file.ts"), []byte("x"), 0o644)
+	testutil.Write(t, root, "my file.ts", "x")
 	// file:///C:/... on Windows, file:///tmp/... elsewhere.
 	fileURL := func(p string) string { return "file://" + "/" + strings.TrimPrefix(filepath.ToSlash(p), "/") }
 	cases := []struct {
@@ -72,8 +75,7 @@ func TestRelThroughSymlink(t *testing.T) {
 		t.Skip("symlinks")
 	}
 	root, _ := filepath.EvalSymlinks(t.TempDir())
-	os.MkdirAll(filepath.Join(root, "pkg"), 0o755)
-	os.WriteFile(filepath.Join(root, "pkg", "a.go"), []byte("x"), 0o644)
+	testutil.Write(t, root, "pkg/a.go", "x")
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(root, link); err != nil {
 		t.Fatal(err)
@@ -89,7 +91,7 @@ func TestRelThroughSymlink(t *testing.T) {
 	}
 	// A symlink inside the repository pointing outside of it is outside.
 	out := t.TempDir()
-	os.WriteFile(filepath.Join(out, "secret"), []byte("x"), 0o644)
+	testutil.Write(t, out, "secret", "x")
 	os.Symlink(out, filepath.Join(root, "ext"))
 	if got, ok := Rel(root, filepath.Join(root, "ext", "secret")); ok {
 		t.Errorf("symlink to outside resolved to %q", got)

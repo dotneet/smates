@@ -38,7 +38,9 @@ func TestE2ERulesCoverSources(t *testing.T) {
 				return err
 			}
 			if d.IsDir() {
-				if d.Name() == "testdata" {
+				// internal/testutil is imported by tests only (its own test checks
+				// this), so it is not part of the binary the e2e tests run.
+				if d.Name() == "testdata" || filepath.ToSlash(p) == filepath.ToSlash(filepath.Join(root, "internal", "testutil")) {
 					return filepath.SkipDir
 				}
 				return nil

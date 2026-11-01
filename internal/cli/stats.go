@@ -418,8 +418,8 @@ func printStats(w io.Writer, rep *statsReport, recent int) {
 		row("files", "none")
 	} else {
 		row("files", "%d in %s", o.Files, plural(o.Runs, "run"))
-		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored},
-			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run"}))
+		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored, selector.OrphanSkipped, selector.OrphanUntested},
+			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run", selector.OrphanSkipped: "skipped by caller", selector.OrphanUntested: "untested code"}))
 	}
 	if a := rep.Agent; a.Calls > 0 {
 		row("agent", "%s (%d cached), %d turns, %s in / %s out tokens", plural(a.Calls, "call"), a.Cached, a.Turns,

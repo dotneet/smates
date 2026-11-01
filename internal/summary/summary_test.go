@@ -231,3 +231,19 @@ func TestSavings(t *testing.T) {
 		t.Errorf("missing %q in:\n%s", want, md)
 	}
 }
+
+func TestUntestedCodeSection(t *testing.T) {
+	res := &selector.Result{
+		Mode:           selector.ModeState,
+		Changed:        []string{"Dockerfile", "cmd/tool/main.go"},
+		Orphans:        []string{"Dockerfile", "cmd/tool/main.go"},
+		OrphanHandling: map[string]string{"Dockerfile": selector.OrphanIgnored, "cmd/tool/main.go": selector.OrphanUntested},
+	}
+	out := Markdown(&Input{Result: res})
+	if !strings.Contains(out, "**Changes no test depends on (1):**\n- `Dockerfile` — ignored") {
+		t.Errorf("orphans:\n%s", out)
+	}
+	if !strings.Contains(out, "**Changes to untested code (1): no test reaches these files, so none can be affected:**\n- `cmd/tool/main.go`\n") {
+		t.Errorf("untested code:\n%s", out)
+	}
+}

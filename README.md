@@ -42,7 +42,9 @@ used and their git blob hashes at the time it last ran:
 D(T) = traced(T)        files executed or read while T ran (incl. its child processes),
                         and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
-     ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
+     ∪ inputs           lockfiles, manifests, runner config, your globs, and the
+                        suite's own settings in smates.yml (editing ignore, agent,
+                        orphans or another suite re-runs nothing)
      ∪ depends_on       code of a server the tests talk to in another process (declared)
 ```
 
@@ -87,17 +89,30 @@ left to the job that runs that suite). smates then
 
 1. selects tests whose sources or dependencies mention the file by name (fixtures,
    migrations, schemas referenced as strings);
-2. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+2. skips **untested code**: Go, Python and JS/TS source under a suite's root that no
+   test imports, directly or through other code, and that no test executed (a `main`
+   package, a component without tests). No test can be affected, so nothing runs; the
+   summary and the pull request comment list these files as "changes to untested code".
+   Tool configuration written as code (`vite.config.ts`, `setup.py`, setup files), files
+   under `testdata/`, `fixtures/` or `__mocks__/`, and files a suite excludes are not
+   counted, and without a recorded state (when only imports are known) nothing is. Code another process runs (a server an e2e suite talks to) needs `rules` so its
+   tests are selected; `untested: orphan` hands these files to the
+   next steps instead;
+3. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
    `OPENROUTER_API_KEY` is set): it explores the
    repository with read-only tools and adds specific tests or requests a full run.
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
-3. otherwise runs the suites the orphan can affect in full.
+4. otherwise runs the suites the orphan can affect in full.
+
+A coding agent that calls smates can decide instead, with `--add` and `--orphans`: see
+[Letting the calling agent decide](#letting-the-calling-agent-decide).
 
 Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
 covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
 100 first-parent commits (`--history N`, `--since rev`) against the current dependency
 map with the same rule, ranks the files that would have been orphans, and prints a
-ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency),
+ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency;
+`--apply` writes those globs into `smates.yml` for you, keeping its comments),
 plus how many commits would still have orphans. Files that can change how tests run (CI
 workflows, Makefiles, Dockerfiles, compose files, toolchain pins) are listed for
 `inputs:` or `rules:` instead. Run it after `smates run --all`: without recorded
@@ -112,8 +127,42 @@ dependencies it only knows the static graph and overstates the orphans.
 | `node` (`node --test`) | test file | V8 coverage per test process + fs hooks | process exit code |
 | `bun` | test file | per-file `bun test --coverage` + module cache, preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` (while recording) | process exit code |
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
-| `go` | package | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
+| `go` | package, or test function with `granularity: func` | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests. Per function: coverage per test process (below) | binary exit code, build failures; per function: its own process (recording) or go test's `--- FAIL` lines |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code |
+
+**Go test functions** (`granularity: func` on a `go` suite). When one package holds most
+of the tests and most changes reach it, selecting packages saves little. With
+`granularity: func` a unit is a top-level test function (`internal/api#TestCreateUser`:
+`TestXxx`, `FuzzXxx` with its seed corpus, `ExampleXxx`; subtests run with their parent).
+While recording, smates builds each package's test binary once with coverage over the
+repository packages it links (`go test -c -cover -coverpkg=...`, with the suite command's
+build flags such as `-tags` and `-race`) and runs every function in its own process
+(`-test.run '^TestX$'`, a coverage profile and a test log). A function then depends on:
+
+- the Go files in which it executed code (a file counts when any of its blocks ran;
+  package initialization runs in every process, so it counts for every function);
+- the *declarations* of every other Go file it may reach (the file without its function
+  bodies): a changed constant, variable initializer, type, signature or method selects
+  every function that could see it, an edit inside a body only those that executed it;
+- its own `_test.go` file, the test files declaring helpers it names, and test files with
+  `TestMain`, `init` or package-level variables initialized by calls;
+- as for a package: files and directories its test log recorded, environment variables
+  it read, embedded and other non-Go files of the static closure, `go.mod`/`go.sum`,
+  what its child processes used; Go packages it builds or runs as a subprocess count in
+  full; and the listing of its package directory (a file added there selects every
+  function of the package).
+
+A changed test file selects the functions it declares; a new function is selected as new.
+Selected functions run with `go test -run '^(TestA|TestB)$'` (or the whole package when
+the pattern would be too long) when not recording. When the binary cannot be built with
+coverage, or the suite command is not a plain `go test` (or passes `-run`, `-skip`,
+`-bench`, `-fuzz`, `-c`), that package is recorded as a whole and says so: each of its
+functions then depends on everything the package does. Recording costs one process per
+function (plus one coverage build per package); functions of one package run one at a
+time, as `go test` runs them, unless `record_jobs` allows more, and packages as many at a
+time as `-p` allows (in the command or `GOFLAGS`; default GOMAXPROCS). Test flags such as
+`-timeout`, `-short`, `-count` or `-v`, in the command or in `GOFLAGS`, reach every
+function's process.
 
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are
@@ -150,7 +199,9 @@ the setup.
 in the code, and variables from `.env.example` the code reads, become commented-out
 `services:`/`env:` blocks to check and enable. If an existing workflow already runs the
 tests, it writes no second one (unless `--force`) and prints a patch replacing those
-steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+steps with the smates action (`--patch FILE` writes it for `git apply`). When
+`smates.yml` already exists, `smates init --github` leaves it untouched and only generates
+the workflow (or the patch) from its suites; `--force` rewrites it. Flags and
 variables of a Makefile `test` target become commented `command:`/`env:` hints in
 `smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
 version outside `engines.node`, and services that are not running. smates never lets
@@ -272,6 +323,8 @@ suites:
   - name: api
     runner: go
     root: services/api
+    granularity: func                # select Go tests per test function (default: package)
+    record_jobs: 4                   # with func: functions of one package recorded at once (default 1)
   - name: e2e                        # Playwright against the api server (docker compose)
     runner: custom
     root: e2e
@@ -286,6 +339,7 @@ suites:
     root: tools
 
 orphans: agent        # agent | all | ignore
+untested: skip        # skip | orphan: changed source code no test reaches (default skip: nothing to run)
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select nothing ("*": tracking off)
 env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
@@ -344,15 +398,17 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
-| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
+| `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
-| `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
-| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
+| `smates init [--github]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
+| `smates list` / `doctor` | suites and test units; setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
+| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable): `--format text\|json` |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
-| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
-| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
+| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite`; `--apply` adds the suggested globs to `ignore:` (nothing else), `--apply --dry-run` prints the diff |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `untested`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
+| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
@@ -391,7 +447,7 @@ reported).
 **Stats** (`smates stats`) sum up the runs recorded in the state: how many test units
 ran out of how many (skip rate), the recorded test time the skipped units would have
 taken (the time saved, also extrapolated to 30 days), shadow-mode misses and their rate,
-orphans by how they were handled (reference scan, agent, full suite run), agent calls
+orphans by how they were handled (reference scan, agent, full suite run, skipped by caller), agent calls
 with their tokens and cost (when the backend reports one, e.g. `claude -p`), and flaky
 flips. Every `smates run` adds a short record (not with `--no-record` or `--dry-run`);
 the state keeps the last 1000 records within 180 days, and `smates state merge` unions
@@ -499,6 +555,42 @@ ok  	example.com/shop/internal/store	0.170s
   running the affected suites in full.
 - Fork pull requests get no secrets: smates simply falls back.
 
+### Letting the calling agent decide
+
+When smates is called by a coding agent (Claude Code, Codex, …), that agent already
+knows what it changed and why: asking another LLM is wasteful, and running whole suites
+is slow. The agent can make the orphan decision itself:
+
+1. `smates select --format json` lists `orphan_candidates`, one per orphan:
+   `path`, `status` (`added`/`modified`/`deleted`), `referenced_by` (tests that name the
+   file, with the `file` that names it and whether the test is already `selected`),
+   `suites` (what the orphan policy would run in full) and `handling` (how this
+   selection handled it: `reference`, `agent`, `no-impact`, `policy`, `ignored`,
+   `skipped`). The other fields of the JSON are unchanged.
+2. `smates run --add <suite>:<unit>` adds tests (repeatable; reason `caller`). The unit
+   may also be a test file (`--add api:tests/test_users.py`, `--add pkg/foo_test.go` for
+   a Go package unit; repository-relative, relative to the current directory, or after
+   `suite:` relative to the suite's root; the suite may be left out when only one has
+   it). A name that matches no test of the run is an error (exit 2).
+3. `--orphans=agent|full|skip` overrides `orphans:` for this run: `agent` is the built-in
+   agent, `full` runs the affected suites in full (`orphans: all`), `skip` applies no
+   orphan policy to what the reference scan did not explain.
+
+```sh
+smates select --format json        # read orphan_candidates
+smates run --orphans=skip --add api:tests/test_users.py --add web:src/app.test.ts
+```
+
+The safety principle stays: the caller can only add tests, never remove any that the
+deterministic selection (or the name-reference scan) picked. `--orphans=skip` is the one
+explicit opt-out, for a caller that judged the changes itself: the log, the job summary
+and the run record (`smates stats`) show those orphans as *skipped by caller*, and like
+any handled orphan they are not reported again on the same branch. Both flags are also
+accepted by `smates select` (to preview the result) and as run flags of the git hook
+(`smates hook install -- --orphans=full`). When orphans make whole suites run and the
+caller decided nothing (for example without an API key), the log says how to decide
+instead.
+
 ## Limitations
 
 - Tracing follows the test process and its children, not a server the tests reach over
@@ -516,8 +608,14 @@ ok  	example.com/shop/internal/store	0.170s
   be confirmed by whoever reads the state file; list such variables in `env_ignore`.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.
-- Granularity is the file (the package for Go): a change anywhere in a module re-runs
-  every test that loaded it. For Python, data a module reads at import time or behind a
+- Granularity is the file (the package for Go, or the test function with
+  `granularity: func`): a change anywhere in a module re-runs every test that loaded it.
+  Go per-function selection costs one process per test function while recording (the
+  default branch's full runs get slower; selective runs only start the selected
+  functions); functions share no process, so a test relying on state another test of
+  its package left behind in memory behaves differently than under `go test`. Code that
+  matters without running (an unexecuted method satisfying an interface) is covered
+  through declarations, but code executed through reflection alone is not. For Python, data a module reads at import time or behind a
   cache belongs to that module.
 - Jest occasionally runs two files back to back in one worker even when recycling; their
   dependencies are then merged (still correct). `isolate: true` makes it exact at the cost

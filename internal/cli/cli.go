@@ -35,16 +35,17 @@ Usage:
   smates run [flags] [-- runner args]   select tests, run them with tracing, update state
   smates select [flags]                 print the selection without running anything
   smates watch [flags] [-- runner args] rerun the affected tests on every change
-  smates init                           write smates.yml for this repository
-  smates why <file>                     tests that depend on a file
-  smates deps <test>                    files a test depends on
+  smates init [--github] [--format json] write smates.yml for this repository
+  smates why <file> [--format json]     tests that depend on a file
+  smates deps <test> [--format json]    files a test depends on
   smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
   smates stats [--since 30d] [--format json] time saved, shadow misses, orphans and agent use
-  smates orphans [--history 100] [--format json] recent changes no test explains, and ignore globs for them
-  smates list                           list suites and test units
-  smates state show|path|pull|push|merge|clear
+  smates orphans [--history 100] [--format json] [--apply [--dry-run]] recent changes no test explains, and ignore globs for them
+  smates list [--format json]           list suites and test units
+  smates config add-ignore|add-input <glob>... | set <key> <value> [--dry-run]  edit smates.yml safely
+  smates state show [--format json]|path|pull|push|merge|clear
   smates hook install|uninstall|status  run the affected tests from a git pre-push hook
-  smates doctor                         check setup
+  smates doctor [--format json]         check setup
   smates version
 
 Run 'smates <command> -h' for flags. Docs: https://github.com/dotneet/smates
@@ -80,6 +81,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdStats(rest, stdout, stderr)
 	case "orphans":
 		err = cmdOrphans(rest, stdout, stderr)
+	case "config":
+		err = cmdConfig(rest, stdout, stderr)
 	case "list", "ls":
 		err = cmdList(rest, stdout, stderr)
 	case "state":
@@ -148,6 +151,7 @@ type project struct {
 	ci        ciInfo
 	log       io.Writer
 	verbose   bool
+	dir       string // -C
 	// others are the suites --suite left out (they still explain changes, see
 	// selector.Input.Others).
 	others []*runner.Suite
@@ -232,7 +236,7 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	}
 	p := &project{
 		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, store: store, state: st, snap: snap, files: files,
-		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
+		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose, dir: cf.dir,
 	}
 	return p, nil
 }
@@ -274,6 +278,10 @@ type selectOptions struct {
 	// orphanScope, when non-nil, limits the orphan policy to these files (`smates
 	// watch`: files changed since the previous cycle).
 	orphanScope map[string]bool
+	// orphans overrides the orphan policy (--orphans: agent, full or skip); adds are
+	// the tests the caller adds (--add).
+	orphans string
+	adds    []string
 }
 
 // selection runs deterministic selection and the orphan policy.
@@ -282,6 +290,12 @@ type selection struct {
 	agentNote  string
 	agentDec   *agent.Decision
 	agentCache bool
+	// mentions are the tests that name a changed file (selector.Mentions).
+	mentions []selector.Mention
+	// candidates describe the orphans for a calling agent (orphanCandidates).
+	candidates []orphanCandidate
+	// hint: suites run in full for orphans the caller has not decided about.
+	hint bool
 }
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {
@@ -308,6 +322,10 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	}
 	sel := &selection{res: res}
 	p.handleOrphans(ctx, sel, opt, base)
+	if err := p.applyCallerAdds(res, opt.adds); err != nil {
+		return nil, err
+	}
+	sel.candidates = p.orphanCandidates(sel)
 	return sel, nil
 }
 

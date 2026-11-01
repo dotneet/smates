@@ -374,3 +374,45 @@ func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+func TestOrphansUntestedCode(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	write := func(rel, content string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("smates.yml", "version: 1\norphans: all\nsuites:\n  - name: go\n    runner: go\n")
+	write("go.mod", "module example.com/m\n\ngo 1.22\n")
+	write("lib/lib.go", "package lib\n")
+	write("lib/lib_test.go", "package lib\n")
+	write("cmd/tool/main.go", "package main\n\nfunc main() {}\n")
+	g.git("add", "-A")
+	base := g.commit("fixture")
+	write("cmd/tool/main.go", "package main\n\nfunc main() { println() }\n")
+	write("deploy.cfg", "x")
+	g.git("add", "-A")
+	g.commit("change")
+	st := state.New()
+	st.Suite("go").Tests["lib"] = &state.Entry{Status: state.Pass, Deps: map[string]string{"lib/lib.go": "x"}}
+	if err := st.Save(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil {
+		t.Fatal(err)
+	}
+	rep, _ := runOrphans(t, g, "--since", base)
+	kinds := map[string]string{}
+	for _, f := range rep.Files {
+		kinds[f.Path] = f.Kind
+	}
+	if kinds["cmd/tool/main.go"] != orphanKindUntested || kinds["deploy.cfg"] != orphanKindIgnore {
+		t.Errorf("kinds: %v", kinds)
+	}
+	for _, ig := range rep.Ignore {
+		if strings.Contains(ig.Glob, "cmd") {
+			t.Errorf("untested code suggested for ignore: %+v", ig)
+		}
+	}
+}
