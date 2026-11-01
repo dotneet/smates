@@ -1,0 +1,277 @@
+{
+  "mode": "state",
+  "changed": [
+    "docker-compose.yml",
+    "migrations/002.sql",
+    "p/b.go",
+    "q/q_extra_test.go"
+  ],
+  "orphans": null,
+  "left_out": null,
+  "orphan_handling": null,
+  "notes": null,
+  "untested": null,
+  "covered": [
+    "@set:paths:docker-compose.yml",
+    "backend/server/server.x",
+    "docker-compose.yml",
+    "go.mod",
+    "migrations/001.sql",
+    "migrations/002.sql",
+    "p/",
+    "p/a.go",
+    "p/a.go#decls",
+    "p/a_test.go",
+    "p/a_test.go#decls",
+    "p/b.go",
+    "p/b.go#decls",
+    "p/b_test.go",
+    "p/b_test.go#decls",
+    "q/",
+    "q/q.go#decls",
+    "q/q_extra_test.go",
+    "q/q_extra_test.go#decls",
+    "q/q_test.go",
+    "q/q_test.go#decls"
+  ],
+  "declared": [
+    {
+      "key": "@set:paths:docker-compose.yml",
+      "label": "depends_on docker-compose.yml",
+      "tests": [
+        "p/a_test.go"
+      ],
+      "files": [
+        "docker-compose.yml"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "go",
+      "all": true,
+      "unrecorded": true,
+      "tests": [
+        {
+          "id": "p#TestA",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "docker-compose.yml",
+            "p/a.go#decls",
+            "p/b.go#decls",
+            "p/b_test.go#decls"
+          ],
+          "via": {
+            "docker-compose.yml": "service",
+            "p/a.go#decls": "import",
+            "p/b.go#decls": "import",
+            "p/b_test.go#decls": "import"
+          },
+          "service": {
+            "docker-compose.yml": "depends_on docker-compose.yml"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "p#TestB",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "p/a.go#decls",
+            "p/a_test.go#decls",
+            "p/b.go",
+            "p/b.go#decls"
+          ],
+          "via": {
+            "p/a.go#decls": "import",
+            "p/a_test.go#decls": "import",
+            "p/b.go": "traced",
+            "p/b.go#decls": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "p#TestB2",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "p/a.go#decls",
+            "p/a_test.go#decls",
+            "p/b.go#decls"
+          ],
+          "via": {
+            "p/a.go#decls": "import",
+            "p/a_test.go#decls": "import",
+            "p/b.go#decls": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "q#TestQ2",
+          "selected": true,
+          "reason": "new",
+          "detail": "no recorded run"
+        },
+        {
+          "id": "q#TestQ",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "migrations/002.sql",
+            "p/a.go#decls",
+            "p/b.go#decls",
+            "q/",
+            "q/q.go#decls",
+            "q/q_extra_test.go#decls"
+          ],
+          "via": {
+            "migrations/002.sql": "input",
+            "p/a.go#decls": "import",
+            "p/b.go#decls": "import",
+            "q/": "import",
+            "q/q.go#decls": "import",
+            "q/q_extra_test.go#decls": "import"
+          },
+          "duration_ms": 10
+        }
+      ],
+      "deps": {
+        "p#TestA": [
+          "@set:paths:docker-compose.yml",
+          "go.mod",
+          "p/",
+          "p/a.go",
+          "p/a.go#decls",
+          "p/a_test.go",
+          "p/b.go#decls",
+          "p/b_test.go#decls"
+        ],
+        "p#TestB": [
+          "backend/server/server.x",
+          "go.mod",
+          "p/",
+          "p/a.go#decls",
+          "p/a_test.go#decls",
+          "p/b.go",
+          "p/b.go#decls",
+          "p/b_test.go"
+        ],
+        "p#TestB2": [
+          "backend/server/server.x",
+          "go.mod",
+          "p/",
+          "p/a.go#decls",
+          "p/a_test.go#decls",
+          "p/b.go#decls",
+          "p/b_test.go"
+        ],
+        "q#TestQ": [
+          "go.mod",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "p/a.go#decls",
+          "p/b.go#decls",
+          "q/",
+          "q/q.go#decls",
+          "q/q_extra_test.go#decls",
+          "q/q_test.go"
+        ],
+        "q#TestQ2": [
+          "go.mod",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "p/a.go#decls",
+          "p/b.go#decls",
+          "q/",
+          "q/q.go#decls",
+          "q/q_extra_test.go",
+          "q/q_test.go#decls"
+        ]
+      },
+      "known": {
+        "p#TestA": [
+          "@set:paths:docker-compose.yml",
+          "go.mod",
+          "p/",
+          "p/a.go#decls",
+          "p/a_test.go",
+          "p/b.go#decls",
+          "p/b_test.go#decls"
+        ],
+        "p#TestB": [
+          "backend/server/server.x",
+          "go.mod",
+          "p/",
+          "p/a.go#decls",
+          "p/a_test.go#decls",
+          "p/b.go#decls",
+          "p/b_test.go"
+        ],
+        "p#TestB2": [
+          "backend/server/server.x",
+          "go.mod",
+          "p/",
+          "p/a.go#decls",
+          "p/a_test.go#decls",
+          "p/b.go#decls",
+          "p/b_test.go"
+        ],
+        "q#TestQ": [
+          "go.mod",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "p/a.go#decls",
+          "p/b.go#decls",
+          "q/",
+          "q/q.go#decls",
+          "q/q_extra_test.go#decls",
+          "q/q_test.go"
+        ],
+        "q#TestQ2": [
+          "go.mod",
+          "migrations/001.sql",
+          "migrations/002.sql",
+          "p/a.go#decls",
+          "p/b.go#decls",
+          "q/",
+          "q/q.go#decls",
+          "q/q_extra_test.go",
+          "q/q_test.go#decls"
+        ]
+      },
+      "inputs": [
+        "go.mod"
+      ],
+      "files": {
+        "p#TestA": [
+          "p/a_test.go"
+        ],
+        "p#TestB": [
+          "p/b_test.go"
+        ],
+        "p#TestB2": [
+          "p/b_test.go"
+        ],
+        "q#TestQ": [
+          "q/q_test.go"
+        ],
+        "q#TestQ2": [
+          "q/q_extra_test.go"
+        ]
+      },
+      "services": [
+        {
+          "key": "@set:paths:docker-compose.yml",
+          "label": "depends_on docker-compose.yml",
+          "tests": [
+            "p/a_test.go"
+          ],
+          "files": [
+            "docker-compose.yml"
+          ]
+        }
+      ]
+    }
+  ]
+}
