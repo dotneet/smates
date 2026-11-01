@@ -9,7 +9,8 @@
 //   {"k":"dir","p":"/abs/dir"}     a directory under the repository was listed
 //   {"k":"probe","p":"/abs/path"}  existence of a path was checked (exists/stat/realpath...)
 //   {"k":"exec","args":[...],"shell":true,"cwd":"/abs"}  a child process was started
-//                                  ("trunc":true: args cut short, see MAX_ARGV)
+//                                  ("trunc":true: args cut short, see MAX_ARGV; "rt": the
+//                                  runtimes the child's environment traces, runtimesOf)
 //   {"k":"tree","p":"/abs/dir"}    everything below a directory may have been read
 //   {"k":"code","p":"/abs/file"}   a module was loaded (Bun, which has no V8 coverage)
 //   {"k":"env","p":"NAME"}         an environment variable was read (never its value)
@@ -46,11 +47,25 @@
   const realpath0 = fs.realpathSync.native || fs.realpathSync;
   const out = path.join(traceDir, `proc-${process.pid}-${threadId}.jsonl`);
   let fd = -1;
-  const write = (obj) => {
+  // mock-fs swaps the fs binding's functions for its fake file system's while it is
+  // active (_mockedBinding), which would take the trace with them: the shim writes with
+  // the real ones. process.binding warns under --pending-deprecation only.
+  let fsBinding = null;
+  if (!/--pending-deprecation/.test(env0.NODE_OPTIONS + ' ' + process.execArgv.join(' '))) {
     try {
+      fsBinding = process.binding('fs');
+    } catch (_) {}
+  }
+  const write = (obj) => {
+    const mocked = fsBinding && fsBinding._mockedBinding;
+    try {
+      if (mocked) fsBinding._mockedBinding = undefined;
       if (fd < 0) fd = openSync0(out, 'a');
       writeSync0(fd, JSON.stringify(obj) + '\n');
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      if (mocked) fsBinding._mockedBinding = mocked;
+    }
   };
   // Command lines are cut to this many characters in all (a test may pass megabytes of
   // arguments, to provoke E2BIG say); exec events mark it ("trunc") and smates then
@@ -114,7 +129,9 @@
   const record = (kind, p) => {
     try {
       let s = toPath(p);
-      if (!s) return;
+      // Module ids that name no file: Node's builtins (node:fs, also joined to a
+      // directory by resolvers probing them) and bundlers' virtual modules ("\0vite/...").
+      if (!s || s.includes('\0') || s.startsWith('node:') || s.includes(path.sep + 'node:')) return;
       if (!path.isAbsolute(s)) s = path.resolve(s);
       if (s.includes(nm) && !(s = linked(s))) return;
       // The repository root itself can be listed (readdirSync('.')), not read.
@@ -241,13 +258,32 @@
     const c = o && typeof o === 'object' && o.cwd;
     return path.resolve((c && (toPath(c) || String(c))) || process.cwd());
   };
+  // opts are the options the child is started with, its environment traced (withEnv).
   const execEv = (args, shell, opts) => {
     try {
       const [cut, trunc] = cutArgv(args.map(String));
-      const ev = { k: 'exec', args: cut, shell: Boolean(shell), cwd: cwdOf(opts) };
+      const ev = { k: 'exec', args: cut, shell: Boolean(shell), cwd: cwdOf(opts), rt: runtimesOf(opts) };
       if (trunc) ev.trunc = true;
       write(ev);
     } catch (_) {}
+  };
+  // runtimesOf lists the runtimes whose shim the environment of a child started with
+  // opts loads (its own env, or this process's): smates takes a Node, Bun or Python
+  // child whose environment does not trace it for an opaque command.
+  const runtimesOf = (opts) => {
+    let env = opts && typeof opts === 'object' && opts.env && typeof opts.env === 'object' ? opts.env : null;
+    env = env ? envTargets.get(env) || env : envTargets.get(process.env) || process.env;
+    const get = (k) => {
+      if (process.platform === 'win32') k = Object.keys(env).find((x) => x.toUpperCase() === k) || k;
+      const v = env[k];
+      return v === undefined || v === null ? '' : String(v);
+    };
+    if (!get('SMATES_TRACE_DIR') || !get('SMATES_REPO_ROOT')) return [];
+    const rt = [];
+    if (shimNames.some((n) => get('NODE_OPTIONS').includes(n))) rt.push('node');
+    if (shimNames.some((n) => get('BUN_OPTIONS').includes(n))) rt.push('bun');
+    if (pythonEntry() && get('PYTHONPATH').split(path.delimiter).includes(pyEntry)) rt.push('python');
+    return rt;
   };
   // A child given an environment of its own ({env: {PATH}}) would start untraced, and
   // smates trusts Node, Bun and Python children to trace themselves: the tracing
@@ -355,8 +391,9 @@
         function () {
           if (spawning.n) return;
           const i = at(arguments);
-          if (ev) ev(arguments, i);
-          return withEnv(arguments, i, true);
+          const traced = withEnv(arguments, i, true);
+          if (ev) ev(traced || arguments, i);
+          return traced;
         },
         spawning,
       );
@@ -517,8 +554,9 @@
           if (spawning.n) return;
           const i = Array.isArray(cmd) ? 1 : 0;
           const argv = i ? cmd : cmd && cmd.cmd;
-          if (Array.isArray(argv)) execEv(argv, false, arguments[i]);
-          return withEnv(arguments, i);
+          const traced = withEnv(arguments, i);
+          if (Array.isArray(argv)) execEv(argv, false, (traced || arguments)[i]);
+          return traced;
         });
       } catch (_) {}
     }
@@ -749,6 +787,14 @@
   process.on('exit', (code) => {
     loadedModules();
     write({ k: 'exit', code, t: Date.now() });
+    // A pool worker that exits by itself may still get the pool's SIGTERM (jest-worker
+    // restarting a worker over its idle memory limit) before Node writes the coverage
+    // at exit, and no handler runs after "exit": write it now.
+    if (pooled) {
+      try {
+        require('v8').takeCoverage();
+      } catch (_) {}
+    }
   });
 
   // Pool workers are often stopped with a signal; V8 coverage is only written on a
@@ -758,6 +804,7 @@
   // so any other forked child that is busy would no longer be killed by it.
   const poolWorker =
     /[\\/](?:tinypool[\\/]dist[\\/](?:esm[\\/])?entry[\\/]process|vitest[\\/]dist[\\/]workers[\\/](?:vmF|f)orks|jest-worker[\\/]build[\\/](?:workers[\\/])?processChild)\.[cm]?js$/;
+  const pooled = Boolean(isMainThread && process.channel && poolWorker.test(process.argv[1] || ''));
   if (isMainThread && process.channel) {
     // A vitest fork worker reports "stopped" and then exits by itself while the pool
     // SIGTERMs it and SIGKILLs it 500ms later: on a busy machine Node's exit-time

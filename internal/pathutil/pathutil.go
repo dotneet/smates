@@ -23,6 +23,10 @@ import (
 // existing directory, so names that merely contain them (/repo/notes#1/new.txt, a probe
 // of a file not created yet) are kept. A file:// URL's query and fragment are already
 // separated by url.Parse.
+//
+// Module ids that name no file are not paths: Node's builtins (node:fs, joined to a
+// directory by resolvers probing them: /repo/pkg/node:internal/x) and bundlers' virtual
+// modules ("\x00vite/...").
 func Rel(root, p string) (string, bool) {
 	if strings.HasPrefix(p, "file://") {
 		u, err := url.Parse(p)
@@ -33,7 +37,7 @@ func Rel(root, p string) (string, bool) {
 	} else if i := strings.IndexAny(p, "?#"); i >= 0 && !fileExists(p) && isFile(p[:i]) && !nameExists(p, i) {
 		p = p[:i]
 	}
-	if !filepath.IsAbs(p) {
+	if !filepath.IsAbs(p) || strings.ContainsRune(p, 0) || strings.Contains(filepath.ToSlash(p), "/node:") {
 		return "", false
 	}
 	p = resolve(filepath.Clean(p))

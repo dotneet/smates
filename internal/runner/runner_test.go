@@ -770,3 +770,23 @@ func TestIsolatedRunCommandLineError(t *testing.T) {
 		t.Error("a unit ran although a command line failed")
 	}
 }
+
+// A unit that ran in its own process but left no trace keeps its unknown outcome when
+// the process exits 0: what it used is unknown, so it runs again (and the warning
+// saying so holds). A failing exit still records the failure.
+func TestSetUnitExitUntraced(t *testing.T) {
+	o := &Observation{Files: map[string]bool{}, Status: state.Unknown, untraced: true}
+	setUnitExit(o, 0)
+	if o.Status != state.Unknown {
+		t.Errorf("untraced unit, exit 0: %s, want unknown", o.Status)
+	}
+	setUnitExit(o, 1)
+	if o.Status != state.Fail {
+		t.Errorf("untraced unit, exit 1: %s, want fail", o.Status)
+	}
+	traced := &Observation{Files: map[string]bool{"a.js": true}, Status: state.Unknown}
+	setUnitExit(traced, 0)
+	if traced.Status != state.Pass {
+		t.Errorf("traced unit, exit 0: %s, want pass", traced.Status)
+	}
+}

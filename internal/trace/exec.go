@@ -13,9 +13,10 @@ import (
 	"github.com/dotneet/smates/internal/depkey"
 )
 
-// Child processes a test starts are traced directly when they are Node or Python
-// processes (they inherit the shims). Everything else (shell scripts, grep, make, a
-// compiled binary) is opaque, so dependencies are inferred from the command line:
+// Child processes a test starts are traced directly when they are Node, Bun or Python
+// processes that load the shims (their environment carries them, as the exec event
+// says, and Python is not run with -I, -E or -S). Everything else (shell scripts, grep,
+// make, a compiled binary) is opaque, so dependencies are inferred from the command line:
 //
 //   - well-known commands that only read their file arguments (cat, grep, jq, ...)
 //     depend on the repository files and directories named on the command line,
@@ -25,11 +26,13 @@ import (
 //   - launchers (uv run, uvx, bunx) and the commands of find -exec are analyzed as the
 //     command they run; sed scripts as the files their r commands read;
 //   - shell code is followed through cd, pushd/popd, source, variables, for-loops, brace
-//     expansion, case items, input redirections, command substitutions and the bodies of
-//     the functions it calls (in the caller's directory);
+//     expansion, case items, input redirections, command substitutions, the bodies of
+//     the functions it calls (in the caller's directory) and a script's positional
+//     parameters ($1, "$@");
 //   - any other program may read anything below the directory it runs in, so the test
 //     depends on that whole tree ("<dir>/**"), plus the files named on its command line
-//     (the script itself) and the program when it is named by path (./build, ../bin/tool).
+//     (the script itself, option values such as --config=cfg/app.ini, response files
+//     @args.txt) and the program when it is named by path (./build, ../bin/tool).
 //
 // This over-approximates on purpose: an opaque command is exactly where a dependency
 // could hide.
@@ -43,6 +46,51 @@ var tracedPrograms = map[string]bool{
 	"npm": true, "npx": true, "pnpm": true, "yarn": true,
 }
 
+// runtimeOf names the runtime a traced program runs on: its shim must reach the child
+// (exec events list the runtimes the child's environment traces) for the child to trace
+// itself.
+func runtimeOf(prog string) string {
+	switch {
+	case prog == "bun":
+		return "bun"
+	case strings.HasPrefix(prog, "python") || prog == "pypy3":
+		return "python"
+	}
+	return "node"
+}
+
+// skipsSite reports whether the options of a Python command line (before its script,
+// -c or -m) keep the interpreter from loading the shim: -I and -E ignore PYTHONPATH,
+// -S skips the site module that imports sitecustomize.
+func skipsSite(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		w := args[i]
+		switch {
+		case w == "-" || w == "--" || !strings.HasPrefix(w, "-"):
+			return false
+		case strings.HasPrefix(w, "--"):
+			if w == "--check-hash-based-pycs" {
+				i++
+			}
+			continue
+		}
+		for j := 1; j < len(w); j++ {
+			switch w[j] {
+			case 'I', 'E', 'S':
+				return true
+			case 'c', 'm':
+				return false // the rest is the code or the module
+			case 'W', 'X':
+				if j+1 == len(w) {
+					i++ // the argument is the next word
+				}
+				j = len(w)
+			}
+		}
+	}
+	return false
+}
+
 // readers only read the paths named on their command line (recursively for -r tools).
 var readers = map[string]bool{
 	"cat": true, "head": true, "tail": true, "grep": true, "egrep": true, "fgrep": true, "rg": true,
@@ -52,16 +100,20 @@ var readers = map[string]bool{
 	"sha1sum": true, "sha256sum": true, "shasum": true, "base64": true, "stat": true, "file": true,
 	"basename": true, "dirname": true, "realpath": true, "readlink": true, "pwd": true,
 	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
-	"getconf": true, "sw_vers": true,
+	"getconf": true, "sw_vers": true, "sysctl": true, "vm_stat": true, "locale": true, "tty": true,
+	"printenv": true, "sleep": true,
 }
 
 // nameOnly commands never open files, whatever their arguments. That includes the
 // system information commands libraries run on their own: platform.processor() runs
-// `uname -p` in every pytest-xdist worker, for example. tr only reads its standard input.
+// `uname -p` in every pytest-xdist worker, tinypool (vitest) `sysctl -n
+// hw.physicalcpu_max` in every worker on macOS, for example. tr only reads its standard
+// input.
 var nameOnly = map[string]bool{
 	"basename": true, "dirname": true, "pwd": true, "echo": true, "printf": true, "true": true, "false": true,
 	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
-	"getconf": true, "sw_vers": true, "tr": true,
+	"getconf": true, "sw_vers": true, "tr": true, "sysctl": true, "vm_stat": true, "locale": true, "tty": true,
+	"printenv": true, "sleep": true,
 }
 
 // scriptFirst readers take a script or pattern as their first operand, unless an option
@@ -128,10 +180,16 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 // execDeps infers dependencies of a child process. It returns repo-relative keys:
 // plain paths (content), "dir/" (listing), "dir/**" (whole tree) and "path?" (existence).
 func execDeps(args []string, shell bool, cwd, root string, rel func(string) (string, bool)) []string {
+	return execDepsIn(args, shell, cwd, root, rel, nil)
+}
+
+// execDepsIn is execDeps for a child whose environment traces the runtimes in rt (nil:
+// all of them); the Node, Bun and Python programs of the others are opaque.
+func execDepsIn(args []string, shell bool, cwd, root string, rel func(string) (string, bool), rt map[string]bool) []string {
 	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, defs: map[string]*funcDef{}, analyzed: map[string]bool{},
-		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, shell: shell}
+		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, shell: shell, rt: rt}
 	if shell {
-		a.shellText(strings.Join(args, " "), cwd, "", 0)
+		a.shellText(strings.Join(args, " "), cwd, "", 0, nil)
 	} else {
 		a.command(args, cwd, 0)
 	}
@@ -154,6 +212,7 @@ type execAnalysis struct {
 	memo     map[string]callResult // calls analyzed, by callKey
 	relevant map[string][]string   // the variables a function's body may use (callKey)
 	shell    bool                  // the words come from shell code (a shell expands their globs)
+	rt       map[string]bool       // the runtimes the child's environment traces (nil: all)
 }
 
 // funcDef is a shell function's body and the state and depth where it was defined.
@@ -248,8 +307,9 @@ func (a *execAnalysis) glob(word, cwd string) {
 }
 
 // shellText analyzes shell source (a -c string or a script file). script is the path of
-// the script ("" for -c strings), used for $0 and $(dirname "$0").
-func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
+// the script ("" for -c strings), used for $0 and $(dirname "$0"); pos are its positional
+// parameters, as shell words (nil: unknown).
+func (a *execAnalysis) shellText(text, cwd, script string, depth int, pos []string) {
 	a.shell = true
 	if script != "" {
 		// bash's ${BASH_SOURCE[0]} names the script like $0 (the dirname idioms below).
@@ -269,7 +329,45 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 	if strings.Contains(text, "`") || strings.Contains(text, "eval ") {
 		a.opaque(cwd) // backticks or eval: cannot follow
 	}
-	a.run(&shellState{cwd: cwd, vars: map[string][]string{}}, splitShell(text), depth)
+	st := &shellState{cwd: cwd, vars: map[string][]string{}}
+	if pos != nil {
+		for i, w := range pos {
+			if i < 9 {
+				st.vars[strconv.Itoa(i+1)] = []string{w}
+			}
+		}
+		st.vars["@"], st.vars["*"] = pos, pos
+	}
+	a.run(st, splitShell(text), depth)
+}
+
+// positionalVars are the variables holding positional parameters ($1...$9, $@, $*).
+var positionalVars = []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "@", "*"}
+
+// unbindPositional forgets the positional parameters of a script: shift or set changed
+// them, or a function (whose body has parameters of its own) was defined.
+func unbindPositional(vars map[string][]string) {
+	for _, v := range positionalVars {
+		delete(vars, v)
+	}
+}
+
+// positional returns the positional parameters of a script started with args (words of
+// shell code when a.shell, literal words of an argv otherwise), as shell words.
+func (a *execAnalysis) positional(args []string) []string {
+	pos := []string{}
+	for i := 0; i < len(args); i++ {
+		w := args[i]
+		if a.shell && (w == "<" || w == ">" || w == ">>" || w == "<<" || w == "<<<") {
+			i++ // a redirection
+			continue
+		}
+		if !a.shell {
+			w = quoteMarks.Replace(strings.ReplaceAll(w, "$", literalDollar))
+		}
+		pos = append(pos, w)
+	}
+	return pos
 }
 
 // run analyzes the commands of a script in order. The body of a function is analyzed
@@ -278,6 +376,9 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 	for k := 0; k < len(segs); k++ {
 		if name, body, next, ok := funcDefAt(segs, k); ok {
+			// $1 in the body is the function's own parameter: the script's are no
+			// longer followed.
+			unbindPositional(st.vars)
 			a.define(name, body, st, depth)
 			k = next - 1
 			continue
@@ -512,7 +613,11 @@ func trimKeywords(seg []string) []string {
 // redirects records the files the input redirections (< file) of a command read.
 func (a *execAnalysis) redirects(seg []string, cwd string) {
 	for i := 0; i+1 < len(seg); i++ {
-		if seg[i] == "<" && !strings.Contains(seg[i+1], "$") {
+		switch {
+		case seg[i] != "<":
+		case strings.Contains(seg[i+1], "$"):
+			a.opaque(cwd) // an unresolved input (< "$1"), like cat "$1"
+		default:
 			for _, m := range expand(seg[i+1], cwd) {
 				a.add(m)
 			}
@@ -524,8 +629,9 @@ var (
 	funcDefRe = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)`)
 	// funcName matches the names of shell functions (bash also allows "-", "." and ":").
 	funcName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.:-]*$`)
-	varRef   = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
-	assign   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+	// varRef also matches positional parameters ($1...$9, $@, $*; $10 is ${1}0).
+	varRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*|[1-9@*])\}|\$([A-Za-z_][A-Za-z0-9_]*|[1-9@*])`)
+	assign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 	bashSource       = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?\}|\$BASH_SOURCE\b`)
 	bashSourcePrefix = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?%`)
@@ -713,13 +819,34 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) bool {
 		case strings.Contains(seg[1], "$"):
 			a.opaque(st.cwd) // unresolved path: cannot follow
 		default:
-			a.script(literal(seg[1]), st.cwd, depth)
+			a.script(literal(seg[1]), st.cwd, depth, nil)
 		}
 		return true
+	case "shift", "getopts":
+		unbindPositional(st.vars)
+	case "set":
+		if setsPositional(seg[1:]) {
+			unbindPositional(st.vars)
+		}
 	}
 	if noops[seg[0]] {
 		a.redirects(seg, st.cwd) // read -r V < VERSION
 		return true
+	}
+	return false
+}
+
+// setsPositional reports whether set with args assigns the positional parameters: it
+// has operands (set -- a b, set a b) besides options (set -e, set -o pipefail).
+func setsPositional(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		w := args[i]
+		if w == "--" || w == "-" || len(w) < 2 || (w[0] != '-' && w[0] != '+') {
+			return true
+		}
+		if strings.ContainsRune(w, 'o') {
+			i++ // -o NAME
+		}
 	}
 	return false
 }
@@ -771,7 +898,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		return
 	}
 	if isScriptFile(seg[0], cwd) {
-		a.script(seg[0], cwd, depth)
+		a.script(seg[0], cwd, depth, a.positional(seg[1:]))
 		return
 	}
 	// A native launcher executes its command itself: analyze that command, which traces
@@ -809,6 +936,11 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		return
 	}
 	traced := tracedPrograms[prog] || strings.HasPrefix(prog, "python3.")
+	// A runtime traces itself only when its shim loads: the environment must carry it,
+	// and Python must not be told to ignore PYTHONPATH or to skip site (-I, -E, -S).
+	if traced && ((a.rt != nil && !a.rt[runtimeOf(prog)]) || (runtimeOf(prog) == "python" && skipsSite(seg[1:]))) {
+		traced = false
+	}
 	// A program named by its path (./build, ../bin/tool, /repo/bin/tool) is read to run
 	// it, wherever the command runs; one that is missing may appear. A bare name is looked
 	// up in PATH.
@@ -970,6 +1102,26 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 			}
 		}
 	}
+	// A file named in an option value or a response file is read (a directory may be);
+	// one that is missing may appear, when the value is a path.
+	for _, w := range args.values {
+		if traced || strings.Contains(w, "$") {
+			continue
+		}
+		for _, m := range expand(w, cwd) {
+			fi, err := os.Stat(m)
+			switch {
+			case err != nil:
+				if strings.Contains(w, "/") && !within(m, cwd) {
+					a.existence(m)
+				}
+			case fi.IsDir():
+				a.opaque(m)
+			default:
+				a.add(m)
+			}
+		}
+	}
 	switch {
 	case traced:
 		// The child traces itself.
@@ -990,6 +1142,7 @@ type cmdArgs struct {
 	script      string     // the inline script or pattern of a scriptFirst reader (-e ones too)
 	scriptFiles []string   // the files a scriptFirst reader reads its script from
 	runs        bool       // an option runs another program (rg --pre)
+	values      []string   // option values (--input=x, -Dk=x) and response files (@x) of other programs
 	roots       []string   // the paths find searches
 	execs       []findExec // the commands find runs
 }
@@ -1069,6 +1222,9 @@ func operands(prog string, args []string) (c cmdArgs) {
 	}
 	opts := readerOpts[prog]
 	needScript := scriptFirst[prog]
+	// The options of a program smates does not know may name files in their values
+	// (--input=data.txt, -Dconfig=cfg/app.ini), its operands response files (@args.txt).
+	other := !readers[prog]
 	// take consumes the arguments of an option (kinds, see readerOpts); the first one is
 	// inline when the option word carries it (-n5, --file=x).
 	var i int
@@ -1121,8 +1277,14 @@ func operands(prog string, args []string) (c cmdArgs) {
 			}
 			name, val, ok := strings.Cut(w, "=")
 			take(opts[name], val, ok)
+			if other && ok && opts[name] == "" {
+				c.values = append(c.values, val)
+			}
 			continue
 		default:
+			if _, val, ok := strings.Cut(w, "="); other && ok {
+				c.values = append(c.values, val)
+			}
 			// A cluster of short options; the first one taking an argument takes the rest
 			// of the word (-n5) or the next word.
 			for j := 1; j < len(w); j++ {
@@ -1142,6 +1304,8 @@ func operands(prog string, args []string) (c cmdArgs) {
 			c.script = w
 		case prog == "awk" && assign.MatchString(w):
 			// var=value operands set awk variables
+		case other && len(w) > 1 && w[0] == '@':
+			c.values = append(c.values, w[1:])
 		default:
 			c.files = append(c.files, w)
 		}
@@ -1338,8 +1502,13 @@ func (a *execAnalysis) shellInvocation(args []string, cwd string, depth int) {
 		}
 	}
 	var script string
+	var pos []string
 	if operand >= 0 {
 		script = literal(args[operand])
+		pos = a.positional(args[operand+1:])
+		if cmd && len(pos) > 0 {
+			pos = pos[1:] // sh -c CODE NAME ARG...: NAME is $0
+		}
 	}
 	switch {
 	case cmd && operand < 0:
@@ -1348,16 +1517,16 @@ func (a *execAnalysis) shellInvocation(args []string, cwd string, depth int) {
 		if depth >= 3 {
 			a.opaque(cwd)
 		} else {
-			a.shellText(script, cwd, "", depth+1)
+			a.shellText(script, cwd, "", depth+1, pos)
 		}
 	case operand >= 0 && !stdin:
 		if strings.Contains(script, "$") {
 			a.opaque(cwd)
 		} else {
-			a.script(script, cwd, depth)
+			a.script(script, cwd, depth, pos)
 		}
 	case stdinFile != "" && !strings.Contains(stdinFile, "$"):
-		a.script(stdinFile, cwd, depth) // sh < script.sh
+		a.script(stdinFile, cwd, depth, nil) // sh < script.sh
 		return
 	default:
 		a.opaque(cwd) // commands from stdin (a pipe, a terminal) or an unresolved script
@@ -1375,8 +1544,9 @@ func (a *execAnalysis) shellInvocation(args []string, cwd string, depth int) {
 	}
 }
 
-// script analyzes a shell script file (bounded recursion).
-func (a *execAnalysis) script(name, cwd string, depth int) {
+// script analyzes a shell script file (bounded recursion) started with the positional
+// parameters pos (nil: unknown).
+func (a *execAnalysis) script(name, cwd string, depth int, pos []string) {
 	p := name
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(cwd, p)
@@ -1387,7 +1557,7 @@ func (a *execAnalysis) script(name, cwd string, depth int) {
 		a.opaque(cwd)
 		return
 	}
-	a.shellText(string(data), cwd, p, depth+1)
+	a.shellText(string(data), cwd, p, depth+1, pos)
 }
 
 // isScriptFile reports whether a program path names a shell script in the repository.

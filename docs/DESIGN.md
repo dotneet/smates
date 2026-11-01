@@ -396,9 +396,13 @@ test loop is over, before pytest-cov reads every `--cov` module for its report. 
 `-coverpkg` builds the named packages into every test binary of the invocation, so their
 source files (`go list -find`) are added to every package's dependencies.
 
-**Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
-analyzed from their command line when the child starts (`child_process.*` in Node,
-`subprocess.Popen`/`os.system` audit events in Python):
+**Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries, and
+Node, Bun or Python children that do not load the shims: their environment lacks the
+runtime's shim, as the exec event's `rt` says, or Python runs with `-I`, `-E` or `-S`)
+are analyzed from their command line when the child starts (`child_process.*` in Node,
+`subprocess.Popen`/`os.system` audit events in Python). Every recording runner exports
+the tracing environment of all three runtimes, so a pytest test's `node` child traces
+itself like a Node test's `python3` child:
 
 - read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name
   (and the files of `sed` `r` commands; `diff` of directories on their trees; `find -exec`
@@ -406,12 +410,15 @@ analyzed from their command line when the child starts (`child_process.*` in Nod
 - shell scripts are read and analyzed the same way, following `cd`, `pushd`/`popd`,
   `source`, variables, for-loops, brace expansion, `case`, input redirections, the bodies
   of the functions they call (where they are called, once per state; a function no call
-  reaches, such as a trap handler, where it is defined), `$(dirname "$0")` and the commands
-  of command substitutions (`$(<file)` reads the file);
+  reaches, such as a trap handler, where it is defined), `$(dirname "$0")`, the commands
+  of command substitutions (`$(<file)` reads the file) and the script's positional
+  parameters (`$1`, `"$@"`, until `shift`, `set --` or a function definition); an
+  unresolved input redirection (`< "$X"`) is opaque;
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name), and on
-  the program itself when it is named by path (`../bin/tool`); so does a command line the
-  shims cut short (beyond 256 Ki characters).
+  the program itself when it is named by path (`../bin/tool`) and the paths in its option
+  values and response files (`--config=cfg/app.ini`, `-Dk=v`, `@args.txt`); so does a
+  command line the shims cut short (beyond 256 Ki characters).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`

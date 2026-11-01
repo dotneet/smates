@@ -10,6 +10,15 @@ import (
 // envAssign is a leading VAR=value word of a shell command.
 var envAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
+// redirection matches a shell redirection word (2>&1, >out.log, >, &>, <in).
+var redirection = regexp.MustCompile(`^(?:[0-9]*[<>]|&>)`)
+
+// redirectionOperand reports whether redirection word w is an operator alone, its
+// target the next word (2> err.log, not 2>&1 or >out.log).
+func redirectionOperand(w string) bool {
+	return strings.TrimRight(strings.TrimLeft(w, "0123456789&"), "<>|") == ""
+}
+
 // craBins are the commands that run jest with the configuration Create React App
 // generates: react-scripts itself and the wrappers that patch it (CRACO,
 // react-app-rewired).
@@ -97,6 +106,11 @@ func craCommand(repoRoot, dir, script string) (string, map[string]string) {
 		rest := cmd[at+2:]
 		for i := 0; i < len(rest); i++ {
 			switch a := rest[i]; {
+			case redirection.MatchString(a):
+				// The script's redirections (2>&1, > test.log) are no arguments.
+				if redirectionOperand(a) {
+					i++
+				}
 			case a == "--watch" || a == "--watchAll":
 				if i+1 < len(rest) && (rest[i+1] == "true" || rest[i+1] == "false") {
 					i++
@@ -147,12 +161,12 @@ var nodeValueOpts = map[string]bool{
 }
 
 // nodeTest finds a `node [options] --test` invocation in an npm script (also inside a
-// quoted argument). command is the invocation up to --test when node gets other
-// options before it (node --import tsx --test), so that the suite runs test files the
-// way the script does; it is "" for a plain `node --test`, the runner's default. Watch
-// options are dropped (the suite must exit), and so are file arguments after --test:
-// smates passes test files itself. A node that runs a script (node scripts/run.js
-// --test) is not a test run.
+// quoted argument). command is the invocation with node's other options, before or
+// after --test, all put before --test (node --import tsx --test, node --test
+// --test-concurrency=1), so that the suite runs test files the way the script does; it
+// is "" for a plain `node --test`, the runner's default. Watch options are dropped (the
+// suite must exit), and so are file arguments after --test: smates passes test files
+// itself. A node that runs a script (node scripts/run.js --test) is not a test run.
 func nodeTest(script string) (command string, env map[string]string, ok bool) {
 	for _, cmd := range nestedCommands(script) {
 		for i, w := range cmd {
@@ -177,19 +191,25 @@ func nodeTest(script string) (command string, env map[string]string, ok bool) {
 	return "", nil, false
 }
 
-// nodeTestOptions returns the options before --test among node's arguments (without
-// watch options), or false if node runs no tests: no --test before the first
-// positional word (the script node runs).
+// nodeTestOptions returns node's options other than --test (without watch options), or
+// false if node runs no tests: no --test before the first positional word (the script
+// node runs). After --test, positional words are test files and globs (left out) and
+// the options end at "--" or a redirection.
 func nodeTestOptions(args []string) ([]string, bool) {
 	var opts []string
+	test := false
 	for k := 0; k < len(args); k++ {
 		a := args[k]
 		name, _, hasValue := strings.Cut(a, "=")
 		switch {
 		case a == "--test":
+			test = true
+		case test && (a == "--" || redirection.MatchString(a)):
 			return opts, true
-		case !strings.HasPrefix(a, "-"):
-			return nil, false
+		case !strings.HasPrefix(a, "-") || a == "-":
+			if !test {
+				return nil, false
+			}
 		case name == "--watch" || name == "--watch-preserve-output":
 		case name == "--watch-path" || name == "--watch-kill-signal":
 			if !hasValue {
@@ -203,13 +223,13 @@ func nodeTestOptions(args []string) ([]string, bool) {
 			}
 		}
 	}
-	return nil, false
+	return opts, test
 }
 
 // scriptCommands splits an npm script into its simple commands, each a list of
 // unquoted words. Quotes and backslashes are honored as a POSIX shell does; unquoted
-// &, | and ; separate commands. Other shell syntax (subshells, redirections) is not
-// interpreted.
+// &, |, ; and subshell parentheses separate commands. Redirections stay words (2>&1,
+// &>, > out.log: see redirection). Other shell syntax is not interpreted.
 func scriptCommands(s string) [][]string {
 	var cmds [][]string
 	var words []string
@@ -246,7 +266,12 @@ func scriptCommands(s string) [][]string {
 			inWord = true
 		case c == ' ' || c == '\t' || c == '\n':
 			endWord()
-		case c == '&' || c == '|' || c == ';':
+		case c == '&' && ((i+1 < len(s) && s[i+1] == '>') || (inWord && strings.HasSuffix(cur.String(), ">")) || (inWord && strings.HasSuffix(cur.String(), "<"))):
+			// A redirection: &> out, 2>&1, <&3.
+			cur.WriteByte(c)
+			inWord = true
+		case c == '&' || c == '|' || c == ';' || c == '(' || c == ')':
+			// Subshell parentheses group commands: "(node --test)".
 			endWord()
 			if len(words) > 0 {
 				cmds = append(cmds, words)

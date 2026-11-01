@@ -95,7 +95,11 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		base = MergeEnv(base, env)
 	}
 	if rc.Record {
-		env = MergeEnv(env, trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base))
+		// Node and Bun children of the tests trace themselves too.
+		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
+			return nil, err
+		}
+		env = MergeEnv(env, trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), base))
 	}
 	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
 		byUnit := map[string]string{}

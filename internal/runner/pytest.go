@@ -78,7 +78,11 @@ func (pytest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	var extra []string
 	if rc.TraceDir != "" {
 		if rc.Record {
-			env = trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+			// Node and Bun children of the tests trace themselves too.
+			if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
+				return nil, err
+			}
+			env = trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
 		} else {
 			// Without recording the plugin only writes per-file results.
 			env = trace.PytestResultsEnv(rc.TraceDir, rc.Shims(), suiteEnv(rc.Suite))

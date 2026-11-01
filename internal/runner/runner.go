@@ -152,6 +152,8 @@ type Observation struct {
 	Inferred bool
 	// Failure is the failure output a runner plugin reported for the unit (bounded).
 	Failure string
+	// untraced: the runner reported the unit but its process left no trace (observeAll).
+	untraced bool
 }
 
 // AddFile adds a repo-relative file.

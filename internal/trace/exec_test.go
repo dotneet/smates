@@ -55,7 +55,8 @@ func TestExecDeps(t *testing.T) {
 		{"bash -ec", []string{"bash", "-ec", "cat data.txt"}, false, []string{"data.txt"}},
 		{"bash -o pipefail -c", []string{"bash", "-o", "pipefail", "-c", "cat data.txt"}, false, []string{"data.txt"}},
 		{"-c positional args are not files", []string{"bash", "-c", "cat data.txt", "other.txt", "list.txt"}, false, []string{"data.txt"}},
-		{"-c with unresolved positional", []string{"bash", "-c", `cat "$1"`, "_", "other.txt"}, false, []string{"./**"}},
+		{"-c with a positional parameter", []string{"bash", "-c", `cat "$1"`, "_", "other.txt"}, false, []string{"other.txt"}},
+		{"-c with an unset positional parameter", []string{"bash", "-c", `cat "$2"`, "_", "other.txt"}, false, []string{"./**"}},
 		{"-c without text", []string{"bash", "-c"}, false, []string{"./**"}},
 		{"sh -c in a shell string", []string{`sh -c 'cat data.txt'`}, true, []string{"data.txt"}},
 		{"bash -e -c in a shell string", []string{`bash -e -c "cat data.txt"`}, true, []string{"data.txt"}},
@@ -361,6 +362,99 @@ func TestExecDepsOperands(t *testing.T) {
 		{"$(script), cwd outside", tmp, []string{"X=$(" + root + "/scripts/gen.sh); echo $X"}, true, []string{"scripts/gen.sh"}},
 		{"$(<file), cwd outside", tmp, []string{"X=$(<" + root + "/list.txt)"}, true, []string{"list.txt"}},
 		{"read < file, cwd outside", tmp, []string{"read -r V < " + root + "/list.txt"}, true, []string{"list.txt"}},
+	} {
+		seen := map[string]bool{}
+		for _, k := range execDeps(c.args, c.shell, c.cwd, root, relCache(root)) {
+			seen[k] = true
+		}
+		if got := keys(seen); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: execDeps(%q) in %s = %v, want %v", c.name, c.args, c.cwd, got, c.want)
+		}
+	}
+}
+
+// Node, Bun and Python children trace themselves only when their shim loads: when the
+// exec event says the child's environment does not trace their runtime, or Python is
+// told to ignore PYTHONPATH or site (-I, -E, -S), they are opaque commands.
+func TestExecDepsUntracedRuntimes(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "tools/reader.js", "tools/reader.py", "data.txt")
+	for _, c := range []struct {
+		name string
+		args []string
+		rt   map[string]bool
+		want []string
+	}{
+		{"node, traced", []string{"node", "tools/reader.js"}, nil, []string{"tools/reader.js"}},
+		{"node, Node traced", []string{"node", "tools/reader.js"}, map[string]bool{"node": true}, []string{"tools/reader.js"}},
+		{"node, only Python traced", []string{"node", "tools/reader.js"}, map[string]bool{"python": true}, []string{"./**", "tools/reader.js"}},
+		{"npm, only Python traced", []string{"npm", "test"}, map[string]bool{"python": true}, []string{"./**"}},
+		{"bun, only Node traced", []string{"bun", "tools/reader.js"}, map[string]bool{"node": true}, []string{"./**", "tools/reader.js"}},
+		{"python3, only Node traced", []string{"python3", "tools/reader.py"}, map[string]bool{"node": true, "bun": true}, []string{"./**", "tools/reader.py"}},
+		{"python3.12, nothing traced", []string{"/usr/bin/python3.12", "tools/reader.py"}, map[string]bool{}, []string{"./**", "tools/reader.py"}},
+		{"python3 in a shell, only Node traced", []string{"sh", "-c", "python3 tools/reader.py"}, map[string]bool{"node": true}, []string{"./**", "tools/reader.py"}},
+		{"python -I", []string{"python3", "-I", "tools/reader.py"}, nil, []string{"./**", "tools/reader.py"}},
+		{"python -E", []string{"python3", "-E", "-m", "pytest"}, nil, []string{"./**"}},
+		{"python -S", []string{"python", "-S", "-c", "print(1)"}, nil, []string{"./**"}},
+		{"python -IB cluster", []string{"python", "-uIB", "tools/reader.py"}, nil, []string{"./**", "tools/reader.py"}},
+		{"python -s", []string{"python", "-s", "tools/reader.py"}, nil, []string{"tools/reader.py"}},
+		{"python -X dev", []string{"python", "-X", "dev", "-W", "error", "tools/reader.py"}, nil, []string{"tools/reader.py"}},
+		{"python -XS is an -X option", []string{"python", "-XS", "tools/reader.py"}, nil, []string{"tools/reader.py"}},
+		{"python -c with I in the code", []string{"python", "-c", "-I"}, nil, nil},
+		{"python script option -I", []string{"python", "tools/reader.py", "-I"}, nil, []string{"tools/reader.py"}},
+		{"uv run python -I", []string{"uv", "run", "python", "-I", "tools/reader.py"}, nil, []string{"./**", "tools/reader.py"}},
+	} {
+		seen := map[string]bool{}
+		for _, k := range execDepsIn(c.args, false, root, root, relCache(root), c.rt) {
+			seen[k] = true
+		}
+		if got := keys(seen); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: execDepsIn(%q, %v) = %v, want %v", c.name, c.args, c.rt, got, c.want)
+		}
+	}
+}
+
+// Programs smates does not know may read the files their option values (--input=x,
+// -Dk=x) and response files (@x) name, and scripts read the files their arguments name.
+func TestExecDepsArguments(t *testing.T) {
+	root := repoDir(t)
+	tmp := t.TempDir()
+	touch(t, root, "data.txt", "cfg/app.ini", "args.txt", "fixtures/lines.txt", "conf/a.conf")
+	writeScript(t, root, "bin/tool", "\x7fELF")
+	writeScript(t, root, "scripts/count.sh", "#!/bin/sh\nwc -l < \"$1\"\n")
+	writeScript(t, root, "scripts/loop.sh", "#!/bin/bash\nset -euo pipefail\nwhile read -r l; do echo \"$l\"; done < \"$1\"\n")
+	writeScript(t, root, "scripts/all.sh", "#!/bin/sh\nfor f in \"$@\"; do cat \"$f\"; done\n")
+	writeScript(t, root, "scripts/shift.sh", "#!/bin/sh\nshift\ncat \"$1\"\n")
+	writeScript(t, root, "scripts/set.sh", "#!/bin/sh\nset -- data.txt\ncat \"$1\"\n")
+	writeScript(t, root, "scripts/func.sh", "#!/bin/sh\nf() { cat \"$1\"; }\nf data.txt\ncat \"$1\"\n")
+	for _, c := range []struct {
+		name  string
+		cwd   string
+		args  []string
+		shell bool
+		want  []string
+	}{
+		{"--name=value, cwd outside", tmp, []string{"mytool", "--input=" + root + "/data.txt"}, false, []string{"data.txt"}},
+		{"program by path --config=", tmp, []string{root + "/bin/tool", "--config=" + root + "/cfg/app.ini"}, false, []string{"bin/tool", "cfg/app.ini"}},
+		{"-Dk=v", tmp, []string{"mytool", "-Dconfig=" + root + "/cfg/app.ini"}, false, []string{"cfg/app.ini"}},
+		{"@file", tmp, []string{"mytool", "@" + root + "/args.txt"}, false, []string{"args.txt"}},
+		{"directory value", tmp, []string{"mytool", "--conf-dir=" + root + "/conf"}, false, []string{"conf/**"}},
+		{"missing path value", tmp, []string{"mytool", "--input=" + root + "/new/x.txt"}, false, []string{"new/x.txt?"}},
+		{"missing non-path value", tmp, []string{"mytool", "--level=3", "-j=4"}, false, nil},
+		{"value in the working directory", root, []string{"mytool", "--input=data.txt"}, false, []string{"./**", "data.txt"}},
+		{"values of a traced runtime", tmp, []string{"node", "--require=" + root + "/data.txt"}, false, nil},
+		{"reader options are not values", tmp, []string{"grep", "--label=" + root + "/data.txt", "x", root + "/args.txt"}, false, []string{"args.txt"}},
+		{"script reading < $1", root, []string{"scripts/count.sh", "fixtures/lines.txt"}, false, []string{"fixtures/lines.txt", "scripts/count.sh"}},
+		{"sh script < $1", root, []string{"sh", "scripts/count.sh", "fixtures/lines.txt"}, false, []string{"fixtures/lines.txt", "scripts/count.sh"}},
+		{"script in shell code", root, []string{"F=fixtures/lines.txt; ./scripts/count.sh $F"}, true, []string{"fixtures/lines.txt", "scripts/count.sh"}},
+		{"done < $1", root, []string{"scripts/loop.sh", "fixtures/lines.txt"}, false, []string{"fixtures/lines.txt", "scripts/loop.sh"}},
+		{"script without its argument", root, []string{"scripts/count.sh"}, false, []string{"./**", "scripts/count.sh"}},
+		{"< $1 unresolved", root, []string{"wc -l < \"$1\""}, true, []string{"./**"}},
+		{"$@", root, []string{"scripts/all.sh", "data.txt", "args.txt"}, false, []string{"args.txt", "data.txt", "scripts/all.sh"}},
+		{"shift", root, []string{"scripts/shift.sh", "data.txt", "args.txt"}, false, []string{"./**", "scripts/shift.sh"}},
+		{"set --", root, []string{"scripts/set.sh", "args.txt"}, false, []string{"./**", "scripts/set.sh"}},
+		{"function parameters", root, []string{"scripts/func.sh", "args.txt"}, false, []string{"./**", "scripts/func.sh"}},
+		{"literal argv glob", root, []string{"scripts/count.sh", "*.txt"}, false, []string{"*.txt", "scripts/count.sh"}},
 	} {
 		seen := map[string]bool{}
 		for _, k := range execDeps(c.args, c.shell, c.cwd, root, relCache(root)) {

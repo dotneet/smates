@@ -9,7 +9,9 @@ $SMATES_TRACE_DIR/proc-<pid>-0.jsonl, using the same protocol as the Node shim:
     {"k": "dir", "p": "/abs/dir"}          a directory was listed
     {"k": "probe", "p": "/abs/path"}       existence of a path was checked (stat/access)
     {"k": "exec", "args": [...], "shell": false, "cwd": "/abs"}  a child process started
-                                           ("trunc": true: args cut short, see _MAX_ARGV)
+                                           ("trunc": true: args cut short, see _MAX_ARGV;
+                                           "rt": the runtimes the child's environment
+                                           traces, _runtimes)
     {"k": "env", "p": "NAME"}              an environment variable was read (never its value)
     {"k": "ctx", "id": "test:/abs/file", "t": ms}   attribution context switch
     {"k": "uses", "id": "/abs/test_file", "ctx": ["fixture:..."]}
@@ -33,8 +35,10 @@ events recorded while the parent was in that context.
 
 Children started with an environment of their own (subprocess's env=, os.execve,
 os.posix_spawn) get the tracing variables (SMATES_*, the shim directory on PYTHONPATH and,
-when Node is traced, NODE_OPTIONS) added where missing, so they see them in their
-environment.
+when Node is traced, NODE_OPTIONS and BUN_OPTIONS) added where missing, so they see them
+in their environment. Exec events list the runtimes the child's environment traces
+("rt"): smates takes a Node, Bun or Python child that is not traced for an opaque
+command.
 """
 
 import os
@@ -43,7 +47,10 @@ import threading
 import time
 
 _state = None
-_os_open = os.open  # unwrapped (the shim writes its own files with it)
+# The shim writes its own files with these, kept in a tuple: pyfakefs patches the os
+# functions it finds in a module's namespace (and the os module itself), which would
+# send the trace into its fake file system while it is active.
+_io = (os.open, os.write, os.close, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
 
 
 class _Tracer:
@@ -104,13 +111,14 @@ class _Tracer:
 
     def _write(self, obj):
         line = self._json.dumps(obj) + "\n"
+        open_, write, close, flags = _io
         try:
             # os.open/os.write do not raise "open" audit events for our own file.
-            fd = _os_open(self.out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+            fd = open_(self.out, flags, 0o644)
             try:
-                os.write(fd, line.encode("utf-8", "surrogateescape"))
+                write(fd, line.encode("utf-8", "surrogateescape"))
             finally:
-                os.close(fd)
+                close(fd)
         except OSError:
             pass
 
@@ -297,7 +305,8 @@ class _Tracer:
         here = os.path.dirname(os.path.abspath(__file__))
         self._child_vars = [("SMATES_TRACE_DIR", self.trace_dir), ("SMATES_REPO_ROOT", self.repo_root)]
         self._pythonpath = here
-        self._node_shim = os.path.join(os.path.dirname(here), "node_modules", "smates", "node.cjs")
+        self._node_shim_path = os.path.join(os.path.dirname(here), "node_modules", "smates", "node.cjs")
+        self._node_shim = self._node_shim_path
         if self._node_shim not in env.get("NODE_OPTIONS", ""):
             self._node_shim = None  # Node is not traced
         elif env.get("NODE_V8_COVERAGE"):
@@ -550,12 +559,59 @@ class _Tracer:
 
         _on_import("multiprocessing.process", patch_mp)
 
+    def _runtimes(self, env):
+        """Lists the runtimes whose shim a child's environment (env, None: this process's)
+        loads: smates takes a Node, Bun or Python child whose environment does not trace
+        it for an opaque command. None when it cannot tell."""
+        local = self._local
+        outer = getattr(local, "busy", False)
+        local.busy = True  # no reads of the program (env may be os.environ)
+        try:
+            if env is None:
+                env = os.environ
+            names = ("SMATES_TRACE_DIR", "SMATES_REPO_ROOT", "PYTHONPATH", "NODE_OPTIONS", "BUN_OPTIONS")
+            vals = {}
+            for k in list(env.keys()):
+                name = os.fsdecode(k)
+                if os.name == "nt":
+                    name = name.upper()
+                if name in names:
+                    vals[name] = os.fsdecode(env[k])
+            if not vals.get("SMATES_TRACE_DIR") or not vals.get("SMATES_REPO_ROOT"):
+                return []
+            rt = []
+            shim = self._node_shim_path
+            if shim in vals.get("NODE_OPTIONS", ""):
+                rt.append("node")
+            if shim in vals.get("BUN_OPTIONS", ""):
+                rt.append("bun")
+            entries = vals.get("PYTHONPATH", "").split(os.pathsep)
+            here = self._real_dir(self._pythonpath)
+            if self._pythonpath in entries or any(os.path.isabs(e) and self._real_dir(e) == here for e in entries):
+                rt.append("python")
+            return rt
+        except Exception:
+            return None
+        finally:
+            local.busy = outer
+
+    def _real_dir(self, p):
+        real = self._real.get(p)
+        if real is None:
+            try:
+                real = os.path.realpath(p)
+            except (OSError, ValueError):
+                real = p
+            self._real[p] = real
+        return real
+
     def child_env(self, env):
         """Returns env, a child's own environment, with the variables that trace the
         child added where missing (as a copy; env itself when nothing is missing). The
         child sees them: SMATES_TRACE_DIR, SMATES_REPO_ROOT, SMATES_TRACE_PARENT,
         SMATES_TRACE_CTX, the shim directory first on PYTHONPATH and, when Node is
-        traced, the shim's --require in NODE_OPTIONS (and NODE_V8_COVERAGE)."""
+        traced, the shim's --require in NODE_OPTIONS and --preload in BUN_OPTIONS (and
+        NODE_V8_COVERAGE)."""
         local = self._local
         outer = getattr(local, "busy", False)
         local.busy = True  # these lookups (env may be os.environ) are no reads of the program
@@ -594,6 +650,13 @@ class _Tracer:
                     if any(c in shim for c in " \t\"'\\"):
                         shim = self._json.dumps(shim)  # as smates quotes it (NodeEnv)
                     add["NODE_OPTIONS"] = ("--require=" + shim + " " + cur).strip()
+                # Bun ignores NODE_OPTIONS --require: it preloads the shim through
+                # BUN_OPTIONS, which has no escapes but takes a whole argument in quotes.
+                cur = get("BUN_OPTIONS") or ""
+                if self._node_shim not in cur:
+                    shim = self._node_shim
+                    opt = '"--preload=%s"' % shim if any(c in shim for c in " \t") else "--preload=" + shim
+                    add["BUN_OPTIONS"] = (cur + " " + opt).strip()
             if not add:
                 return env
             out = dict(env)
@@ -718,10 +781,10 @@ class _Tracer:
                     return
             self.record("read", path)
         elif event == "subprocess.Popen":
-            _exe, cmd, cwd, _env = args
+            _exe, cmd, cwd, env = args
             shell = isinstance(cmd, (str, bytes))
             argv = [cmd] if shell else list(cmd)
-            self.exec_event(argv, shell, cwd)
+            self.exec_event(argv, shell, cwd, env=env)
         elif event == "os.system":
             self.exec_event([args[0]], True, None)
         elif event in ("os.exec", "os.posix_spawn", "os.spawn"):
@@ -732,9 +795,10 @@ class _Tracer:
                 return
             try:
                 argv = list(args[2] if event == "os.spawn" else args[1])
+                env = args[3] if event == "os.spawn" else args[2]
             except (TypeError, IndexError):
                 return
-            self.exec_event(argv, False, None, event == "os.exec")
+            self.exec_event(argv, False, None, event == "os.exec", env)
         elif event == "sqlite3.connect":
             self._sqlite(args[0] if args else None)
         elif event in ("os.listdir", "os.scandir"):
@@ -797,8 +861,9 @@ class _Tracer:
             return
         self.record("read", db)
 
-    def exec_event(self, argv, shell, cwd, replace=False):
-        """Records a child process; replace: this process execs it (os.exec*)."""
+    def exec_event(self, argv, shell, cwd, replace=False, env=None):
+        """Records a child process; replace: this process execs it (os.exec*); env: its
+        environment (None: this process's)."""
         if not self.enabled:
             return
         try:
@@ -814,6 +879,9 @@ class _Tracer:
             # a traced one records itself, with the same traced ancestor.
             self._begin(argv, own=False)
         ev = {"k": "exec", "args": argv, "shell": shell, "cwd": cwd}
+        rt = self._runtimes(env)
+        if rt is not None:
+            ev["rt"] = rt
         if cut:
             ev["trunc"] = True
         self.write(ev)

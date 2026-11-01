@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,6 +137,19 @@ func PythonEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 		"SMATES_TRACE_PARENT=",
 		"SMATES_TRACE_CTX=",
 	}
+}
+
+// Env returns environment variables that trace Node, Bun and Python processes alike. A
+// recording runner exports all of them: smates trusts a Node, Bun or Python child of a
+// test to trace itself, whatever the language of the test that starts it.
+func Env(traceDir, repoRoot string, sh *Shims, base []string) []string {
+	env := NodeEnv(traceDir, repoRoot, sh, base)
+	for _, kv := range PythonEnv(traceDir, repoRoot, sh, base) {
+		if !slices.Contains(env, kv) {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // PytestResultsEnv returns environment variables that load the pytest plugin without
@@ -302,6 +316,9 @@ type event struct {
 	Msg    string   `json:"msg"`
 	Pctx   string   `json:"pctx"`
 	Trunc  bool     `json:"trunc"`
+	// Rt lists the runtimes ("node", "bun", "python") whose shim the environment of an
+	// exec event's child loads; absent (older shims), all of them.
+	Rt *[]string `json:"rt"`
 }
 
 var (
@@ -504,7 +521,14 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 				}
 				break
 			}
-			for _, k := range execDeps(ev.Args, ev.Shell, cwd, root, rel) {
+			var rt map[string]bool
+			if ev.Rt != nil {
+				rt = map[string]bool{}
+				for _, r := range *ev.Rt {
+					rt[r] = true
+				}
+			}
+			for _, k := range execDepsIn(ev.Args, ev.Shell, cwd, root, rel, rt) {
 				add("key", k)
 			}
 		case "ctx":

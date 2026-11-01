@@ -64,7 +64,7 @@ func runNodeAttempt(ctx context.Context, rc *RunContext, extra, testArgs []strin
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		env = trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+		env = trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
 	}
 	start := time.Now()
 	code, err := runBatches(ctx, rc, extra, testArgs, env)
@@ -333,7 +333,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 		return nil, err
 	}
-	env := trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	env := trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
 	start := time.Now()
 	// A command that runs files one after another (tests sharing a database or ports)
 	// is recorded one file at a time too; record_jobs overrides this.
