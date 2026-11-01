@@ -107,7 +107,7 @@ func cmdWatch(ctx context.Context, args []string, stdin *os.File, stdout, stderr
 		return 1, err
 	}
 	if len(p.suites) == 0 {
-		return 1, fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")
+		return 1, configError{fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")}
 	}
 	repo := p.repo
 	ignored := watchIgnore(p)
