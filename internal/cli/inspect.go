@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
-	"github.com/dotneet/smates/internal/runner"
 	"gopkg.in/yaml.v3"
 )
 
@@ -303,84 +302,6 @@ func envRequirements(root string, suites []config.Suite, reads map[string]string
 }
 
 var secretNameRe = regexp.MustCompile(`(?i)(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE)`)
-
-// ---- doctor ----
-
-type report func(format string, a ...any)
-
-// doctorProject checks what the suites need beyond their runners: installed JS
-// dependencies, no implicit npx/bunx downloads, the engines.node range, services and
-// environment variables, and workflows that run the tests without smates.
-func doctorProject(p *project, nodeVersion func() string, ok, warn, bad report) {
-	var cs []config.Suite
-	nodeV := ""
-	for _, s := range p.suites {
-		cs = append(cs, s.Suite)
-		js := s.Runner == "vitest" || s.Runner == "jest" || s.Runner == "node" || s.Runner == "bun"
-		if !js {
-			continue
-		}
-		if (s.Runner == "vitest" || s.Runner == "jest") && !runner.HasNodeModules(p.repo.Root, s.Root) {
-			bad("suite %s: no node_modules (or Yarn PnP loader) from %s up to the repository root: install the dependencies first (npm ci / pnpm install / yarn / bun install)", s.Name, s.Root)
-		} else if hard, err := runner.LauncherProblem(p.repo.Root, s); err != nil && hard {
-			bad("suite %s: %v", s.Name, err)
-		} else if err != nil {
-			warn("suite %s: %v", s.Name, err)
-		}
-		if s.Runner == "bun" {
-			continue
-		}
-		rng, file := enginesNode(p.repo.Root, s.Root)
-		if rng == "" {
-			continue
-		}
-		if nodeV == "" {
-			if nodeV = nodeVersion(); nodeV == "" {
-				continue
-			}
-		}
-		if sat, known := nodeSatisfies(nodeV, rng); known && !sat {
-			warn("suite %s: node %s does not satisfy engines.node %q in %s", s.Name, nodeV, rng, file)
-		} else if known {
-			ok("suite %s: node %s satisfies engines.node %q (%s)", s.Name, nodeV, rng, file)
-		}
-	}
-	in := inspect(p.repo.Root, cs, p.files)
-	for _, h := range in.Services {
-		port := serviceDefaults[h.Kind].port
-		if reachable(port) {
-			ok("service %s (%s, from %s): localhost:%d is reachable", h.Name, h.Image, h.Source, port)
-		} else {
-			warn("service %s (%s, from %s): nothing listens on localhost:%d; start it before the tests (e.g. docker compose up -d %s); in CI add a services: block (the workflow `smates init --github` generates has one, commented out)", h.Name, h.Image, h.Source, port, h.Name)
-		}
-	}
-	for _, r := range in.Local {
-		if reachable(r.Port) {
-			ok("%s calls %s: reachable", r.File, r.URL)
-		} else {
-			warn("%s calls %s, but nothing listens on port %d: tests using it need that server running", r.File, r.URL, r.Port)
-		}
-	}
-	for _, e := range in.Env {
-		set := false
-		for _, s := range p.suites {
-			if _, found := s.LookupEnv(e.Name); found {
-				set = true
-			}
-		}
-		if !set {
-			warn("%s is not set: %s reads it and %s lists it (set it in the shell or in the suite's env: in smates.yml)", e.Name, e.ReadBy, e.Source)
-		}
-	}
-	steps := workflowTestSteps(p.repo.Root)
-	for _, st := range steps {
-		if st.Skip != "" {
-			warn("%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, st.Skip)
-			continue
-		}
-		warn("%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates)
-	}
-}
 
 // reachable reports whether something accepts TCP connections on localhost:port.
 func reachable(port int) bool {
