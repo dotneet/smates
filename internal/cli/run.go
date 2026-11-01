@@ -244,7 +244,7 @@ func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
 
 func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runner.RunContext {
 	rc := &runner.RunContext{
-		Repo: c.p.repo, Suite: sr.Suite, Units: units, All: full && !sr.Suite.Narrowed, Record: c.record, ExtraArgs: c.f.extra,
+		Repo: c.p.repo, Suite: sr.Suite, Units: units, All: full && !sr.Suite.Narrowed, Record: c.record, Fresh: c.f.shadow, ExtraArgs: c.f.extra,
 		ShimDir: c.shimDir, Self: c.self, Stdout: c.stdout, Stderr: c.stderr,
 		IsTest: sr.Suite.IsTestFile,
 	}

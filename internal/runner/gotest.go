@@ -66,6 +66,11 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		testArgs = pkgs
 	}
 	var env []string
+	if rc.Fresh && !rc.Record {
+		// go test does not recheck files outside the module before reusing a cached
+		// result: a change there would pass unseen.
+		env = []string{"GOFLAGS=" + strings.TrimSpace(Getenv(suiteEnv(rc.Suite), "GOFLAGS")+" -count=1")}
+	}
 	if rc.Record {
 		exe, err := goExecWrapper(rc)
 		if err != nil {

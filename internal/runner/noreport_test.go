@@ -168,3 +168,45 @@ func TestReportedJUnitWithoutRecording(t *testing.T) {
 		t.Errorf("no results directory: %v", obs)
 	}
 }
+
+// A shadow run without recording must not take go test results from its cache: go
+// does not recheck files outside the module before reusing one.
+func TestGoFreshWithoutRecording(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	repo := tempRepo(t, "calc/c.go")
+	os.WriteFile(filepath.Join(repo.Root, "go.mod"), []byte("module example.com/m\n"), 0o644)
+	flags := filepath.Join(t.TempDir(), "flags")
+	stub := filepath.Join(t.TempDir(), "stub.sh")
+	os.WriteFile(stub, []byte(`printf "%s" "$GOFLAGS" > "$FLAGS"; printf "ok  \texample.com/m/calc\t0.1s\n"`), 0o644)
+	for _, tc := range []struct {
+		fresh bool
+		env   map[string]string
+		want  string
+	}{
+		{false, nil, ""},
+		{true, nil, "-count=1"},
+		{true, map[string]string{"GOFLAGS": "-mod=mod"}, "-mod=mod -count=1"},
+	} {
+		env := map[string]string{"FLAGS": flags, "GOFLAGS": ""}
+		for k, v := range tc.env {
+			env[k] = v
+		}
+		var out bytes.Buffer
+		rc := &RunContext{
+			Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Command: "sh " + stub, Env: env}}, Units: []string{"calc"},
+			Fresh: tc.fresh, TraceDir: t.TempDir(), Stdout: &out, Stderr: &out,
+		}
+		res, err := goTest{}.Run(context.Background(), rc)
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("run: %+v %v\n%s", res, err, &out)
+		}
+		if got, _ := os.ReadFile(flags); string(got) != tc.want {
+			t.Errorf("fresh=%v env=%v: GOFLAGS %q, want %q", tc.fresh, tc.env, got, tc.want)
+		}
+		if o := res.Observations["calc"]; o == nil || o.Status != state.Pass {
+			t.Errorf("calc: %+v", o)
+		}
+	}
+}

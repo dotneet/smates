@@ -258,7 +258,8 @@ selection in a new repository, or permanently on a nightly job. With `--no-recor
 skips tracing (much cheaper) and leaves the state as it was; escapes are still found for
 runners that report per-file status without tracing: vitest, jest, pytest, `go test`,
 and any runner with a `junit:` report (with the others, unselected tests of a failing
-run are reported as possible escapes).
+run are reported as possible escapes). Shadow runs never reuse cached `go test` results
+(`-count=1`): go does not recheck files outside the module before reusing one.
 
 **Likeliest failures first.** `smates run` starts the selected tests in this order: tests
 that did not pass last time; tests whose own file or a file they import directly changed;

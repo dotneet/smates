@@ -57,9 +57,12 @@ type RunContext struct {
 	Suite *Suite
 	// Units to run (repo-relative IDs; always the full list). When All is set, adapters
 	// may let the runner discover tests itself instead of passing Units.
-	Units     []string
-	All       bool
-	Record    bool
+	Units  []string
+	All    bool
+	Record bool
+	// Fresh asks for outcomes the runner did not take from a cache of earlier runs
+	// (shadow mode evaluates the selection against them). Recording always runs fresh.
+	Fresh     bool
 	ExtraArgs []string
 	// TraceDir is an empty directory for trace output owned by this run. Without Record
 	// it only receives the per-file results of runner reporters ("" for none).

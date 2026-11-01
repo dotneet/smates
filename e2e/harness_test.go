@@ -468,15 +468,12 @@ func (r *repo) env() []string {
 	return append(env, "CI=", "GITHUB_ACTIONS=", "GITHUB_OUTPUT=", "GITHUB_STEP_SUMMARY=", "PYTHONDONTWRITEBYTECODE=1")
 }
 
-func (r *repo) smates(args ...string) (string, int) { return r.smatesEnv(nil, args...) }
-
-// smatesEnv is smates with extra environment variables.
-func (r *repo) smatesEnv(env []string, args ...string) (string, int) {
+func (r *repo) smates(args ...string) (string, int) {
 	// A stale report from an earlier run must never be mistaken for this run's.
 	os.Remove(r.reportPath())
 	cmd := exec.Command(smatesBin, args...)
 	cmd.Dir = r.dir
-	cmd.Env = append(r.env(), env...)
+	cmd.Env = r.env()
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()
@@ -742,14 +739,11 @@ func TestMutations(t *testing.T) {
 						t.Fatal(err)
 					}
 					args := []string{"run", "--shadow", "--no-agent", "--report", r.reportPath()}
-					var env []string
 					noRecord := r.spec.MutationNoRecord && os.Getenv("SMATES_E2E_MUTATION_RECORD") == ""
 					if noRecord {
-						// Recording runs go test with -count=1; a cached result would miss a
-						// change to a file outside the module (go does not recheck those).
-						args, env = append(args, "--no-record"), []string{"GOFLAGS=-count=1"}
+						args = append(args, "--no-record")
 					}
-					out, _ := r.smatesEnv(env, args...)
+					out, _ := r.smates(args...)
 					rep := r.readReport()
 					failing := rep.failing()
 					if noRecord && len(rep.Possible) > 0 {
