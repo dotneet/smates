@@ -46,7 +46,9 @@ suites:
   - name: py
     runner: custom
     tests: ["tests/*_check.py"]
-    command: sh -c '[ $# -gt 0 ] || set -- tests/*_check.py; for f; do python3 "$f" || exit 1; done' sh
+    # Every file runs after a failure: smates orders them by recorded duration, which
+    # varies, and the shadow run below expects both to run.
+    command: sh -c 'rc=0; [ $# -gt 0 ] || set -- tests/*_check.py; for f; do python3 "$f" || rc=1; done; exit $rc' sh
 `)
 	write(".gitignore", ".smates/\n")
 	write("src/mod_a.py", "X = 1\n")

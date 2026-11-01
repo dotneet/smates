@@ -80,7 +80,8 @@ track a default one with `env_track` (top level or per suite), or turn tracking 
 `env_ignore: ["*"]`.
 
 **Orphans.** A changed file that is in no test's `D(T)` and not ignored (docs, editor
-config, …) is an *orphan*: deterministic analysis cannot explain it. smates then
+config, …) is an *orphan*: deterministic analysis cannot explain it (with `--suite`, the
+tests of the other suites count too). smates then
 
 1. selects tests whose sources or dependencies mention the file by name (fixtures,
    migrations, schemas referenced as strings);

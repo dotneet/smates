@@ -6,23 +6,105 @@ suites:
     runner: go
     root: .
     command: go test -race
-    # e2e/ has its own suite; e2e/fixtures/ holds the projects the e2e tests run on.
+    # e2e/ has its own suites; e2e/fixtures/ holds the projects the e2e tests run on.
     exclude: ["e2e/**"]
 
   # End-to-end tests: build the smates binary and run it against e2e/fixtures/ with
   # real toolchains. Run them without recording (CI passes --no-record), so the tracing
   # of this run does not leak into the smates processes the tests start.
-  - name: e2e
+  #
+  # Go units are packages, so the e2e package is a single unit. One suite per CI shard
+  # (SMATES_E2E_FIXTURE picks its fixtures) makes the selection per fixture: each one
+  # depends on the core of smates, the runner code its fixtures use and the fixtures
+  # themselves ("." is the e2e package, whose own files every suite depends on). A new
+  # fixture runs them all as an orphan. A new source file of smates is not an orphan (the
+  # go suite depends on it), so cmd/smates/e2e_rules_test.go fails until a rule below
+  # names it.
+  - name: e2e-polyglot-scenarios
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m -run TestScenarios
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: polyglot }
+    rules:
+      - tests: ["."]
+        deps: &core
+          - "cmd/**"
+          - "internal/{agent,cli,config,depkey,detect,gitx,hints,pathutil,selector,state}/**"
+          - "internal/summary/*.go"
+          - "internal/static/*.go"
+          - "internal/static/host/**"
+          - "internal/trace/*.go"
+          - "internal/runner/{runner,common,custom,procgroup*}.go"
+      - tests: ["."]
+        # vitest, jest, node --test and bun.
+        deps: &js ["internal/runner/node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
+      - tests: ["."]
+        deps: &vitest ["internal/trace/shims/vitest-reporter.mjs"]
+      - tests: ["."]
+        deps: &pytest ["internal/runner/pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
+      - tests: ["."]
+        deps: &gotest ["internal/runner/gotest.go", "internal/static/golang/**"]
+      - tests: ["."]
+        deps: &polyglot ["e2e/fixtures/polyglot/**"]
+
+  - name: e2e-polyglot-others
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m -skip TestScenarios
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: polyglot }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *vitest }
+      - { tests: ["."], deps: *pytest }
+      - { tests: ["."], deps: *gotest }
+      - { tests: ["."], deps: *polyglot }
+
+  - name: e2e-jest-node
     runner: go
     root: e2e
     command: go test -tags e2e -timeout 40m
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: "jest-npm,node-test" }
     rules:
-      # The tests build ./cmd/smates and run it on the fixtures. Go units are
-      # packages, so "." is the e2e package itself.
-      - tests: ["."]
-        deps: ["cmd/**", "internal/**", "e2e/**"]
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: ["internal/trace/shims/jest-reporter.cjs", "e2e/fixtures/{jest-npm,node-test}/**"] }
+
+  - name: e2e-vitest-python
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: "vitest-npm,python-uv" }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *vitest }
+      - { tests: ["."], deps: *pytest }
+      - { tests: ["."], deps: ["e2e/fixtures/{vitest-npm,python-uv}/**"] }
+
+  # Every fixture not named above: a new fixture runs here until it gets a suite.
+  - name: e2e-others
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv" }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *vitest } # pnpm-monorepo
+      - { tests: ["."], deps: *gotest }
+      - { tests: ["."], deps: *pytest } # env (Python through a custom runner)
+      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,pnpm-monorepo}/**"] }
 
 # Release packaging and CI files that no test reads; action.yml is covered by the
 # action job in .github/workflows/ci.yml.

@@ -45,31 +45,21 @@ jobs:
 
   e2e:
     # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects.
-    # Selected by smates (suite "e2e"): skipped when a pull request changes nothing
-    # under cmd/, internal/, e2e/ or go.mod. Not recorded, so no state is kept and
-    # pull requests diff against the base branch.
-    # Sharded by fixture into jobs of about equal run time. The last one runs every
-    # fixture not named before it, so a new fixture runs there until it gets a shard.
-    name: e2e (${{ matrix.name }})
+    # One job per e2e suite in smates.yml, each a shard of the fixtures of about equal
+    # run time, selected by smates: a job is skipped when a pull request changes nothing
+    # its fixtures and the smates code they use depend on. Not recorded, so no state is
+    # kept and pull requests diff against the base branch.
+    name: ${{ matrix.suite }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: polyglot scenarios
-            fixtures: polyglot
-            args: -- -run TestScenarios
-          - name: polyglot others
-            fixtures: polyglot
-            args: -- -skip TestScenarios
-          - name: jest-npm, node-test
-            fixtures: jest-npm,node-test
-          - name: vitest-npm, python-uv
-            fixtures: vitest-npm,python-uv
-          - name: others
-            fixtures: -polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv
+        suite:
+          - e2e-polyglot-scenarios
+          - e2e-polyglot-others
+          - e2e-jest-node
+          - e2e-vitest-python
+          - e2e-others
     runs-on: ubuntu-latest
-    env:
-      SMATES_E2E_FIXTURE: ${{ matrix.fixtures }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +79,7 @@ jobs:
         uses: ./
         with:
           version: source
-          args: --suite e2e --no-record --no-agent ${{ matrix.args }}
+          args: --suite ${{ matrix.suite }} --no-record --no-agent
           cache: 'false'
 
   action:
