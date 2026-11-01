@@ -235,8 +235,8 @@ func TestWorkflowTestSteps(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("steps %+v\nwant %+v", got, want)
 	}
-	if steps[0].EnvFrom != 18 || steps[0].EnvTo != 20 {
-		t.Errorf("env block %d-%d", steps[0].EnvFrom, steps[0].EnvTo)
+	if steps[0].Blocks["env"] != [2]int{18, 20} || steps[0].TestLine != 17 || steps[1].WorkDir != "web" {
+		t.Errorf("env block %v, test line %d, working-directory %q", steps[0].Blocks["env"], steps[0].TestLine, steps[1].WorkDir)
 	}
 }
 
@@ -246,7 +246,7 @@ func TestWorkflowPatchApplies(t *testing.T) {
 	g.git("add", ".")
 	g.commit("ci")
 	suites := []config.Suite{{Name: "go", Runner: "go", Root: "."}, {Name: "web", Runner: "vitest", Root: "web"}}
-	patch := workflowPatch(g.dir, workflowTestSteps(g.dir), suites)
+	patch, _ := workflowPatch(g.dir, workflowTestSteps(g.dir), suites)
 	for _, s := range []string{
 		"--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n",
 		"-          go test -race ./...\n",
@@ -498,5 +498,153 @@ func TestDoctorReportsProjectNeeds(t *testing.T) {
 	}
 	if _, err := exec.LookPath("node"); err == nil && !strings.Contains(out.String(), `does not satisfy engines.node ">=999"`) {
 		t.Errorf("no engines.node warning:\n%s", out.String())
+	}
+}
+
+func TestDoctorYarnPnP(t *testing.T) {
+	g := newGitRepo(t)
+	writeTree(t, g.dir, map[string]string{
+		"package.json":  `{}`,
+		"yarn.lock":     "",
+		".pnp.cjs":      "",
+		"src/a.test.ts": "",
+		"smates.yml":    "version: 1\nsuites:\n  - name: web\n    runner: vitest\n    root: .\n    command: yarn vitest run\n",
+	})
+	g.git("add", ".")
+	g.commit("files")
+	var out, errb bytes.Buffer
+	Main([]string{"doctor", "-C", g.dir}, &out, &errb)
+	if strings.Contains(out.String(), "no node_modules") {
+		t.Errorf("Yarn PnP reported as not installed:\n%s", out.String())
+	}
+}
+
+// patchWorkflow writes ci.yml (and files) into a repository, applies the patch
+// workflowPatch proposes with git apply and returns the patch, its notes and the
+// patched workflow.
+func patchWorkflow(t *testing.T, workflow string, files map[string]string, suites []config.Suite) (string, []string, string) {
+	t.Helper()
+	g := newGitRepo(t)
+	files[".github/workflows/ci.yml"] = workflow
+	writeTree(t, g.dir, files)
+	g.git("add", ".")
+	g.commit("ci")
+	patch, notes := workflowPatch(g.dir, workflowTestSteps(g.dir), suites)
+	if patch != "" {
+		pf := filepath.Join(t.TempDir(), "p.patch")
+		if err := os.WriteFile(pf, []byte(patch), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		g.git("apply", pf)
+	}
+	data, _ := os.ReadFile(filepath.Join(g.dir, ".github/workflows/ci.yml"))
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("patched workflow does not parse: %v\n%s", err, data)
+	}
+	return patch, notes, string(data)
+}
+
+func TestWorkflowPatchCases(t *testing.T) {
+	goWeb := []config.Suite{{Name: "go", Runner: "go", Root: "."}, {Name: "web", Runner: "vitest", Root: "web"}}
+	head := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n"
+	cases := []struct {
+		name     string
+		steps    string
+		files    map[string]string
+		want     []string // substrings of the patched workflow
+		notWant  []string
+		note     string // substring of the notes ("" = none expected)
+		noPatch  bool
+		skipWant string // substring of the step's Skip
+	}{
+		{name: "single go step in a go+vitest repo selects its suite",
+			steps:   "      - run: go test ./...\n",
+			want:    []string{"        uses: dotneet/smates@v1\n        with:\n          args: --suite go\n          anthropic-api-key:"},
+			notWant: []string{"cache-key", "go test"}},
+		{name: "step keys kept",
+			steps:   "      - name: unit\n        id: unit\n        if: github.event_name == 'push'\n        timeout-minutes: 15\n        continue-on-error: true\n        shell: bash\n        run: go test ./...\n        env:\n          TZ: UTC\n",
+			want:    []string{"      - name: 'unit (smates: affected tests only)'\n        id: unit\n        if: github.event_name == 'push'\n        timeout-minutes: 15\n        continue-on-error: true\n        uses: dotneet/smates@v1\n", "          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional (or openai-api-key / openrouter-api-key)\n        env:\n          TZ: UTC\n"},
+			notWant: []string{"shell: bash", "go test"}},
+		{name: "if on the dash line",
+			steps: "      - if: always()\n        run: go test ./...\n",
+			want:  []string{"      - name: 'tests (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n"}},
+		{name: "other commands stay in the original step",
+			steps:   "      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          go test -race ./...\n          echo done\n      - run: echo after\n",
+			want:    []string{"      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          echo done\n      - name: 'checks (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n", "      - run: echo after\n"},
+			notWant: []string{"go test", "        id: checks\n        if: always()\n        uses"},
+			note:    `only "go test -race ./..." moves`},
+		{name: "working-directory without its own smates.yml is a note",
+			steps:   "      - working-directory: web\n        run: pnpm test\n",
+			want:    []string{"          args: --suite web\n"},
+			notWant: []string{"working-directory"},
+			note:    "ran in working-directory web"},
+		{name: "working-directory with its own smates.yml maps to the input",
+			steps: "      - working-directory: web\n        run: pnpm test\n",
+			files: map[string]string{"web/smates.yml": "version: 1\n"},
+			want:  []string{"          working-directory: web\n"}},
+		{name: "test:unit and make test-unit are unit tests",
+			steps:   "      - run: pnpm run test:unit\n      - run: make test-unit\n",
+			want:    []string{"cache-key: test\n", "cache-key: test-2\n"},
+			notWant: []string{"test:unit", "make"}},
+		{name: "test:e2e is reported, not patched",
+			steps: "      - run: npm run test:e2e\n", noPatch: true, skipWant: `"npm run test:e2e" is not the plain unit-test command`},
+		{name: "make test-integration is reported, not patched",
+			steps: "      - run: make test-integration\n", noPatch: true, skipWant: "not the plain unit-test command"},
+		{name: "chained command is reported, not patched",
+			steps: "      - run: cd web && pnpm test\n", noPatch: true, skipWant: "chained with other commands"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.files == nil {
+				c.files = map[string]string{}
+			}
+			patch, notes, got := patchWorkflow(t, head+c.steps, c.files, goWeb)
+			if c.noPatch {
+				if patch != "" {
+					t.Errorf("patched:\n%s", patch)
+				}
+				steps := parseWorkflowSteps("ci.yml", []byte(head+c.steps))
+				if len(steps) != 1 || !strings.Contains(steps[0].Skip, c.skipWant) {
+					t.Errorf("steps %+v, want skip %q", steps, c.skipWant)
+				}
+				return
+			}
+			for _, w := range c.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("lacks %q:\n%s", w, got)
+				}
+			}
+			for _, w := range c.notWant {
+				if strings.Contains(got, w) {
+					t.Errorf("has %q:\n%s", w, got)
+				}
+			}
+			joined := strings.Join(notes, "\n")
+			if (c.note == "") != (joined == "") || !strings.Contains(joined, c.note) {
+				t.Errorf("notes %q, want %q", joined, c.note)
+			}
+		})
+	}
+}
+
+func TestInitGitHubOnlyOtherTestTargets(t *testing.T) {
+	g := newGitRepo(t)
+	writeTree(t, g.dir, map[string]string{
+		".github/workflows/e2e.yml": "on: push\njobs:\n  e2e:\n    steps:\n      - run: npm run test:e2e\n",
+		"go.mod":                    "module example.com/x\n\ngo 1.22\n",
+		"x_test.go":                 "package x\n",
+	})
+	g.git("add", ".")
+	g.commit("files")
+	var out, errb bytes.Buffer
+	if code := Main([]string{"init", "--github", "-C", g.dir}, &out, &errb); code != 0 {
+		t.Fatalf("init: %d %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(g.dir, ".github/workflows/smates.yml")); err != nil {
+		t.Errorf("an e2e-only workflow blocked the smates workflow:\n%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), `not patched: "npm run test:e2e" is not the plain unit-test command`) {
+		t.Errorf("stderr:\n%s", errb.String())
 	}
 }

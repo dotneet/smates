@@ -329,12 +329,21 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 		}
 	}
 	if len(steps) > 0 {
-		fmt.Fprintln(stderr, "smates: existing workflows already run the tests:")
+		fmt.Fprintln(stderr, "smates: existing workflows already run tests:")
+		duplicate := false
 		for _, st := range steps {
 			fmt.Fprintf(stderr, "  %s: job %q, step %q: %s\n", st.File, st.Job, st.Step, st.Command)
+			if st.Skip != "" {
+				fmt.Fprintf(stderr, "    not patched: %s\n", st.Skip)
+			}
+			duplicate = duplicate || !st.Other
 		}
-		patch := workflowPatch(repo.Root, steps, suites)
+		patch, notes := workflowPatch(repo.Root, steps, suites)
+		for _, n := range notes {
+			fmt.Fprintf(stderr, "  note: %s\n", n)
+		}
 		switch {
+		case !duplicate:
 		case patch == "":
 			fmt.Fprintf(stderr, "  replace those steps with `uses: %s` (with `args: --suite <name>` and a distinct `cache-key` per job when the suites run in separate jobs)\n", actSmates)
 		case patchFile != "":
@@ -345,7 +354,7 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 		default:
 			fmt.Fprintf(stderr, "  this patch replaces them with the smates action (review it, then save it and `git apply` it, or rerun with --patch FILE):\n\n%s\n", patch)
 		}
-		if !force {
+		if duplicate && !force {
 			fmt.Fprintf(stderr, "smates: not writing %s, which would run the same tests a second time (use --force to write it anyway)\n", wfRel)
 			return nil
 		}

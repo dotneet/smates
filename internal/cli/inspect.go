@@ -321,9 +321,11 @@ func doctorProject(p *project, nodeVersion func() string, ok, warn, bad report) 
 			continue
 		}
 		if (s.Runner == "vitest" || s.Runner == "jest") && !runner.HasNodeModules(p.repo.Root, s.Root) {
-			bad("suite %s: no node_modules from %s up to the repository root: install the dependencies first (npm ci / pnpm install / yarn / bun install)", s.Name, s.Root)
-		} else if err := runner.Preflight(p.repo.Root, s); err != nil {
+			bad("suite %s: no node_modules (or Yarn PnP loader) from %s up to the repository root: install the dependencies first (npm ci / pnpm install / yarn / bun install)", s.Name, s.Root)
+		} else if hard, err := runner.LauncherProblem(p.repo.Root, s); err != nil && hard {
 			bad("suite %s: %v", s.Name, err)
+		} else if err != nil {
+			warn("suite %s: %v", s.Name, err)
 		}
 		if s.Runner == "bun" {
 			continue
@@ -372,6 +374,10 @@ func doctorProject(p *project, nodeVersion func() string, ok, warn, bad report) 
 	}
 	steps := workflowTestSteps(p.repo.Root)
 	for _, st := range steps {
+		if st.Skip != "" {
+			warn("%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, st.Skip)
+			continue
+		}
 		warn("%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates)
 	}
 }

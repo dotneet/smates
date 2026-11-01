@@ -38,7 +38,8 @@ func TestPreflight(t *testing.T) {
 		{"installed bin", []string{"node_modules/.bin/vitest", "pkg/package.json"}, "pkg", "npx --no-install vitest run", ""},
 		{"npx would download", []string{"package-lock.json"}, ".", "npx vitest run", "smates does not let npx download it"},
 		{"bunx would download", []string{"bun.lock"}, ".", "bunx vitest run", "run `bun install`"},
-		{"pnpm exec without install", []string{"pnpm-lock.yaml"}, ".", "pnpm exec jest", "jest is not installed"},
+		{"pnpm exec never downloads", []string{"pnpm-lock.yaml"}, ".", "pnpm exec jest", ""},
+		{"tool on PATH", nil, ".", "npx sh -c true", ""},
 		{"explicit version", []string{"node_modules/.bin/vitest"}, ".", "npx vitest@2 run", "download vitest@2"},
 		{"package flag", nil, ".", "npx -p jest jest", "download a package"},
 		{"direct command", nil, ".", "go test", ""},
@@ -58,5 +59,32 @@ func TestPreflight(t *testing.T) {
 	repo := tempRepo(t, "pkg/node_modules/.bin/x")
 	if !HasNodeModules(repo.Root, "pkg") || HasNodeModules(tempRepo(t, "pkg/package.json").Root, "pkg") {
 		t.Error("HasNodeModules")
+	}
+	if !HasNodeModules(tempRepo(t, ".pnp.cjs", "pkg/package.json").Root, "pkg") {
+		t.Error("Yarn PnP counts as installed")
+	}
+}
+
+func TestLauncherProblem(t *testing.T) {
+	cases := []struct {
+		name, command string
+		hard, problem bool
+	}{
+		{"pnpm exec missing tool: advisory", "pnpm exec jest", false, true},
+		{"pnpm exec tool on PATH", "pnpm exec sh -c true", false, false},
+		{"pnpm exec without a tool", "pnpm exec", false, false},
+		{"npx missing tool: hard", "npx jest", true, true},
+		{"bun x missing tool: hard", "bun x vitest", true, true},
+	}
+	for _, c := range cases {
+		repo := tempRepo(t, "pnpm-lock.yaml")
+		s := &Suite{Suite: config.Suite{Name: "s", Root: ".", Command: c.command}}
+		hard, err := LauncherProblem(repo.Root, s)
+		if hard != c.hard || (err != nil) != c.problem {
+			t.Errorf("%s: hard %t, err %v", c.name, hard, err)
+		}
+		if perr := Preflight(repo.Root, s); (perr != nil) != c.hard {
+			t.Errorf("%s: Preflight %v", c.name, perr)
+		}
 	}
 }
