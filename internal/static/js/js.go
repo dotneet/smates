@@ -169,15 +169,10 @@ func (a *Analyzer) resolveModule(dir, spec string, add func(string)) {
 			a.resolvePath(path.Join(pd, rel), add)
 		}
 	case spec[0] == '#':
-		// package.json "imports", else tsconfig "paths" ("#lib/*" is a valid key).
-		found := false
-		a.resolveHashImport(dir, spec, func(f string) {
-			found = true
-			add(f)
-		})
-		if !found {
-			a.resolveTSConfig(dir, spec, add)
-		}
+		// package.json "imports" (Node) and tsconfig "paths" (TypeScript and bundlers
+		// check them first; "#lib/*" is a valid key): keep both.
+		a.resolveHashImport(dir, spec, add)
+		a.resolveTSConfig(dir, spec, add)
 	case isExternalScheme(spec):
 	default:
 		a.resolveBare(dir, spec, add)

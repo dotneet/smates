@@ -724,6 +724,19 @@ func TestHashTSPaths(t *testing.T) {
 	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/db.ts", "src/lib/other.ts", "src/lib/util.ts"})
 }
 
+// TestHashImportsAndTSPaths checks that a '#' key mapped by both package.json "imports"
+// and tsconfig "paths" depends on both targets (Node uses one, TypeScript the other).
+func TestHashImportsAndTSPaths(t *testing.T) {
+	h := newHost(t, map[string]string{
+		"tsconfig.json": `{"compilerOptions":{"paths":{"#x":["./src/x.ts.ts"]}}}`,
+		"package.json":  `{"name":"app","imports":{"#x":"./src/x.node.ts"}}`,
+		"src/a.test.ts": `import x from "#x"`,
+		"src/x.ts.ts":   ``,
+		"src/x.node.ts": ``,
+	})
+	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/x.node.ts", "src/x.ts.ts"})
+}
+
 // TestConfigDirTemplate checks that ${configDir} expands to the directory of the config
 // that uses it, not the one that declares it.
 func TestConfigDirTemplate(t *testing.T) {
