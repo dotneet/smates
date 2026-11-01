@@ -73,7 +73,7 @@ smates run --explain # ...各テストが選ばれた理由も表示する
 | [設計](docs/DESIGN.md) | 内部の仕組み（英語） |
 
 サイトは [`docs/`](docs/) から MkDocs Material でビルドしています
-（`uvx --with mkdocs-material --with mkdocs-static-i18n mkdocs serve`）。
+（`uvx --with-requirements docs/requirements.txt mkdocs serve`）。
 
 ## ライセンス
 

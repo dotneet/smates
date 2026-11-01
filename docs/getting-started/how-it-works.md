@@ -176,7 +176,7 @@ previously failed files first.
 With `--fail-fast`, each suite is split into one runner call per group, and the calls
 run group by group across suites. After a call fails, no further call starts (the running
 one finishes). Tests that did not start are not recorded, so they stay selected for the
-next run; `--report` lists them under `not_run`. The extra runner start-ups are why this
+next run; the log, the summary and `--report` (under `not_run`) list them. The extra runner start-ups are why this
 is not the default. `--fail-fast` cannot be combined with `--shadow`.
 
 ## Next steps

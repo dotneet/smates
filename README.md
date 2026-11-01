@@ -73,7 +73,7 @@ and [How smates decides](https://dotneet.github.io/smates/getting-started/how-it
 | [Design](docs/DESIGN.md) | how it works inside |
 
 The site is built from [`docs/`](docs/) with MkDocs Material
-(`uvx --with mkdocs-material --with mkdocs-static-i18n mkdocs serve`).
+(`uvx --with-requirements docs/requirements.txt mkdocs serve`).
 
 ## License
 
