@@ -94,17 +94,20 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-// cumulativeSavings is the summary line on the time the recorded runs saved.
+// cumulativeSavings is the summary line on the time the recorded runs saved. A sharded
+// run is one run: its shards' records add up its savings, its first shard counts it.
 func cumulativeSavings(runs []state.Run) *summary.Savings {
 	s := &summary.Savings{}
 	for _, r := range runs {
 		if r.Shadow {
 			continue
 		}
-		if s.Runs == 0 {
+		if s.Since.IsZero() {
 			s.Since = r.At
 		}
-		s.Runs++
+		if r.Shard == "" || strings.HasPrefix(r.Shard, "1/") {
+			s.Runs++
+		}
 		s.SavedMs += r.SkippedMs
 	}
 	if s.Runs < 2 || s.SavedMs == 0 {

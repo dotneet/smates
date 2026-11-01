@@ -154,6 +154,11 @@ func TestCumulativeSavings(t *testing.T) {
 	if s == nil || s.Runs != 4 || s.SavedMs != 90_000 || !s.Since.Equal(st.Runs[0].At) {
 		t.Errorf("savings: %+v", s)
 	}
+	// The shards of one run count as one run.
+	st.AddRun(state.Run{ID: "6", At: st.Runs[len(st.Runs)-1].At.Add(time.Hour), Mode: "state", Shard: "2/2", SkippedMs: 10_000})
+	if s := cumulativeSavings(st.Runs); s.Runs != 4 || s.SavedMs != 100_000 {
+		t.Errorf("with a second shard: %+v", s)
+	}
 	if cumulativeSavings(st.Runs[:1]) != nil {
 		t.Error("one run without savings must not show a line")
 	}
