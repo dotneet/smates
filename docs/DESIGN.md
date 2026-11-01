@@ -311,7 +311,12 @@ so `sh -c "node x | tr"` or `make` in between does not break the chain). A proce
 without a test of its own belongs to its nearest traced ancestor that has one; processes
 under a Go test binary belong to that package. Helpers of the runner itself that execute
 repository code (a server from global setup) are global dependencies; helpers that only
-read files (crawlers, transformers) are ignored.
+read files (crawlers, transformers) are ignored. A process smates started that names a
+test file on its command line is the runner even when that test left no trace (a jest
+worker force-killed before writing its coverage, with one runner per test file): only
+its code is global, not its reads (jest's watchman probe and `find` crawl stand for the
+whole tree). A setup script the suite command runs first (`sh -c "node setup.js &&
+jest"`) names no test: what it uses is global.
 
 **Coverage tools sharing the same mechanisms.** V8 precise coverage is one per isolate:
 vitest's v8 provider and jest's v8 coverage take it through `node:inspector` and then stop
@@ -334,11 +339,17 @@ source files (`go list -find`) are added to every package's dependencies.
 analyzed from their command line when the child starts (`child_process.*` in Node,
 `subprocess.Popen`/`os.system` audit events in Python):
 
-- read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name;
-- shell scripts are read and analyzed the same way, following `cd`, `source`, variables,
-  for-loops, functions, `$(dirname "$0")` and read-only command substitutions;
+- read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name
+  (and the files of `sed` `r` commands; `diff` of directories on their trees; `find -exec`
+  is analyzed as the command it runs);
+- shell scripts are read and analyzed the same way, following `cd`, `pushd`/`popd`,
+  `source`, variables, for-loops, brace expansion, `case`, input redirections, the bodies
+  of the functions they call (where they are called, once per state; a function no call
+  reaches, such as a trap handler, where it is defined), `$(dirname "$0")` and the commands
+  of command substitutions (`$(<file)` reads the file);
 - anything else may read anything below its working directory: the test depends on
-  `cwd/**` (commands running outside the repository only on the paths they name).
+  `cwd/**` (commands running outside the repository only on the paths they name), and on
+  the program itself when it is named by path (`../bin/tool`).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
@@ -365,7 +376,15 @@ main-module packages it links (`go list -deps -test`), lists its tests (`-test.l
 and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
-and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`).
+and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`). A
+function declared only in a test file the suite's configuration does not compile (build
+constraints: a `//go:build linux` file on darwin, a tag neither `GOFLAGS` nor the command
+passes; `go list -find` over the packages of the test files that may be constrained by
+name or a build line, cached by file stat) is not a unit there: go test would run nothing
+for it, and a pass would hide it from a configuration that compiles it. A selected
+function `-test.list` does not list runs nothing: an example without output (compiled,
+never run anywhere) passes, as does any when `go list` fails; one go list says is not
+compiled (build flags passed to this run only) is not recorded.
 Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
 binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
 (blocks placed by `//line` in a file that is not there: every Go file of the package);

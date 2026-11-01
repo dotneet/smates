@@ -56,7 +56,8 @@ func SplitFuncUnit(unit string) (dir, name string, ok bool) {
 
 // funcUnits lists the test functions of the test files. A file that does not parse
 // yields its package directory as a unit (the package does not compile; it runs, and
-// fails, as a whole).
+// fails, as a whole). Files the suite's configuration does not compile (build
+// constraints, see excludedTestFiles) have no units.
 func funcUnits(s *Suite, testFiles []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -66,7 +67,11 @@ func funcUnits(s *Suite, testFiles []string) []string {
 			out = append(out, u)
 		}
 	}
+	excluded := excludedTestFiles(s, testFiles)
 	for _, f := range testFiles {
+		if excluded[f] {
+			continue
+		}
 		d := path.Dir(f)
 		tf, err := readTestFile(s.RepoRoot, f)
 		if err != nil {
