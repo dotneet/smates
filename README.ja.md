@@ -109,6 +109,19 @@ smates deps src/cart.test.ts  # このテストは何に依存している?
 smates hook install  # 任意: git push の前に影響するテストを実行
 ```
 
+`init --github` は `mise.toml`/`.tool-versions`(`jdx/mise-action` を使用)、
+`.nvmrc`/`.node-version` または `package.json` の `engines.node`/`volta`、`.python-version`
+からツールチェーンを設定します。`docker-compose.yml`/`compose.yaml` のデータベースやコード中の
+`localhost` URL、`.env.example` にありコードが読む環境変数は、確認して有効にするための
+コメントアウトされた `services:`/`env:` ブロックになります。既存のワークフローがすでにテストを
+実行している場合は 2 つ目のワークフローを書かず(`--force` で書く)、そのステップを smates
+アクションに置き換えるパッチを表示します(`--patch FILE` で `git apply` 用に書き出し)。
+Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml` にコメントの
+`command:`/`env:` ヒントとして書かれます。`smates doctor` も同じ内容に加えて、
+`node_modules` の欠如、`engines.node` を満たさない Node、起動していないサービスを報告します。
+smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを許さず、`node_modules/.bin` に
+ないときはエラーにします。
+
 ### git フック
 
 `smates hook install` は `pre-push` フック(`--hook pre-commit` で pre-commit)を書き込み、

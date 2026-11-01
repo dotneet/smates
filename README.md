@@ -142,6 +142,18 @@ smates hook install  # optional: run the affected tests before every git push
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
 
+`init --github` sets up toolchains from `mise.toml`/`.tool-versions` (via
+`jdx/mise-action`), `.nvmrc`/`.node-version` or `package.json` `engines.node`/`volta`, and
+`.python-version`. Databases from `docker-compose.yml`/`compose.yaml` or `localhost` URLs
+in the code, and variables from `.env.example` the code reads, become commented-out
+`services:`/`env:` blocks to check and enable. If an existing workflow already runs the
+tests, it writes no second one (unless `--force`) and prints a patch replacing those
+steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+variables of a Makefile `test` target become commented `command:`/`env:` hints in
+`smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
+version outside `engines.node`, and services that are not running. smates never lets
+`npx`/`bunx` download a runner: one missing from `node_modules/.bin` is an error.
+
 ### Git hook
 
 `smates hook install` writes a `pre-push` hook (`--hook pre-commit` for a pre-commit

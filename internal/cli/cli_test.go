@@ -401,7 +401,7 @@ func TestRenderConfig(t *testing.T) {
 		},
 	}
 	for _, suites := range cases {
-		out := renderConfig(suites)
+		out := renderConfig(suites, map[string][]string{"go:root": {"# command: \"go test -race\"", "# env:", "#   TZ: UTC"}})
 		c, err := config.Parse([]byte(out))
 		if err != nil {
 			t.Fatalf("rendered config does not parse: %v\n%s", err, out)
