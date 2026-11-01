@@ -398,7 +398,7 @@ declare none of `depends_on`, `serves` or `rules`.
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--only suite:unit` (run exactly that test; repeatable), `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--output full\|failures`, `--report file.json` (`-` for stdout), `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run`, `--add suite:unit`, `--orphans agent\|full\|skip` ([caller decides](#letting-the-calling-agent-decide)) |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
 | `smates init [--github]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
@@ -410,6 +410,41 @@ declare none of `depends_on`, `serves` or `rules`.
 | `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `untested`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
+
+### For AI coding agents
+
+An agent reads everything a command prints, so `smates run --output failures` (or
+`SMATES_OUTPUT=agent` in its environment; the flag wins) keeps the output small:
+
+- each runner batch's output is buffered and printed only when the batch fails. For
+  runners that report each failing test's own output (vitest, jest, pytest, `go test`,
+  JUnit) only that is printed; otherwise the failing batch's output, at most 200 lines
+  (the first 30 and the last 170, with a note in between);
+- smates' own progress lines are left out; the selection line stays;
+- the run ends with a short summary: one line when it passed, otherwise the failing tests,
+  the changed inputs of each (from the failure hints) and a command that reruns exactly
+  them:
+
+```
+smates: FAILED 1 of 7 test unit(s) in 3.2s:
+  web: src/cart.test.ts
+    changed inputs: src/price.ts (modified), fixtures/prices.json (modified)
+smates: rerun them: smates run --output failures --only web:src/cart.test.ts
+```
+
+`--only suite:unit` (repeatable) runs exactly those test units (a test file, or a package
+directory for Go) and records them as usual; the other tests and changes are left for the
+next run. `--report -` writes the JSON report to stdout and everything else to stderr.
+
+**Exit codes** tell "fix the code" from "fix the setup":
+
+| code | meaning |
+|---|---|
+| 0 | success |
+| 1 | tests failed (whatever code the runner exited with; `--report` has it in `exit_code`) |
+| 2 | usage error: invalid command line |
+| 3 | configuration error: invalid `smates.yml`, unknown runner, a suite command that cannot be parsed, a suite or test named on the command line (`--suite`, `--only`) that the configuration does not define, no suites at all |
+| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4 |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the

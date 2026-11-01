@@ -122,7 +122,7 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(p.suites) == 0 {
-		return fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")
+		return configError{fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")}
 	}
 	var cfgAbs, cfgName string
 	if *apply {
