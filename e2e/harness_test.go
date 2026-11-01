@@ -868,6 +868,12 @@ func tail(s string, n int) string {
 // copyTree copies a fixture to dst, without the harness's own files (fixture.json,
 // scenarios.json and the extra ones named).
 func copyTree(src, dst string, extra ...string) error {
+	skip := map[string]bool{"fixture.json": true, "scenarios.json": true}
+	for _, f := range extra {
+		if f != "" {
+			skip[path.Clean(filepath.ToSlash(f))] = true
+		}
+	}
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -876,7 +882,7 @@ func copyTree(src, dst string, extra ...string) error {
 		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".venv" || d.Name() == ".smates") {
 			return filepath.SkipDir
 		}
-		if rel == "fixture.json" || rel == "scenarios.json" || contains(extra, filepath.ToSlash(rel)) {
+		if skip[filepath.ToSlash(rel)] {
 			return nil
 		}
 		target := filepath.Join(dst, rel)
