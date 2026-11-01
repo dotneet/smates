@@ -207,9 +207,7 @@
     "fails": [
       "src/i18n.test.ts"
     ],
-    "orphans": [
-      "locales/ja-JP.json"
-    ]
+    "orphans": []
   },
   {
     "name": "bun-glob-new-locale",

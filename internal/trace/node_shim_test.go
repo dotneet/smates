@@ -315,3 +315,91 @@ await Bun.spawn(['cat', 'd.txt'], { cwd: 'sub', env: { PATH: process.env.PATH } 
 		t.Errorf("child_process.execFileSync recorded %d times, want 1 (%v)", execs["cat c.txt"], execs)
 	}
 }
+
+// Bun ignores NODE_OPTIONS --require: bun children of Node and of Bun processes trace
+// themselves through BUN_OPTIONS, inherited or added to an environment of their own,
+// also when the shim's path has a space in it.
+func TestBunShimChildren(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun not on PATH")
+	}
+	children := map[string]string{
+		"a.txt": "", "b.txt": "", "c.txt": "",
+		"a.js": "require('fs').readFileSync('a.txt');\n",
+		"b.js": "require('fs').readFileSync('b.txt');\n",
+		"c.js": "require('fs').readFileSync('c.txt');\n",
+	}
+	root := shimRepo(t, nil)
+	procs := traceNode(t, root, children, `
+const cp = require('child_process');
+cp.execFileSync('bun', ['a.js']);
+cp.execFileSync('bun', ['b.js'], { env: { PATH: process.env.PATH } });
+`)
+	checkDeps(t, readsOf(procs, "bun"), []string{"a.txt", "b.txt"}, nil)
+
+	root = shimRepo(t, children)
+	writeFiles(t, root, map[string]string{"test.js": `
+require('child_process').execFileSync('bun', ['a.js']);
+await Bun.spawn(['bun', 'b.js']).exited;
+await Bun.spawn(['bun', 'c.js'], { env: { PATH: process.env.PATH } }).exited;
+`})
+	sh, err := ExtractShims(filepath.Join(t.TempDir(), "my dir"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceDir := t.TempDir()
+	procs = runCollect(t, root, traceDir, NodeEnv(traceDir, root, sh, os.Environ()), bun, "test.js")
+	checkDeps(t, readsOf(procs, "bun"), []string{"a.txt", "b.txt", "c.txt"}, nil)
+	if n := len(procs); n != 4 {
+		t.Errorf("%d processes traced, want 4", n)
+	}
+}
+
+// Under bun test (which emits no exit event) the modules loaded are still recorded,
+// such as JSON required at run time that lcov does not list; the shim preloaded both by
+// --preload and BUN_OPTIONS runs once.
+func TestBunShimTestRunnerModules(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun not on PATH")
+	}
+	root := shimRepo(t, map[string]string{
+		"src/x.json": `{"a": 1}`,
+		"x.test.js":  "import { test, expect } from 'bun:test';\ntest('x', () => { const n = 'x'; expect(require('./src/' + n + '.json').a).toBe(1); });\n",
+	})
+	sh, traceDir := extractShims(t)
+	procs := runCollect(t, root, traceDir, NodeEnv(traceDir, root, sh, os.Environ()), bun, "test", "--preload", sh.Node, "./x.test.js")
+	if len(procs) != 1 {
+		t.Fatalf("%d processes traced, want 1", len(procs))
+	}
+	if !procs[0].Code["src/x.json"] {
+		t.Errorf("dynamically required module not recorded: %v", procs[0].Code)
+	}
+}
+
+// Bun.Glob scans start at the literal directories before the first glob segment: a
+// listing when only the last segment is a glob, everything below it otherwise.
+func TestBunShimGlob(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun not on PATH")
+	}
+	root := shimRepo(t, map[string]string{
+		"flat/a.json": "", "deep/x/fixtures/a.json": "", "mid/x/x.txt": "", "all/a.txt": "", "sub/in/a.txt": "",
+		"test.js": `
+const scan = (p, o) => [...new Bun.Glob(p).scanSync(o)];
+scan('flat/*.json');
+scan('deep/**/fixtures/*.json');
+scan('mid/*/x.txt');
+scan('./all/**');
+scan('in/*.txt', { cwd: 'sub' });
+for await (const _ of new Bun.Glob('flat/*.txt').scan('.')) {}
+`,
+	})
+	sh, traceDir := extractShims(t)
+	procs := runCollect(t, root, traceDir, NodeEnv(traceDir, root, sh, os.Environ()), bun, "test.js")
+	checkDeps(t, readsOf(procs, "bun"),
+		[]string{"flat/", "deep/**", "mid/**", "all/**", "sub/in/"},
+		[]string{"deep/fixtures/**", "mid/*/", "mid/", "./"})
+}

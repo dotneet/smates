@@ -24,6 +24,9 @@ func TestBunConfigWithShim(t *testing.T) {
 		{"none", ""},
 		{"preload and threshold", "[test]\npreload = [\"./setup.ts\"]\ncoverageThreshold = { lines = 0.9, functions = 0.9 }\n"},
 		{"no test section", "smol = true\n"},
+		// [test] keys set at the top level move into the [test] table (defined once).
+		{"dotted keys", "smol = true\ntest.preload = [\n  \"./setup.ts\", # setup\n]\ntest.coverageThreshold = 0.9\n[install]\nexact = true\n"},
+		{"inline table", "test = { preload = [\"./setup.ts\"], coverageThreshold = { lines = 0.9 }, root = \"./src\" }\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -46,6 +49,49 @@ func TestBunConfigWithShim(t *testing.T) {
 			}
 			if strings.Contains(tc.in, "setup.ts") && !strings.Contains(out, filepath.Join(dir, "setup.ts")) {
 				t.Errorf("project preload lost:\n%s", out)
+			}
+			if strings.Count(out, "[test]") != 1 || strings.Contains(out, "test.") || strings.Contains(out, "test =") {
+				t.Errorf("[test] keys not in one table:\n%s", out)
+			}
+			for _, keep := range []string{"smol = true", "exact = true", `root = "./src"`} {
+				if strings.Contains(tc.in, keep) && !strings.Contains(out, keep) {
+					t.Errorf("%s lost:\n%s", keep, out)
+				}
+			}
+		})
+	}
+}
+
+// bun itself reads the recording bunfig of a project setting [test] keys at the top
+// level: the shim and the project's preload both run.
+func TestBunConfigTopLevelTestKeys(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("bun not on PATH")
+	}
+	for name, cfg := range map[string]string{
+		"dotted": "test.preload = [\"./setup.ts\"]\n",
+		"inline": "test = { preload = [\"./setup.ts\"] }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			testutil.Write(t, dir, "bunfig.toml", cfg)
+			testutil.Write(t, dir, "setup.ts", "globalThis.SETUP = 1;\n")
+			testutil.Write(t, dir, "shim.cjs", "globalThis.SHIM = 1;\n")
+			testutil.Write(t, dir, "x.test.ts", "import { test, expect } from 'bun:test';\ntest('x', () => { expect(globalThis.SETUP).toBe(1); expect(globalThis.SHIM).toBe(1); });\n")
+			rc := &RunContext{Suite: &Suite{Suite: config.Suite{Root: "."}}, TraceDir: t.TempDir()}
+			rc.Repo = &gitx.Repo{Root: dir}
+			path, cleanup, err := bunConfigWithShim(rc, filepath.Join(dir, "shim.cjs"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			data, _ := os.ReadFile(path)
+			// From another directory: the project's preload path must be absolute.
+			cmd := exec.Command(bun, "test", "--config="+path, filepath.Join(dir, "x.test.ts"))
+			cmd.Dir = t.TempDir()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("%v\n%s\nbunfig:\n%s", err, out, data)
 			}
 		})
 	}

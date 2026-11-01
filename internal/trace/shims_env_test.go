@@ -92,3 +92,40 @@ console.log('done');
 		t.Errorf("read %v, want %v", got, want)
 	}
 }
+
+// The environment proxy can be cloned like process.env itself (structuredClone,
+// postMessage, workerData, v8.serialize), at the top level and one level down; a clone
+// is a copy, not a read of every variable.
+func TestNodeShimEnvClone(t *testing.T) {
+	const script = `
+const wt = require('worker_threads');
+const v8 = require('v8');
+if (wt.isMainThread) {
+  if (structuredClone(process.env).APP_COPIED !== 'x') throw new Error('structuredClone');
+  if (structuredClone({ env: process.env }).env.APP_COPIED !== 'x') throw new Error('nested');
+  structuredClone([process.env]);
+  const { port1 } = new wt.MessageChannel();
+  port1.postMessage({ env: process.env });
+  port1.close();
+  void process.env.APP_REGION;
+  const w = new wt.Worker(__filename, { workerData: process.env });
+  w.on('message', (m) => {
+    if (m !== 'x') process.exit(2);
+    // A replaced environment is traced too (process.env itself is no v8.serialize value).
+    process.env = structuredClone(process.env);
+    if (v8.deserialize(v8.serialize(process.env)).APP_COPIED !== 'x') throw new Error('v8');
+    console.log('done');
+  });
+} else {
+  wt.parentPort.postMessage(wt.workerData.APP_COPIED);
+}
+`
+	for _, argv := range [][]string{{"node", "--require={node}"}, {"bun", "--preload={node}"}} {
+		t.Run(argv[0], func(t *testing.T) {
+			got := runShim(t, repoDir(t), "t.js", script, argv...)
+			if want := []string{"APP_REGION"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("read %v, want %v", got, want)
+			}
+		})
+	}
+}

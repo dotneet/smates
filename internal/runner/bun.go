@@ -50,10 +50,10 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// and the preload shim (files read). The shim must load before the project's own
 	// preloads (bunfig [test].preload), which may import node:fs first: smates passes a
 	// copy of bunfig.toml with the shim prepended. Child processes get the shim through
-	// BUN_OPTIONS (bun) and NODE_OPTIONS (node).
+	// BUN_OPTIONS (bun, also preloading it into bun test itself: loaded once) and
+	// NODE_OPTIONS (node), both set by NodeEnv.
 	shim := rc.Shims().Node
 	env := trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
-	env = append(env, "BUN_OPTIONS="+strings.TrimSpace(Getenv(suiteEnv(rc.Suite), "BUN_OPTIONS")+" --preload="+shim))
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 		return nil, err
 	}
@@ -176,30 +176,38 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 			break
 		}
 	}
-	// Top-level preload paths move with the file too.
 	top := len(text)
 	if len(secs) > 0 {
 		top = secs[0][0]
 	}
-	head := tomlPreload.ReplaceAllStringFunc(text[:top], func(m string) string {
+	head := text[:top]
+	// Without a [test] table, the top level may set its keys as dotted keys
+	// (test.preload = [...]) or an inline table (test = { preload = [...] }). A table is
+	// defined once in TOML: they move into the [test] table appended.
+	var keys []string
+	if start < 0 {
+		head, keys = bunTestKeys(head)
+	}
+	// Top-level preload paths move with the file too.
+	head = tomlPreload.ReplaceAllStringFunc(head, func(m string) string {
 		return render(list(m[strings.Index(m, "=")+1:]))
 	})
 	// Recording runs one file per process with coverage on: a project coverage
 	// threshold would fail every one of them.
 	const noThreshold = "coverageThreshold = 0"
-	var out string
-	switch {
-	case start < 0:
-		out = head + text[top:] + "\n[test]\n" + render([]string{shim}) + "\n" + noThreshold + "\n"
-	default:
-		section := tomlThreshold.ReplaceAllString(text[start:end], "")
+	testSection := func(section string) string {
+		section = tomlThreshold.ReplaceAllString(section, "")
 		if loc := tomlPreload.FindStringIndex(section); loc != nil {
 			m := section[loc[0]:loc[1]]
-			section = section[:loc[0]] + render(append([]string{shim}, list(m[strings.Index(m, "=")+1:])...)) + "\n" + noThreshold + section[loc[1]:]
-		} else {
-			section = "\n" + render([]string{shim}) + "\n" + noThreshold + section
+			return section[:loc[0]] + render(append([]string{shim}, list(m[strings.Index(m, "=")+1:])...)) + "\n" + noThreshold + section[loc[1]:]
 		}
-		out = head + text[top:start] + section + text[end:]
+		return "\n" + render([]string{shim}) + "\n" + noThreshold + section
+	}
+	var out string
+	if start < 0 {
+		out = head + text[top:] + "\n[test]" + testSection("\n"+strings.Join(keys, "\n")+"\n")
+	} else {
+		out = head + text[top:start] + testSection(text[start:end]) + text[end:]
 	}
 	f, err := os.CreateTemp(rc.TraceDir, "bunfig-*.toml")
 	if err != nil {
@@ -210,6 +218,84 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 		return "", nil, err
 	}
 	return f.Name(), func() { os.Remove(f.Name()) }, nil
+}
+
+// tomlTestKey matches the start of a top-level test.key = ... or test = {...} line.
+var tomlTestKey = regexp.MustCompile(`(?m)^[ \t]*test[ \t]*([.=])[ \t]*`)
+
+// bunTestKeys removes the [test] keys the top level of a bunfig sets with dotted keys
+// (test.preload = [...]) or an inline table (test = { preload = [...] }) from head and
+// returns them as lines of a [test] table (preload = [...]).
+func bunTestKeys(head string) (string, []string) {
+	var keys []string
+	for {
+		m := tomlTestKey.FindStringSubmatchIndex(head)
+		if m == nil {
+			return head, keys
+		}
+		rest := m[1]
+		if head[m[2]] == '.' {
+			// The rest of the line (and of a multi-line value) is key = value.
+			end := tomlScan(head, rest, func(c byte, depth int) bool { return depth == 0 && (c == '\n' || c == '#') })
+			keys = append(keys, strings.TrimSpace(head[rest:end]))
+			head = head[:m[0]] + head[end:]
+			continue
+		}
+		if rest >= len(head) || head[rest] != '{' {
+			// test = <something else>: not a table, nothing bun reads.
+			head = head[:m[0]] + "#" + head[m[0]:]
+			continue
+		}
+		// The inline table's key = value pairs, split at its top-level commas.
+		end := tomlScan(head, rest+1, func(c byte, depth int) bool { return depth < 0 })
+		for i := rest + 1; i < end; {
+			j := tomlScan(head, i, func(c byte, depth int) bool { return depth == 0 && c == ',' })
+			if j > end {
+				j = end
+			}
+			if kv := strings.TrimSpace(head[i:j]); kv != "" {
+				keys = append(keys, kv)
+			}
+			i = j + 1
+		}
+		if end < len(head) {
+			end++ // the closing brace
+		}
+		head = head[:m[0]] + head[end:]
+	}
+}
+
+// tomlScan returns the index of the first byte at or after i for which stop reports
+// true, given the bracket depth relative to i; quoted strings and comments are skipped.
+func tomlScan(s string, i int, stop func(c byte, depth int) bool) int {
+	depth := 0
+	for ; i < len(s); i++ {
+		c := s[i]
+		if stop(c, depth) {
+			return i
+		}
+		switch c {
+		case '"', '\'':
+			for i++; i < len(s) && s[i] != c; i++ {
+				if c == '"' && s[i] == '\\' {
+					i++
+				}
+			}
+		case '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			i-- // the newline is seen next
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+			if stop(c, depth) {
+				return i
+			}
+		}
+	}
+	return len(s)
 }
 
 // readLcov returns repo-relative source files listed in an lcov report.

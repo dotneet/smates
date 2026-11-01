@@ -535,22 +535,25 @@ func TestCollectGo(t *testing.T) {
 func TestEnv(t *testing.T) {
 	sh := &Shims{Dir: "/s", Node: "/s/node.cjs", Python: "/s/py"}
 	t.Setenv("NODE_OPTIONS", "")
+	t.Setenv("BUN_OPTIONS", "")
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTEST_PLUGINS", "")
-	env := NodeEnv("/tr", "/repo", sh, []string{"NODE_OPTIONS=--max-old-space-size=4096"})
-	want := []string{"SMATES_TRACE_DIR=/tr", "SMATES_REPO_ROOT=/repo", "NODE_V8_COVERAGE=" + V8Dir("/tr"), "NODE_OPTIONS=--require=/s/node.cjs --max-old-space-size=4096"}
+	env := NodeEnv("/tr", "/repo", sh, []string{"NODE_OPTIONS=--max-old-space-size=4096", "BUN_OPTIONS=--smol"})
+	want := []string{"SMATES_TRACE_DIR=/tr", "SMATES_REPO_ROOT=/repo", "NODE_V8_COVERAGE=" + V8Dir("/tr"),
+		"NODE_OPTIONS=--require=/s/node.cjs --max-old-space-size=4096", "BUN_OPTIONS=--smol --preload=/s/node.cjs"}
 	if !reflect.DeepEqual(env, want) {
 		t.Errorf("NodeEnv %v", env)
 	}
 	// Already present: not added twice.
-	env = NodeEnv("/tr", "/repo", sh, []string{"NODE_OPTIONS=--require=/s/node.cjs"})
-	if env[3] != "NODE_OPTIONS=--require=/s/node.cjs" {
-		t.Errorf("%v", env[3])
+	env = NodeEnv("/tr", "/repo", sh, []string{"NODE_OPTIONS=--require=/s/node.cjs", "BUN_OPTIONS=--preload=/s/node.cjs"})
+	if env[3] != "NODE_OPTIONS=--require=/s/node.cjs" || env[4] != "BUN_OPTIONS=--preload=/s/node.cjs" {
+		t.Errorf("%v", env[3:])
 	}
-	// Paths with spaces are quoted for NODE_OPTIONS.
+	// Paths with spaces are quoted for NODE_OPTIONS, and as a whole argument for
+	// BUN_OPTIONS (which has no escapes).
 	env = NodeEnv("/tr", "/repo", &Shims{Node: "/my dir/node.cjs"}, nil)
-	if env[3] != `NODE_OPTIONS=--require="/my dir/node.cjs"` {
-		t.Errorf("%v", env[3])
+	if env[3] != `NODE_OPTIONS=--require="/my dir/node.cjs"` || env[4] != `BUN_OPTIONS="--preload=/my dir/node.cjs"` {
+		t.Errorf("%v", env[3:])
 	}
 	// The process environment is the fallback.
 	t.Setenv("NODE_OPTIONS", "--inspect")

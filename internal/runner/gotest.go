@@ -374,7 +374,7 @@ func repoDir(root, dir string) (string, bool) {
 	return "", false
 }
 
-// childTraceEnv is the environment tracing the Node and Python processes a Go test
+// childTraceEnv is the environment tracing the Node, Bun and Python processes a Go test
 // starts, writing their traces under dir.
 func childTraceEnv(rc *RunContext, dir string) []string {
 	base := suiteEnv(rc.Suite)
