@@ -1,6 +1,9 @@
 package js
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
 // refKind says how a reference found in source is resolved.
 type refKind uint8
@@ -134,6 +137,8 @@ func (p *parser) text(i int) string {
 
 // appendArg appends the specifier at token i, if it is a literal, a template literal
 // with a static prefix, or a concatenation starting with a literal ("./x/" + name).
+// A leading __dirname or import.meta.dirname counts as the static prefix "."
+// (`${__dirname}/x/${n}.js`, __dirname + "/x/" + n).
 func (p *parser) appendArg(refs []ref, i int) []ref {
 	t := p.at(i)
 	switch {
@@ -142,13 +147,79 @@ func (p *parser) appendArg(refs []ref, i int) []ref {
 	case p.literal(i):
 		return append(refs, ref{kind: refModule, spec: p.text(i)})
 	case t.kind == tTemplate:
+		if r, ok := p.dirnameTemplate(i); ok {
+			return append(refs, r)
+		}
 		return append(refs, ref{
 			kind:   refTemplate,
 			spec:   unescape(p.src[t.s:t.e]),
 			suffix: unescape(p.src[t.ts:t.te]),
 		})
+	case p.dirname(i) > i && p.punct(p.dirname(i), '+') && p.literal(p.dirname(i)+1):
+		j := p.dirname(i) + 1
+		if s := p.text(j); strings.HasPrefix(s, "/") {
+			if p.punct(j+1, '+') {
+				return append(refs, ref{kind: refTemplate, spec: "." + s, suffix: p.concatSuffix(j + 2)})
+			}
+			return append(refs, ref{kind: refModule, spec: "." + s})
+		}
 	}
 	return refs
+}
+
+// dirname returns the index after a __dirname or import.meta.dirname expression at
+// token i, or i if there is none.
+func (p *parser) dirname(i int) int {
+	switch {
+	case p.ident(i, "__dirname") && !p.punct(i-1, '.'):
+		return i + 1
+	case p.ident(i, "import") && p.punct(i+1, '.') && p.ident(i+2, "meta") && p.punct(i+3, '.') && p.ident(i+4, "dirname"):
+		return i + 5
+	}
+	return i
+}
+
+// dirnameTemplate returns the reference of the template literal at token i if it
+// starts with a dirname substitution followed by "/": the text up to the next
+// substitution (or the end) is then its static prefix, relative to the file.
+func (p *parser) dirnameTemplate(i int) (ref, bool) {
+	t := p.at(i)
+	k := p.dirname(i + 1)
+	if !t.expr || t.s != t.e || k == i+1 {
+		return ref{}, false
+	}
+	// The lexer consumes the '}' closing the substitution and the text after it, so
+	// the segment is read from the source.
+	src := p.src
+	j := p.at(k - 1).e
+	for j < len(src) && isSpace(src[j]) {
+		j++
+	}
+	if j >= len(src) || src[j] != '}' {
+		return ref{}, false
+	}
+	start := j + 1
+	for j = start; j < len(src); j++ {
+		var r ref
+		switch {
+		case src[j] == '\\':
+			j++
+			continue
+		case src[j] == '`':
+			r = ref{kind: refModule}
+		case src[j] == '$' && j+1 < len(src) && src[j+1] == '{':
+			r = ref{kind: refTemplate, suffix: unescape(src[t.ts:t.te])}
+		default:
+			continue
+		}
+		seg := unescape(src[start:j])
+		if !strings.HasPrefix(seg, "/") {
+			return ref{}, false
+		}
+		r.spec = "." + seg
+		return r, true
+	}
+	return ref{}, false
 }
 
 // concatSuffix returns the trailing literal of a concatenation whose remaining operands
