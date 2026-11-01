@@ -261,8 +261,15 @@ agent:
 	return b.String()
 }
 
+// yamlStr renders s as a YAML scalar for one line after "key: " or "- ". A string with
+// a line break is double-quoted ("a\nb"): the block scalar yaml.Marshal picks for it
+// spans lines and would not parse spliced into a line.
 func yamlStr(s string) string {
-	out, err := yaml.Marshal(s)
+	var v any = s
+	if strings.ContainsAny(s, "\n\r") {
+		v = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s, Style: yaml.DoubleQuotedStyle}
+	}
+	out, err := yaml.Marshal(v)
 	if err != nil {
 		return fmt.Sprintf("%q", s)
 	}
@@ -814,8 +821,11 @@ func pushState(repo *gitx.Repo, path, remote, ref string, log io.Writer) error {
 
 // pullState fetches the first of refs that holds a state and saves it at path, in the
 // format path's name asks for (gzip for .gz). A pushed blob is decoded whatever its
-// encoding: older versions pushed a plain .json state under the same name.
+// encoding: older versions pushed a plain .json state under the same name. A state this
+// version cannot read (one a newer smates pushed) is skipped for the next ref, the
+// default branch's: it is an error only when no ref has a state to use.
 func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Writer) error {
+	var unreadable error
 	for _, ref := range refs {
 		if _, err := repo.Git("fetch", "--quiet", "--no-tags", remote, "+"+ref+":"+ref); err != nil {
 			continue
@@ -828,13 +838,20 @@ func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Write
 		}
 		st, err := state.Read(bytes.NewReader(data), isGzip(data))
 		if err != nil {
-			return fmt.Errorf("state on %s %s: %w", remote, ref, err)
+			fmt.Fprintf(log, "smates: skipping the state on %s %s: %v\n", remote, ref, err)
+			if unreadable == nil {
+				unreadable = fmt.Errorf("state on %s %s: %w", remote, ref, err)
+			}
+			continue
 		}
 		if err := st.Save(path); err != nil {
 			return err
 		}
 		fmt.Fprintf(log, "smates: pulled state from %s %s\n", remote, ref)
 		return nil
+	}
+	if unreadable != nil {
+		return unreadable
 	}
 	fmt.Fprintf(log, "smates: no remote state found (%s); the next run will start fresh\n", strings.Join(refs, ", "))
 	return nil

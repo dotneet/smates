@@ -71,6 +71,7 @@ func (c *commandBackend) Decide(ctx context.Context, req *Request) (*Decision, e
 	stdout := &limitedBuffer{max: maxCommandOutput}
 	stderr := &limitedBuffer{max: 64 << 10, keepTail: true}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
+	killGroupOnCancel(cmd)
 	cmd.WaitDelay = 2 * time.Second // do not hang on grandchildren holding the pipes
 
 	logf(log, "running %s", command)

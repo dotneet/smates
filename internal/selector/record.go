@@ -383,8 +383,10 @@ func (h *Hasher) snapEntries(key string) (names []string, ok bool) {
 // (with granularity: func, every test function of a Go package), and on every fresh
 // checkout where a test creates it. A directory the snapshot has no file below (one git
 // ignores entirely: generated fixtures, build output) is listed from disk, with a root,
-// except vendored entries and those the ignore globs match; it hashes as "" when it
-// does not exist. Like the content of files outside the snapshot, it is listed when
+// except vendored entries; it hashes as "" when it does not exist. The ignore globs do
+// not apply: listing the directory is the read, so an added entry they match (a
+// markdown fixture under DefaultIgnore's **/*.md) is a change to the test that listed
+// it. Like the content of files outside the snapshot, it is listed when
 // first hashed, which for a recording is after the run: a test that adds a file to the
 // directory it lists (a timestamped report) then finds the listing it left.
 func (h *Hasher) listing(key string) string {
@@ -398,7 +400,7 @@ func (h *Hasher) listing(key string) string {
 			ok = true
 			for _, e := range entries {
 				n := e.Name()
-				if p := path.Join(dir, n); pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
+				if pathutil.IsVendored(path.Join(dir, n)) {
 					continue
 				}
 				if e.IsDir() {
@@ -485,8 +487,8 @@ func (h *Hasher) tree(dir string) string {
 var maxDiskTree = 20000
 
 // diskTree hashes a directory outside the snapshot from disk: the paths and sizes of
-// the files below it, without vendored ones and those the ignore globs match. Contents
-// are not read: such trees are build output (build/, target/, dist/), gigabytes to hash
+// the files below it, without vendored ones (the ignore globs do not apply, as for
+// listing: the command ran there and may read anything below). Contents are not read: such trees are build output (build/, target/, dist/), gigabytes to hash
 // on every selection, and a build that is not reproducible would rerun the tests
 // forever. A tree of more than maxDiskTree entries hashes as a constant (it stays the
 // same while the tree is that large: its changes select nothing).
@@ -509,7 +511,7 @@ func (h *Hasher) diskTree(dir string) string {
 			return nil
 		}
 		p := filepath.ToSlash(rel)
-		if pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
+		if pathutil.IsVendored(p) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

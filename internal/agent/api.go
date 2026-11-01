@@ -309,13 +309,15 @@ func (b *apiBackend) Decide(ctx context.Context, req *Request) (*Decision, error
 			if (len(d.Dropped) > 0 || err != nil) && !corrected && turnNo < maxTurns {
 				corrected = true
 				msg := "These entries do not match any test and were not accepted:\n- " + strings.Join(d.Dropped, "\n- ")
+				problem := fmt.Sprintf("named %d unknown tests", len(d.Dropped))
 				if len(d.Dropped) == 0 {
 					msg = "The decision is \"tests\" but no test is listed."
+					problem = "listed no tests"
 				}
 				msg += "\nFind the exact IDs with search_tests (or use test \"*\" for a whole suite), then call submit_selection again with the complete selection."
 				results[i], done[i] = toolOutcome{id: u.ID, content: msg, isError: true}, true
 				submitted = true
-				logf(log, "turn %d: submission named %d unknown tests; asking for a correction", turnNo, len(d.Dropped))
+				logf(log, "turn %d: submission %s; asking for a correction", turnNo, problem)
 				continue
 			}
 			if err != nil {

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -88,7 +89,10 @@ func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectO
 	if policy == config.OrphansAgent && !opt.noAgent && p.cfg.Agent.Enabled != config.AgentNever {
 		ok, why := agent.Available(p.cfg.Agent)
 		if ok {
-			dec, cached, err := p.runAgent(ctx, res, remaining, base)
+			// A sharded run only reuses a cached decision: each shard asking on its
+			// own may get a different answer, and a test only one shard's agent picked
+			// would run nowhere when another shard owns it.
+			dec, cached, err := p.runAgent(ctx, res, remaining, base, opt.sharded)
 			if err == nil {
 				sel.agentDec, sel.agentCache = dec, cached
 				applyDecision(res, dec)
@@ -98,7 +102,11 @@ func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectO
 				res.HandleOrphans(remaining, selector.OrphanAgent)
 				return
 			}
-			sel.agentNote = "agent failed (" + err.Error() + "); running affected suites in full"
+			if errors.Is(err, errNoCachedDecision) {
+				sel.agentNote = "sharded run: the agent is not asked (shards could get different answers) and no unsharded run cached its decision; running affected suites in full"
+			} else {
+				sel.agentNote = "agent failed (" + err.Error() + "); running affected suites in full"
+			}
 		} else {
 			sel.agentNote = "agent unavailable (" + why + "); running affected suites in full"
 		}
@@ -378,7 +386,14 @@ func applyDecision(res *selector.Result, dec *agent.Decision) {
 	res.Apply(dec.Add)
 }
 
-func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []string, base string) (*agent.Decision, bool, error) {
+// errNoCachedDecision: runAgent was asked for a cached decision only, and there is
+// none.
+var errNoCachedDecision = errors.New("no cached agent decision")
+
+// runAgent asks the agent about the orphans, or reuses its cached answer to the same
+// question (cached). With cachedOnly it never asks: without a cached answer it returns
+// errNoCachedDecision.
+func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []string, base string, cachedOnly bool) (*agent.Decision, bool, error) {
 	req := &agent.Request{Repo: p.repo, Config: p.cfg.Agent, Selection: res, Log: io.Discard}
 	if p.verbose {
 		req.Log = p.log
@@ -394,6 +409,9 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 			p.logf("agent: reusing cached decision for %d orphan file(s)", len(orphans))
 			return &dec, true, nil
 		}
+	}
+	if cachedOnly {
+		return nil, false, errNoCachedDecision
 	}
 	p.logf("agent: asking %s about %d unattributed change(s): %s", agent.Describe(p.cfg.Agent), len(orphans), strings.Join(limit(orphans, 5), ", "))
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.Agent.Timeout)

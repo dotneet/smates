@@ -147,7 +147,9 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 	if err != nil && !os.IsNotExist(err) {
 		return "", nil, err
 	}
-	text := string(data)
+	// A byte order mark is no TOML statement: left in front, it would hide a [test]
+	// header or a test.preload key on the first line (bun accepts the file without it).
+	text := withoutCoverageThresholdTables(strings.TrimPrefix(string(data), "\ufeff"))
 	abs := func(p string) string {
 		if filepath.IsAbs(p) || !strings.HasPrefix(p, ".") {
 			return p // absolute, or a package specifier
@@ -224,7 +226,9 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 		items := []string{shim}
 		last := 0
 		for _, s := range tomlStatements(table) {
-			if s.header || len(s.key) != 1 || (s.key[0] != "preload" && s.key[0] != "coverageThreshold") {
+			// coverageThreshold also as dotted keys (coverageThreshold.lines = 0.9): any of
+			// them would redefine the coverageThreshold = 0 set here.
+			if s.header || s.key == nil || !((len(s.key) == 1 && s.key[0] == "preload") || s.key[0] == "coverageThreshold") {
 				continue
 			}
 			if s.key[0] == "preload" {
@@ -251,6 +255,30 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 		return "", nil, err
 	}
 	return f.Name(), func() { os.Remove(f.Name()) }, nil
+}
+
+// withoutCoverageThresholdTables removes [test.coverageThreshold] tables (their header
+// and body, up to the next header) from a TOML document: the recording bunfig sets
+// test.coverageThreshold = 0, which a table of that name would redefine.
+func withoutCoverageThresholdTables(text string) string {
+	var b strings.Builder
+	last, skip := 0, false
+	for _, s := range tomlStatements(text) {
+		if !s.header {
+			continue
+		}
+		drop := len(s.key) >= 2 && s.key[0] == "test" && s.key[1] == "coverageThreshold"
+		if drop && !skip {
+			b.WriteString(text[last:s.start])
+		} else if !drop && skip {
+			last = s.start
+		}
+		skip = drop
+	}
+	if !skip {
+		b.WriteString(text[last:])
+	}
+	return b.String()
 }
 
 // tomlStmt is a statement of a TOML document: a table header or a key = value pair.
@@ -385,9 +413,21 @@ func tomlStrings(value string) []string {
 // tomlStringEnd returns the index just past the string starting at s[i] (a quote).
 func tomlStringEnd(s string, i int) int {
 	q := s[i]
-	if strings.HasPrefix(s[i:], strings.Repeat(string(q), 3)) {
-		if k := strings.Index(s[i+3:], strings.Repeat(string(q), 3)); k >= 0 {
-			return i + 3 + k + 3
+	if delim := strings.Repeat(string(q), 3); strings.HasPrefix(s[i:], delim) {
+		// A multi-line string: basic ones (""") escape quotes with a backslash, and
+		// either kind may end in one or two quotes of its own ("""a""""" holds a"").
+		for j := i + 3; j < len(s); j++ {
+			if s[j] == '\\' && q == '"' {
+				j++
+				continue
+			}
+			if strings.HasPrefix(s[j:], delim) {
+				j += 3
+				for k := 0; k < 2 && j < len(s) && s[j] == q; k++ {
+					j++
+				}
+				return j
+			}
 		}
 		return len(s)
 	}

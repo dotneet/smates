@@ -125,6 +125,12 @@ func TestDetectRegressions(t *testing.T) {
 			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --test-reporter spec --test", tests: []string{"test/a.test.js"}},
 		},
 		{
+			// Coverage thresholds take their value as the next word too.
+			name:  "node --test-coverage-lines 80 --test",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --test-coverage-lines 80 --test-coverage-branches 70 --test-coverage-functions 60 --test-random-seed 3 --experimental-test-coverage --test"}}`, "test/a.test.js": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --test-coverage-lines 80 --test-coverage-branches 70 --test-coverage-functions 60 --test-random-seed 3 --experimental-test-coverage --test", tests: []string{"test/a.test.js"}},
+		},
+		{
 			name:  "plain node --test",
 			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --test"}}`, "test/a.test.js": ""},
 			want:  want{suites: []got{{"node", ".", "node"}}, tests: []string{"test/a.test.js"}},
