@@ -123,7 +123,7 @@ the affected suites in full); `--agent` keeps it, and `smates run` flags can fol
   snippet for `.husky/pre-push` or `lefthook.yml` instead;
 - pulls the shared state (`smates state pull`) when there is none locally, and merges in
   the remote one when the local state is older than a week or was recorded on a commit
-  outside the current history;
+  outside the current history (fetching at most once an hour);
 - is skipped with `git push --no-verify` or `SMATES_SKIP_HOOK=1`, and lets the push
   through with a warning when `smates` is not on `PATH`.
 

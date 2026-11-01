@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dotneet/smates/internal/state"
+	"gopkg.in/yaml.v3"
 )
 
 func hookCmd(t *testing.T, dir string, args ...string) (int, string, string) {
@@ -145,8 +147,25 @@ func TestHookManagers(t *testing.T) {
 	g = newGitRepo(t)
 	os.WriteFile(filepath.Join(g.repo.Root, "lefthook.yml"), []byte("pre-commit:\n"), 0o644)
 	code, _, errs = hookCmd(t, g.dir, "install")
-	if code == 0 || !strings.Contains(errs, "lefthook") || !strings.Contains(errs, "use_stdin: true") || !strings.Contains(errs, "run: if command -v smates") {
+	if code == 0 || !strings.Contains(errs, "lefthook") {
 		t.Errorf("lefthook: %d %s", code, errs)
+	}
+	// The printed entry is valid YAML that lefthook can load as it is.
+	var cfg map[string]struct {
+		Commands map[string]struct {
+			Run      string `yaml:"run"`
+			UseStdin bool   `yaml:"use_stdin"`
+		} `yaml:"commands"`
+	}
+	if err := yaml.Unmarshal([]byte(lefthookSnippet("pre-push", []string{"--no-agent"})), &cfg); err != nil {
+		t.Fatalf("lefthook snippet: %v", err)
+	}
+	cmd := cfg["pre-push"].Commands["smates"]
+	if !cmd.UseStdin || !strings.Contains(cmd.Run, "smates hook run pre-push -- --no-agent") || !strings.Contains(cmd.Run, "not found on PATH") {
+		t.Errorf("lefthook entry: %+v", cmd)
+	}
+	if !strings.Contains(errs, lefthookSnippet("pre-push", []string{"--no-agent"})) {
+		t.Errorf("lefthook output:\n%s", errs)
 	}
 	if _, err := os.Stat(filepath.Join(g.repo.Root, ".git", "hooks", "pre-push")); !os.IsNotExist(err) {
 		t.Error("installed despite lefthook")
@@ -212,7 +231,8 @@ func TestHookRunSkip(t *testing.T) {
 func TestReadPushUpdates(t *testing.T) {
 	in := "refs/heads/main 1111 refs/heads/main 2222\nrefs/heads/x 3333 refs/heads/x 0000\nbad line\n"
 	got := readPushUpdates(strings.NewReader(in))
-	if strings.Join(got, ",") != "1111,3333" {
+	want := []pushUpdate{{"refs/heads/main", "1111"}, {"refs/heads/x", "3333"}}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("readPushUpdates = %v", got)
 	}
 }
@@ -279,9 +299,19 @@ func TestRefreshHookState(t *testing.T) {
 		t.Error("fresh local state was merged with the remote one")
 	}
 
-	// A stale one is merged with the newer remote state, keeping local entries.
+	// A stale one is merged with the newer remote state, keeping local entries, but
+	// not within hookPullEvery of the previous fetch.
 	local.Created = shared.Created.Add(-30 * 24 * time.Hour)
 	if err := local.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	refreshHookState(g.repo, f, io.Discard)
+	if st, _ := state.Load(path); st.Suites["s"].Tests["remote_test.go"] != nil {
+		t.Error("fetched again within hookPullEvery")
+	}
+	stamp := filepath.Join(filepath.Dir(path), ".state.json.gz.pulled")
+	old := time.Now().Add(-2 * hookPullEvery)
+	if err := os.Chtimes(stamp, old, old); err != nil {
 		t.Fatal(err)
 	}
 	refreshHookState(g.repo, f, io.Discard)

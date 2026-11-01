@@ -78,7 +78,7 @@ smates hook install  # 任意: git push の前に影響するテストを実行
   `.husky/pre-push` や `lefthook.yml` に追加する設定例を表示します。
 - ローカルに state がなければ共有 state を取得し(`smates state pull`)、ローカルの state が
   1 週間より古いか、現在の履歴にないコミットで記録されたものなら、リモートの state を
-  マージします。
+  マージします(fetch は 1 時間に 1 回まで)。
 - `git push --no-verify` または `SMATES_SKIP_HOOK=1` でスキップできます。`smates` が `PATH`
   にない環境では警告を出して push を通します。
 

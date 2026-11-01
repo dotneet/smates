@@ -29,6 +29,9 @@ const (
 	hookEnd   = "# <<< smates hook <<<"
 	// hookStaleAfter is the age after which the hook refreshes the state from the remote.
 	hookStaleAfter = 7 * 24 * time.Hour
+	// hookPullEvery limits how often the hook fetches the state, so a remote with nothing
+	// (newer) to pull costs at most one fetch per interval.
+	hookPullEvery = time.Hour
 )
 
 var hookKinds = []string{"pre-push", "pre-commit"}
@@ -243,10 +246,16 @@ func printHookManager(h *hookTarget, runArgs []string, w io.Writer) {
 		fmt.Fprintf(w, "smates: this repository uses husky. Add this to .husky/%s:\n\n%s\n\n", h.kind,
 			indent(hookCommand(h.kind, runArgs, "\n", "  ", ""), "  "))
 	case "lefthook":
-		fmt.Fprintf(w, "smates: this repository uses lefthook. Add this to lefthook.yml and run `lefthook install`:\n\n"+
-			"  %s:\n    commands:\n      smates:\n        run: %s\n        use_stdin: true\n\n",
-			h.kind, hookCommand(h.kind, runArgs, "; ", "", ""))
+		fmt.Fprintf(w, "smates: this repository uses lefthook. Add this to lefthook.yml and run `lefthook install`:\n\n%s\n",
+			lefthookSnippet(h.kind, runArgs))
 	}
+}
+
+// lefthookSnippet is the lefthook.yml entry that runs the hook (a block scalar: the
+// command contains ": ", which a plain YAML scalar cannot).
+func lefthookSnippet(kind string, runArgs []string) string {
+	return "  " + kind + ":\n    commands:\n      smates:\n        run: |\n" +
+		indent(hookCommand(kind, runArgs, "\n", "  ", ""), "          ") + "\n        use_stdin: true\n"
 }
 
 func indent(s, prefix string) string {
@@ -367,10 +376,17 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	if kind == "pre-push" {
 		updates := readPushUpdates(stdin)
-		if len(updates) > 0 && !slices.ContainsFunc(updates, func(sha string) bool { return strings.Trim(sha, "0") != "" }) {
+		if len(updates) > 0 && !slices.ContainsFunc(updates, func(u pushUpdate) bool { return strings.Trim(u.sha, "0") != "" }) {
 			return 0, nil // only deleting remote refs
 		}
-		if head := repo.Head(); len(updates) > 0 && head != "" && !slices.Contains(updates, head) {
+		// Only branches: a tag's SHA is the tag object for annotated tags.
+		var branches []string
+		for _, u := range updates {
+			if strings.HasPrefix(u.ref, "refs/heads/") && strings.Trim(u.sha, "0") != "" {
+				branches = append(branches, u.sha)
+			}
+		}
+		if head := repo.Head(); len(branches) > 0 && head != "" && !slices.Contains(branches, head) {
 			fmt.Fprintf(stderr, "smates: warning: the pushed commits are not checked out; testing the working tree at HEAD instead\n")
 		}
 	}
@@ -399,9 +415,12 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	return code, err
 }
 
-// readPushUpdates returns the local commit of every ref git is about to push, read
-// from the pre-push hook's standard input ("<local ref> <local sha> <remote ref> <remote sha>").
-func readPushUpdates(stdin io.Reader) []string {
+// pushUpdate is a local ref git is about to push and its object (all zeros: a deletion).
+type pushUpdate struct{ ref, sha string }
+
+// readPushUpdates reads the pre-push hook's standard input
+// ("<local ref> <local sha> <remote ref> <remote sha>" per line).
+func readPushUpdates(stdin io.Reader) []pushUpdate {
 	if f, ok := stdin.(*os.File); ok {
 		if fi, err := f.Stat(); err != nil || fi.Mode()&os.ModeCharDevice != 0 {
 			return nil // a terminal: not run by git
@@ -410,14 +429,14 @@ func readPushUpdates(stdin io.Reader) []string {
 	if stdin == nil {
 		return nil
 	}
-	var shas []string
+	var updates []pushUpdate
 	sc := bufio.NewScanner(stdin)
 	for sc.Scan() {
 		if fields := strings.Fields(sc.Text()); len(fields) == 4 {
-			shas = append(shas, fields[1])
+			updates = append(updates, pushUpdate{ref: fields[0], sha: fields[1]})
 		}
 	}
-	return shas
+	return updates
 }
 
 // uncommitted counts the files whose working-tree content differs from what the hook's
@@ -439,7 +458,8 @@ func uncommitted(repo *gitx.Repo, kind string) int {
 
 // refreshHookState pulls the shared state (`smates state push`) when there is none
 // locally, and merges it in when the local one is stale: older than hookStaleAfter or
-// recorded on a commit outside HEAD's history (e.g. before a rebase).
+// recorded on a commit outside HEAD's history (e.g. before a rebase). It fetches at
+// most once per hookPullEvery.
 func refreshHookState(repo *gitx.Repo, f *runFlags, log io.Writer) {
 	path := f.state
 	if path == "" {
@@ -450,12 +470,21 @@ func refreshHookState(repo *gitx.Repo, f *runFlags, log io.Writer) {
 		path = filepath.Join(repo.Root, filepath.FromSlash(cfg.State))
 	}
 	st, err := state.Load(path)
-	refs := stateRefs(repo)
-	if err != nil || st.Empty() {
-		_ = pullState(repo, path, "origin", refs, log)
+	missing := err != nil || st.Empty()
+	if !missing && !hookStateStale(repo, st) {
 		return
 	}
-	if !hookStateStale(repo, st) {
+	// The attempt is recorded whatever its outcome, so pushes in between do not fetch.
+	stamp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".pulled")
+	if fi, err := os.Stat(stamp); err == nil && time.Since(fi.ModTime()) < hookPullEvery {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err == nil {
+		_ = os.WriteFile(stamp, nil, 0o644)
+	}
+	refs := stateRefs(repo)
+	if missing {
+		_ = pullState(repo, path, "origin", refs, log)
 		return
 	}
 	// Same extension: state.Load picks the format from it.
