@@ -126,6 +126,9 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	if f.shadow && f.failFast {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
 	}
+	if f.dryRun && (f.report != "" || f.markdown != "" || f.summary != "") {
+		return nil, usageError{fmt.Errorf("--dry-run runs nothing and cannot be combined with --report, --markdown or --summary (use `smates select --format json|markdown` for the selection)")}
+	}
 	return &f, nil
 }
 
@@ -222,6 +225,9 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	}
 	c.hasher.PinBefore(p.state, ran, start)
 	for i, b := range batches {
+		if !c.stopped && ctx.Err() != nil {
+			c.interrupted, c.stopped = true, true // Ctrl-C between batches
+		}
 		if c.stopped {
 			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
 			continue
@@ -236,6 +242,10 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 				p.logf("--fail-fast: %s failed; starting no further test batch", b.sr.Name)
 			}
 		}
+	}
+	if c.interrupted {
+		// What ran is recorded and reported; the run itself failed.
+		c.worst = max(c.worst, ExitFailed)
 	}
 	hooks.onRan(c.started)
 	c.failures.wait()
@@ -264,11 +274,24 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			return c.worst, fmt.Errorf("writing report: %w", err)
 		}
 	}
+	if c.interrupted {
+		for _, err := range []error{c.envErr, saveErr} {
+			if err != nil {
+				p.logf("%v", err)
+			}
+		}
+		return c.worst, errors.New("interrupted")
+	}
 	// A batch whose tests never started (notStarted) makes the run an environment
-	// error, reported after the usual failure handling and summary.
+	// error, reported after the usual failure handling and summary; when tests of
+	// another batch failed, they matter more (exit 1, the error as a note).
 	if c.envErr != nil {
 		if saveErr != nil {
 			p.logf("%v", saveErr)
+		}
+		if c.testsFailed {
+			p.logf("%v", c.envErr)
+			return c.worst, nil
 		}
 		return c.worst, c.envErr
 	}
@@ -312,15 +335,20 @@ type cycle struct {
 	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
 	// failedBatches are the batches that exited non-zero.
 	failedBatches []failedBatch
-	// envErr is set when a batch's tests never started (notStarted).
-	envErr   error
-	started  map[string][]string     // suite -> units started
-	notRun   map[string][]string     // --fail-fast: suite -> units not started after a failure
-	stopped  bool                    // --fail-fast stopped the run
-	results  map[string]*suiteResult // suite -> outcomes to record
-	escapes  []string                // shadow: failing tests the selection would have skipped
-	possible []string                // shadow: skipped tests failed only by the run's exit code
-	flakes   []flakeReport
+	// envErr is set when a batch's tests never started (notStarted); testsFailed when
+	// another batch exited non-zero.
+	envErr      error
+	testsFailed bool
+	started     map[string][]string     // suite -> units started
+	notRun      map[string][]string     // --fail-fast, interrupt: suite -> units not started (or cut short)
+	stopped     bool                    // --fail-fast (or an interrupt) stopped the run
+	results     map[string]*suiteResult // suite -> outcomes to record
+	escapes     []string                // shadow: failing tests the selection would have skipped
+	possible    []string                // shadow: skipped tests failed only by the run's exit code
+	flakes      []flakeReport
+	// interrupted: the run was cancelled (Ctrl-C); the batch it cut short counts as
+	// not run.
+	interrupted bool
 }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
@@ -386,7 +414,7 @@ func (c *cycle) printCommands(batches []*batch) {
 		if cmd, ok := b.sr.Suite.Adapter.(runner.Commander); ok {
 			if argvs, err := cmd.Commands(rc); err == nil && argvs != nil {
 				for _, argv := range argvs {
-					fmt.Fprintf(c.stdout, "(cd %s && %s)\n", b.sr.Suite.Root, strings.Join(argv, " "))
+					fmt.Fprintf(c.stdout, "(cd %s && %s)\n", shellJoin([]string{b.sr.Suite.Root}), shellJoin(argv))
 				}
 				continue
 			}
@@ -395,7 +423,7 @@ func (c *cycle) printCommands(batches []*batch) {
 		if rc.All {
 			argv, _ = rc.CommandLine(nil, nil)
 		}
-		fmt.Fprintf(c.stdout, "(cd %s && %s)\n", b.sr.Suite.Root, strings.Join(argv, " "))
+		fmt.Fprintf(c.stdout, "(cd %s && %s)\n", shellJoin([]string{b.sr.Suite.Root}), shellJoin(argv))
 	}
 }
 
@@ -447,6 +475,10 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	stop := c.startHeartbeat(sr.Name, countUnits(c.started), c.total, c.start)
 	r, err := sr.Suite.Adapter.Run(ctx, rc)
 	stop()
+	if ctx.Err() != nil {
+		c.interrupt(sr, b, buf)
+		return 0, nil
+	}
 	if err != nil {
 		if buf != nil {
 			c.printFailedBatch(sr, b, buf, nil)
@@ -455,7 +487,12 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	}
 	var retried map[string]*runner.Observation
 	if c.record && len(c.f.extra) == 0 {
-		if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
+		r, retried, err = retryFlaky(ctx, p, rc, sr, r)
+		if ctx.Err() != nil {
+			c.interrupt(sr, b, buf)
+			return 0, nil
+		}
+		if err != nil {
 			if buf != nil {
 				c.printFailedBatch(sr, b, buf, nil)
 			}
@@ -465,7 +502,11 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
 	// executable or not installed: when tests that report results reported none, they
 	// never ran. The batch is still handled as a failure below.
-	if c.envErr == nil && notStarted(sr.Suite.Runner, c.record, r) {
+	if !notStarted(sr.Suite.Runner, c.record, r) {
+		// Any other failing batch failed tests, even when no unit is known to have
+		// failed (TestMain exiting 1, a teardown error, a coverage threshold).
+		c.testsFailed = c.testsFailed || r.ExitCode != 0
+	} else if c.envErr == nil {
 		c.envErr = envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
@@ -517,6 +558,17 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		}
 	}
 	return r.ExitCode, nil
+}
+
+// interrupt handles a batch cut short by cancellation (Ctrl-C): its outcomes are
+// incomplete (a killed runner fails its tests or reports none), so none is recorded
+// and its units count as not run, like those of the batches after it.
+func (c *cycle) interrupt(sr *selector.Suite, b *batch, buf *outputBuffer) {
+	if buf != nil {
+		c.printFailedBatch(sr, b, buf, nil)
+	}
+	c.interrupted, c.stopped = true, true
+	c.notRun[sr.Name] = append(c.notRun[sr.Name], b.units...)
 }
 
 // recordSuites writes the collected outcomes into the state. Units that did not run
@@ -647,9 +699,13 @@ func (c *cycle) saveState() error {
 		// Orphans were handled by this run (by name, by the agent or by running the
 		// affected suites): remember their current content so the next run on this
 		// branch does not ask again. Other files stay as recorded; per-test entries
-		// track them.
+		// track them. Orphans the policy was not applied to (a watch cycle's older
+		// changes, --only) stay unseen.
 		own := selector.NewOwnership(p.suites, p.others)
 		for _, o := range res.Orphans {
+			if _, handled := res.OrphanHandling[o]; !handled {
+				continue
+			}
 			if len(p.others) > 0 {
 				p.recordSeen(own, o, p.snap[o])
 			} else if h, ok := p.snap[o]; ok {
@@ -731,7 +787,9 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 		if len(c.possible) > 0 {
 			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
-	} else if n := countUnits(c.notRun); n > 0 {
+	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.worst, n)
+	} else if n > 0 {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; --fail-fast left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, n)
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.worst)
@@ -782,8 +840,10 @@ func (c *cycle) writeReport() error {
 		Flaky    []flakeReport                `json:"flaky"`
 		Failures []*hints.Hint                `json:"failure_hints"`
 		FailFast bool                         `json:"fail_fast"`
-		NotRun   map[string][]string          `json:"not_run"` // --fail-fast: selected units not started
-	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun}
+		NotRun   map[string][]string          `json:"not_run"` // --fail-fast, interrupt: selected units not run
+		// Interrupted: the run was cancelled (Ctrl-C); what did not finish is in not_run.
+		Interrupted bool `json:"interrupted"`
+	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}
