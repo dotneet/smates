@@ -629,8 +629,8 @@ smates: failure hints for 1 failing test unit(s):
 - Shown in the run log, the step summary (`--summary` / `$GITHUB_STEP_SUMMARY`) and the
   JSON report (`failure_hints`, with the runner's failure output when it reports one:
   vitest, jest, pytest, `go test`, JUnit). Runs with `--no-record` have them too: those
-  runners report per-file status without tracing; with the others a failing run marks
-  every test it ran as possibly failed.
+  runners report per-file status without tracing (other runners give no per-test
+  results without recording).
 - **With the agent** (an API key, not `--no-agent`, `agent.explain_failures` not false),
   up to `agent.explain_max` failures get a one-line probable cause (file, line, reason,
   confidence). It is one tool-less request per failure with the failure output and the

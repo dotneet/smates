@@ -466,6 +466,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	for _, w := range r.Warnings {
 		p.logf("%s: %s", sr.Name, w)
 	}
+	unreported := unreportedUnits(r, b.units)
 	settleOutcomes(r, b.units, c.record, len(c.f.extra) > 0)
 	selector.DropIgnoredEnv(p.cfg, sr.Suite, r)
 	if c.ran[sr.Name] == nil {
@@ -487,7 +488,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		}
 	}
 	if c.f.shadow {
-		c.checkShadow(sr, r.Observations)
+		c.checkShadow(sr, r.Observations, unreported)
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
@@ -535,22 +536,13 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 	if r.Observations == nil {
 		r.Observations = map[string]*runner.Observation{}
 	}
-	// Units that ran but left no trace when the run failed (build or collection
-	// failure, an aborted session) have an unknown outcome: they are retried next time.
-	if r.ExitCode != 0 && record {
+	// Units that ran but left no trace (or, without recording, no reported status) when
+	// the run failed (build or collection failure, a global setup error, an aborted
+	// session) have an unknown outcome: they are retried next time.
+	if r.ExitCode != 0 {
 		for _, u := range units {
 			if r.Observations[u] == nil {
 				r.Observations[u] = &runner.Observation{Status: state.Unknown, Inferred: true}
-			}
-		}
-	}
-	// Without recording nothing is retried from the state: a unit the runner reported
-	// nothing for in a failed run (a startup or global setup error, a runner without
-	// per-file status) may have failed with it, as a traced unit without a status would.
-	if r.ExitCode != 0 && !record {
-		for _, u := range units {
-			if r.Observations[u] == nil {
-				r.Observations[u] = &runner.Observation{Status: state.Fail, Inferred: true}
 			}
 		}
 	}
@@ -580,13 +572,29 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 	}
 }
 
+// unreportedUnits returns the units of a failed run that nothing was observed for
+// (no trace, no reported status): any of them may have failed.
+func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
+	out := map[string]bool{}
+	if r.ExitCode == 0 {
+		return out
+	}
+	for _, u := range units {
+		if r.Observations[u] == nil {
+			out[u] = true
+		}
+	}
+	return out
+}
+
 // checkShadow notes the failing tests of a suite the selection would have skipped
 // (--shadow). Only failures reported for the unit itself count: a failure inferred
-// from a shared exit code may belong to a selected test.
-func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation) {
+// from a shared exit code, or a unit a failed run said nothing about, may belong to a
+// selected test (they are possible escapes).
+func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
 	for _, t := range sr.Tests {
 		o := obs[t.ID]
-		if t.Selected || o == nil || o.Status != state.Fail {
+		if t.Selected || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
 			continue
 		}
 		if o.Inferred {

@@ -475,8 +475,8 @@ smates: failure hints for 1 failing test unit(s):
 - 実行ログ、ステップサマリー(`--summary` / `$GITHUB_STEP_SUMMARY`)、JSON レポート
   (`failure_hints`。vitest、jest、pytest、`go test`、JUnit ではランナーの失敗出力も含む)
   に出力されます。`--no-record` での実行でも、これらのランナーはトレースなしでファイル単位の
-  結果を報告するのでヒントが出ます。それ以外のランナーでは、失敗した実行のテストすべてが
-  「失敗した可能性あり」として扱われます。
+  結果を報告するのでヒントが出ます(それ以外のランナーは記録しない実行ではテストごとの
+  結果を返しません)。
 - **エージェントがある場合**(API キーあり、`--no-agent` なし、`agent.explain_failures` が
   false でない)、最大 `agent.explain_max` 件(既定 3)の失敗について、推定原因を 1 行
   (ファイル、行、理由、確信度)で示します。失敗ごとにツールなしの 1 リクエストで、失敗

@@ -130,7 +130,15 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 		exportNodeV8(rc, res)
 		return res, ctx.Err() // interrupted, not rejected
 	}
-	if len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
+	keep := []string{}
+	for _, a := range injected {
+		if a == "--runTestsByPath" {
+			keep = append(keep, a)
+		}
+	}
+	// A run that loaded the reporter, or would run again with the same arguments,
+	// failed on its own.
+	if len(keep) == len(injected) || trace.ReporterLoaded(rc.TraceDir) || len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
 		exportNodeV8(rc, res)
 		return res, nil
 	}
@@ -140,12 +148,6 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 	}
 	if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
 		return res, err
-	}
-	keep := []string{}
-	for _, a := range injected {
-		if a == "--runTestsByPath" {
-			keep = append(keep, a)
-		}
 	}
 	res, err = runNode(ctx, rc, keep, testArgs, opt)
 	if res != nil {

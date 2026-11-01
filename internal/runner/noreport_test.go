@@ -18,12 +18,14 @@ import (
 // stubNodeRunner is a jest / vitest stand-in (a script, so that smates does not take
 // its text for user configuration): it fails (exit 9) when traced, appends a line to
 // $COUNT per invocation ("1" with smates' reporter on its command line), and writes
-// $RESULTS as reporter output when it has the reporter (and $RESULTS is set).
+// $RESULTS as reporter output when it has the reporter (and $RESULTS is set); with
+// $LOADED set, the reporter also marks itself loaded.
 const stubNodeRunner = `rep=
 for a; do case $a in --reporters=*jest-reporter.cjs|--reporter=*vitest-reporter.mjs) rep=1;; esac; done
 [ -z "$NODE_OPTIONS$NODE_V8_COVERAGE" ] || exit 9
 echo "x$rep" >> "$COUNT"
 if [ -n "$rep" ] && [ -n "$RESULTS" ]; then printf "%s\n" "$RESULTS" > "$SMATES_TRACE_DIR/results-stub-1.jsonl"; fi
+if [ -n "$rep" ] && [ -n "$LOADED" ]; then : > "$SMATES_TRACE_DIR/reporter-loaded-1"; fi
 exit 1
 `
 
@@ -99,6 +101,35 @@ func TestNodeRunnersReportWithoutRecording(t *testing.T) {
 			}
 			if len(res.Observations) != 0 || len(res.Warnings) != 1 {
 				t.Errorf("observations %v warnings %v", res.Observations, res.Warnings)
+			}
+		})
+		// A run that loaded the reporter but reported nothing (a global setup error)
+		// failed on its own: it does not run again.
+		t.Run(a.Name()+"/loaded", func(t *testing.T) {
+			rc, count := setup(t, false)
+			rc.Suite.Env["LOADED"] = "1"
+			res, err := a.Run(context.Background(), rc)
+			if err != nil || res.ExitCode != 1 {
+				t.Fatalf("run: %+v %v", res, err)
+			}
+			if got := invocations(count); !slices.Equal(got, []string{"x1"}) {
+				t.Errorf("invocations (x1 = with the reporter) %v", got)
+			}
+			if len(res.Warnings) != 0 {
+				t.Errorf("warnings %v", res.Warnings)
+			}
+		})
+		// With the user's own reporters nothing would change in a second run.
+		t.Run(a.Name()+"/user-reporters", func(t *testing.T) {
+			rc, count := setup(t, false)
+			cfg := map[string]string{"jest": "jest.config.js", "vitest": "vitest.config.ts"}[a.Name()]
+			os.WriteFile(filepath.Join(rc.Repo.Root, cfg), []byte("export default { reporters: ['dot'] }\n"), 0o644)
+			res, err := a.Run(context.Background(), rc)
+			if err != nil || res.ExitCode != 1 {
+				t.Fatalf("run: %+v %v", res, err)
+			}
+			if got := invocations(count); !slices.Equal(got, []string{"x"}) {
+				t.Errorf("invocations (x1 = with the reporter) %v", got)
 			}
 		})
 		// Without a results directory nothing is injected.
