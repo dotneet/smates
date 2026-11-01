@@ -224,7 +224,7 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 			}
 		}
 		if n > 0 {
-			if err := p.state.Save(p.statePath); err != nil {
+			if err := p.store.Save(p.state); err != nil {
 				return err
 			}
 		}

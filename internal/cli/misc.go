@@ -555,41 +555,24 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	if *asJSON {
 		*format = "json"
 	}
-	d := *dir
-	if d == "" {
-		d = "."
-	}
-	repo, err := gitx.Open(d)
+	store, err := resolveStore(*dir, *statePath, stderr)
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return err
-	}
-	if cfg == nil {
-		cfg = &config.Config{}
-		_ = cfg.Normalize()
-	}
-	path := *statePath
-	if path == "" {
-		path = filepath.Join(repo.Root, filepath.FromSlash(cfg.State))
-	}
+	repo, path := store.repo, store.path
 	switch sub {
 	case "path":
 		fmt.Fprintln(stdout, path)
 	case "clear":
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+		return store.Clear()
 	case "show":
-		st, err := state.Load(path)
+		st, err := store.Load()
 		if err != nil {
 			return err
 		}
-		return showState(st, path, *format == "json", stdout)
+		return showState(st, store, *format == "json", stdout)
 	case "merge":
-		st, err := state.Load(path)
+		st, err := store.Load()
 		if err != nil {
 			return err
 		}
@@ -600,12 +583,24 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 			}
 			st.Merge(o)
 		}
-		dst := *out
-		if dst == "" {
-			dst = path
+		if *out != "" {
+			return st.Save(*out)
 		}
-		return st.Save(dst)
+		return store.Save(st)
 	case "push":
+		if store.shared {
+			// Push the entries with this worktree's snapshot.
+			st, err := store.Load()
+			if err != nil {
+				return err
+			}
+			tmp := filepath.Join(filepath.Dir(store.snapPath), ".push-"+filepath.Base(store.path))
+			defer os.Remove(tmp)
+			if err := st.Save(tmp); err != nil {
+				return err
+			}
+			path = tmp
+		}
 		r := *ref
 		if r == "" {
 			b := branchName(repo)
@@ -620,7 +615,28 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if *ref == "" {
 			refs = stateRefs(repo)
 		}
-		return pullState(repo, path, *remote, refs, stderr)
+		if !store.shared {
+			return pullState(repo, path, *remote, refs, stderr)
+		}
+		// Shared: merge into the entries other worktrees use instead of replacing them.
+		tmp := filepath.Join(filepath.Dir(store.snapPath), ".pull-"+filepath.Base(store.path))
+		defer os.Remove(tmp)
+		if err := pullState(repo, tmp, *remote, refs, stderr); err != nil {
+			return err
+		}
+		if _, err := os.Stat(tmp); err != nil {
+			return nil
+		}
+		pulled, err := state.Load(tmp)
+		if err != nil {
+			return err
+		}
+		st, err := store.Load()
+		if err != nil {
+			return err
+		}
+		st.Merge(pulled)
+		return store.Save(st)
 	default:
 		return usageError{fmt.Errorf("unknown state command %q", sub)}
 	}
@@ -647,7 +663,8 @@ func branchName(repo *gitx.Repo) string {
 	return first(os.Getenv("SMATES_BRANCH"), ci.Branch, repo.CurrentBranch())
 }
 
-func showState(st *state.State, path string, asJSON bool, w io.Writer) error {
+func showState(st *state.State, store *stateStore, asJSON bool, w io.Writer) error {
+	path := store.path
 	type suiteInfo struct {
 		Tests  int            `json:"tests"`
 		Status map[string]int `json:"status"`
@@ -661,7 +678,19 @@ func showState(st *state.State, path string, asJSON bool, w io.Writer) error {
 		Files   int                  `json:"snapshot_files"`
 		Suites  map[string]suiteInfo `json:"suites"`
 		Agent   int                  `json:"agent_cache_entries"`
-	}{Path: path, Commit: st.Commit, Created: st.Created, Tool: st.Tool, Files: len(st.Files), Suites: map[string]suiteInfo{}, Agent: len(st.AgentCache)}
+		Shared  bool                 `json:"shared"`
+		// SnapshotPath is this worktree's snapshot file in shared mode.
+		SnapshotPath string     `json:"snapshot_path,omitempty"`
+		SeededFrom   string     `json:"seeded_from,omitempty"`
+		SeededAt     *time.Time `json:"seeded_at,omitempty"`
+	}{Path: path, Commit: st.Commit, Created: st.Created, Tool: st.Tool, Files: len(st.Files), Suites: map[string]suiteInfo{}, Agent: len(st.AgentCache),
+		Shared: store.shared, SnapshotPath: store.snapPath}
+	if from, at := store.Seeded(); from != "" {
+		info.SeededFrom = from
+		if !at.IsZero() {
+			info.SeededAt = &at
+		}
+	}
 	for name, su := range st.Suites {
 		si := suiteInfo{Tests: len(su.Tests), Status: map[string]int{}}
 		total := 0
@@ -677,11 +706,23 @@ func showState(st *state.State, path string, asJSON bool, w io.Writer) error {
 	if asJSON {
 		return writeJSON(w, info)
 	}
+	fmt.Fprintf(w, "state:    %s\nlocation: %s\n", path, store.describe())
+	if info.SeededFrom != "" {
+		when := ""
+		if info.SeededAt != nil {
+			when = " on " + info.SeededAt.Format(time.RFC3339)
+		}
+		fmt.Fprintf(w, "seeded:   from %s%s\n", info.SeededFrom, when)
+	}
 	if st.Empty() {
-		fmt.Fprintf(w, "%s: no recorded state\n", path)
+		fmt.Fprintf(w, "no recorded state\n")
 		return nil
 	}
-	fmt.Fprintf(w, "state:    %s\nrecorded: %s (commit %.12s, %s)\nsnapshot: %d files\n", path, st.Created.Format(time.RFC3339), st.Commit, st.Tool, len(st.Files))
+	if st.Created.IsZero() {
+		fmt.Fprintf(w, "recorded: no snapshot in this worktree yet (%s)\nsnapshot: %d files\n", st.Tool, len(st.Files))
+	} else {
+		fmt.Fprintf(w, "recorded: %s (commit %.12s, %s)\nsnapshot: %d files\n", st.Created.Format(time.RFC3339), st.Commit, st.Tool, len(st.Files))
+	}
 	for _, name := range slices.Sorted(maps.Keys(info.Suites)) {
 		si := info.Suites[name]
 		fmt.Fprintf(w, "suite %s: %d tests (pass %d, fail %d, unknown %d), ~%d deps each\n", name, si.Tests, si.Status["pass"], si.Status["fail"], si.Status["unknown"], si.Deps)

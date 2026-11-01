@@ -37,6 +37,12 @@ type Config struct {
 	Agent    AgentConfig `yaml:"agent"`
 	// State: path of the state file, relative to the repository root.
 	State string `yaml:"state"`
+	// StateSeed: in a linked git worktree without a state, start from the main
+	// worktree's state (or the remote one) instead of cold (default true).
+	StateSeed *bool `yaml:"state_seed"`
+	// StateShared: keep the per-test entries in one file under the git common
+	// directory, shared by all worktrees; each worktree keeps its own snapshot.
+	StateShared bool `yaml:"state_shared"`
 	// FullRunBranches: branches on which `smates run` runs everything (default: the default branch).
 	FullRunBranches []string `yaml:"full_run_branches"`
 	// Flaky configures what happens to tests known to be flaky.
