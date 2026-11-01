@@ -1,0 +1,8 @@
+{
+  "requires": ["node", "npm", "uv", "go", "git", "sh"],
+  "setup": [
+    ["npm", "ci", "--no-audit", "--no-fund"],
+    ["uv", "sync", "--frozen", "--project", "py"]
+  ],
+  "mutation_only": ["src/**", "py/src/**", "go/**"]
+}

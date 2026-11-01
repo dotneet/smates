@@ -88,6 +88,10 @@ func TestExecDeps(t *testing.T) {
 		{"unknown output in a script", []string{"scripts/toplevel.sh"}, false, []string{"./**", "scripts/toplevel.sh"}},
 		{"source $(dirname $0)", []string{"sh", "scripts/src.sh"}, false, []string{"lib/env.sh", "scripts/src.sh"}},
 		{"source unresolved", []string{`. "$(dirname "$0")/env.sh"`}, true, []string{"./**"}},
+
+		// System information (platform.processor() runs uname -p in pytest-xdist workers).
+		{"uname -p", []string{"uname", "-p"}, false, nil},
+		{"$(uname -m)", []string{`ARCH="$(uname -m)"; cat data.txt`}, true, []string{"data.txt"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

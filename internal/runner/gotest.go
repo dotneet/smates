@@ -113,6 +113,7 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		return res, err
 	}
 	children := trace.GoChildren(procs)
+	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	res.Observations = map[string]*Observation{}
 	for _, r := range runs {
 		unit, ok := pathutil.Rel(rc.Repo.Root, r.Dir)
@@ -285,8 +286,12 @@ func modulePath(gomod string) string {
 // arguments, chunked if needed.
 func runAll(ctx context.Context, rc *RunContext, args []string, env []string) (int, error) {
 	worst := 0
-	for _, b := range chunk(args) {
+	for i, b := range chunk(args) {
 		argv, err := rc.CommandLine(nil, b)
+		if err != nil {
+			return 1, err
+		}
+		env, err := trace.SeparateV8(env, rc.TraceDir, i)
 		if err != nil {
 			return 1, err
 		}

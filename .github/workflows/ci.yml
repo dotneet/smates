@@ -58,6 +58,7 @@ jobs:
           - e2e-polyglot-others
           - e2e-jest-node
           - e2e-vitest-python
+          - e2e-coverage-tools
           - e2e-others
     runs-on: ubuntu-latest
     steps:

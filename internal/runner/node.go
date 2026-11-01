@@ -42,6 +42,7 @@ func runNode(ctx context.Context, rc *RunContext, extra, testArgs []string, opt 
 		return res, err
 	}
 	res.Observations, res.Warnings, err = observe(rc, code, opt)
+	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	return res, err
 }
 
@@ -309,7 +310,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 			setUnitExit(o, c)
 		}
 	}
-	res.Observations, res.Warnings = obs, warns
+	res.Observations, res.Warnings = obs, append(warns, exportV8(rc)...)
 	return res, err
 }
 

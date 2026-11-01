@@ -125,6 +125,21 @@ Package managers: npm, pnpm, yarn, bun (local `node_modules/.bin` binaries are u
 directly), uv / virtualenvs for Python. Monorepos with several suites, workspaces
 (npm/pnpm/yarn/bun) and tsconfig `paths` are handled by the static analyzer.
 
+### Works with coverage tools
+
+Keep collecting coverage in the suite `command`; smates records on top of it, and the
+reports stay the same as without smates:
+
+| tool | how both keep working |
+|---|---|
+| `vitest --coverage` (v8 provider), jest `--coverage --coverageProvider=v8` | They take V8's coverage through `node:inspector` and stop it, which would leave smates' `NODE_V8_COVERAGE` files empty; smates records the scripts listed in the coverage they take instead. |
+| `c8` | c8 uses `NODE_V8_COVERAGE` as its temporary directory when it is set, so it reads smates' files for its report (`--reports-dir` output as usual, but no `coverage/tmp`). Every runner invocation gets a directory of its own, so c8's `--clean` never deletes another invocation's files. |
+| `node --test --experimental-test-coverage` | Works as is; smates' preload lives in a `node_modules` directory, which coverage reports leave out. |
+| your own `NODE_V8_COVERAGE` (environment or suite `env`) | Replaced while recording; the raw coverage files are copied into your directory after the run (existing files are never overwritten or deleted). |
+| pytest-cov / coverage.py | Every core: `sys.settrace` (ctrace, pytrace) and `sys.monitoring` (`COVERAGE_CORE=sysmon`). smates takes a `sys.monitoring` tool id of its own (3, 4, 2 or 5; coverage.py uses 1 and moves up when it is taken), and before 3.12 chains to any profile function already installed. What pytest-cov reads for its report after the tests is no dependency of any test. |
+| pytest-xdist (`-n auto`) | The plugin loads in every worker; dependencies and results are per test file as without xdist. |
+| `go test -cover`, `-coverpkg`, `-coverprofile`, `-covermode` | Unaffected by smates' `-exec` wrapper; the profile is written as usual. |
+
 ## Quick start
 
 ```bash
@@ -494,7 +509,16 @@ ok  	example.com/shop/internal/store	0.170s
 - Arguments passed through to the runner (`smates run -- -t name`) may filter tests, so
   such runs never record a test as passed; put permanent flags in the suite `command`.
 - Python 3.8–3.11 is traced with `sys.setprofile`, which slows tests noticeably while
-  recording; Python 3.12+ uses `sys.monitoring` (low overhead).
+  recording; Python 3.12+ uses `sys.monitoring` (low overhead). With coverage.py's
+  `sysmon` core, smates re-enables monitoring events at every test switch, which also
+  re-arms coverage.py's: its results are unchanged, but it does some work again per test.
+  A profiler installed later with `sys.setprofile` (before 3.12) replaces smates' tracer.
+- Coverage tools (see [Works with coverage tools](#works-with-coverage-tools)): a command
+  that sets `NODE_V8_COVERAGE` itself (`env NODE_V8_COVERAGE=… node`, or a script that
+  exports it) hides the code the processes below it execute from smates (only the static
+  graph covers it then; set it in the environment or the suite `env` instead), and c8 writes no
+  `coverage/tmp` while smates records (`c8 report` afterwards has nothing to read; let c8
+  report in the same command).
 - On case-insensitive file systems, an import whose case differs from the file on disk
   is recorded under the imported spelling and may not match the file's changes.
 - Type-only changes are handled like any change (type checking is not a test run;

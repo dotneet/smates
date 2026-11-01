@@ -341,6 +341,29 @@ ok  	example.com/shop/internal/store	0.170s
 
 設定・コマンド・制限事項の詳細は [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を参照してください。
 
+## カバレッジツールとの併用
+
+カバレッジの収集はスイートの `command` にそのまま書いてください。smates はその上で記録し、
+レポートは smates なしで実行した場合と同じになります。
+
+| ツール | 両立のしかた |
+|---|---|
+| `vitest --coverage`(v8 プロバイダ)、jest `--coverage --coverageProvider=v8` | `node:inspector` 経由で V8 のカバレッジを取得・停止するため、smates の `NODE_V8_COVERAGE` のファイルが空になります。smates はそれらが取得したカバレッジに含まれるスクリプトを代わりに記録します。 |
+| `c8` | `NODE_V8_COVERAGE` が設定されていると c8 はそれを一時ディレクトリとして使うため、smates のファイルからレポートを作ります(`--reports-dir` の出力は通常どおり。`coverage/tmp` は作られません)。ランナーの起動ごとに別ディレクトリを使うので、c8 の `--clean` が他の起動のファイルを消すことはありません。 |
+| `node --test --experimental-test-coverage` | そのまま動きます。smates のプリロードは `node_modules` ディレクトリに置かれ、カバレッジレポートから除外されます。 |
+| ユーザー自身の `NODE_V8_COVERAGE`(環境変数またはスイートの `env`) | 記録中は置き換えられ、実行後に生のカバレッジファイルがそのディレクトリにコピーされます(既存のファイルを上書き・削除することはありません)。 |
+| pytest-cov / coverage.py | すべてのコアに対応: `sys.settrace`(ctrace、pytrace)と `sys.monitoring`(`COVERAGE_CORE=sysmon`)。smates は専用の `sys.monitoring` ツール ID(3、4、2、5 の順。coverage.py は 1 を使い、使用中なら次に移ります)を取り、3.12 未満では既存のプロファイル関数を連鎖して呼びます。テスト終了後に pytest-cov がレポートのために読むファイルは、どのテストの依存にもなりません。 |
+| pytest-xdist(`-n auto`) | プラグインは各ワーカーで読み込まれ、依存と結果は xdist なしと同じくテストファイル単位です。 |
+| `go test -cover`、`-coverpkg`、`-coverprofile`、`-covermode` | smates の `-exec` ラッパーの影響を受けず、プロファイルは通常どおり書き出されます。 |
+
+制限事項: コマンド自身が `NODE_V8_COVERAGE` を設定する場合(`env NODE_V8_COVERAGE=… node`
+や、それを export するスクリプト)、その配下のプロセスが実行したコードは smates から見えません
+(静的グラフだけが頼りになります。環境変数かスイートの `env` で設定してください)。
+また記録中の c8 は `coverage/tmp` を残さないため、後から `c8 report` を実行しても読むものが
+ありません(同じコマンド内でレポートを出してください)。coverage.py の `sysmon` コアでは、
+smates がテストの切り替えごとに監視イベントを再有効化するため coverage.py 側の処理も
+テストごとに少し増えます(結果は変わりません)。
+
 ## ライセンス
 
 [MIT](LICENSE)

@@ -1,0 +1,94 @@
+[
+  {
+    "name": "no change selects nothing",
+    "note": "Every test left a trace while the coverage tools ran (vitest's v8 provider used to leave none).",
+    "edits": [],
+    "selected": [],
+    "not_selected": [
+      "vitest/math.test.js",
+      "vitest/plugin.test.js",
+      "vitest/text.test.js",
+      "c8/math.test.js",
+      "c8/plugin.test.js",
+      "c8/text.test.js",
+      "native/math.test.js",
+      "native/plugin.test.js",
+      "native/text.test.js",
+      "py/tests/test_arith.py",
+      "py/tests/test_plugin.py",
+      "py/tests/test_text.py",
+      "py/tests_sysmon/test_sysmon_arith.py",
+      "py/tests_sysmon/test_sysmon_plugin.py",
+      "go/calc",
+      "go/text"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "a plugin loaded by a computed path selects the tests that executed it",
+    "note": "Only the executed code links the plugin tests to src/plugin.js, under every Node coverage tool.",
+    "edits": [{ "file": "src/plugin.js", "op": "replace", "old": "=> 42", "new": "=> 41" }],
+    "selected": ["vitest/plugin.test.js", "c8/plugin.test.js", "native/plugin.test.js"],
+    "not_selected": [
+      "vitest/math.test.js",
+      "vitest/text.test.js",
+      "c8/math.test.js",
+      "c8/text.test.js",
+      "native/math.test.js",
+      "native/text.test.js",
+      "py/tests/test_plugin.py",
+      "go/text"
+    ],
+    "fails": ["vitest/plugin.test.js", "c8/plugin.test.js", "native/plugin.test.js"]
+  },
+  {
+    "name": "src/text.js selects the text tests of every node runner",
+    "edits": [{ "file": "src/text.js", "op": "replace", "old": "'!'", "new": "'?'" }],
+    "selected": ["vitest/text.test.js", "c8/text.test.js", "native/text.test.js"],
+    "not_selected": [
+      "vitest/math.test.js",
+      "vitest/plugin.test.js",
+      "c8/math.test.js",
+      "c8/plugin.test.js",
+      "native/math.test.js",
+      "native/plugin.test.js"
+    ],
+    "fails": ["vitest/text.test.js", "c8/text.test.js", "native/text.test.js"]
+  },
+  {
+    "name": "python plugin module selects its tests with pytest-cov, xdist and sysmon",
+    "edits": [{ "file": "py/src/calc/answer.py", "op": "replace", "old": "return 42", "new": "return 41" }],
+    "selected": ["py/tests/test_plugin.py", "py/tests_sysmon/test_sysmon_plugin.py"],
+    "not_selected": ["py/tests/test_arith.py", "py/tests/test_text.py", "py/tests_sysmon/test_sysmon_arith.py"],
+    "fails": ["py/tests/test_plugin.py", "py/tests_sysmon/test_sysmon_plugin.py"]
+  },
+  {
+    "name": "a module only pytest-cov's report reads is no dependency",
+    "note": "pytest-cov reads every module under --cov after the tests ran (calc/text.py for the sysmon suite, which never imports it).",
+    "edits": [{ "file": "py/src/calc/text.py", "op": "replace", "old": "\"!\"", "new": "\"?\"" }],
+    "selected": ["py/tests/test_text.py"],
+    "not_selected": ["py/tests/test_arith.py", "py/tests_sysmon/test_sysmon_arith.py"],
+    "fails": ["py/tests/test_text.py"]
+  },
+  {
+    "name": "python arith module selects its tests across xdist workers",
+    "edits": [{ "file": "py/src/calc/arith.py", "op": "replace", "old": "return a + b", "new": "return a - b" }],
+    "selected": ["py/tests/test_arith.py", "py/tests_sysmon/test_sysmon_arith.py"],
+    "not_selected": ["py/tests/test_text.py"],
+    "fails": ["py/tests/test_arith.py"]
+  },
+  {
+    "name": "go data file read under go test -cover selects its package",
+    "edits": [{ "file": "go/text/greeting.txt", "op": "write", "content": "hi\n" }],
+    "selected": ["go/text"],
+    "not_selected": ["go/calc"],
+    "fails": ["go/text"]
+  },
+  {
+    "name": "go source with -coverpkg selects its importers only",
+    "edits": [{ "file": "go/calc/calc.go", "op": "replace", "old": "return a + b", "new": "return a - b" }],
+    "selected": ["go/calc"],
+    "not_selected": ["go/text"],
+    "fails": ["go/calc"]
+  }
+]
