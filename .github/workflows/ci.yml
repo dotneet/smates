@@ -59,6 +59,7 @@ jobs:
           - e2e-jest-scenarios
           - e2e-jest-others
           - e2e-vitest-python
+          - e2e-coverage-tools
           - e2e-others
     runs-on: ubuntu-latest
     steps:

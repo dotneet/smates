@@ -37,11 +37,17 @@ var readers = map[string]bool{
 	"[": true, "echo": true, "printf": true, "true": true, "false": true, "md5sum": true,
 	"sha1sum": true, "sha256sum": true, "shasum": true, "base64": true, "stat": true, "file": true,
 	"basename": true, "dirname": true, "realpath": true, "readlink": true, "pwd": true,
+	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
+	"getconf": true, "sw_vers": true,
 }
 
-// nameOnly commands never open files, whatever their arguments.
+// nameOnly commands never open files, whatever their arguments. That includes the
+// system information commands libraries run on their own: platform.processor() runs
+// `uname -p` in every pytest-xdist worker, for example.
 var nameOnly = map[string]bool{
 	"basename": true, "dirname": true, "pwd": true, "echo": true, "printf": true, "true": true, "false": true,
+	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
+	"getconf": true, "sw_vers": true,
 }
 
 var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true}

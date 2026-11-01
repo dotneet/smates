@@ -177,40 +177,72 @@ class _Tracer:
         sys.addaudithook(self._audit)
         self._wrap_probes()
         self._wrap_environ()
-        mon = getattr(sys, "monitoring", None)
-        if mon is not None:
-            for tool in (3, 4, 2, 5):
-                try:
-                    if mon.get_tool(tool) is None:
-                        mon.use_tool_id(tool, "smates")
-                        self.tool = tool
-                        break
-                except ValueError:
-                    continue
-        if self.tool is not None:
-            disable = mon.DISABLE
-
-            def on_start(code, offset):
-                self.record("code", code.co_filename)
-                return disable
-
-            mon.register_callback(self.tool, mon.events.PY_START, on_start)
-            mon.set_events(self.tool, mon.events.PY_START)
-        else:
-            seen_codes = {}
-
-            def profile(frame, event, arg):
-                if event == "call":
-                    code = frame.f_code
-                    if seen_codes.get(code) != self.ctx:
-                        seen_codes[code] = self.ctx
-                        self.record("code", code.co_filename)
-
-            sys.setprofile(profile)
-            threading.setprofile(profile)
+        if not self._monitor():
+            self._profile()
         import atexit
 
         atexit.register(self._exit)
+
+    # Tool ids smates tries, in order. 0 (debugger), 1 (coverage) and 2 (profiler) are
+    # the ids reserved for those tools (coverage.py starts at 1 and moves up when it is
+    # taken), so smates prefers the unassigned ones.
+    TOOL_IDS = (3, 4, 2, 5)
+
+    def _monitor(self):
+        """Observes executed code with sys.monitoring (3.12+), as a tool of its own, so
+        that coverage.py (sysmon core), profilers and debuggers keep theirs. Returns
+        False when sys.monitoring is missing or every candidate id is taken."""
+        mon = getattr(sys, "monitoring", None)
+        if mon is None:
+            return False
+        for tool in self.TOOL_IDS:
+            try:
+                if mon.get_tool(tool) is not None:
+                    continue
+                mon.use_tool_id(tool, "smates")
+            except ValueError:  # taken in between
+                continue
+            try:
+                disable = mon.DISABLE
+
+                def on_start(code, offset):
+                    self.record("code", code.co_filename)
+                    return disable
+
+                mon.register_callback(tool, mon.events.PY_START, on_start)
+                mon.set_events(tool, mon.events.PY_START)
+            except Exception:
+                try:
+                    mon.free_tool_id(tool)
+                except Exception:
+                    pass
+                return False
+            self.tool = tool
+            return True
+        return False
+
+    def _profile(self):
+        """Observes executed code with sys.setprofile (before 3.12, or without a free
+        sys.monitoring id). A profile function installed before keeps being called;
+        coverage.py's tracers use sys.settrace, which is independent."""
+        seen_codes = {}
+        tracer = self
+
+        def chain(prev):
+            def profile(frame, event, arg):
+                if event == "call":
+                    code = frame.f_code
+                    if seen_codes.get(code) != tracer.ctx:
+                        seen_codes[code] = tracer.ctx
+                        tracer.record("code", code.co_filename)
+                if prev is not None:
+                    prev(frame, event, arg)
+
+            return profile
+
+        sys.setprofile(chain(sys.getprofile()))
+        getprofile = getattr(threading, "getprofile", None)  # 3.10+
+        threading.setprofile(chain(getprofile() if getprofile is not None else None))
 
     def _wrap_probes(self):
         # os.path.exists/isfile/isdir and pathlib call these at run time; the import

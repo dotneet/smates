@@ -1,0 +1,41 @@
+version: 1
+suites:
+  # vitest with its v8 coverage provider (drives the V8 profiler through node:inspector).
+  - name: vitest
+    runner: vitest
+    tests: ["vitest/**/*.test.js"]
+    command: npx vitest run --coverage
+
+  # c8 around node --test (c8 takes NODE_V8_COVERAGE as its temporary directory).
+  - name: c8
+    runner: node
+    tests: ["c8/**/*.test.js"]
+    command: npx c8 --reporter=json-summary --reporter=text --reports-dir=coverage/c8 node --test
+
+  # Node's own test coverage, as lcov, with raw V8 coverage requested by the user.
+  - name: native
+    runner: node
+    tests: ["native/**/*.test.js"]
+    command: node --test --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/native.lcov
+    env: { NODE_V8_COVERAGE: coverage/raw }
+
+  # pytest-cov (coverage.py's default core) on two pytest-xdist workers.
+  - name: pytest-xdist
+    runner: pytest
+    root: py
+    tests: ["tests/test_*.py"]
+    command: uv run pytest -n 2 --cov=calc --cov-branch --cov-report=term --cov-report=json:cov-xdist.json
+
+  # pytest-cov on sys.monitoring, the API smates' Python tracer uses too.
+  - name: pytest-sysmon
+    runner: pytest
+    root: py
+    tests: ["tests_sysmon/test_*.py"]
+    command: uv run pytest --cov=calc --cov-report=term --cov-report=json:cov-sysmon.json
+    env: { COVERAGE_CORE: sysmon }
+
+  # go test with coverage across packages, through smates' -exec wrapper.
+  - name: go
+    runner: go
+    root: go
+    command: go test -cover -coverpkg=./... -coverprofile=cover.out

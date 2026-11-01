@@ -26,8 +26,25 @@ var jsTestExts = "{js,mjs,cjs,jsx,ts,mts,cts,tsx}"
 
 var jsExclude = []string{"**/node_modules/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.next/**", "**/out/**"}
 
-// runNode runs a Node-based runner, tracing it when recording.
+// runNode runs a Node-based runner, tracing it when recording, and hands the V8
+// coverage to a NODE_V8_COVERAGE the user set.
 func runNode(ctx context.Context, rc *RunContext, extra, testArgs []string, opt traceOptions) (*RunResult, error) {
+	res, err := runNodeAttempt(ctx, rc, extra, testArgs, opt)
+	exportNodeV8(rc, res)
+	return res, err
+}
+
+// exportNodeV8 copies the V8 coverage of a recorded run (its final attempt) into the
+// user's NODE_V8_COVERAGE.
+func exportNodeV8(rc *RunContext, res *RunResult) {
+	if res != nil && rc.Record {
+		res.Warnings = append(res.Warnings, exportV8(rc)...)
+	}
+}
+
+// runNodeAttempt is runNode without exporting the coverage: one attempt that may be
+// retried (runNodeWithFallback).
+func runNodeAttempt(ctx context.Context, rc *RunContext, extra, testArgs []string, opt traceOptions) (*RunResult, error) {
 	var env []string
 	if rc.Record {
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
@@ -96,15 +113,20 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 // runNodeWithFallback runs with smates' injected arguments and, if the run failed
 // before any test file ran (an injected reporter the runner rejects, for example),
 // runs again without them: smates must never be the reason a test run fails.
+// The V8 coverage goes to the user's NODE_V8_COVERAGE once, from the attempt kept: a
+// rejected first attempt's files are discarded with its trace.
 func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs []string, opt traceOptions) (*RunResult, error) {
-	res, err := runNode(ctx, rc, injected, testArgs, opt)
+	res, err := runNodeAttempt(ctx, rc, injected, testArgs, opt)
 	if err != nil || len(injected) == 0 || res.ExitCode == 0 || len(res.Observations) > 0 || !rc.Record {
+		exportNodeV8(rc, res)
 		return res, err
 	}
 	if ctx.Err() != nil {
+		exportNodeV8(rc, res)
 		return res, ctx.Err() // interrupted, not rejected
 	}
 	if len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
+		exportNodeV8(rc, res)
 		return res, nil
 	}
 	fmt.Fprintf(rc.Stderr, "smates: %s failed before running any test with smates' reporter; retrying without it\n", rc.Suite.Runner)
@@ -309,7 +331,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 			setUnitExit(o, c)
 		}
 	}
-	res.Observations, res.Warnings = obs, warns
+	res.Observations, res.Warnings = obs, append(warns, exportV8(rc)...)
 	return res, err
 }
 

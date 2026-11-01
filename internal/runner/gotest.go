@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -129,6 +130,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 		return res, err
 	}
 	children := trace.GoChildren(procs)
+	res.Warnings = append(res.Warnings, exportV8(rc)...)
 	res.Observations = map[string]*Observation{}
 	for _, r := range runs {
 		unit, ok := pathutil.Rel(rc.Repo.Root, r.Dir)
@@ -153,6 +155,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 			o.Status = st
 		}
 	}
+	addCoverPkgDeps(ctx, rc, res)
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		modDir, mod := findModule(rc.Repo.Root, rc.Dir())
 		for _, u := range units {
@@ -314,8 +317,12 @@ func modulePath(gomod string) string {
 // arguments, chunked if needed; extra flags go before them.
 func runAll(ctx context.Context, rc *RunContext, extra, args []string, env []string) (int, error) {
 	worst := 0
-	for _, b := range chunk(args) {
+	for i, b := range chunk(args) {
 		argv, err := rc.CommandLine(extra, b)
+		if err != nil {
+			return 1, err
+		}
+		env, err := trace.SeparateV8(env, rc.TraceDir, i)
 		if err != nil {
 			return 1, err
 		}
@@ -342,4 +349,122 @@ func goExecWrapper(rc *RunContext) (string, error) {
 		return "", err
 	}
 	return link, nil
+}
+
+// addCoverPkgDeps adds the source files of the -coverpkg packages to every observation
+// of res. With -coverpkg, go test builds the packages it names into every test binary of
+// the invocation: one that does not compile fails them all, whatever they import. That
+// holds for function units too: they run with the user's command when not recording.
+func addCoverPkgDeps(ctx context.Context, rc *RunContext, res *RunResult) {
+	pats := coverPkgs(rc)
+	if len(pats) == 0 || res == nil || len(res.Observations) == 0 {
+		return
+	}
+	files, err := goPackageFiles(ctx, rc, pats)
+	if err != nil {
+		res.Warnings = append(res.Warnings, "could not list the -coverpkg packages ("+err.Error()+"); tests depend only on what they import")
+	}
+	for _, o := range res.Observations {
+		for _, f := range files {
+			o.AddFile(f)
+		}
+	}
+}
+
+// coverPkgs returns the package patterns of a -coverpkg flag on the suite command, the
+// arguments passed through or GOFLAGS (nil when there is none).
+func coverPkgs(rc *RunContext) []string {
+	words, _ := SplitWords(rc.Suite.Command)
+	words = append(words, rc.ExtraArgs...)
+	words = append(words, strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))...)
+	var pats []string
+	for i, w := range words {
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		if flag != "coverpkg" || w == flag {
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(words) {
+				continue
+			}
+			value = words[i+1]
+		}
+		for _, p := range strings.Split(value, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				pats = append(pats, p)
+			}
+		}
+	}
+	return pats
+}
+
+// Build flags that change which files go test compiles, forwarded to go list. Others
+// (test flags, -exec, -coverpkg, -count) are not go list's and are left out.
+var (
+	goListValueFlags = map[string]bool{"tags": true, "mod": true, "modfile": true, "overlay": true}
+	goListBoolFlags  = map[string]bool{"race": true, "msan": true, "asan": true}
+)
+
+// goListFlags returns the build flags of GOFLAGS, the suite command and the arguments
+// passed through (in that order: later ones win, as with go test) that go list needs to
+// see the files go test builds.
+func goListFlags(rc *RunContext) []string {
+	words := strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))
+	cmd, _ := SplitWords(rc.Suite.Command)
+	words = append(append(words, cmd...), rc.ExtraArgs...)
+	var out []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "--" || w == "-args" || w == "--args" {
+			break // what follows goes to the test binary
+		}
+		if !strings.HasPrefix(w, "-") {
+			continue
+		}
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		switch {
+		case goListValueFlags[flag] && hasValue:
+			out = append(out, "-"+flag+"="+value)
+		case goListValueFlags[flag] && i+1 < len(words):
+			out = append(out, "-"+flag+"="+words[i+1])
+			i++
+		case goListBoolFlags[flag]:
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// goPackageFiles lists the Go source files (repository-relative) of the packages
+// matching patterns, resolved in the suite directory. Files excluded by build
+// constraints count too (minus tests): go test may build them under tags or a platform
+// this listing cannot see, and listing too many only selects more tests.
+func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]string, error) {
+	const format = "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}{{range .IgnoredGoFiles}}|{{.}}{{end}}"
+	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", format, "--")
+	args = append(args, patterns...)
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = rc.Dir()
+	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
+	// flags) must not reach go list.
+	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, "|")
+		for _, name := range parts[1:] {
+			if strings.HasSuffix(name, "_test.go") || !strings.HasSuffix(name, ".go") {
+				continue // IgnoredGoFiles lists tests too; -coverpkg builds no test files
+			}
+			if rel, ok := pathutil.Rel(rc.Repo.Root, filepath.Join(parts[0], name)); ok && !pathutil.IsVendored(rel) {
+				files = append(files, rel)
+			}
+		}
+	}
+	return files, nil
 }

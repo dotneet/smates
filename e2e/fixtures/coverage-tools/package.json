@@ -1,0 +1,15 @@
+{
+  "name": "coverage-tools",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test:vitest": "vitest run --coverage",
+    "test:c8": "c8 --reporter=json-summary --reports-dir=coverage/c8 node --test 'c8/*.test.js'",
+    "test:native": "node --test --experimental-test-coverage 'native/*.test.js'"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "5.0.5",
+    "c8": "12.0.0",
+    "vitest": "5.0.5"
+  }
+}

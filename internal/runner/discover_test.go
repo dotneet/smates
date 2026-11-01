@@ -194,6 +194,12 @@ module.exports.testMatch = ['**/*.test.js'];`),
 			source: SourceDefaults, warn: "Go's regexp lacks", tests: defaults,
 		},
 		{
+			name: "coverage options are not test patterns", suite: jest,
+			files: with(jsFiles, "jest.config.js", `module.exports = { collectCoverage: true, coverageProvider: 'v8',
+  collectCoverageFrom: ['src/**/*.ts'], coveragePathIgnorePatterns: ['/e2e/'], coverageDirectory: 'coverage/jest' }`),
+			source: SourceDefaults, tests: defaults,
+		},
+		{
 			name: "tests in smates.yml win", suite: config.Suite{Runner: "jest", Tests: []string{"lib/**"}},
 			files:  with(jsFiles, "jest.config.js", `module.exports = { testMatch: ['**/e2e/**'] }`),
 			source: SourceConfig, tests: []string{"lib/x.test.js"},
@@ -207,6 +213,16 @@ func TestDiscoverVitest(t *testing.T) {
 		{
 			name: "no test options", suite: vitest,
 			files:  with(jsFiles, "vitest.config.ts", `export default defineConfig({ test: { globals: true } })`),
+			source: SourceDefaults,
+			tests: []string{"e2e/home.test.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "packages/q/test/q.spec.ts",
+				"src/__fixtures__/data.test.ts", "src/a.test.ts", "src/b.spec.js"},
+		},
+		{
+			// coverage.include/exclude select the files a coverage report covers, not tests.
+			name: "coverage options are not test patterns", suite: vitest,
+			files: with(jsFiles, "vitest.config.ts", `export default defineConfig({ test: {
+  coverage: { provider: 'v8', include: ['src/**'], exclude: ['src/a.test.ts'], reportsDirectory: 'coverage/vitest' },
+} })`),
 			source: SourceDefaults,
 			tests: []string{"e2e/home.test.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "packages/q/test/q.spec.ts",
 				"src/__fixtures__/data.test.ts", "src/a.test.ts", "src/b.spec.js"},
@@ -309,6 +325,23 @@ func TestDiscoverPytest(t *testing.T) {
 		{
 			name: "no configuration", suite: pytest, source: SourceDefaults, tests: all,
 			files: with(pyFiles, "pyproject.toml", "[project]\nname = 'x'\n"),
+		},
+		{
+			// pytest-cov options and coverage.py sections name source paths, not tests.
+			name: "pytest-cov and coverage options are not test patterns", suite: pytest, source: SourceDefaults, tests: all,
+			files: with(pyFiles, "pyproject.toml", `[project]
+name = "x"
+
+[tool.pytest.ini_options]
+addopts = "--cov=src --cov-branch --cov-report=json:cov.json -n auto"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+include = ["src/*"]
+`, "setup.cfg", "[coverage:run]\nsource = src\n"),
 		},
 		{
 			name: "pyproject testpaths and python_files", suite: pytest,

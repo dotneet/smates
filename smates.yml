@@ -103,6 +103,24 @@ suites:
       - { tests: ["."], deps: *pytest }
       - { tests: ["."], deps: ["e2e/fixtures/{vitest-npm,python-uv}/**"] }
 
+  # Coverage tools next to the runners (vitest --coverage, c8, node --test coverage,
+  # pytest-cov with xdist and sysmon, go test -cover): both smates' trace and the tools'
+  # reports must survive.
+  - name: e2e-coverage-tools
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: coverage-tools }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *vitest }
+      - { tests: ["."], deps: *pytest }
+      - { tests: ["."], deps: *gotest }
+      - { tests: ["."], deps: ["e2e/fixtures/coverage-tools/**"] }
+
   # Every fixture not named above: a new fixture runs here until it gets a suite.
   - name: e2e-others
     runner: go
@@ -110,7 +128,7 @@ suites:
     command: go test -tags e2e -timeout 40m
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
-    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv" }
+    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv,-coverage-tools" }
     rules:
       - { tests: ["."], deps: *core }
       - { tests: ["."], deps: *js }

@@ -370,6 +370,9 @@ func runFuncs(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	var err error
 	if rc.Record {
 		r, err = recordFuncs(ctx, rc, dirs, funcs)
+		if err == nil {
+			addCoverPkgDeps(ctx, rc, r)
+		}
 	} else {
 		r, err = runFuncsPlain(ctx, rc, dirs, funcs)
 	}

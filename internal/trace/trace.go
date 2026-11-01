@@ -36,6 +36,12 @@ func ExtractShims(dir string) (*Shims, error) {
 			return err
 		}
 		dst := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(p, "shims")))
+		if p == "shims/node.cjs" {
+			dst = NodeShim(dir)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+		}
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
@@ -48,8 +54,14 @@ func ExtractShims(dir string) (*Shims, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Shims{Dir: dir, Node: filepath.Join(dir, "node.cjs"), Python: filepath.Join(dir, "py")}, nil
+	return &Shims{Dir: dir, Node: NodeShim(dir), Python: filepath.Join(dir, "py")}, nil
 }
+
+// NodeShim is where the Node shim is extracted in a shim directory. Inside a
+// node_modules directory: V8 coverage lists the preloaded shim like any other script,
+// and coverage reports (node --test --experimental-test-coverage, c8, vitest, jest)
+// leave out files below node_modules, so the shim never shows up in the user's report.
+func NodeShim(dir string) string { return filepath.Join(dir, "node_modules", "smates", "node.cjs") }
 
 // Shims are the extracted shim locations.
 type Shims struct {
@@ -287,7 +299,11 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 	}
 
-	if v8, err := os.ReadDir(V8Dir(traceDir)); err == nil {
+	for _, dir := range v8Dirs(traceDir) {
+		v8, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
 		for _, e := range v8 {
 			m := v8FileRe.FindStringSubmatch(e.Name())
 			if m == nil {
@@ -301,7 +317,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 			if ts > p.End {
 				p.End = ts
 			}
-			urls, err := v8URLs(filepath.Join(V8Dir(traceDir), e.Name()))
+			urls, err := v8URLs(filepath.Join(dir, e.Name()))
 			if err != nil {
 				continue // a truncated file from a killed process: skip it
 			}

@@ -24,7 +24,7 @@ const maxArgBytes = 96 * 1024
 
 // Shims returns the extracted shim locations.
 func (rc *RunContext) Shims() *trace.Shims {
-	return &trace.Shims{Dir: rc.ShimDir, Node: filepath.Join(rc.ShimDir, "node.cjs"), Python: filepath.Join(rc.ShimDir, "py")}
+	return &trace.Shims{Dir: rc.ShimDir, Node: trace.NodeShim(rc.ShimDir), Python: filepath.Join(rc.ShimDir, "py")}
 }
 
 // chunk splits args into groups whose total length stays under maxArgBytes.
@@ -54,8 +54,14 @@ func runBatches(ctx context.Context, rc *RunContext, extra []string, testArgs []
 		batches = chunk(testArgs)
 	}
 	worst := 0
-	for _, b := range batches {
+	for i, b := range batches {
 		argv, err := rc.CommandLine(extra, b)
+		if err != nil {
+			return 1, err
+		}
+		// Each invocation writes V8 coverage to a directory of its own: a coverage tool
+		// cleaning it when it starts (c8) must not delete an earlier invocation's files.
+		env, err := trace.SeparateV8(env, rc.TraceDir, i)
 		if err != nil {
 			return 1, err
 		}
@@ -203,6 +209,9 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	cmds := make([]job, len(units))
 	for i, u := range units {
 		argv, env, err := argvFor(u, i)
+		if err == nil {
+			env, err = trace.SeparateV8(env, rc.TraceDir, i)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -238,6 +247,20 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	}
 	wg.Wait()
 	return codes, firstErr
+}
+
+// exportV8 copies the V8 coverage of a recorded run into the directory the user set
+// NODE_V8_COVERAGE to (smates points it at its own trace directory while recording),
+// returning a warning when that fails.
+func exportV8(rc *RunContext) []string {
+	dst := trace.UserV8Dir(suiteEnv(rc.Suite), rc.Dir())
+	if dst == "" {
+		return nil
+	}
+	if err := trace.CopyV8(rc.TraceDir, dst); err != nil {
+		return []string{"could not copy V8 coverage to NODE_V8_COVERAGE (" + dst + "): " + err.Error()}
+	}
+	return nil
 }
 
 // worstCode returns the highest exit code of an isolated run.

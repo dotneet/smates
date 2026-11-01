@@ -249,6 +249,23 @@ under a Go test binary belong to that package. Helpers of the runner itself that
 repository code (a server from global setup) are global dependencies; helpers that only
 read files (crawlers, transformers) are ignored.
 
+**Coverage tools sharing the same mechanisms.** V8 precise coverage is one per isolate:
+vitest's v8 provider and jest's v8 coverage take it through `node:inspector` and then stop
+it, so the `NODE_V8_COVERAGE` file of such a worker lists almost nothing; the Node shim
+wraps `inspector.Session.prototype.post` and records the scripts of every
+`Profiler.takePreciseCoverage` result (left untouched). c8 adopts a set
+`NODE_V8_COVERAGE` as its temporary directory and empties it on start (`--clean`), so
+every runner invocation gets its own `v8`, `v8-1`, … directory. A `NODE_V8_COVERAGE` the
+user set is replaced while recording and the files are copied there afterwards (never
+overwriting); one inherited from an outer smates run is not the user's. The preload lives
+under `shims/node_modules/` so coverage reports (which skip `node_modules`) never list it.
+Python: smates takes a `sys.monitoring` tool id of its own (3, 4, 2, 5; coverage.py's
+sysmon core takes 1 and moves up), or chains to an existing `sys.setprofile` function;
+the pytest plugin switches to a `session:end` context (attributed to nothing) once the
+test loop is over, before pytest-cov reads every `--cov` module for its report. Go:
+`-coverpkg` builds the named packages into every test binary of the invocation, so their
+source files (`go list -find`) are added to every package's dependencies.
+
 **Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
 analyzed from their command line when the child starts (`child_process.*` in Node,
 `subprocess.Popen`/`os.system` audit events in Python):
