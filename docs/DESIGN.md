@@ -482,9 +482,12 @@ variable telling the child what to do). A test binary writes its counters only w
 `-test.gocoverdir` says (otherwise to a temporary directory it removes; `GOCOVERDIR` is
 used only by the exit hook of a binary whose tests did not finish, an `os.Exit` in a
 test), and the child's arguments are the test's, so recording adds one test file to the
-package through `-overlay` (merged with a user `-overlay`; never written into the
-package): its `init` puts `-test.gocoverdir=$SMATES_GOCOVERDIR` in front of the
-arguments and leaves a start marker named after the process ID there. The function runs
+package through `-overlay` (merged with a user `-overlay` of the command or
+`GOFLAGS`, which ours on the command line replaces; never written into the package): its `init` calls `testing.Init` and sets the flag `test.gocoverdir` to
+`$SMATES_GOCOVERDIR` (`MainStart` calling `Init` again keeps it; `os.Args` is left
+alone, since a re-execution may run the program's own command line, a `TestMain`
+dispatching to a CLI that rejects unknown flags) and leaves a start marker named after
+the process ID there. The function runs
 with that variable set to its coverage directory, so its own process and every
 re-execution inheriting its environment write counters into the same directory, from
 which go builds the function's profile when its tests end. A marker without a counter

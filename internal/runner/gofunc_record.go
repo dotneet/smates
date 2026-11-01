@@ -165,7 +165,7 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 		bin += ".exe"
 	}
 	pkgDir := filepath.Join(rc.Repo.Root, filepath.FromSlash(dir))
-	build, err := childCoverFlags(fr.flags.build, rc.Dir(), pkgDir, gp.names[pkgDir], work)
+	build, err := childCoverFlags(fr.flags.build, Getenv(suiteEnv(rc.Suite), "GOFLAGS"), rc.Dir(), pkgDir, gp.names[pkgDir], work)
 	if err != nil {
 		return "", err
 	}

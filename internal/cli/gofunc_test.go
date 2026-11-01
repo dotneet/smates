@@ -249,7 +249,7 @@ func TestGoFuncSelection(t *testing.T) {
 	if code != 0 || len(res) != 2 || res["calc#TestMul"] != state.Pass || res["calc#(build)"] != state.Pass {
 		t.Errorf("--no-record after fix: %d %v\n%s", code, res, out)
 	}
-	if _, out, _ := r.run("run", "--dry-run"); !strings.Contains(out, "-run '^(TestMul)$' ./calc") || !strings.Contains(out, "go test '-run=^$' -count=1 -exec=") {
+	if _, out, _ := r.run("run", "--dry-run"); !strings.Contains(out, "-run '^(TestMul)$' ./calc") || !strings.Contains(out, "env GOFLAGS= SMATES_GOCHECK=1 go test '-run=^$' -count=1 -exec=") {
 		t.Errorf("dry run: %s", out)
 	}
 

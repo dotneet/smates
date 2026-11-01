@@ -147,19 +147,20 @@ func TestCheckArgv(t *testing.T) {
 	}
 }
 
-// A user's -overlay is merged into the one adding the child-coverage file; relative
-// paths in it are relative to the go command's directory.
+// A user's -overlay (of the command, else of GOFLAGS) is merged into the one adding the
+// child-coverage file; relative paths in it are relative to the go command's directory.
 func TestChildCoverFlags(t *testing.T) {
 	goDir, work := t.TempDir(), t.TempDir()
 	pkgDir := filepath.Join(goDir, "p")
 	testutil.Write(t, goDir, "p/zz_smates_cover_test.go", "package p\n") // taken
 	testutil.Write(t, goDir, "ov.json", `{"Replace": {"p/gen.go": "gen/p.go"}}`)
-	flags, err := childCoverFlags([]string{"-race", "-overlay", "ov.json", "-tags=x"}, goDir, pkgDir, "p", work)
+	testutil.Write(t, goDir, "env.json", `{"Replace": {"p/env.go": "gen/env.go"}}`)
+	flags, err := childCoverFlags([]string{"-race", "-overlay", "ov.json", "-tags=x"}, "-overlay=env.json", goDir, pkgDir, "p", work)
 	if err != nil {
 		t.Fatal(err)
 	}
 	overlay := filepath.Join(work, "overlay.json")
-	if !slices.Equal(flags, []string{"-race", "-overlay=" + overlay, "-tags=x"}) {
+	if !slices.Equal(flags, []string{"-race", "-tags=x", "-overlay=" + overlay}) {
 		t.Fatalf("flags %q", flags)
 	}
 	var ov struct{ Replace map[string]string }
@@ -180,8 +181,16 @@ func TestChildCoverFlags(t *testing.T) {
 	if b, _ := os.ReadFile(src); !strings.Contains(string(b), "package p\n") || !strings.Contains(string(b), childCoverEnv) {
 		t.Errorf("source:\n%s", b)
 	}
+	// An -overlay only in GOFLAGS is merged too.
+	if _, err := childCoverFlags([]string{"-race"}, "-mod=mod -overlay=env.json", goDir, pkgDir, "p", work); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(overlay)
+	if !strings.Contains(string(data), "env.go") {
+		t.Errorf("GOFLAGS overlay not merged: %s", data)
+	}
 	// Without a package name nothing is added.
-	if flags, err := childCoverFlags([]string{"-race"}, goDir, pkgDir, "", work); err != nil || !slices.Equal(flags, []string{"-race"}) {
+	if flags, err := childCoverFlags([]string{"-race"}, "", goDir, pkgDir, "", work); err != nil || !slices.Equal(flags, []string{"-race"}) {
 		t.Errorf("no name: %q %v", flags, err)
 	}
 }
@@ -190,12 +199,75 @@ func TestChildCoverFlags(t *testing.T) {
 // the child ran, whether the child returns or calls os.Exit (as the classic
 // TestHelperProcess does: go's exit hook writes its counters to $GOCOVERDIR). A child
 // that writes no coverage (it panics) makes its function's coverage uncertain: it
-// depends on the content of every file of its closure.
+// depends on the content of every file of its closure. A child running the program's
+// own command line (a TestMain dispatching to a CLI) gets its arguments untouched: one
+// rejecting unknown arguments, or parsing them with a strict FlagSet, still passes.
 func TestRecordFuncsReexec(t *testing.T) {
 	rc := goModule(t, map[string]string{
 		"p/crash.go": "package p\n\nimport \"fmt\"\n\nfunc Crash() { fmt.Println(\"fine\") }\n",
 		"p/exit.go":  "package p\n\nfunc Exit() int { return 0 }\n",
 		"p/panic.go": "package p\n\nfunc Panic() { panic(\"boom\") }\n",
+		"p/cli.go": `package p
+
+import (
+	"flag"
+	"fmt"
+	"io"
+)
+
+// Run takes positional arguments only.
+func Run(args []string) int {
+	for _, a := range args {
+		if len(a) > 0 && a[0] == '-' {
+			fmt.Println("unknown flag", a)
+			return 2
+		}
+	}
+	return 0
+}
+
+// RunFlags parses its arguments with a FlagSet of its own.
+func RunFlags(args []string) int {
+	fs := flag.NewFlagSet("tool", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "")
+	if err := fs.Parse(args); err != nil || *name != "x" || fs.NArg() != 1 {
+		fmt.Println("bad arguments", args, err)
+		return 2
+	}
+	return 0
+}
+`,
+		"p/main_test.go": `package p
+
+import (
+	"os"
+	"os/exec"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	switch os.Getenv("BE_CLI") {
+	case "positional":
+		os.Exit(Run(os.Args[1:]))
+	case "flags":
+		os.Exit(RunFlags(os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+func runCLI(t *testing.T, mode string, args ...string) {
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), "BE_CLI="+mode)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cli failed: %v\n%s", err, out)
+	}
+}
+
+func TestCLIPositional(t *testing.T) { runCLI(t, "positional", "hello", "world") }
+
+func TestCLIFlags(t *testing.T) { runCLI(t, "flags", "-name=x", "arg") }
+`,
 		"p/other.go": "package p\n\nfunc Other() int { return 1 }\n",
 		"p/crash_test.go": `package p
 
@@ -248,9 +320,9 @@ func TestPlain(t *testing.T) { Other() }
 `,
 	})
 	rc.Known = func(string) []string {
-		return []string{"p/crash.go#decls", "p/exit.go#decls", "p/other.go#decls", "p/panic.go#decls"}
+		return []string{"p/cli.go#decls", "p/crash.go#decls", "p/exit.go#decls", "p/other.go#decls", "p/panic.go#decls"}
 	}
-	res, err := recordFuncs(context.Background(), rc, []string{"p"}, map[string][]string{"p": {"TestCrasher", "TestExiter", "TestPanicker", "TestPlain"}})
+	res, err := recordFuncs(context.Background(), rc, []string{"p"}, map[string][]string{"p": {"TestCrasher", "TestExiter", "TestPanicker", "TestPlain", "TestCLIPositional", "TestCLIFlags"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +343,11 @@ func TestPlain(t *testing.T) { Other() }
 	for unit, want := range map[string][]string{
 		"p#TestCrasher":  {"p/crash.go"},
 		"p#TestExiter":   {"p/exit.go"},
-		"p#TestPanicker": {"p/crash.go", "p/exit.go", "p/other.go", "p/panic.go"}, // the child wrote no coverage
+		"p#TestPanicker": {"p/cli.go", "p/crash.go", "p/exit.go", "p/other.go", "p/panic.go"}, // the child wrote no coverage
 		"p#TestPlain":    {"p/other.go"},
+		// The children's code, which only they ran.
+		"p#TestCLIPositional": {"p/cli.go"},
+		"p#TestCLIFlags":      {"p/cli.go"},
 	} {
 		if got := files(unit); !slices.Equal(got, want) {
 			t.Errorf("%s: %v, want %v", unit, got, want)

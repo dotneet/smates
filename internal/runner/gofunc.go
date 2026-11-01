@@ -130,8 +130,9 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 	var out [][]string
 	for _, args := range chunk(pkgArgs(rc.Suite, checks)) {
 		if len(args) > 0 {
-			argv, _ := checkArgv(rc, args)
-			out = append(out, argv)
+			// With its environment, so that it can be run as printed.
+			argv, env := checkArgv(rc, args)
+			out = append(out, append(append([]string{"env"}, env...), argv...))
 		}
 	}
 	if rc.All && !rc.Suite.Narrowed {
