@@ -135,6 +135,13 @@ func TestGolden(t *testing.T) {
 			return &Input{Result: r, Shard: 2, Shards: 2}
 		},
 		"large": func() *Input { return &Input{Result: largeResult()} },
+		"env": func() *Input {
+			r := &selector.Result{Mode: "state", Suites: []*selector.Suite{suite("web", "vitest",
+				sel("web/tz.test.ts", selector.ReasonChanged, map[string]string{"$TZ": selector.ViaTraced}, 300),
+				sel("web/both.test.ts", selector.ReasonChanged, map[string]string{"$TZ": selector.ViaTraced, "web/src/a.ts": selector.ViaImport}, 300),
+				skip("web/other.test.ts", 100))}, Changed: []string{"web/src/a.ts"}}
+			return &Input{Result: r}
+		},
 	}
 	for name, mk := range cases {
 		t.Run(name, func(t *testing.T) {

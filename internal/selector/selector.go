@@ -225,6 +225,7 @@ func Select(in *Input) (*Result, error) {
 		hasher.WithRoot(in.Repo.Root)
 	}
 	for _, su := range in.Suites {
+		hs := hasher.ForSuite(su)
 		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
 		res.Suites = append(res.Suites, sr)
 		tests := su.TestFiles(files)
@@ -273,7 +274,10 @@ func Select(in *Input) (*Result, error) {
 			}
 			if entry != nil {
 				for f := range entry.Deps {
-					deps[f] = true
+					// A variable env_ignore lists now (it may have been recorded before).
+					if !EnvIgnored(in.Config, su, f) {
+						deps[f] = true
+					}
 				}
 			}
 			dl := make([]string, 0, len(deps))
@@ -289,9 +293,9 @@ func Select(in *Input) (*Result, error) {
 				t.Duration = entry.DurationMs
 			}
 			if entry == nil && res.Mode == ModeState && baseChanged != nil {
-				decide(t, ModeDiff, nil, dl, hasher, baseChanged)
+				decide(t, ModeDiff, nil, dl, hs, baseChanged)
 			} else {
-				decide(t, res.Mode, entry, dl, hasher, changedSet)
+				decide(t, res.Mode, entry, dl, hs, changedSet)
 			}
 			for _, c := range t.Changed {
 				if t.Via == nil {

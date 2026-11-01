@@ -14,6 +14,8 @@ func TestParseAndMake(t *testing.T) {
 		{"config/local.json?", KindExistence, "config/local.json"},
 		{"scripts/**", KindTree, "scripts"},
 		{"./**", KindTree, "."},
+		{"$TZ", KindEnv, "TZ"},
+		{"$WEIRD/NAME?", KindEnv, "WEIRD/NAME?"},
 	} {
 		k, p := Parse(c.key)
 		if k != c.kind || p != c.path {
@@ -24,6 +26,9 @@ func TestParseAndMake(t *testing.T) {
 		}
 		if IsPseudo(c.key) != (c.kind != KindContent) {
 			t.Errorf("IsPseudo(%q)", c.key)
+		}
+		if IsEnv(c.key) != (c.kind == KindEnv) {
+			t.Errorf("IsEnv(%q)", c.key)
 		}
 	}
 	// A trailing slash on the path is not doubled.

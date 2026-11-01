@@ -40,11 +40,71 @@ Dependency keys:
 | `dir/` | hash of the entry names | a directory is listed (readdir, os.listdir, Bun.Glob) |
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
+| `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
 is the same — modulo nondeterminism and inputs outside the repository (services, network),
 which are handled by global inputs, rules, and the orphan path below.
+
+### Environment variables
+
+A variable a test reads is an input like a file. Only a hash of its value is stored, so a
+state file does not leak secrets (but a guessable value can be confirmed against the hash;
+such variables belong in `env_ignore`). Unset hashes as `""` and an empty value does not,
+so setting a variable that a test probed selects it. The value hashed is the one the
+suite's tests see: the suite's `env:` from smates.yml (already an input of every test)
+over smates' own environment, without the agent credentials smates withholds from tests.
+Variables smates sets to trace a run are not taken into account (they are ignored).
+
+What counts as a read, per runtime (section 2 has the mechanics): `process.env` is
+replaced by a proxy in Node and Bun, and jest's per-file copy of it is wrapped the same
+way; `os.environ` is patched in Python (`os.getenv`, `.get`, `in`, indexing); Go test
+logs already list `getenv` calls (`os.Getenv`, `os.LookupEnv`, the records `go test`
+itself uses to invalidate its cache). A lookup is recorded only when
+
+- repository code is on the stack: runners, reporters and libraries look variables up
+  for their own bookkeeping in every test, which would make every test depend on them;
+  a library called by the test (an SDK reading `AWS_REGION`) does count;
+- it is not the test framework saving a value it is about to stub (`vi.stubEnv`,
+  `monkeypatch.setenv`);
+- the value is still the one the process started with: a test that sets `TZ` and reads
+  it back does not depend on the outer `TZ`;
+- it is not part of copying the whole environment (`{...process.env}`, `Object.keys`,
+  `dict(os.environ)`, `os.environ.copy()`, `items()`): children started with the copy
+  record their own reads, and an untraced child is a limitation either way.
+
+Reads that happen while a module is imported once per process are given, like file
+reads, to every test depending on the module (`ReadsBy`).
+
+**CI and local.** The state is usually recorded on CI and pulled to a laptop, where many
+variables differ for reasons that have nothing to do with the tests: the user and
+machine (`PATH`, `HOME`, `USER`, `TMPDIR`, `SHELL`), the locale, the terminal (`TERM`,
+`COLUMNS`, color switches), CI metadata (`CI`, `GITHUB_*`, `RUNNER_*`, ...), proxies,
+toolchain locations (`GOPATH`, `VIRTUAL_ENV`, `npm_*`) and the variables smates injects
+(`NODE_OPTIONS`, `PYTHONPATH`, `GOFLAGS`, `SMATES_*`). Tracking them would select every
+test that touches one of them on the first local run, which defeats pulling the state.
+They are therefore ignored by default (`config.DefaultEnvIgnore`); `env_ignore` adds to
+the list, `env_track` takes names out of it (top level or per suite), and the ignore list
+is applied both when recording and when comparing, so adding a name stops it from
+selecting tests at once, without a new recording. What remains tracked are the variables
+a project defines (`DATABASE_URL`, `APP_*`), `TZ`, `NODE_ENV` and the like. When one of
+them differs between CI and a laptop, the tests reading it do run locally — they may
+behave differently there, which is the point — and only those tests.
+
+Tracking is **on by default**. Recorded variables only add keys to `D(T)`, so a selection
+can only grow compared with not tracking them: the risk is running too much, never too
+little, in line with resolving every uncertainty towards running more. The two ways it
+could run too much are bounded: systematic CI/local differences are on the ignore list,
+and lookups that every test would share (the runner's own) are excluded by the stack
+rule, so a differing variable selects the tests whose code reads it, not the suite. A
+project that still sees noise lists the variable in `env_ignore`; `env_ignore: ["*"]`
+turns the feature off.
+
+Compatibility: env keys are stored in the state's path table like any key, so the format
+version is unchanged and older state files load as they are. Their entries simply have no
+env keys until the test runs again. An older smates reading a newer state takes `$NAME`
+for a missing file and selects those tests (the safe direction).
 
 ### Orphans: the part TIA cannot explain
 
@@ -98,6 +158,20 @@ analyzed from their command line when the child starts (`child_process.*` in Nod
   for-loops, functions, `$(dirname "$0")` and read-only command substitutions;
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name).
+
+**Environment variables** (see section 1). Node and Bun: `process.env` becomes an
+accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
+and `getOwnPropertyDescriptor` record a name after checking the stack (`Error().stack`,
+at most 32 checks per name and context); an `ownKeys` call followed, within the same
+tick, by lookups of the returned keys in order is a copy. jest-util's
+`installCommonGlobals` is shadowed on load so the copy jest gives each test file is
+proxied too; vitest's `import.meta.env` reads through `process.env`. Bun's `Bun.env` is
+not configurable and is not traced. Python: `os._Environ.__getitem__` (behind `get`, `in`
+and `os.getenv`) records the name with the nearest repository frame as `by`;
+`__iter__` remembers the frame and instruction that enumerates, and lookups from that
+same instruction are the copy. Go: `getenv` lines of the test log; they carry no stack,
+so the lookup `t.Setenv` makes to restore a variable later counts as a read (the test
+depends on the outer value of a variable it sets: more runs, never fewer).
 
 **Python module-level state.** pytest imports a module once per process, and caches
 (`functools.cache`) run once: a read made then belongs to the module that made it
@@ -182,7 +256,9 @@ of:
 
 - every dependency recorded by the previous run still has the same hash, and every file
   the unit depends on now but did not record then is unchanged since the recorded
-  snapshot (so a dependency the previous trace missed cannot hide a real change);
+  snapshot (so a dependency the previous trace missed cannot hide a real change); an
+  environment variable read for the first time has nothing to compare with, so it rules
+  this out;
 - an earlier outcome in the unit's history has the same *fingerprint* (a hash of its whole
   dependency map);
 - both outcomes come from the same run (a failed attempt and its retry).
@@ -209,7 +285,8 @@ after it runs and before its results are recorded, since recording overwrites th
 
 Ranking is by tier, then most recent modification, then directory proximity to the test
 file: code the test imports directly (static graph), other code, the test file itself,
-data, configuration (suite inputs, manifests, lockfiles), then directory listings,
+environment variables the test read (tied with the test file), data, configuration
+(suite inputs, manifests, lockfiles), then directory listings,
 existence checks and opaque trees. A failure with no changed input is reported as such
 (flaky, environmental, or untraceable), or as "already failing" when the previous entry
 did not pass; orphans of the run are offered as candidates in that case, since they are

@@ -9,6 +9,7 @@ $SMATES_TRACE_DIR/proc-<pid>-0.jsonl, using the same protocol as the Node shim:
     {"k": "dir", "p": "/abs/dir"}          a directory was listed
     {"k": "probe", "p": "/abs/path"}       existence of a path was checked (stat/access)
     {"k": "exec", "args": [...], "shell": false, "cwd": "/abs"}  a child process started
+    {"k": "env", "p": "NAME"}              an environment variable was read (never its value)
     {"k": "ctx", "id": "test:/abs/file", "t": ms}   attribution context switch
     {"k": "uses", "id": "/abs/test_file", "ctx": ["fixture:..."]}
     {"k": "result", "id": "/abs/test_file", "status": "pass|fail", "ms": 12}
@@ -16,7 +17,8 @@ $SMATES_TRACE_DIR/proc-<pid>-0.jsonl, using the same protocol as the Node shim:
 
 Code execution is observed with sys.monitoring (Python 3.12+; each code object reports
 once per context, then is disabled until the next context switch) or sys.setprofile on
-older versions. Reads come from the "open"/"os.listdir"/"os.scandir" audit events.
+older versions. Reads come from the "open"/"os.listdir"/"os.scandir" audit events;
+environment variables from os.environ (os.getenv, os.environ.get, `in`, indexing).
 """
 
 import os
@@ -174,6 +176,7 @@ class _Tracer:
         os.environ["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
         sys.addaudithook(self._audit)
         self._wrap_probes()
+        self._wrap_environ()
         mon = getattr(sys, "monitoring", None)
         if mon is not None:
             for tool in (3, 4, 2, 5):
@@ -234,6 +237,105 @@ class _Tracer:
 
         for name in ("stat", "lstat", "access"):
             wrap(name)
+
+    def _wrap_environ(self):
+        # Names of the variables read with repository code on the stack (not the
+        # runner's or a library's own lookups at their import), and only of values this
+        # process did not set itself. Copying the whole environment (dict(os.environ),
+        # os.environ.copy(), items()) is not a read of every variable: traced children
+        # record their own reads.
+        cls = type(os.environ)
+        if getattr(cls, "__smates__", False):
+            return
+        tracer = self
+        initial = dict(os.environ)
+        local = self._local
+        skip = ("os", "_collections_abc", "collections.abc")
+
+        def caller(f):
+            # The first frame outside os and the Mapping mixins (frozen modules, so
+            # recognized by name).
+            while f is not None and f.f_globals.get("__name__") in skip:
+                f = f.f_back
+            return f
+
+        orig_iter = cls.__iter__
+        orig_getitem = cls.__getitem__
+
+        def __iter__(self_):
+            # Remembers where the enumeration happens: lookups made there (at the same
+            # instruction) are the copy, not reads of single variables.
+            f = caller(sys._getframe(1))
+            if f is not None:
+                local.enum = (id(f), f.f_code, f.f_lasti)
+            return orig_iter(self_)
+
+        def __getitem__(self_, key):
+            # A missing variable (KeyError) is a read too; other errors (a key that is
+            # not a string) are the caller's and propagate unchanged.
+            try:
+                value = orig_getitem(self_, key)
+            except KeyError:
+                if tracer.enabled and not getattr(local, "busy", False):
+                    tracer._env_read(self_, key, None, initial, caller)
+                raise
+            if tracer.enabled and not getattr(local, "busy", False):
+                tracer._env_read(self_, key, value, initial, caller)
+            return value
+
+        cls.__iter__ = __iter__
+        cls.__getitem__ = __getitem__
+        cls.__smates__ = True
+
+    def _env_read(self, env, key, value, initial, caller):
+        local = self._local
+        local.busy = True
+        try:
+            if isinstance(key, bytes):
+                name, value = os.fsdecode(key), None if value is None else os.fsdecode(value)
+            else:
+                name = key
+            if not isinstance(name, str) or initial.get(name) != value:
+                return  # set by this process
+            f = caller(sys._getframe(2))
+            if f is None or getattr(local, "enum", None) == (id(f), f.f_code, f.f_lasti):
+                return
+            module = f.f_globals.get("__name__") or ""
+            if module.split(".")[0] in ("_pytest", "pytest", "pluggy"):
+                return  # pytest itself, e.g. monkeypatch saving the value it restores later
+            # The repository file nearest on the stack: a module reading the variable at
+            # import (once per process) passes it on to every test depending on it.
+            by = None
+            n = 0
+            while f is not None and n < 50:
+                fn = f.f_code.co_filename
+                real = self._code_real.get(f.f_code, False)
+                if real is False:
+                    real = self._code_real[f.f_code] = None if fn.startswith("<") else self._norm(fn)
+                if real is not None:
+                    by = real
+                    break
+                f = f.f_back
+                n += 1
+            if by is None:
+                return
+            if self.ctx.startswith("fixture:"):
+                by = None
+            k = (self.ctx, "env", name, by)
+            if k in self.seen:
+                return
+            with self.lock:
+                if k in self.seen:
+                    return
+                self.seen.add(k)
+                ev = {"k": "env", "p": name}
+                if by is not None:
+                    ev["by"] = by
+                self.write(ev)
+        except Exception:
+            pass
+        finally:
+            local.busy = False
 
     def _audit(self, event, args):
         if event in ("os.chdir", "os.fchdir"):
