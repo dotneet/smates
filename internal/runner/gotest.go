@@ -101,8 +101,14 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	out.Stdout = io.MultiWriter(rc.Stdout, failed)
 	code, err := runAll(ctx, &out, testArgs, env)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
-	if err != nil || !rc.Record {
+	if err != nil {
 		return res, err
+	}
+	if !rc.Record {
+		if rc.TraceDir != "" {
+			res.Observations = failed.observations(rc)
+		}
+		return res, nil
 	}
 	runs, err := trace.CollectGo(rc.TraceDir)
 	if err != nil {
@@ -182,21 +188,33 @@ var goSummaryRe = regexp.MustCompile(`^(ok|FAIL|\?)\s+(\S+)(\s|$)`)
 // maxGoPending bounds the output kept for the package currently printing.
 const maxGoPending = 16 << 10
 
-// buildFailures collects import paths of packages go test could not build, and the
+// buildFailures collects import paths of packages go test could not build, the
 // output of failing packages (go test prints each package's output in one block,
-// followed by its summary line).
+// followed by its summary line) and the status each summary line gives.
 type buildFailures struct {
 	mu      sync.Mutex
 	buf     []byte
 	paths   map[string]bool
 	pending []byte
 	output  map[string]string // import path -> failure output (bounded)
+	status  map[string]string // import path -> state.Pass / state.Fail
 }
 
 // collect accumulates one output line, attributing it to the package whose summary
 // line follows.
 func (b *buildFailures) collect(line []byte) {
 	if m := goSummaryRe.FindSubmatch(line); m != nil {
+		if b.status == nil {
+			b.status = map[string]string{}
+		}
+		switch string(m[1]) {
+		case "ok":
+			if b.status[string(m[2])] != state.Fail {
+				b.status[string(m[2])] = state.Pass
+			}
+		case "FAIL":
+			b.status[string(m[2])] = state.Fail
+		}
 		if string(m[1]) == "FAIL" && len(bytes.TrimSpace(b.pending)) > 0 {
 			if b.output == nil {
 				b.output = map[string]string{}
@@ -236,6 +254,31 @@ func (b *buildFailures) Write(p []byte) (int, error) {
 		b.buf = b.buf[i+1:]
 	}
 	return len(p), nil
+}
+
+// observations returns the per-package outcomes of a run that was not traced, from the
+// summary lines go test printed: statuses and failure output, no dependencies.
+func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.status) == 0 {
+		return nil
+	}
+	modDir, mod := findModule(rc.Repo.Root, rc.Dir())
+	obs := map[string]*Observation{}
+	for _, u := range rc.Units {
+		ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+		st, ok := b.status[ip]
+		if ip == "" || !ok {
+			continue
+		}
+		o := &Observation{Files: map[string]bool{}, Status: st}
+		if st == state.Fail {
+			o.Failure = b.output[ip]
+		}
+		obs[u] = o
+	}
+	return obs
 }
 
 // findModule finds the go.mod governing dir (searching up to root) and returns its

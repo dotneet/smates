@@ -37,7 +37,12 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	if !rc.Record {
 		start := time.Now()
 		code, err := runBatches(ctx, rc, nil, rc.RelArgs("./"), nil)
-		return &RunResult{ExitCode: code, Duration: time.Since(start)}, err
+		res := &RunResult{ExitCode: code, Duration: time.Since(start)}
+		if err == nil {
+			// Only a JUnit report (junit: in smates.yml) gives per-file status.
+			res.Observations, res.Warnings = reported(rc)
+		}
+		return res, err
 	}
 	// Bun runs all files in one process and does not support NODE_V8_COVERAGE, so while
 	// recording each file runs in its own process with lcov coverage (loaded modules)

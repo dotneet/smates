@@ -123,13 +123,13 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		c.printCommands(batches)
 		return 0, nil
 	}
-	if c.record {
-		cleanup, err := c.prepareTrace()
-		if err != nil {
-			return 1, err
-		}
-		defer cleanup()
+	// Without recording the directory still receives the per-file results of runner
+	// reporters.
+	cleanup, err := c.prepareTrace()
+	if err != nil {
+		return 1, err
 	}
+	defer cleanup()
 	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
 	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
@@ -289,11 +289,9 @@ type suiteResult struct {
 func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	p, sr := c.p, b.sr
 	rc := c.runContext(sr, b.units, b.full)
-	if c.record {
-		rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("batch-%d", i))
-		if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
-			return 0, err
-		}
+	rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("batch-%d", i))
+	if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
+		return 0, err
 	}
 	if b.parts > 1 {
 		p.logf("%s: running %d test unit(s) with %s (batch %d of %d: %s)", sr.Name, len(b.units), sr.Suite.Runner, b.part, b.parts, prioLabel(b.prio))

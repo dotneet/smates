@@ -37,8 +37,13 @@ func (custom) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	start := time.Now()
 	code, err := runBatches(ctx, rc, nil, rc.RelArgs(""), env)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
-	if err != nil || !rc.Record {
+	if err != nil {
 		return res, err
+	}
+	if !rc.Record {
+		// Only a JUnit report (junit: in smates.yml) gives per-file status.
+		res.Observations, res.Warnings = reported(rc)
+		return res, nil
 	}
 	res.Observations, res.Warnings, res.ReadsBy, err = observeAll(rc, code, traceOptions{})
 	return res, err

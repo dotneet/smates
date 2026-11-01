@@ -1,12 +1,14 @@
 """smates pytest plugin: attributes traced activity to test files.
 
-Loaded through PYTEST_PLUGINS while smates records. Contexts:
+Loaded through PYTEST_PLUGINS while smates records, and without tracing (smates run
+--no-record) to write per-file results only. Contexts:
     collect:<file>   importing a test module (module-level code, imports)
     test:<file>      running a test item of that file (setup, call, teardown)
     fixture:<name>@<baseid>   setting up a fixture (shared fixtures are set up once,
                               so their dependencies are added to every test using them)
 """
 
+import json
 import os
 import time
 
@@ -16,6 +18,8 @@ import smates_trace
 
 _tracer = smates_trace.install()
 _results = {}
+# Without tracing, results go to a file of their own in $SMATES_TRACE_DIR.
+_results_dir = os.environ.get("SMATES_TRACE_DIR") if _tracer is None else None
 
 
 def _file_of(node):
@@ -23,6 +27,17 @@ def _file_of(node):
     if path is None:
         path = getattr(node, "fspath", None)
     return os.path.realpath(str(path)) if path is not None else None
+
+
+def _write_result(ev):
+    if _tracer is not None:
+        _tracer.write(ev)
+        return
+    try:
+        with open(os.path.join(_results_dir, "results-pytest-%d.jsonl" % os.getpid()), "a") as f:
+            f.write(json.dumps(ev) + "\n")
+    except OSError:
+        pass
 
 
 if _tracer is not None:
@@ -40,32 +55,37 @@ if _tracer is not None:
             _tracer.pop()
 
     @pytest.hookimpl(hookwrapper=True)
-    def pytest_runtest_protocol(item, nextitem):
-        f = _file_of(item)
-        start = time.time()
-        _tracer.push("test:" + f)
-        try:
-            yield
-        finally:
-            _tracer.pop()
-            r = _results.setdefault(f, {"ms": 0, "failed": False})
-            r["ms"] += int((time.time() - start) * 1000)
-            names = getattr(item, "fixturenames", ()) or ()
-            defs = getattr(getattr(item, "_fixtureinfo", None), "name2fixturedefs", {}) or {}
-            ctx = []
-            for name in names:
-                for fd in defs.get(name, ()):
-                    ctx.append("fixture:%s@%s" % (fd.argname, fd.baseid))
-            if ctx:
-                _tracer.write({"k": "uses", "id": f, "ctx": sorted(set(ctx))})
-
-    @pytest.hookimpl(hookwrapper=True)
     def pytest_fixture_setup(fixturedef, request):
         _tracer.push("fixture:%s@%s" % (fixturedef.argname, fixturedef.baseid))
         try:
             yield
         finally:
             _tracer.pop()
+
+
+if _tracer is not None or _results_dir:
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(item, nextitem):
+        f = _file_of(item)
+        start = time.time()
+        if _tracer is not None:
+            _tracer.push("test:" + f)
+        try:
+            yield
+        finally:
+            r = _results.setdefault(f, {"ms": 0, "failed": False})
+            r["ms"] += int((time.time() - start) * 1000)
+            if _tracer is not None:
+                _tracer.pop()
+                names = getattr(item, "fixturenames", ()) or ()
+                defs = getattr(getattr(item, "_fixtureinfo", None), "name2fixturedefs", {}) or {}
+                ctx = []
+                for name in names:
+                    for fd in defs.get(name, ()):
+                        ctx.append("fixture:%s@%s" % (fd.argname, fd.baseid))
+                if ctx:
+                    _tracer.write({"k": "uses", "id": f, "ctx": sorted(set(ctx))})
 
     _failed_nodeids = set()
     # Failure output per test file (bounded: it only feeds smates' failure hints).
@@ -106,10 +126,10 @@ if _tracer is not None:
             ev = {"k": "result", "id": f, "status": "fail" if f in failed else "pass", "ms": r["ms"]}
             if failed.get(f):
                 ev["msg"] = failed[f]
-            _tracer.write(ev)
+            _write_result(ev)
         for f, msg in failed.items():
             if f not in _results:
                 ev = {"k": "result", "id": f, "status": "fail", "ms": 0}
                 if msg:
                     ev["msg"] = msg
-                _tracer.write(ev)
+                _write_result(ev)

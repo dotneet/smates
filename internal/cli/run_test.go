@@ -252,3 +252,82 @@ func TestSettleOutcomes(t *testing.T) {
 		t.Error("observations map not created")
 	}
 }
+
+// A shadow run without recording still learns per-file status from what the runner
+// reports (here a JUnit report), so it detects escapes; the state is left as it was.
+func TestShadowNoRecordReportsEscapes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	clearCI(t)
+	t.Setenv("GITHUB_OUTPUT", "")
+	t.Setenv("GITHUB_STEP_SUMMARY", "")
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	write := func(rel, content string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("smates.yml", `version: 1
+orphans: ignore
+suites:
+  - name: py
+    runner: custom
+    tests: ["tests/*_check.py"]
+    junit: junit.xml
+    command: sh -c 'rc=0; echo "<testsuite>" > junit.xml; for f; do if python3 "$f"; then echo "<testcase file=\"$f\" name=\"t\"/>"; else rc=1; echo "<testcase file=\"$f\" name=\"t\"><failure message=\"boom\"/></testcase>"; fi >> junit.xml; done; echo "</testsuite>" >> junit.xml; exit $rc' sh
+`)
+	write(".gitignore", ".smates/\njunit.xml\n")
+	write("tests/a_check.py", "assert True\n")
+	// b depends on an environment variable, which tracing cannot see.
+	write("tests/b_check.py", "import os\nassert os.environ.get(\"SMATES_TEST_MODE\") != \"broken\"\n")
+	g.git("add", "-A")
+	g.commit("fixture")
+	run := func(args ...string) (int, string) {
+		var out, errb bytes.Buffer
+		code := Main(append(args[:1:1], append([]string{"-C", g.dir, "--no-agent"}, args[1:]...)...), &out, &errb)
+		return code, errb.String()
+	}
+	if code, errs := run("run", "--all"); code != 0 {
+		t.Fatalf("baseline: %d\n%s", code, errs)
+	}
+	statePath := filepath.Join(g.dir, ".smates", "state.json.gz")
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SMATES_TEST_MODE", "broken")
+	report := filepath.Join(t.TempDir(), "report.json")
+	code, errs := run("run", "--shadow", "--no-record", "--report", report)
+	if code == 0 {
+		t.Fatalf("shadow run must fail\n%s", errs)
+	}
+	data, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Escapes  []string                     `json:"escapes"`
+		Possible []string                     `json:"possible_escapes"`
+		Results  map[string]map[string]string `json:"results"`
+	}
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Escapes) != 1 || rep.Escapes[0] != "py: tests/b_check.py" || len(rep.Possible) != 0 {
+		t.Errorf("escapes %v possible %v\n%s", rep.Escapes, rep.Possible, errs)
+	}
+	if rep.Results["py"]["tests/a_check.py"] != "pass" || rep.Results["py"]["tests/b_check.py"] != "fail" {
+		t.Errorf("results %v", rep.Results)
+	}
+	if after, _ := os.ReadFile(statePath); !bytes.Equal(before, after) {
+		t.Error("--no-record changed the state")
+	}
+}
