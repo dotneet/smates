@@ -297,10 +297,12 @@ so `sh -c "node x | tr"` or `make` in between does not break the chain). A proce
 without a test of its own belongs to its nearest traced ancestor that has one; processes
 under a Go test binary belong to that package. Helpers of the runner itself that execute
 repository code (a server from global setup) are global dependencies; helpers that only
-read files (crawlers, transformers) are ignored. A process smates started itself is the
-runner even when no test of it left a trace (a jest worker force-killed before writing
-its coverage, with one runner per test file): only its code is global, not its reads
-(jest's watchman probe and `find` crawl stand for the whole tree).
+read files (crawlers, transformers) are ignored. A process smates started that names a
+test file on its command line is the runner even when that test left no trace (a jest
+worker force-killed before writing its coverage, with one runner per test file): only
+its code is global, not its reads (jest's watchman probe and `find` crawl stand for the
+whole tree). A setup script the suite command runs first (`sh -c "node setup.js &&
+jest"`) names no test: what it uses is global.
 
 **Coverage tools sharing the same mechanisms.** V8 precise coverage is one per isolate:
 vitest's v8 provider and jest's v8 coverage take it through `node:inspector` and then stop

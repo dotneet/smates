@@ -106,13 +106,15 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	owner := func(p *Proc) bool { return len(own[p]) > 0 || p.HasContexts() }
 
 	// Processes that are ancestors of a unit-owning process are runner infrastructure,
-	// and so is a process smates started itself (no traced parent) that owns nothing:
-	// a runner whose test process left no trace (a jest worker force-killed before it
-	// wrote its coverage, with isolate one runner per test file). Its crawls and its
-	// probes (jest's find, watchman: the whole tree) are not reads of every test.
+	// and so is a runner smates started (no traced parent) whose test process left no
+	// trace (a jest worker force-killed before it wrote its coverage, with isolate one
+	// runner per test file): a process that owns nothing but names a test file on its
+	// command line. Its crawls and probes (jest's find, watchman: the whole tree) are not
+	// reads of every test. A setup script the suite command runs first (sh -c "node
+	// setup.js && jest") names no test: what it reads stays global.
 	infra := map[*Proc]bool{}
 	for _, p := range procs {
-		if !owner(p) && parent(p) == nil {
+		if !owner(p) && parent(p) == nil && namesUnit(p, unitOf, opt.Rel) {
 			infra[p] = true
 		}
 	}
@@ -239,6 +241,23 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 	}
 	return res
+}
+
+// namesUnit reports whether p's command line names a test file (arguments resolved
+// against its working directory, as namedUnit does).
+func namesUnit(p *Proc, unitOf func(string) string, rel func(string) (string, bool)) bool {
+	if rel == nil {
+		return false
+	}
+	for _, a := range p.Argv {
+		if !filepath.IsAbs(a) {
+			a = filepath.Join(p.Cwd, a)
+		}
+		if r, ok := rel(a); ok && unitOf(r) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // namedUnit returns the one unit among units that p's command line names (arguments

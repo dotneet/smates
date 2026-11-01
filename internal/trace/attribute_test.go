@@ -105,19 +105,32 @@ func TestAttributeSingleUnitWorkers(t *testing.T) {
 
 // With one runner per test file (isolate), a runner whose test process left no trace
 // (a jest worker force-killed before writing its coverage) is still a runner: the tree
-// its crawl or watchman probe stands for is not a read of the other tests.
+// its crawl or watchman probe stands for is not a read of the other tests. A setup
+// script the suite command runs before the runner (sh -c "node setup.js && jest": no
+// traced parent, no test of its own, no test on its command line) still gives every
+// test what it reads.
 func TestAttributeRunnerWithoutTracedTest(t *testing.T) {
-	a := attr(Options{},
-		mkProc(10, 1, 0).code("jest.config.js").read("./**"),
+	root := repoDir(t)
+	touch(t, root, "a.test.ts", "b.test.ts", "src/a.ts", "jest.config.js", "setup.js", "seed.json")
+	jest := func(pid int, test string) *pb {
+		b := mkProc(pid, 1, 0).code("jest.config.js").read("./**")
+		b.p.Argv, b.p.Cwd = []string{"node", "node_modules/.bin/jest", "--runTestsByPath", test}, root
+		return b
+	}
+	setup := mkProc(30, 1, 0).code("setup.js").read("seed.json")
+	setup.p.Argv, setup.p.Cwd = []string{"node", "setup.js"}, root
+	a := attr(Options{Rel: RelFunc(root)},
+		jest(10, "a.test.ts"),
 		mkProc(11, 10, 0).code("a.test.ts", "src/a.ts").exit(0),
-		mkProc(20, 1, 0).code("jest.config.js").read("./**"),
+		jest(20, filepath.Join(root, "b.test.ts")),
 		mkProc(21, 20, 0), // the worker of b.test.ts, killed: no coverage
+		setup,
 	)
 	if got := unitFiles(a, "a.test.ts"); !reflect.DeepEqual(got, []string{"a.test.ts", "src/a.ts"}) {
 		t.Errorf("a: %v", got)
 	}
-	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"jest.config.js"}) {
-		t.Errorf("global: %v, want the runners' code only", got)
+	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"jest.config.js", "seed.json", "setup.js"}) {
+		t.Errorf("global: %v, want the runners' code and the setup script's files", got)
 	}
 }
 
