@@ -167,7 +167,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			all = true
 		}
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), noOrphans: len(f.onlySpecs) > 0, orphans: f.orphans, adds: f.adds})
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), noOrphans: len(f.onlySpecs) > 0, orphans: f.orphans, adds: f.adds, sharded: f.shardN > 1})
 	if err != nil {
 		return 1, err
 	}
@@ -185,18 +185,20 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 
 	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
-		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, results: map[string]*suiteResult{}}
+		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
 	prioritize(sel.res, p.state, p.direct())
 	batches := c.plan()
 	c.logSkipped()
-	if f.dryRun {
-		c.printCommands(batches)
-		return 0, nil
-	}
-	if f.skipEmpty && len(batches) == 0 {
+	if f.dryRun || (f.skipEmpty && len(batches) == 0) {
+		if f.dryRun {
+			c.printCommands(batches)
+		}
+		if err := c.saveWithoutRun(len(batches) == 0); err != nil {
+			p.logf("could not save the agent's answer: %v", err)
+		}
 		return 0, nil
 	}
 	if hooks == nil {
@@ -233,8 +235,24 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			continue
 		}
 		code, err := c.runBatch(ctx, i, b)
-		if err != nil {
+		var ce configError
+		if errors.As(err, &ce) {
 			return 1, err
+		}
+		if err != nil {
+			// The runner could not start (not installed, preflight failed): like a
+			// batch whose tests never started, an environment error reported after
+			// the other batches ran and were recorded. Its units count as not run
+			// (they stay selected).
+			if c.envErr == nil {
+				c.envErr = err
+			} else {
+				p.logf("%v", err) // only the first is reported at the end
+			}
+			c.unstarted[b.sr.Name] = append(c.unstarted[b.sr.Name], b.units...)
+			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+			c.worst = max(c.worst, ExitFailed)
+			continue
 		}
 		if code != 0 && f.failFast && i < len(batches)-1 {
 			c.stopped = true
@@ -340,7 +358,8 @@ type cycle struct {
 	envErr      error
 	testsFailed bool
 	started     map[string][]string     // suite -> units started
-	notRun      map[string][]string     // --fail-fast, interrupt: suite -> units not started (or cut short)
+	notRun      map[string][]string     // --fail-fast, interrupt, unstarted: suite -> units not started (or cut short)
+	unstarted   map[string][]string     // suite -> units of batches whose runner could not start (also in notRun)
 	stopped     bool                    // --fail-fast (or an interrupt) stopped the run
 	results     map[string]*suiteResult // suite -> outcomes to record
 	escapes     []string                // shadow: failing tests the selection would have skipped
@@ -666,23 +685,25 @@ func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observati
 // saveState updates the state's repository snapshot and saves the state.
 func (c *cycle) saveState() error {
 	p, res := c.p, c.sel.res
+	picked, left := c.ranSuites()
 	switch {
-	case c.stopped:
-		// --fail-fast stopped the run: the repository-wide snapshot stays as it was,
-		// so changes and orphans the tests that did not run would have covered are
-		// seen again next time.
-	case len(p.others) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
-		// Every test of the suites --suite picked ran. Files only they own get their
-		// hash; files suites left out also own (or own alone) are marked as seen by
-		// the picked suites (state.MarkerSnap), so the suites left out still find
-		// them changed on a shared state (locally, after `state merge`, or in CI
-		// without a cache-key per job). Commit and Created stay as they were on
-		// purpose: a partial refresh must not win State.Merge over a full
-		// snapshot, and hooks judge staleness by the last full run.
+	case c.stopped || len(picked) == 0:
+		// --fail-fast stopped the run (or no suite's runner could start): the
+		// repository-wide snapshot stays as it was, so changes and orphans the tests
+		// that did not run would have covered are seen again next time.
+	case len(left) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
+		// Every test of the suites --suite picked ran (a suite whose runner could not
+		// start counts as left out). Files only they own get their hash; files suites
+		// left out also own (or own alone) are marked as seen by the picked suites
+		// (state.MarkerSnap), so the suites left out still find them changed on a
+		// shared state (locally, after `state merge`, or in CI without a cache-key per
+		// job). Commit and Created stay as they were on purpose: a partial refresh
+		// must not win State.Merge over a full snapshot, and hooks judge staleness by
+		// the last full run.
 		if p.state.Files == nil {
 			p.state.Files = map[string]string{}
 		}
-		own := selector.NewOwnership(p.suites, p.others)
+		own := selector.NewOwnership(picked, left)
 		for f, h := range p.snap {
 			p.recordSeen(own, f, h)
 		}
@@ -695,26 +716,78 @@ func (c *cycle) saveState() error {
 		p.state.Files = map[string]string(p.snap)
 		p.state.Commit = p.repo.Head()
 		p.state.Created = c.now
-	case len(p.state.Files) > 0:
-		// Orphans were handled by this run (by name, by the agent or by running the
-		// affected suites): remember their current content so the next run on this
-		// branch does not ask again. Other files stay as recorded; per-test entries
-		// track them. Orphans the policy was not applied to (a watch cycle's older
-		// changes, --only) stay unseen.
-		own := selector.NewOwnership(p.suites, p.others)
-		for _, o := range res.Orphans {
-			if _, handled := res.OrphanHandling[o]; !handled {
-				continue
-			}
-			if len(p.others) > 0 {
-				p.recordSeen(own, o, p.snap[o])
-			} else if h, ok := p.snap[o]; ok {
-				p.state.Files[o] = h
-			} else {
-				delete(p.state.Files, o)
-			}
+	default:
+		c.markHandledOrphans(picked, left)
+	}
+	return c.save()
+}
+
+// ranSuites splits the suites of the run into those that ran (picked) and those
+// --suite left out or whose runner could not start (left).
+func (c *cycle) ranSuites() (picked, left []*runner.Suite) {
+	p := c.p
+	if len(c.unstarted) == 0 {
+		return p.suites, p.others
+	}
+	left = slices.Clip(p.others)
+	for _, s := range p.suites {
+		if _, ok := c.unstarted[s.Name]; ok {
+			left = append(left, s)
+		} else {
+			picked = append(picked, s)
 		}
 	}
+	return picked, left
+}
+
+// markHandledOrphans records the orphans the run handled (by name, by the agent or by
+// running the affected suites) with their current content, so the next run on this
+// branch does not ask again. Other files stay as recorded; per-test entries track
+// them. Orphans the policy was not applied to (a watch cycle's older changes, --only)
+// stay unseen. With suites left out (ranSuites) an orphan is recorded as seen by the
+// picked suites only.
+func (c *cycle) markHandledOrphans(picked, left []*runner.Suite) {
+	p, res := c.p, c.sel.res
+	if len(p.state.Files) == 0 {
+		return
+	}
+	own := selector.NewOwnership(picked, left)
+	for _, o := range res.Orphans {
+		if _, handled := res.OrphanHandling[o]; !handled {
+			continue
+		}
+		if len(left) > 0 {
+			p.recordSeen(own, o, p.snap[o])
+		} else if h, ok := p.snap[o]; ok {
+			p.state.Files[o] = h
+		} else {
+			delete(p.state.Files, o)
+		}
+	}
+}
+
+// saveWithoutRun saves what the selection learned when no test runs (--dry-run, or a
+// selection that runs nothing under skipEmpty): the agent's new answer, so the next
+// run on the same change does not ask again, and, when there was nothing to run, the
+// orphans handled (the policy left no test to run for them). No outcome is recorded.
+func (c *cycle) saveWithoutRun(nothingToRun bool) error {
+	if !c.record {
+		return nil
+	}
+	fresh := c.sel.agentDec != nil && !c.sel.agentCache
+	handled := nothingToRun && len(c.sel.res.OrphanHandling) > 0 && len(c.p.state.Files) > 0
+	if !fresh && !handled {
+		return nil
+	}
+	if handled {
+		c.markHandledOrphans(c.p.suites, c.p.others)
+	}
+	return c.save()
+}
+
+// save writes the state.
+func (c *cycle) save() error {
+	p := c.p
 	p.state.Tool = "smates/" + Version
 	if err := p.store.Save(p.state); err != nil {
 		return fmt.Errorf("saving state: %w", err)
@@ -762,6 +835,34 @@ func runError(suite string, err error) error {
 	return envError{err}
 }
 
+// unstartedSection lists, for the summary, the suites whose runner could not start.
+func (c *cycle) unstartedSection() (sec summary.Section, ok bool) {
+	if len(c.unstarted) == 0 {
+		return sec, false
+	}
+	var b strings.Builder
+	b.WriteString("The runner could not start (see the log); these units did not run and stay selected:\n")
+	for _, sr := range c.sel.res.Suites {
+		if units := c.unstarted[sr.Name]; len(units) > 0 {
+			fmt.Fprintf(&b, "- `%s`: %d test unit(s)\n", sr.Name, len(units))
+		}
+	}
+	return summary.Section{Title: fmt.Sprintf(":warning: %d test unit(s) not run", countUnits(c.unstarted)), Body: b.String()}, true
+}
+
+// notStartedBy names what left the units of notRun not started (when the run was not
+// interrupted): --fail-fast, a runner that could not start, or both.
+func (c *cycle) notStartedBy() string {
+	switch {
+	case len(c.unstarted) == 0:
+		return "--fail-fast"
+	case countUnits(c.unstarted) == countUnits(c.notRun):
+		return "a runner that could not start"
+	default:
+		return "--fail-fast and a runner that could not start"
+	}
+}
+
 // logShadowAndFlakes logs, in failures mode, what logOutcome logs besides the outcome
 // line: shadow escapes and flaky tests.
 func (c *cycle) logShadowAndFlakes() {
@@ -790,7 +891,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.worst, n)
 	} else if n > 0 {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; --fail-fast left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, n)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, c.notStartedBy(), n)
 	} else {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.worst)
 	}
@@ -810,8 +911,13 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 			}
 		}
 		for _, u := range c.notRun[sr.Name] {
-			sum.Run.NotRun = append(sum.Run.NotRun, sr.Name+": "+u)
+			if !slices.Contains(c.unstarted[sr.Name], u) {
+				sum.Run.NotRun = append(sum.Run.NotRun, sr.Name+": "+u)
+			}
 		}
+	}
+	if sec, ok := c.unstartedSection(); ok {
+		sum.Sections = append(sum.Sections, sec)
 	}
 	if sec, ok := flakySection(c.flakes); ok {
 		sum.Sections = append(sum.Sections, sec)
@@ -936,7 +1042,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds})
+	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
 	if err != nil {
 		return 1, err
 	}

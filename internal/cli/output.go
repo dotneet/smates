@@ -257,7 +257,7 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 	if n := countUnits(c.notRun); n > 0 && c.interrupted {
 		fmt.Fprintf(w, "  (interrupted: %d selected test unit(s) not run)\n", n)
 	} else if n > 0 {
-		fmt.Fprintf(w, "  (--fail-fast left %d selected test unit(s) not started)\n", n)
+		fmt.Fprintf(w, "  (%s left %d selected test unit(s) not started)\n", c.notStartedBy(), n)
 	}
 	fmt.Fprintf(w, "smates: rerun them: %s\n", c.rerunCommand(failed))
 }

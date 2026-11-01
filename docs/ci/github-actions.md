@@ -177,6 +177,13 @@ overwrite each other's state:
 The same applies to a matrix over, say, Node versions (`cache-key: node-${{ matrix.node }}`).
 The runner OS is already part of the key.
 
+Sharded runs do not ask the orphan-file agent: each shard would ask on its own and could
+get a different answer, and a test picked only by one shard's answer may be owned by
+another shard. Without an agent decision cached in the state they restored, the shards
+apply the fallback (the affected suites run, each shard its share). To use the agent
+with shards, run `smates select` once before them (unsharded) and have every shard
+restore the state it saved: they then reuse its cached decision.
+
 **Monorepos.** A single smates step covers every suite of the repository (smates.yml
 at the repository root lists them). If you split suites across jobs, use `args: --suite
 <name>` and a distinct `cache-key` per job. Each job then selects what a single step would

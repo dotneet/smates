@@ -31,8 +31,9 @@ affected). Do not run the whole test suite yourself: smates already picked what 
 | 3 | configuration error | fix `smates.yml` (`smates config ...`), or the `--suite`/`--only` name (`smates list`) |
 | 4 | environment problem | see `smates doctor --format json`: each failed check has a `fix` |
 
-Exit 4 also covers a runner that could not start (exit 126/127 with no test result, in a
-recorded run of any runner but `custom`) and a state that could not be saved (e.g. the
+Exit 4 also covers a runner that could not start (not installed, or exit 126/127 with no
+test result in a recorded run of any runner but `custom`; the other suites still run and
+are recorded, its tests stay selected) and a state that could not be saved (e.g. the
 shared state's lock is held); the summary is printed first. When tests also failed, the
 exit code is 1.
 

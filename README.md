@@ -701,6 +701,11 @@ ok  	example.com/shop/internal/store	0.170s
 - Bounded by turns, a wall-clock timeout and a token budget; answers are validated
   against the real test inventory and cached per change. Any failure falls back to
   running the affected suites in full.
+- Sharded runs (`--shard I/N`) do not ask the agent: each shard would ask on its own,
+  and a test only one shard's answer picked could be owned by another shard and run
+  nowhere. A shard uses a decision cached in the state it restored (from an unsharded
+  `smates select` or `smates run` on the same change); otherwise it falls back to the
+  orphan policy.
 - Fork pull requests get no secrets: smates simply falls back.
 
 ### Letting the calling agent decide

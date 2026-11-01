@@ -261,8 +261,15 @@ agent:
 	return b.String()
 }
 
+// yamlStr renders s as a YAML scalar for one line after "key: " or "- ". A string with
+// a line break is double-quoted ("a\nb"): the block scalar yaml.Marshal picks for it
+// spans lines and would not parse spliced into a line.
 func yamlStr(s string) string {
-	out, err := yaml.Marshal(s)
+	var v any = s
+	if strings.ContainsAny(s, "\n\r") {
+		v = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s, Style: yaml.DoubleQuotedStyle}
+	}
+	out, err := yaml.Marshal(v)
 	if err != nil {
 		return fmt.Sprintf("%q", s)
 	}

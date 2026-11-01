@@ -113,9 +113,11 @@ the run. Known limitation: a git-ignored input edited by hand while
 the run is in progress is recorded with its new content, so the edit selects nothing.
 
 A directory the snapshot has no file below (one git ignores entirely: generated
-fixtures, `build/`) is listed from disk too, without vendored entries and those the
-`ignore` globs match, as the run left it like content (a test that adds a timestamped
-report to the directory it lists settles after one run). The listing of a directory the
+fixtures, `build/`) is listed from disk too, without vendored entries, as the run left
+it like content (a test that adds a timestamped report to the directory it lists settles
+after one run). The `ignore` globs do not apply to such a listing: listing the directory
+is the read, so a markdown fixture (`**/*.md` is ignored by default) added to a
+git-ignored spec directory that a test iterates selects the test. The listing of a directory the
 snapshot has files below is the snapshot's alone: entries git ignores inside a tracked
 directory are not part of it. That is a known gap (a git-ignored file added next to
 tracked ones selects no test that lists the directory, unless the test read it), kept
@@ -124,8 +126,8 @@ listing, so a log a test writes into the package, a `go test -c` binary, `cover.
 profiles, `.DS_Store` or an editor's swap file would rerun the whole package (on every
 fresh checkout, for files a test writes there), where only the test reading the file
 should run. A `dir/**` tree of a directory git ignores entirely is the relative paths
-and sizes of its files on disk, without vendored ones and those the `ignore` globs
-match; contents are not read (build output can be gigabytes, and a build that is not
+and sizes of its files on disk, without vendored ones (the `ignore` globs do not apply
+here either: the command ran there); contents are not read (build output can be gigabytes, and a build that is not
 reproducible would rerun the tests forever), so a rebuilt file of the same size is no
 change. A tree of more than 20,000 entries hashes as a constant (`tree:over:20000`): its
 changes select nothing while it stays that large. A tree the snapshot has files below
@@ -244,7 +246,12 @@ recorded entry yet; so is everything without a recorded state, where `D(T)` hold
    cannot see.
 3. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
    adds tests or requests a full run. It can never remove deterministic selections, so a
-   wrong or manipulated answer can at worst fail to add tests for the orphan.
+   wrong or manipulated answer can at worst fail to add tests for the orphan. A sharded
+   run (`--shard I/N`, `selectOptions.sharded`) only reuses a cached decision: shards
+   asking on their own can get different answers, and a test only one shard's answer
+   picked but another shard owns would run nowhere while every shard marks the orphan
+   handled. Without a cached decision (one an unsharded `smates select` on the change
+   saved into the state the shards restore) it goes on to step 4, with a note.
 4. **The orphan policy** (default without agent: run the suites the orphan can affect, by
    suite root).
 
@@ -258,7 +265,10 @@ handled `skipped` ("skipped by caller" in the summary and `smates stats`). Step 
 runs, and nothing the caller passes can deselect a test.
 
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
-not ask again (and the agent's answers are cached per change).
+not ask again (and the agent's answers are cached per change). A run that runs nothing
+(`--dry-run`, or the Claude Code Stop hook when nothing is selected) still saves the
+agent's new answer and, when nothing was selected, the orphans it handled
+(`cycle.saveWithoutRun`); it records no outcome.
 
 `smates orphans` replays the first-parent history (each commit's diff against its first
 parent; added and deleted files count as existence changes) against the covered set of an
@@ -461,6 +471,13 @@ failure hints, flake evidence, the summary and `--report` only contain what ran;
 interrupted run (Ctrl-C) stops the same way: the batch it cuts short is not recorded
 either (a killed runner fails its tests or reports nothing), what finished is recorded
 and reported (`interrupted` in `--report`), and smates exits 1.
+A batch whose runner cannot start (not installed, a failed preflight check) does not end
+the run: its units count as not run (`not_run`, they stay selected), later batches run,
+and what ran is recorded and reported; smates then exits 1 when tests failed, else 4.
+For the snapshot its suite counts as one `--suite` left out: a full run refreshes it only
+for the suites that ran (markers for files the others also own), and the orphans a
+selective run handled are marked seen by those suites alone. A suite command line that
+cannot be parsed still ends the run as a configuration error (exit 3).
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
 ### Flaky tests
@@ -629,7 +646,8 @@ budget; answers are validated against the test inventory and cached per change. 
 tests are dropped (the built-in backend asks once for a correction); an answer that
 names tests but none that exist (or decides `tests` without listing any) is a failure,
 never an empty selection, and is not cached. Any failure falls back to the orphan
-policy. An external agent CLI can be plugged in instead (`agent.command`).
+policy. An external agent CLI can be plugged in instead (`agent.command`). Sharded runs
+never ask it and only reuse a cached answer (see "Orphans" in §1).
 
 ## 6. Watch mode
 
