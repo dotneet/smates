@@ -344,6 +344,7 @@ func TestV8URLs(t *testing.T) {
 		{"trailing whitespace ok", "{\"result\":[{\"url\":\"/a.js\"}]}\n\n", []string{"/a.js"}, false},
 		{"truncated", `{"result":[{"url":"/a.js"},{"url":"/b`, nil, true},
 		{"unterminated escape at end", `{"url":"/a\`, nil, true},
+		{"cut after a range object", `{"result":[{"url":"/a.js","functions":[{"ranges":[{"count":1}`, nil, true},
 		{"no urls", `{"result":[]}`, nil, false},
 	}
 	for _, c := range cases {
