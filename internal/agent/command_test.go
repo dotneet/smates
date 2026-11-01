@@ -136,3 +136,17 @@ func TestLimitedBuffer(t *testing.T) {
 		t.Fatalf("tail = %q", tail.String())
 	}
 }
+
+// A "tests" decision whose tests all fail to resolve is an error, not an empty selection.
+func TestCommandBackendRejectsUnknownTests(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh scripts")
+	}
+	f := newFixture(t)
+	cfg := testConfig()
+	cfg.Command = writeScript(t, `cat >/dev/null; echo '{"decision":"tests","tests":[{"suite":"web","test":"ghost.test.ts","why":"reads seed"}],"no_impact":[],"summary":"seed affects ghost"}'`)
+	d, err := New(cfg).Decide(context.Background(), f.request(cfg))
+	if err == nil || !strings.Contains(err.Error(), "ghost.test.ts") {
+		t.Fatalf("Decide = %+v, %v; want an error naming the unknown test", d, err)
+	}
+}

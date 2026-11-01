@@ -73,11 +73,11 @@ func resolveStore(dir, flagPath string, log io.Writer) (*stateStore, error) {
 	}
 	repo, err := gitx.Open(dir)
 	if err != nil {
-		return nil, err
+		return nil, asEnvError(err)
 	}
 	cfg, err := config.Load(repo.Root)
 	if err != nil {
-		return nil, err
+		return nil, asConfigError(err)
 	}
 	if cfg == nil {
 		cfg = &config.Config{}

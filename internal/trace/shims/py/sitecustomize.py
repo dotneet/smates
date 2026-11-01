@@ -22,7 +22,13 @@ def _smates_bootstrap():
     import importlib.machinery
     import importlib.util
 
-    rest = [p for p in sys.path if os.path.abspath(p or ".") != here]
+    # Skipping other copies of this shim too (smates run under smates puts both on
+    # PYTHONPATH): two of them would chain to each other endlessly.
+    def other(p):
+        p = os.path.abspath(p or ".")
+        return p != here and not os.path.isfile(os.path.join(p, "smates_trace.py"))
+
+    rest = [p for p in sys.path if other(p)]
     spec = importlib.machinery.PathFinder.find_spec("sitecustomize", rest)
     if spec is not None and spec.loader is not None:
         mod = importlib.util.module_from_spec(spec)

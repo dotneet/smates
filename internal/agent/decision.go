@@ -106,7 +106,11 @@ func (inv inventory) resolve(suite, test string) (string, string, error) {
 
 // toDecision validates a submission against the selection: unknown tests are
 // dropped (and recorded), duplicates removed, and no_impact restricted to orphans.
-func toDecision(sub *submission, req *Request) *Decision {
+// When only some tests resolve, those are kept (the agent can only add). A decision
+// that asks for tests but names none that exist is an error (see Decision.Check):
+// accepting it would select nothing for the orphans, so the caller falls back to the
+// orphan policy instead. The decision is returned with the error for its Dropped list.
+func toDecision(sub *submission, req *Request) (*Decision, error) {
 	d := &Decision{Summary: strings.TrimSpace(sub.Summary), RunAll: sub.Decision == decisionRunAll}
 	inv := newInventory(req.Selection)
 	seen := map[[2]string]bool{}
@@ -144,7 +148,10 @@ func toDecision(sub *submission, req *Request) *Decision {
 		d.NoImpact = append(d.NoImpact, p)
 	}
 	sort.Strings(d.NoImpact)
-	return d
+	if !d.RunAll && len(d.Add) == 0 && sub.Decision == decisionTests && len(sub.Tests) == 0 {
+		return d, errors.New(`decision "tests" lists no test`)
+	}
+	return d, d.Check()
 }
 
 // parseCommandOutput extracts the answer from an external agent's stdout. A JSON
