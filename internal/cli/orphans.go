@@ -115,7 +115,7 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 		req.Log = p.log
 	}
 	for _, o := range orphans {
-		old, hadOld := p.state.Files[o]
+		old, hadOld := selector.SnapshotHash(p.state.Files, o)
 		cur, has := p.snap[o]
 		st := "modified"
 		switch {

@@ -121,8 +121,9 @@ the root of a picked suite, and no suite rooted at the repository root is picked
 an orphan of the run either (`selector.Owned`): the job that runs those suites handles
 it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
 the snapshot entries of the files its suites own; files only the suites left out own
-keep their entry, or get the marker `?` (`selector.Unrecorded`) when they had none, so
-they stay changes for a run of their own suites but not for runs of the others.
+keep their entry, or, when they had none, get `?` followed by their current hash
+(`selector.Unrecorded`): a run of their own suites, or of every suite, still sees them
+as changed, while `--suite` runs of the other suites compare the hash after `?`.
 
 Orphans go through, in order:
 

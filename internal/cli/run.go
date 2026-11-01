@@ -449,15 +449,19 @@ func (c *cycle) saveState() error {
 		for f, h := range p.snap {
 			if selector.Owned(f, all, n) {
 				p.state.Files[f] = h
-			} else if _, ok := p.state.Files[f]; !ok {
-				// Not compared by this state yet: still a change for the suites that
-				// own it, but not for this run's suites (selector.Unrecorded).
-				p.state.Files[f] = selector.Unrecorded
+			} else if v, ok := p.state.Files[f]; !ok || strings.HasPrefix(v, selector.Unrecorded) {
+				// Not recorded for its own suites: still a change for them, but this
+				// run's suites compare it from now on (selector.Unrecorded).
+				p.state.Files[f] = selector.Unrecorded + h
 			}
 		}
-		for f := range p.state.Files {
-			if _, ok := p.snap[f]; !ok && selector.Owned(f, all, n) {
-				delete(p.state.Files, f)
+		for f, v := range p.state.Files {
+			if _, ok := p.snap[f]; !ok {
+				if selector.Owned(f, all, n) {
+					delete(p.state.Files, f)
+				} else if strings.HasPrefix(v, selector.Unrecorded) {
+					p.state.Files[f] = selector.Unrecorded // absent now
+				}
 			}
 		}
 	case res.Mode == selector.ModeAll || c.f.shadow:

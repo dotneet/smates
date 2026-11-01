@@ -206,14 +206,14 @@ func Select(in *Input) (*Result, error) {
 			return nil, err
 		}
 		if len(in.Others) > 0 && len(in.State.Files) > 0 {
-			// A --suite --all run that found no snapshot entry for a file only the
-			// suites left out own records it as Unrecorded (cli saveState): its
-			// content was never compared by this state, so it is not a change of a
-			// run of other suites. A run of its own suites, or of every suite, sees
-			// it as changed.
+			// A --suite --all run records the files only the suites left out own,
+			// when the snapshot holds no comparable entry for them, as Unrecorded
+			// followed by their current hash (cli saveState). A --suite run of other
+			// suites compares that hash; a run of their own suites, or of every
+			// suite, sees the file as changed until it records it.
 			all := append(slices.Clip(in.Suites), in.Others...)
 			for f := range changedSet {
-				if in.State.Files[f] == Unrecorded && !Owned(f, all, len(in.Suites)) {
+				if v := in.State.Files[f]; strings.HasPrefix(v, Unrecorded) && !Owned(f, all, len(in.Suites)) && v[len(Unrecorded):] == in.Snap[f] {
 					delete(changedSet, f)
 				}
 			}
@@ -400,10 +400,20 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 // revision in diff mode; unknown counts as existing, which keeps f an orphan).
 func existedBefore(in *Input, f string) bool {
 	if len(in.State.Files) > 0 {
-		_, ok := in.State.Files[f]
+		_, ok := SnapshotHash(in.State.Files, f)
 		return ok
 	}
 	return true
+}
+
+// SnapshotHash returns the hash a snapshot holds for f and whether f existed then. An
+// Unrecorded entry holds the hash a --suite run of other suites last saw.
+func SnapshotHash(files map[string]string, f string) (string, bool) {
+	v, ok := files[f]
+	if h, marked := strings.CutPrefix(v, Unrecorded); marked {
+		return h, h != ""
+	}
+	return v, ok
 }
 
 func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
@@ -609,10 +619,11 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	return adds
 }
 
-// Unrecorded is the snapshot hash of a file whose content the snapshot does not hold:
-// a --suite --all run records it for the files only the suites left out own and the
-// snapshot had no entry for. It never equals a content hash, so any run that compares
-// the file finds it changed; only --suite runs of other suites skip it.
+// Unrecorded prefixes the snapshot entry of a file only the suites left out by a
+// --suite --all run own, when the snapshot had no comparable entry for it: the rest is
+// the file's hash in that run ("" = absent). Such an entry never equals a content hash,
+// so a run of the owning suites, or of every suite, finds the file changed; --suite
+// runs of other suites compare the hash after the prefix.
 const Unrecorded = "?"
 
 // orphanOwners returns the indexes of the suites (by root) an orphan may affect: the

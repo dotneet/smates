@@ -415,7 +415,7 @@ suites:
 	if strings.Contains(out.String(), "Dockerfile") {
 		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
 	}
-	if h := st.Files["b/notes.cfg"]; h != selector.Unrecorded {
+	if h := st.Files["b/notes.cfg"]; !strings.HasPrefix(h, selector.Unrecorded) || len(h) == 1 {
 		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run: %q", h)
 	}
 	out.Reset()
@@ -448,6 +448,31 @@ suites:
 	}
 	if err := json.Unmarshal(out.Bytes(), &ja); err != nil || ja.Suites[0].Tests[0].Reason != "reference" || len(ja.Orphans) != 0 {
 		t.Errorf("new file under b's root named by a's test: %v %s", err, out.String())
+	}
+
+	// Once a --suite a --all run has seen it, the file is compared by its hash in a's
+	// runs: unchanged selects nothing, an edit selects a's test by reference again.
+	selectA2 := func() string {
+		out.Reset()
+		errb.Reset()
+		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+			t.Fatalf("select --suite a: %d %s", code, errb.String())
+		}
+		ja.Suites = nil
+		if err := json.Unmarshal(out.Bytes(), &ja); err != nil {
+			t.Fatal(err)
+		}
+		return ja.Suites[0].Tests[0].Reason
+	}
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "a", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite a --all: %d %s", code, errb.String())
+	}
+	if r := selectA2(); r != "unaffected" {
+		t.Errorf("unchanged marked file: %s", r)
+	}
+	write("b/fixtures/users.json", "[1]")
+	if r := selectA2(); r != "reference" {
+		t.Errorf("edited marked file named by a's test: %s", r)
 	}
 
 	out.Reset()
