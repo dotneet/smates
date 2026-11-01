@@ -193,14 +193,16 @@ func TestGoFreshWithoutRecording(t *testing.T) {
 		for k, v := range tc.env {
 			env[k] = v
 		}
-		var out bytes.Buffer
+		// Separate buffers: the adapter tees stdout, so the two streams are copied
+		// concurrently.
+		var out, errb bytes.Buffer
 		rc := &RunContext{
 			Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Command: "sh " + stub, Env: env}}, Units: []string{"calc"},
-			Fresh: tc.fresh, TraceDir: t.TempDir(), Stdout: &out, Stderr: &out,
+			Fresh: tc.fresh, TraceDir: t.TempDir(), Stdout: &out, Stderr: &errb,
 		}
 		res, err := goTest{}.Run(context.Background(), rc)
 		if err != nil || res.ExitCode != 0 {
-			t.Fatalf("run: %+v %v\n%s", res, err, &out)
+			t.Fatalf("run: %+v %v\n%s%s", res, err, &out, &errb)
 		}
 		if got, _ := os.ReadFile(flags); string(got) != tc.want {
 			t.Errorf("fresh=%v env=%v: GOFLAGS %q, want %q", tc.fresh, tc.env, got, tc.want)
