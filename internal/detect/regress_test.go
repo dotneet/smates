@@ -94,6 +94,37 @@ func TestDetectRegressions(t *testing.T) {
 			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --loader ts-node/esm --test", tests: []string{"test/a.test.ts"}},
 		},
 		{
+			// Runner calls inside quoted arguments.
+			name:  "concurrently react-scripts test",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"concurrently \"react-scripts test\" \"echo hi\""}}`, "src/App.test.js": ""},
+			want:  want{suites: []got{{"jest", ".", "jest"}}, command: "npx --no-install react-scripts test --watchAll=false", tests: []string{"src/App.test.js"}},
+		},
+		{
+			name:  "sh -c react-scripts test",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"sh -c 'CI=true react-scripts test'"}}`, "src/App.test.js": ""},
+			want:  want{suites: []got{{"jest", ".", "jest"}}, command: "npx --no-install react-scripts test --watchAll=false", env: map[string]string{"CI": "true"}, tests: []string{"src/App.test.js"}},
+		},
+		{
+			name:  "sh -c node --test",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"sh -c \"node --test\""}}`, "test/a.test.js": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, tests: []string{"test/a.test.js"}},
+		},
+		{
+			// A wrapper's configuration may change roots/testMatch: jest's own patterns.
+			name: "craco with config",
+			files: map[string]string{
+				"package.json":    `{"name":"x","scripts":{"test":"craco test"}}`,
+				"craco.config.js": "module.exports = {}\n", "src/App.test.js": "", "test/b.test.js": "",
+			},
+			want: want{suites: []got{{"jest", ".", "jest"}}, command: "npx --no-install craco test --watchAll=false", tests: []string{"src/App.test.js", "test/b.test.js"}},
+		},
+		{
+			// The suite must exit: watch options are dropped.
+			name:  "node --watch --test",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --watch --watch-path src --test-reporter spec --test"}}`, "test/a.test.js": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --test-reporter spec --test", tests: []string{"test/a.test.js"}},
+		},
+		{
 			name:  "plain node --test",
 			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --test"}}`, "test/a.test.js": ""},
 			want:  want{suites: []got{{"node", ".", "node"}}, tests: []string{"test/a.test.js"}},
@@ -127,5 +158,17 @@ func TestDetectRegressions(t *testing.T) {
 				t.Errorf("tests %v, want %v", got, c.want.tests)
 			}
 		})
+	}
+}
+
+func TestDetectNodeScriptIsNotATestRun(t *testing.T) {
+	for _, script := range []string{"node scripts/run.js --test", "node -r ./setup.js scripts/run.js --test"} {
+		g, _ := detect(t, map[string]string{
+			"package.json":   `{"name":"x","scripts":{"test":"` + script + `"}}`,
+			"test/a.test.js": "",
+		})
+		if len(g) != 0 {
+			t.Errorf("%q: suites %v, want none", script, g)
+		}
 	}
 }

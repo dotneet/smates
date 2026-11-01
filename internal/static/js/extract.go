@@ -154,7 +154,7 @@ func (p *parser) typeArgs(i int) int {
 	if !p.punct(i, '<') {
 		return i
 	}
-	depth := 0
+	depth, braces := 0, 0 // braces: depth of object types ({ a: string; b: number })
 	for j := i; j < len(p.toks) && j < i+256; j++ {
 		t := p.toks[j]
 		if t.kind != tPunct {
@@ -170,8 +170,16 @@ func (p *parser) typeArgs(i int) int {
 			if depth--; depth == 0 {
 				return j + 1
 			}
+		case '{':
+			braces++
+		case '}':
+			if braces--; braces < 0 {
+				return i
+			}
 		case ';':
-			return i
+			if braces == 0 {
+				return i
+			}
 		}
 	}
 	return i

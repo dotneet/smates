@@ -5,11 +5,13 @@ import "testing"
 func TestGlobTypeArguments(t *testing.T) {
 	h := newHost(t, map[string]string{
 		"src/a.test.ts": "const pages = import.meta.glob<{ default: string }>('./pages/*.ts', { eager: true })\n" +
-			"const fns = import.meta.glob<() => Promise<unknown>>('./lazy/*.ts')\n",
+			"const fns = import.meta.glob<() => Promise<unknown>>('./lazy/*.ts')\n" +
+			"const objs = import.meta.glob<{ default: string; name: string }>('./objs/*.ts')\n",
 		"src/pages/home.ts": "",
 		"src/lazy/x.ts":     "",
+		"src/objs/o.ts":     "",
 	})
-	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/lazy/x.ts", "src/pages/home.ts"})
+	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/lazy/x.ts", "src/objs/o.ts", "src/pages/home.ts"})
 }
 
 func TestMockFnTypeArguments(t *testing.T) {

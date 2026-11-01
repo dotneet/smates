@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -207,10 +208,32 @@ suites:
 	}
 	for _, s := range suites {
 		fmt.Fprintf(&b, "  - name: %s\n    runner: %s\n    root: %s\n", yamlStr(s.Name), s.Runner, yamlStr(s.Root))
+		// What detection found besides the defaults (Create React App's test patterns,
+		// the script's command and environment) is kept, or the suite would change.
+		if len(s.Tests) > 0 {
+			b.WriteString("    tests:\n")
+			for _, t := range s.Tests {
+				fmt.Fprintf(&b, "      - %s\n", yamlStr(t))
+			}
+		}
 		if len(s.Exclude) > 0 {
 			b.WriteString("    exclude:\n")
 			for _, e := range s.Exclude {
 				fmt.Fprintf(&b, "      - %s\n", yamlStr(e))
+			}
+		}
+		if s.Command != "" {
+			fmt.Fprintf(&b, "    command: %s\n", yamlStr(s.Command))
+		}
+		if len(s.Env) > 0 {
+			b.WriteString("    env:\n")
+			keys := make([]string, 0, len(s.Env))
+			for k := range s.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				fmt.Fprintf(&b, "      %s: %s\n", yamlStr(k), yamlStr(s.Env[k]))
 			}
 		}
 		for _, l := range hints[s.Name] {
@@ -373,11 +396,20 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	})
 }
 
+// goTestFunc is the name of a Go test, benchmark, fuzz test or example function.
+var goTestFunc = regexp.MustCompile(`^(Test|Benchmark|Fuzz|Example)\w*$`)
+
 func (p *project) relArg(a string) string {
-	// A Go test function unit (dir#TestName): resolve the directory, keep the name.
-	// pathutil.Rel drops a "#..." suffix, as it does for trace paths.
-	if dir, name, ok := runner.SplitFuncUnit(a); ok && dir != "" && name != "" && !strings.ContainsAny(name, `/\.`) {
-		return p.relArg(dir) + "#" + name
+	// A Go test function unit (dir#TestName): resolve the directory, keep the name
+	// (pathutil.Rel would keep "#TestName" as part of a file name). A subtest
+	// (dir#TestName/sub) runs in its function's unit, so it names that unit.
+	if dir, name, ok := runner.SplitFuncUnit(a); ok && dir != "" && name != "" {
+		if top, _, sub := strings.Cut(name, "/"); sub && goTestFunc.MatchString(top) {
+			name = top
+		}
+		if !strings.ContainsAny(name, `/\.`) {
+			return p.relArg(dir) + "#" + name
+		}
 	}
 	abs := absPath(a)
 	// The repository root itself (pathutil.Rel rejects "."): the root package, whose

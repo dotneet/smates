@@ -100,18 +100,19 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		test := pj.Scripts["test"]
 		r, command, env := "", "", map[string]string(nil)
 		var tests []string
-		_, craAt, _ := craTest(test)
+		_, craAt, craBin := craTest(test)
 		nodeCommand, nodeEnv, isNodeTest := nodeTest(test)
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
-		case craAt >= 0:
+		case craAt >= 0 || strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
 			// which a bare jest would not see: only src/ is searched for tests, unless
-			// package.json overrides testMatch (which smates then reads itself).
+			// package.json overrides testMatch (which smates then reads itself) or a
+			// wrapper's configuration (craco.config.js, config-overrides.js) may.
 			r = "jest"
 			command, env = craCommand(repo.Root, d, test)
-			if !jestHasKey(pj.Jest, "testMatch") {
+			if !jestHasKey(pj.Jest, "testMatch") && (craBin == "react-scripts" || craBin == "" || !hasMatch(d, craWrapperConfig)) {
 				tests = craTests
 			}
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
