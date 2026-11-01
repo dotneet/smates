@@ -18,6 +18,23 @@ func TestNodeTestOptionsValues(t *testing.T) {
 	}
 }
 
+// Options after --test are kept (with their values); test files, globs, watch options,
+// "--" and redirections are not.
+func TestNodeTestOptionsAfterTest(t *testing.T) {
+	args := strings.Fields("--test --import tsx test/a.test.ts --watch --test-reporter spec 'src/**/*.test.ts' --test-concurrency=1 -- --not-an-option")
+	got, ok := nodeTestOptions(args)
+	want := strings.Fields("--import tsx --test-reporter spec --test-concurrency=1")
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Errorf("nodeTestOptions = %q, %v; want %q", got, ok, want)
+	}
+	if got, ok := nodeTestOptions(strings.Fields("--test x.test.js 2>&1 --foo")); !ok || len(got) != 0 {
+		t.Errorf("nodeTestOptions with a redirection = %q, %v", got, ok)
+	}
+	if _, ok := nodeTestOptions(strings.Fields("scripts/run.js --test")); ok {
+		t.Error("node running a script is no test run")
+	}
+}
+
 // Every option node 24's --help lists as --name=... is known to take a value (the
 // list was taken from it).
 func TestNodeValueOptsCoverNodeHelp(t *testing.T) {

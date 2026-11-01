@@ -162,7 +162,7 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		if id == "" || obs[id] != nil {
 			continue
 		}
-		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms, Failure: r.Message}
+		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms, Failure: r.Message, untraced: true}
 		if o.Status != state.Fail {
 			o.Status = state.Unknown
 			untraced++
@@ -329,8 +329,13 @@ func worstCode(codes map[string]int) int {
 
 // setUnitExit sets the status of a unit that ran in its own process (isolatedRun) from
 // that process's exit code: the outcome is the unit's own, not inferred from the run.
+// A unit that passed without a trace keeps its unknown outcome: it runs again.
 func setUnitExit(o *Observation, code int) {
-	o.Status, o.Inferred = overallStatus("", code), false
+	st := overallStatus("", code)
+	if o.untraced && st != state.Fail {
+		return
+	}
+	o.Status, o.Inferred = st, false
 }
 
 // findBin looks for node_modules/.bin/<name> from dir up to the repository root and

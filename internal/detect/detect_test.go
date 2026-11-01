@@ -370,6 +370,10 @@ func TestCRACommand(t *testing.T) {
 		{`react-scripts test --testNamePattern "it's a b"`, `pnpm exec react-scripts test --testNamePattern 'it'\''s a b' --watchAll=false`, nil},
 		{"react-scripts test --env=jsdom --watchAll=false", "pnpm exec react-scripts test --env=jsdom --watchAll=false", nil},
 		{"react-scripts test --watch --watchAll true --coverage", "pnpm exec react-scripts test --coverage --watchAll=false", nil},
+		// Redirections are no arguments.
+		{"react-scripts test 2>&1", "pnpm exec react-scripts test --watchAll=false", nil},
+		{"react-scripts test --coverage > test.log 2> err.log &> all.log", "pnpm exec react-scripts test --coverage --watchAll=false", nil},
+		{"(CI=true react-scripts test --env=jsdom)", "pnpm exec react-scripts test --env=jsdom --watchAll=false", map[string]string{"CI": "true"}},
 	}
 	for _, c := range cases {
 		got, env := craCommand(dir, ".", c.script)

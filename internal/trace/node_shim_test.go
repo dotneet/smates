@@ -23,8 +23,8 @@ func traceNode(t *testing.T, root string, files map[string]string, script string
 	writeFiles(t, root, files)
 	writeFiles(t, root, map[string]string{"test.cjs": script})
 	sh, traceDir := extractShims(t)
-	env := append(NodeEnv(traceDir, root, sh, os.Environ()), extraEnv...)
-	env = append(env, PythonEnv(traceDir, root, sh, os.Environ())...)
+	// As the Node runners record: every runtime traced, without the pytest plugin.
+	env := append(Env(traceDir, root, sh, os.Environ()), extraEnv...)
 	return runCollect(t, root, traceDir, env, node, "test.cjs")
 }
 

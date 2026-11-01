@@ -84,6 +84,28 @@ func TestDetectRegressions(t *testing.T) {
 			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --import tsx --test", tests: []string{"src/a.test.ts"}},
 		},
 		{
+			// Options after --test count too; file arguments and globs are left out.
+			name:  "node --test --import tsx",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --test --import tsx 'src/**/*.test.ts'"}}`, "src/a.test.ts": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --import tsx --test", tests: []string{"src/a.test.ts"}},
+		},
+		{
+			name:  "node --test --experimental-strip-types --test-concurrency=1",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node --test --experimental-strip-types --watch --test-concurrency=1 test/ 2>&1"}}`, "test/a.test.ts": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --experimental-strip-types --test-concurrency=1 --test", tests: []string{"test/a.test.ts"}},
+		},
+		{
+			name:  "node -r ts-node/register --test --require x",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"node -r ts-node/register --test --require ./setup.js test/a.test.ts"}}`, "test/a.test.ts": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node -r ts-node/register --require ./setup.js --test", tests: []string{"test/a.test.ts"}},
+		},
+		{
+			// A subshell around the command.
+			name:  "(node --test)",
+			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"(node --test --test-concurrency 1)"}}`, "test/a.test.js": ""},
+			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --test-concurrency 1 --test", tests: []string{"test/a.test.js"}},
+		},
+		{
 			name:  "node --experimental-strip-types --test",
 			files: map[string]string{"package.json": `{"name":"x","scripts":{"test":"TZ=UTC node --experimental-strip-types --test"}}`, "test/a.test.ts": ""},
 			want:  want{suites: []got{{"node", ".", "node"}}, command: "node --experimental-strip-types --test", env: map[string]string{"TZ": "UTC"}, tests: []string{"test/a.test.ts"}},
