@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -30,6 +31,10 @@ type Hasher struct {
 	ignore []string
 	root   string // repository root for files outside the snapshot ("" = none)
 	env    func(string) (string, bool)
+	// cfg and suite: the config file's key hashes as the part of the configuration
+	// that can change how the suite's tests run (see ConfigHash).
+	cfg   *config.Config
+	suite *runner.Suite
 	*hashCache
 }
 
@@ -55,13 +60,47 @@ func (h *Hasher) WithRoot(root string) *Hasher {
 	return h
 }
 
+// WithConfig makes the hasher hash the configuration file (c.Path) of a suite (see
+// ForSuite) as ConfigHash instead of its content, so edits that cannot change how the
+// suite's tests run (the ignore list, the agent, another suite) select nothing.
+func (h *Hasher) WithConfig(c *config.Config) *Hasher {
+	h.cfg = c
+	return h
+}
+
 // ForSuite returns a hasher (sharing h's caches) that hashes environment variables as
 // the tests of su see them: the suite's env overrides smates' own environment. Without
 // it, variables are looked up in smates' environment.
 func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 	c := *h
 	c.env = su.LookupEnv
+	c.suite = su
 	return &c
+}
+
+// legacyConfig reports whether recorded is the content hash an older smates recorded for
+// the configuration file key and the file still has that content.
+func (h *Hasher) legacyConfig(key, recorded string) bool {
+	return h.cfg != nil && h.suite != nil && key == h.cfg.Path && key != "" &&
+		recorded != "" && !strings.HasPrefix(recorded, "config:") && recorded == h.file(key)
+}
+
+// ConfigHash fingerprints the settings of smates.yml that can change how the tests of
+// su run or what they are recorded to depend on: the suite's own entry and the
+// top-level env_track. The rest (ignore, orphans, agent, flaky, state, inputs,
+// env_ignore, full_run_branches, other suites) cannot change a test's outcome: input
+// globs and rules add dependency keys of their own, ignore globs change the "dir/**"
+// hashes they affect, and env_ignore applies when comparing.
+func ConfigHash(c *config.Config, su *config.Suite) string {
+	data, err := json.Marshal(struct {
+		Suite    *config.Suite
+		EnvTrack []string
+	}{su, c.EnvTrack})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "config:" + hex.EncodeToString(sum[:16])
 }
 
 // EnvHash is the hash recorded for an environment variable: "" when it is not set, so
@@ -116,6 +155,9 @@ func (h *Hasher) Hash(key string) string {
 		}
 		return "absent"
 	case depkey.KindContent:
+		if h.cfg != nil && h.suite != nil && h.cfg.Path != "" && key == h.cfg.Path {
+			return ConfigHash(h.cfg, &h.suite.Suite)
+		}
 		return h.file(key)
 	}
 	if h.dirs == nil {

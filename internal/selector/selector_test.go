@@ -106,7 +106,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 	f.t.Helper()
 	st := state.New()
 	res := f.sel(st, func(in *Input) { in.All = true })
-	h := NewHasher(f.snap())
+	h := NewHasher(f.snap()).WithConfig(f.cfg)
 	for _, sr := range res.Suites {
 		obs := map[string]*runner.Observation{}
 		for _, tt := range sr.Tests {
@@ -119,7 +119,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 			}
 			obs[tt.ID] = o
 		}
-		Record(st, sr, obs, h, RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
+		Record(st, sr, obs, h.ForSuite(sr.Suite), RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
 	}
 	st.Files = map[string]string(f.snap())
 	return st
@@ -209,7 +209,19 @@ func TestSelectStateMode(t *testing.T) {
 		{name: "suite input changed", edit: func(f *fixture) { f.write("web/vitest.config.ts", "export default {x:1}") }, want: all(ReasonChanged)},
 		{name: "repo-relative suite input changed", edit: func(f *fixture) { f.write("package-lock.json", `{"x":1}`) }, want: all(ReasonChanged)},
 		{name: "global input added", edit: func(f *fixture) { f.write(".tool-versions", "node 22") }, want: all(ReasonChanged)},
-		{name: "config file changed", edit: func(f *fixture) { f.write("smates.yml", "version: 1\n#") }, want: all(ReasonChanged)},
+		// smates.yml hashes as the suite's settings: other edits select nothing.
+		{name: "config file edited, suite unchanged", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n#")
+			f.cfg.Orphans, f.cfg.Agent.Model, f.cfg.Flaky.Retry = config.OrphansAll, "m", 1
+		}, want: base},
+		{name: "suite settings changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# env")
+			f.suites[0].Env = map[string]string{"TZ": "UTC"}
+		}, want: all(ReasonChanged)},
+		{name: "env_track changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# track")
+			f.cfg.EnvTrack = []string{"LANG"}
+		}, want: all(ReasonChanged)},
 		{name: "rule dep changed", edit: func(f *fixture) { f.write("migrations/001.sql", "create table u()") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "rule dep added", edit: func(f *fixture) { f.write("migrations/002.sql", "x") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "new test file", edit: func(f *fixture) { f.write("web/src/d.test.ts", "test('d')") }, want: with(map[string]string{"web/src/d.test.ts": ReasonNew})},
@@ -939,5 +951,45 @@ func TestExistenceProbe(t *testing.T) {
 	f.remove("present.cfg")
 	if d := decisions(f.sel(st, nil)); d["test_x.py"] != ReasonChanged {
 		t.Errorf("probed file removed: %v", d)
+	}
+}
+
+func TestUntested(t *testing.T) {
+	mk := func(runner_, root string, static bool) *Suite {
+		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
+	}
+	r := &Result{Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	got := r.Untested([]string{
+		"cmd/tool/main.go",   // Go code under the go suite
+		"web/src/Button.tsx", // TS under the vitest suite
+		"web/vite.config.ts", // tool configuration
+		"web/src/types.d.ts", // declarations
+		"web/.eslintrc.js",   // rc file
+		"scripts/build.ts",   // not under a JS suite root
+		"py/app.py",          // static analysis off for that suite
+		"web/setup-tests.ts", // setup file
+		"Dockerfile",         // not code
+		"web/src/data.json",  // not code
+	})
+	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Untested = %v, want %v", got, want)
+	}
+}
+
+// An entry recorded before smates.yml was hashed as the suite's settings holds the
+// file's content hash: it still matches while the file is unchanged.
+func TestSelectLegacyConfigHash(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	blob := f.snap()["smates.yml"]
+	for _, e := range st.Suites["web"].Tests {
+		e.Deps["smates.yml"] = blob
+	}
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
+		t.Errorf("legacy hash, file unchanged: %v", d)
+	}
+	f.write("smates.yml", "version: 1\n#")
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != ReasonChanged {
+		t.Errorf("legacy hash, file changed: %v", d)
 	}
 }

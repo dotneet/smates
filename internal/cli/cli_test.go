@@ -424,3 +424,55 @@ func TestRenderConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestUntestedCode checks that a change to source code no test reaches selects nothing
+// by default (untested: skip) and is an orphan with untested: orphan.
+func TestUntestedCode(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	write := func(rel, content string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := "version: 1\norphans: all\nsuites:\n  - name: go\n    runner: go\n"
+	write("smates.yml", cfg)
+	write("go.mod", "module example.com/m\n\ngo 1.22\n")
+	write("lib/lib.go", "package lib\n\nfunc F() int { return 1 }\n")
+	write("lib/lib_test.go", "package lib\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {}\n")
+	write("cmd/tool/main.go", "package main\n\nfunc main() {}\n")
+	g.git("add", "-A")
+	base := g.commit("fixture")
+	sel := func() (orphans []string, handling map[string]string, reason string) {
+		var out, errb bytes.Buffer
+		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--base", base, "--format", "json"}, &out, &errb); code != 0 {
+			t.Fatalf("select: %d %s", code, errb.String())
+		}
+		var js struct {
+			Suites []struct {
+				Tests []struct {
+					Reason string `json:"reason"`
+				} `json:"tests"`
+			} `json:"suites"`
+			Orphans        []string          `json:"orphans"`
+			OrphanHandling map[string]string `json:"orphan_handling"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &js); err != nil {
+			t.Fatalf("%v\n%s", err, out.String())
+		}
+		return js.Orphans, js.OrphanHandling, js.Suites[0].Tests[0].Reason
+	}
+	write("cmd/tool/main.go", "package main\n\nfunc main() { println() }\n")
+	if orphans, how, reason := sel(); !reflect.DeepEqual(orphans, []string{"cmd/tool/main.go"}) || how["cmd/tool/main.go"] != "untested" || reason != "unaffected" {
+		t.Errorf("untested: skip: orphans %v, handling %v, reason %s", orphans, how, reason)
+	}
+	write("smates.yml", cfg+"untested: orphan\n")
+	// (smates.yml itself changed too: without a recorded state, diff mode compares
+	// files by content.)
+	if _, how, reason := sel(); how["cmd/tool/main.go"] != "policy" || reason == "unaffected" {
+		t.Errorf("untested: orphan: handling %v, reason %s", how, reason)
+	}
+}

@@ -520,22 +520,39 @@ func reasonLabel(r string) string {
 }
 
 func (v *view) orphans(b *strings.Builder) {
-	if len(v.res.Orphans) == 0 {
+	var orphans, untested []string
+	for _, o := range v.res.Orphans {
+		if v.res.OrphanHandling[o] == selector.OrphanUntested {
+			untested = append(untested, o)
+		} else {
+			orphans = append(orphans, o)
+		}
+	}
+	titledList(b, fmt.Sprintf("Changes no test depends on (%d)", len(orphans)), orphans, func(o string) string {
+		return fmt.Sprintf("- %s — %s\n", code(o), v.handling(o))
+	})
+	titledList(b, fmt.Sprintf("Changes to untested code (%d): no test reaches these files, so none can be affected", len(untested)), untested, func(o string) string {
+		return fmt.Sprintf("- %s\n", code(o))
+	})
+}
+
+// titledList writes a titled list, collapsed when it is long and cut at maxItems.
+func titledList(b *strings.Builder, title string, items []string, line func(string) string) {
+	if len(items) == 0 {
 		return
 	}
-	title := fmt.Sprintf("Changes no test depends on (%d)", len(v.res.Orphans))
-	if len(v.res.Orphans) > 5 {
+	if len(items) > 5 {
 		fmt.Fprintf(b, "\n<details><summary>%s</summary>\n\n", title)
 		defer b.WriteString("\n</details>\n")
 	} else {
 		fmt.Fprintf(b, "\n**%s:**\n", title)
 	}
-	for i, o := range v.res.Orphans {
+	for i, o := range items {
 		if i == maxItems {
-			fmt.Fprintf(b, "- … and %d more\n", len(v.res.Orphans)-i)
+			fmt.Fprintf(b, "- … and %d more\n", len(items)-i)
 			break
 		}
-		fmt.Fprintf(b, "- %s — %s\n", code(o), v.handling(o))
+		b.WriteString(line(o))
 	}
 }
 
@@ -571,6 +588,8 @@ func (v *view) handling(o string) string {
 		return "orphan policy: runs " + strings.Join(suites, ", ") + " in full"
 	case selector.OrphanIgnored:
 		return "ignored (`orphans: ignore`)"
+	case selector.OrphanUntested:
+		return "untested code: no test reaches it"
 	}
 	return "not handled"
 }

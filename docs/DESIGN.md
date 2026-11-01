@@ -24,8 +24,17 @@ The dependency set used at selection time is
     D(T) = recorded(T)        traced during T's last run (code, data, listings, probes, subprocesses)
          ∪ static(T) at HEAD  import-graph closure computed now
          ∪ suite inputs       lockfiles and manifests (up to the repo root), runner config,
-                              smates.yml, configured globs
+                              configured globs, smates.yml (hashed as the suite's settings)
          ∪ rule deps          declared in smates.yml
+
+smates.yml is a dependency of every test, but its key hashes as `ConfigHash`: the
+suite's own entry and the top-level `env_track`, not the file's content. The other
+settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
+they affect, input globs and rules add keys of their own, `env_ignore` applies when
+comparing), so editing them selects nothing. Diff mode (no recorded state) still
+compares the file by content. An entry recorded by an older smates holds the file's blob
+hash instead; it is compared with the file's content as before until the test runs
+again.
 
 A key present in `D(T)` but absent from the recorded hashes counts as changed, so a newly
 added import, conftest.py, Go file in an imported package or rule target triggers the test
@@ -123,10 +132,18 @@ Orphans go through, in order:
    (fixtures, scripts, schemas referenced as strings) are selected. Files every test of a
    suite depends on (package.json, lockfiles, runner config) only count when no
    test-specific file mentions the orphan.
-2. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
+2. **Untested code** (`untested: skip`, the default): an orphan in a language a suite
+   analyzes statically (Go, Python, JS/TS) under that suite's root is imported by no
+   test, directly or transitively (every test's import closure is in its `D(T)`), and
+   was neither read nor executed by any test in its last run. No test can be affected,
+   so it selects nothing and is reported as a change to untested code. Code configuring
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`) is excluded, and
+   code run by another process must be declared (rules), as for any dependency tracing
+   cannot see.
+3. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
    adds tests or requests a full run. It can never remove deterministic selections, so a
    wrong or manipulated answer can at worst fail to add tests for the orphan.
-3. **The orphan policy** (default without agent: run the suites the orphan can affect, by
+4. **The orphan policy** (default without agent: run the suites the orphan can affect, by
    suite root).
 
 Orphans handled by a run are written into the snapshot so later runs on the same branch do

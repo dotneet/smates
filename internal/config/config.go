@@ -27,8 +27,12 @@ type Config struct {
 	Inputs []string `yaml:"inputs"`
 	// Orphans: what to do with changed files no test is known to depend on:
 	// "agent" (ask the agent, fall back to all), "all", or "ignore".
-	Orphans string      `yaml:"orphans"`
-	Agent   AgentConfig `yaml:"agent"`
+	Orphans string `yaml:"orphans"`
+	// Untested: what a change to source code no test reaches is: "skip" (default: no
+	// test can be affected; reported as a change to untested code) or "orphan" (handled
+	// like any other orphan).
+	Untested string      `yaml:"untested"`
+	Agent    AgentConfig `yaml:"agent"`
 	// State: path of the state file, relative to the repository root.
 	State string `yaml:"state"`
 	// FullRunBranches: branches on which `smates run` runs everything (default: the default branch).
@@ -241,6 +245,12 @@ const (
 	OrphansIgnore = "ignore" // do nothing
 )
 
+// Untested code policies (Config.Untested).
+const (
+	UntestedSkip   = "skip"
+	UntestedOrphan = "orphan"
+)
+
 // Agent modes (AgentConfig.Enabled).
 const (
 	AgentAuto   = "auto"
@@ -263,6 +273,14 @@ func (c *Config) Normalize() error {
 	case OrphansAgent, OrphansAll, OrphansIgnore:
 	default:
 		return fmt.Errorf("orphans must be agent, all or ignore (got %q)", c.Orphans)
+	}
+	if c.Untested == "" {
+		c.Untested = UntestedSkip
+	}
+	switch c.Untested {
+	case UntestedSkip, UntestedOrphan:
+	default:
+		return fmt.Errorf("untested must be skip or orphan (got %q)", c.Untested)
 	}
 	if c.State == "" {
 		c.State = ".smates/state.json.gz"

@@ -48,6 +48,7 @@ const (
 	OrphanNoImpact  = "no-impact" // the agent judged it irrelevant to every test
 	OrphanPolicy    = "policy"    // orphan policy "all": the suites it may affect run in full
 	OrphanIgnored   = "ignored"   // orphan policy "ignore"
+	OrphanUntested  = "untested"  // source code no test reaches (untested: skip)
 )
 
 // Input is everything selection needs.
@@ -224,7 +225,7 @@ func Select(in *Input) (*Result, error) {
 		}
 	}
 	covered := map[string]bool{} // union of all D(T)
-	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...)
+	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
@@ -405,7 +406,7 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 	for _, d := range deps {
 		recorded, ok := entry.Deps[d]
-		if !ok || h.Hash(d) != recorded {
+		if !ok || (h.Hash(d) != recorded && !h.legacyConfig(d, recorded)) {
 			t.Changed = append(t.Changed, d)
 		}
 	}
@@ -588,6 +589,61 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 		}
 	}
 	return adds
+}
+
+// staticLangs are the source file extensions each runner's static analysis follows.
+var staticLangs = map[string][]string{
+	"go":     {".go"},
+	"pytest": {".py"},
+	"vitest": jsExts, "jest": jsExts, "node": jsExts, "bun": jsExts,
+}
+
+var jsExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
+
+// Untested returns the orphans that are source code no test can reach: a file in a
+// language whose imports a suite follows statically (Go, Python, JS/TS) under that
+// suite's root. Every test's import closure is part of its dependencies, so such a file
+// is imported by no test, directly or through other code; and no test read or executed
+// it in its last recorded run. Changing it cannot change a test's outcome — unless
+// something outside the repository's tests runs it (a server an e2e suite talks to,
+// which depends_on/rules declare, or a script started by a command smates cannot see
+// into). Tool and runner configuration written as code (vite.config.ts, setup.py, ...)
+// is never counted as untested.
+func (r *Result) Untested(orphans []string) []string {
+	var out []string
+	for _, o := range orphans {
+		if r.untested(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func (r *Result) untested(f string) bool {
+	base := strings.ToLower(path.Base(f))
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if strings.HasSuffix(base, ".d.ts") || strings.Contains(stem, ".config") || strings.HasSuffix(stem, "rc") || untestedExcluded[stem] {
+		return false
+	}
+	for _, s := range r.Suites {
+		if !config.Bool(s.Suite.Static, true) || !slices.Contains(staticLangs[s.Suite.Runner], ext) {
+			continue
+		}
+		if pathutil.Under(f, s.Suite.Root) {
+			return true
+		}
+	}
+	return false
+}
+
+// untestedExcluded are file stems of code that configures or drives tools rather than
+// being imported: a change to them is left to the orphan policy.
+var untestedExcluded = map[string]bool{
+	"setup": true, "noxfile": true, "tasks": true, "fabfile": true, "conftest": true, "manage": true,
+	"gulpfile": true, "gruntfile": true, "jakefile": true, "magefile": true, "dangerfile": true,
+	"globalsetup": true, "global-setup": true, "globalteardown": true, "global-teardown": true, "setuptests": true,
+	"setup-tests": true, "test-setup": true, "testsetup": true, "vitest.workspace": true, "jest.preset": true,
 }
 
 // References finds tests that mention an orphan file by name in their own sources or
