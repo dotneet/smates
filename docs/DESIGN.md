@@ -217,7 +217,9 @@ under `shims/node_modules/` so coverage reports (which skip `node_modules`) neve
 Python: smates takes a `sys.monitoring` tool id of its own (3, 4, 2, 5; coverage.py's
 sysmon core takes 1 and moves up), or chains to an existing `sys.setprofile` function;
 the pytest plugin switches to a `session:end` context (attributed to nothing) once the
-test loop is over, before pytest-cov reads every `--cov` module for its report.
+test loop is over, before pytest-cov reads every `--cov` module for its report. Go:
+`-coverpkg` builds the named packages into every test binary of the invocation, so their
+source files (`go list -find`) are added to every package's dependencies.
 
 **Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
 analyzed from their command line when the child starts (`child_process.*` in Node,

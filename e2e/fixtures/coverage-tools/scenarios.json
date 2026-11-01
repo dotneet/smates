@@ -85,10 +85,17 @@
     "fails": ["go/text"]
   },
   {
-    "name": "go source with -coverpkg selects its importers only",
+    "name": "go source named by -coverpkg selects every package of the invocation",
+    "note": "go test builds the -coverpkg packages into every test binary: a compile error in go/calc fails go/text too.",
     "edits": [{ "file": "go/calc/calc.go", "op": "replace", "old": "return a + b", "new": "return a - b" }],
-    "selected": ["go/calc"],
-    "not_selected": ["go/text"],
+    "selected": ["go/calc", "go/text"],
+    "not_selected": ["py/tests/test_arith.py", "c8/math.test.js"],
     "fails": ["go/calc"]
+  },
+  {
+    "name": "a go compile error under -coverpkg fails and selects every package",
+    "edits": [{ "file": "go/calc/calc.go", "op": "append", "content": "\nvar _ = undefinedName\n" }],
+    "selected": ["go/calc", "go/text"],
+    "fails": ["go/calc", "go/text"]
   }
 ]

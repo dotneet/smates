@@ -354,7 +354,7 @@ ok  	example.com/shop/internal/store	0.170s
 | ユーザー自身の `NODE_V8_COVERAGE`(環境変数またはスイートの `env`) | 記録中は置き換えられ、実行後に生のカバレッジファイルがそのディレクトリにコピーされます(既存のファイルを上書き・削除することはありません)。 |
 | pytest-cov / coverage.py | すべてのコアに対応: `sys.settrace`(ctrace、pytrace)と `sys.monitoring`(`COVERAGE_CORE=sysmon`)。smates は専用の `sys.monitoring` ツール ID(3、4、2、5 の順。coverage.py は 1 を使い、使用中なら次に移ります)を取り、3.12 未満では既存のプロファイル関数を連鎖して呼びます。テスト終了後に pytest-cov がレポートのために読むファイルは、どのテストの依存にもなりません。 |
 | pytest-xdist(`-n auto`) | プラグインは各ワーカーで読み込まれ、依存と結果は xdist なしと同じくテストファイル単位です。 |
-| `go test -cover`、`-coverpkg`、`-coverprofile`、`-covermode` | smates の `-exec` ラッパーの影響を受けず、プロファイルは通常どおり書き出されます。 |
+| `go test -cover`、`-coverpkg`、`-coverprofile`、`-covermode` | smates の `-exec` ラッパーの影響を受けず、プロファイルは通常どおり書き出されます。`-coverpkg`(コマンド、`--` 以降、`GOFLAGS` のいずれか)を使うと go は指定パッケージをすべてのテストバイナリに組み込むため、各テストパッケージはそれらのソースファイルにも依存します(そこでのコンパイルエラーは全パッケージを失敗させます)。 |
 
 制限事項: コマンド自身が `NODE_V8_COVERAGE` を設定する場合(`env NODE_V8_COVERAGE=… node`
 や、それを export するスクリプト)、その配下のプロセスが実行したコードは smates から見えません

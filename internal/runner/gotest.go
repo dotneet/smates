@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -154,6 +155,19 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		st := overallStatus("", r.Exit)
 		if o.Status == "" || st == state.Fail {
 			o.Status = st
+		}
+	}
+	// With -coverpkg, go test builds the packages it names into every test binary of
+	// the invocation: one that does not compile fails them all, whatever they import.
+	if pats := coverPkgs(rc); len(pats) > 0 {
+		files, err := goPackageFiles(ctx, rc, pats)
+		if err != nil {
+			res.Warnings = append(res.Warnings, "could not list the -coverpkg packages ("+err.Error()+"); tests depend only on what they import")
+		}
+		for _, o := range res.Observations {
+			for _, f := range files {
+				o.AddFile(f)
+			}
 		}
 	}
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
@@ -318,4 +332,56 @@ func goExecWrapper(rc *RunContext) (string, error) {
 		return "", err
 	}
 	return link, nil
+}
+
+// coverPkgs returns the package patterns of a -coverpkg flag on the suite command, the
+// arguments passed through or GOFLAGS (nil when there is none).
+func coverPkgs(rc *RunContext) []string {
+	words, _ := SplitWords(rc.Suite.Command)
+	words = append(words, rc.ExtraArgs...)
+	words = append(words, strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))...)
+	var pats []string
+	for i, w := range words {
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		if flag != "coverpkg" || w == flag {
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(words) {
+				continue
+			}
+			value = words[i+1]
+		}
+		for _, p := range strings.Split(value, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				pats = append(pats, p)
+			}
+		}
+	}
+	return pats
+}
+
+// goPackageFiles lists the Go source files (repository-relative) of the packages
+// matching patterns, resolved in the suite directory.
+func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]string, error) {
+	args := append([]string{"list", "-e", "-find", "-f", "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}", "--"}, patterns...)
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = rc.Dir()
+	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, "|")
+		for _, name := range parts[1:] {
+			if rel, ok := pathutil.Rel(rc.Repo.Root, filepath.Join(parts[0], name)); ok && !pathutil.IsVendored(rel) {
+				files = append(files, rel)
+			}
+		}
+	}
+	return files, nil
 }

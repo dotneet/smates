@@ -138,7 +138,7 @@ reports stay the same as without smates:
 | your own `NODE_V8_COVERAGE` (environment or suite `env`) | Replaced while recording; the raw coverage files are copied into your directory after the run (existing files are never overwritten or deleted). |
 | pytest-cov / coverage.py | Every core: `sys.settrace` (ctrace, pytrace) and `sys.monitoring` (`COVERAGE_CORE=sysmon`). smates takes a `sys.monitoring` tool id of its own (3, 4, 2 or 5; coverage.py uses 1 and moves up when it is taken), and before 3.12 chains to any profile function already installed. What pytest-cov reads for its report after the tests is no dependency of any test. |
 | pytest-xdist (`-n auto`) | The plugin loads in every worker; dependencies and results are per test file as without xdist. |
-| `go test -cover`, `-coverpkg`, `-coverprofile`, `-covermode` | Unaffected by smates' `-exec` wrapper; the profile is written as usual. |
+| `go test -cover`, `-coverpkg`, `-coverprofile`, `-covermode` | Unaffected by smates' `-exec` wrapper; the profile is written as usual. With `-coverpkg` (on the command, after `--` or in `GOFLAGS`), go builds the packages it names into every test binary, so every test package also depends on their source files (a compile error there fails them all). |
 
 ## Quick start
 
