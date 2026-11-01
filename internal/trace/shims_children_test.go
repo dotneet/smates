@@ -67,20 +67,58 @@ func TestShimsUntracedRuntimeChildren(t *testing.T) {
 	}
 }
 
-// Env traces every runtime: what NodeEnv and PythonEnv set, each variable once.
+// Env traces every runtime: what NodeEnv and PythonEnv set, each variable once, but the
+// pytest plugin (PytestEnv adds it).
 func TestEnvTracesAllRuntimes(t *testing.T) {
 	sh := &Shims{Dir: "/s", Node: "/s/node_modules/smates/node.cjs", Python: "/s/py"}
-	env := Env("/t", "/r", sh, []string{"PATH=/bin"})
-	seen := map[string]int{}
-	for _, kv := range env {
-		name, _, _ := strings.Cut(kv, "=")
-		seen[name]++
-	}
-	for _, name := range []string{"SMATES_TRACE_DIR", "SMATES_REPO_ROOT", "NODE_OPTIONS", "BUN_OPTIONS", "NODE_V8_COVERAGE", "PYTHONPATH", "PYTEST_PLUGINS", "SMATES_TRACE_PARENT", "SMATES_TRACE_CTX"} {
-		if seen[name] != 1 {
-			t.Errorf("%s set %d times in %q", name, seen[name], env)
+	names := []string{"SMATES_TRACE_DIR", "SMATES_REPO_ROOT", "NODE_OPTIONS", "BUN_OPTIONS", "NODE_V8_COVERAGE", "PYTHONPATH", "SMATES_TRACE_PARENT", "SMATES_TRACE_CTX"}
+	for _, c := range []struct {
+		name    string
+		env     []string
+		plugins int
+	}{
+		{"Env", Env("/t", "/r", sh, []string{"PATH=/bin"}), 0},
+		{"PytestEnv", PytestEnv("/t", "/r", sh, []string{"PATH=/bin"}), 1},
+	} {
+		seen := map[string]int{}
+		for _, kv := range c.env {
+			name, _, _ := strings.Cut(kv, "=")
+			seen[name]++
+		}
+		for _, name := range names {
+			if seen[name] != 1 {
+				t.Errorf("%s: %s set %d times in %q", c.name, name, seen[name], c.env)
+			}
+		}
+		if seen["PYTEST_PLUGINS"] != c.plugins {
+			t.Errorf("%s: PYTEST_PLUGINS set %d times, want %d", c.name, seen["PYTEST_PLUGINS"], c.plugins)
 		}
 	}
+}
+
+// A pytest session a JavaScript test starts is traced like any Python child: what it
+// reads belongs to the JavaScript test (with the plugin it would take itself for a
+// top-level session and file the reads under its own tests).
+func TestNodeTestStartsPytest(t *testing.T) {
+	py := pytestPython(t)
+	root := shimRepo(t, nil)
+	files := map[string]string{
+		"inner/check_inner.py": "def test_inner():\n    assert open('data/inner.txt').read() == 'x'\n",
+		"data/inner.txt":       "x",
+		"a.test.cjs":           "",
+	}
+	procs := traceNode(t, root, files, `
+const path = require('path');
+globalThis.__smatesTrace.context('test:' + path.resolve('a.test.cjs'));
+require('child_process').execFileSync(process.env.PY, ['-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'inner/check_inner.py'], { stdio: 'inherit' });
+`, "PY="+py, "PYTHONDONTWRITEBYTECODE=1")
+	a := Attribute(procs, func(f string) string {
+		if strings.HasSuffix(f, ".test.cjs") {
+			return f
+		}
+		return ""
+	}, Options{})
+	checkUnit(t, a, "a.test.cjs", []string{"data/inner.txt"}, nil)
 }
 
 // A Python child given an environment of its own gets the Node shim's preload in
@@ -158,6 +196,21 @@ fs.readFileSync('after.txt');
 	if !found {
 		t.Error("the context switch while the binding was mocked was lost")
 	}
+}
+
+// The shim's process.binding (for mock-fs) raises no deprecation warning under pending
+// deprecations (fatal with --throw-deprecation).
+func TestNodeShimPendingDeprecation(t *testing.T) {
+	root := shimRepo(t, nil)
+	traceNode(t, root, map[string]string{"a.txt": ""}, `
+process.on('warning', (w) => {
+  if (w.code === 'DEP0111') {
+    console.error(w);
+    process.exitCode = 3;
+  }
+});
+require('fs').readFileSync('a.txt');
+`, "NODE_PENDING_DEPRECATION=1")
 }
 
 // A pool worker that exits by itself may be killed before Node writes its coverage at

@@ -356,22 +356,42 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int, pos []stri
 		a.opaque(cwd) // backticks or eval: cannot follow
 	}
 	st := &shellState{cwd: cwd, vars: map[string][]string{}}
-	if pos != nil {
-		for i, w := range pos {
-			if i < 9 {
-				st.vars[strconv.Itoa(i+1)] = []string{w}
-			}
-		}
-		st.vars["@"], st.vars["*"] = pos, pos
+	segs := splitShell(text)
+	// A script that shifts or sets its parameters anywhere (a loop over "$@" with
+	// shift) has other values for $1 than the first argument: they are not followed.
+	if pos != nil && !changesPositional(segs) {
+		bindPositional(st.vars, pos)
 	}
-	a.run(st, splitShell(text), depth)
+	a.run(st, segs, depth)
+}
+
+// bindPositional sets the positional parameters to pos.
+func bindPositional(vars map[string][]string, pos []string) {
+	for i, w := range pos {
+		if i < 9 {
+			vars[strconv.Itoa(i+1)] = []string{w}
+		}
+	}
+	vars["@"], vars["*"] = pos, pos
+}
+
+// changesPositional reports whether shell code (segs) may change its positional
+// parameters: shift, getopts, set with operands.
+func changesPositional(segs [][]string) bool {
+	for _, seg := range segs {
+		w := trimKeywords(trimAssignments(seg))
+		if len(w) > 0 && (w[0] == "shift" || w[0] == "getopts" || (w[0] == "set" && setsPositional(w[1:]))) {
+			return true
+		}
+	}
+	return false
 }
 
 // positionalVars are the variables holding positional parameters ($1...$9, $@, $*).
 var positionalVars = []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "@", "*"}
 
-// unbindPositional forgets the positional parameters of a script: shift or set changed
-// them, or a function (whose body has parameters of its own) was defined.
+// unbindPositional forgets the positional parameters of a script or function: shift or
+// set changed them, or a function body (which has parameters of its own) is analyzed.
 func unbindPositional(vars map[string][]string) {
 	for _, v := range positionalVars {
 		delete(vars, v)
@@ -402,9 +422,6 @@ func (a *execAnalysis) positional(args []string) []string {
 func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 	for k := 0; k < len(segs); k++ {
 		if name, body, next, ok := funcDefAt(segs, k); ok {
-			// $1 in the body is the function's own parameter: the script's are no
-			// longer followed.
-			unbindPositional(st.vars)
 			a.define(name, body, st, depth)
 			k = next - 1
 			continue
@@ -460,7 +477,7 @@ func (a *execAnalysis) run(st *shellState, segs [][]string, depth int) {
 		}
 		if w := trimKeywords(trimAssignments(seg)); len(w) > 0 && (a.funcs[w[0]] || strings.HasSuffix(w[0], "()")) {
 			a.redirects(w, st.cwd)
-			a.call(st, w[0])
+			a.callWith(st, w[0], w[1:])
 			continue
 		}
 		if a.builtin(seg, st, depth) {
@@ -477,11 +494,34 @@ func (a *execAnalysis) define(name string, body [][]string, st *shellState, dept
 	if d := a.defs[name]; d != nil && &d.body[0] == &body[0] && len(d.body) == len(body) {
 		return // the same definition again (a body defining a function, called twice)
 	}
-	a.defs[name] = &funcDef{body: body, st: st.subshell(), depth: depth}
+	// $1 in the body is the function's own parameter (callWith), unknown where no call
+	// reaches it (flush).
+	def := st.subshell()
+	unbindPositional(def.vars)
+	a.defs[name] = &funcDef{body: body, st: def, depth: depth}
 	a.pending = append(a.pending, name)
 	clear(a.memo)
 	clear(a.relevant)
 	clear(a.changes)
+}
+
+// callWith analyzes a call of function name with the arguments args (shell words): its
+// body sees them as its positional parameters (unbound when it shifts or sets them),
+// and the caller's are restored afterwards.
+func (a *execAnalysis) callWith(st *shellState, name string, args []string) {
+	saved := map[string][]string{}
+	for _, v := range positionalVars {
+		if vals, ok := st.vars[v]; ok {
+			saved[v] = vals
+		}
+	}
+	unbindPositional(st.vars)
+	if d := a.defs[name]; d != nil && !changesPositional(d.body) {
+		bindPositional(st.vars, a.positional(args))
+	}
+	a.call(st, name)
+	unbindPositional(st.vars)
+	maps.Copy(st.vars, saved)
 }
 
 // call analyzes the body of the shell function name called in state st, applying what
@@ -1009,7 +1049,9 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 				}
 			default:
 				if rt := a.consoleScript(cmd[0], dir); rt != "" {
-					cmd = append([]string{rt}, cmd[1:]...)
+					// The runtime runs the script: its arguments are the tool's own
+					// (uv run black -S src is no python -S).
+					cmd = append([]string{rt}, cmd...)
 				}
 			}
 			a.command(cmd, dir, depth)

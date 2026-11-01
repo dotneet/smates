@@ -142,10 +142,28 @@ func PythonEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 // Env returns environment variables that trace Node, Bun and Python processes alike. A
 // recording runner exports all of them: smates trusts a Node, Bun or Python child of a
 // test to trace itself, whatever the language of the test that starts it.
+//
+// The pytest plugin is left out (PytestEnv adds it): the Node shim exports no context, so
+// a pytest session a JavaScript test starts would take itself for a top-level one and
+// file what it reads under its own tests instead of the JavaScript test. Without it the
+// session is traced like any Python child.
 func Env(traceDir, repoRoot string, sh *Shims, base []string) []string {
 	env := NodeEnv(traceDir, repoRoot, sh, base)
 	for _, kv := range PythonEnv(traceDir, repoRoot, sh, base) {
-		if !slices.Contains(env, kv) {
+		if !slices.Contains(env, kv) && !strings.HasPrefix(kv, "PYTEST_PLUGINS=") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// PytestEnv is Env with the pytest plugin, for Python runs (pytest, unittest, custom
+// commands): their own pytest sessions attribute to their tests, and pytest sessions
+// their tests start see the context they were started in (SMATES_TRACE_CTX).
+func PytestEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
+	env := Env(traceDir, repoRoot, sh, base)
+	for _, kv := range PythonEnv(traceDir, repoRoot, sh, base) {
+		if strings.HasPrefix(kv, "PYTEST_PLUGINS=") {
 			env = append(env, kv)
 		}
 	}

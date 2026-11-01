@@ -49,12 +49,26 @@
   let fd = -1;
   // mock-fs swaps the fs binding's functions for its fake file system's while it is
   // active (_mockedBinding), which would take the trace with them: the shim writes with
-  // the real ones. process.binding warns under --pending-deprecation only.
+  // the real ones. process.binding warns under --pending-deprecation only (also given as
+  // NODE_PENDING_DEPRECATION=1), which the shim then does without; the warning (fatal
+  // with --throw-deprecation) is also kept off while it is called.
   let fsBinding = null;
-  if (!/--pending-deprecation/.test(env0.NODE_OPTIONS + ' ' + process.execArgv.join(' '))) {
+  if (
+    process.env.NODE_PENDING_DEPRECATION !== '1' &&
+    !/--pending-deprecation/.test(env0.NODE_OPTIONS + ' ' + process.execArgv.join(' '))
+  ) {
+    // --no-deprecation makes process.noDeprecation read-only (and true).
+    const quiet = process.noDeprecation;
+    const setQuiet = (v) => {
+      try {
+        if (!quiet) process.noDeprecation = v;
+      } catch (_) {}
+    };
+    setQuiet(true);
     try {
       fsBinding = process.binding('fs');
     } catch (_) {}
+    setQuiet(quiet);
   }
   const write = (obj) => {
     const mocked = fsBinding && fsBinding._mockedBinding;

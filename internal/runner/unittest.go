@@ -99,7 +99,7 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		env = MergeEnv(env, trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), base))
+		env = MergeEnv(env, trace.PytestEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base))
 	}
 	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
 		byUnit := map[string]string{}

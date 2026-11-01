@@ -412,8 +412,9 @@ itself like a Node test's `python3` child:
   of the functions they call (where they are called, once per state; a function no call
   reaches, such as a trap handler, where it is defined), `$(dirname "$0")`, the commands
   of command substitutions (`$(<file)` reads the file) and the script's positional
-  parameters (`$1`, `"$@"`, until `shift`, `set --` or a function definition); an
-  unresolved input redirection (`< "$X"`) is opaque;
+  parameters (`$1`, `"$@"`; a function's body sees its call's arguments; not followed in
+  a script or function that uses `shift`, `getopts` or `set --`); an unresolved input
+  redirection (`< "$X"`) is opaque;
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name), and on
   the program itself when it is named by path (`../bin/tool`) and the paths in its option

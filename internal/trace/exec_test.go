@@ -378,7 +378,8 @@ func TestExecDepsOperands(t *testing.T) {
 // told to ignore PYTHONPATH or site (-I, -E, -S), they are opaque commands.
 func TestExecDepsUntracedRuntimes(t *testing.T) {
 	root := repoDir(t)
-	touch(t, root, "tools/reader.js", "tools/reader.py", "data.txt")
+	touch(t, root, "tools/reader.js", "tools/reader.py", "data.txt", "src/a.py")
+	writeScript(t, root, ".venv/bin/black", "#!"+root+"/.venv/bin/python\nimport sys\n")
 	for _, c := range []struct {
 		name string
 		args []string
@@ -403,6 +404,8 @@ func TestExecDepsUntracedRuntimes(t *testing.T) {
 		{"python -c with I in the code", []string{"python", "-c", "-I"}, nil, nil},
 		{"python script option -I", []string{"python", "tools/reader.py", "-I"}, nil, []string{"tools/reader.py"}},
 		{"uv run python -I", []string{"uv", "run", "python", "-I", "tools/reader.py"}, nil, []string{"./**", "tools/reader.py"}},
+		// A console script's own options are not the interpreter's.
+		{"uv run black -S", []string{"uv", "run", "black", "-S", "src"}, nil, nil},
 	} {
 		seen := map[string]bool{}
 		for _, k := range execDepsIn(c.args, false, root, root, relCache(root), c.rt) {
@@ -427,6 +430,12 @@ func TestExecDepsArguments(t *testing.T) {
 	writeScript(t, root, "scripts/shift.sh", "#!/bin/sh\nshift\ncat \"$1\"\n")
 	writeScript(t, root, "scripts/set.sh", "#!/bin/sh\nset -- data.txt\ncat \"$1\"\n")
 	writeScript(t, root, "scripts/func.sh", "#!/bin/sh\nf() { cat \"$1\"; }\nf data.txt\ncat \"$1\"\n")
+	writeScript(t, root, "scripts/funcshift.sh", "#!/bin/sh\ng() { shift; cat \"$1\"; }\ng args.txt data.txt\n")
+	writeScript(t, root, "scripts/while.sh", "#!/bin/sh\nwhile [ $# -gt 0 ]; do wc -l < \"$1\"; shift; done\n")
+	writeScript(t, root, "scripts/until.sh", "#!/bin/bash\nuntil [ -z \"$1\" ]; do cat \"$1\"; shift; done\n")
+	writeScript(t, root, "scripts/case.sh", "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -v) ;;\n    *) cat \"$1\" ;;\n  esac\n  shift\ndone\n")
+	writeScript(t, root, "scripts/lib.sh", "readit() { cat \"$1\"; }\n")
+	writeScript(t, root, "scripts/src.sh", "#!/bin/sh\n. \"$(dirname \"$0\")/lib.sh\"\nreadit data.txt\n")
 	for _, c := range []struct {
 		name  string
 		cwd   string
@@ -453,7 +462,12 @@ func TestExecDepsArguments(t *testing.T) {
 		{"$@", root, []string{"scripts/all.sh", "data.txt", "args.txt"}, false, []string{"args.txt", "data.txt", "scripts/all.sh"}},
 		{"shift", root, []string{"scripts/shift.sh", "data.txt", "args.txt"}, false, []string{"./**", "scripts/shift.sh"}},
 		{"set --", root, []string{"scripts/set.sh", "args.txt"}, false, []string{"./**", "scripts/set.sh"}},
-		{"function parameters", root, []string{"scripts/func.sh", "args.txt"}, false, []string{"./**", "scripts/func.sh"}},
+		{"function parameters", root, []string{"scripts/func.sh", "args.txt"}, false, []string{"args.txt", "data.txt", "scripts/func.sh"}},
+		{"function shifting its parameters", root, []string{"scripts/funcshift.sh"}, false, []string{"./**", "scripts/funcshift.sh"}},
+		{"while loop with shift", root, []string{"scripts/while.sh", "data.txt", "args.txt"}, false, []string{"./**", "scripts/while.sh"}},
+		{"until loop with shift", root, []string{"scripts/until.sh", "data.txt", "args.txt"}, false, []string{"./**", "scripts/until.sh"}},
+		{"case in a shift loop", root, []string{"scripts/case.sh", "-v", "data.txt"}, false, []string{"./**", "scripts/case.sh"}},
+		{"function of a sourced file", root, []string{"scripts/src.sh", "args.txt"}, false, []string{"data.txt", "scripts/lib.sh", "scripts/src.sh"}},
 		{"literal argv glob", root, []string{"scripts/count.sh", "*.txt"}, false, []string{"*.txt", "scripts/count.sh"}},
 	} {
 		seen := map[string]bool{}
