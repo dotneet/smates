@@ -87,8 +87,10 @@ type Suite struct {
 	// that share worker processes between files (jest, vitest with isolate: false).
 	Isolate *bool `yaml:"isolate"`
 	// RecordJobs bounds how many per-file processes run at once while recording with
-	// one process per file (bun always; jest/vitest with isolate). Default: 1 for bun
-	// (bun test runs files one after another), the CPU count otherwise. With Go
+	// one process per file (bun always; jest/vitest/node with isolate). Default: 1 for bun
+	// (bun test runs files one after another) and for commands that run files serially
+	// (--runInBand, --no-file-parallelism, --test-isolation=none, --test-concurrency=1),
+	// the CPU count otherwise. With Go
 	// granularity "func", it bounds how many test functions of one package run at once
 	// while recording (default 1, as go test runs them one after another).
 	RecordJobs int `yaml:"record_jobs"`

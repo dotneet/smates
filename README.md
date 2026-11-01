@@ -124,7 +124,7 @@ dependencies it only knows the static graph and overstates the orphans.
 |---|---|---|---|
 | `vitest` | test file | V8 coverage per worker + fs hooks; globalSetup reads count for every test | injected reporter |
 | `jest` | test file | V8 coverage + fs hooks per worker, workers recycled after each file (`isolate: true` for strictly one process per file) | injected reporter |
-| `node` (`node --test`) | test file | V8 coverage per test process + fs hooks | process exit code |
+| `node` (`node --test`) | test file | V8 coverage per test process + fs hooks (`isolate: true` for one process per file under `--test-isolation=none`) | process exit code |
 | `bun` | test file | per-file `bun test --coverage` + module cache, preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` (while recording) | process exit code |
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
 | `unittest` (`python -m unittest`) | test module | same Python tracing; every selected module runs in one process through a `unittest` wrapper with contexts per module (import, `setUpModule`/`setUpClass`, tests) | wrapper result class |
@@ -361,7 +361,7 @@ suites:
       - tests: ["src/db/**"]
         deps: ["migrations/**"]
     env: { TZ: UTC }
-    isolate: true                    # jest/bun/unittest: one process per file while recording
+    isolate: true                    # jest/bun/unittest/node: one process per file while recording
     junit: reports/junit.xml          # per-file status from a JUnit report you produce
   - name: api
     runner: go

@@ -185,7 +185,7 @@ root からの相対)で依存を付けるテストを絞れます。宣言ご�
 |---|---|---|---|
 | `vitest` | テストファイル | ワーカーごとの V8 カバレッジ + fs フック。globalSetup の読み取りは全テストの依存 | 注入するレポーター |
 | `jest` | テストファイル | ワーカーごとの V8 カバレッジ + fs フック。ワーカーはファイルごとに作り直す(`isolate: true` で厳密に 1 ファイル 1 プロセス) | 注入するレポーター |
-| `node`(`node --test`) | テストファイル | テストプロセスごとの V8 カバレッジ + fs フック | プロセスの終了コード |
+| `node`(`node --test`) | テストファイル | テストプロセスごとの V8 カバレッジ + fs フック(`--test-isolation=none` では `isolate: true` で 1 ファイル 1 プロセス) | プロセスの終了コード |
 | `bun` | テストファイル | ファイルごとの `bun test --coverage` + モジュールキャッシュ、`node:fs`・`Bun.file`・`Bun.Glob` の preload フック(記録時) | プロセスの終了コード |
 | `pytest` | テストファイル | `sys.monitoring`(3.12+)/ `sys.setprofile`、audit フック。テスト・fixture・収集したモジュールごと、モジュールレベルの読み取りも | プラグイン |
 | `unittest`(`python -m unittest`) | テストモジュール | Python と同じトレース。選択したモジュールを 1 プロセスで、モジュールごとのコンテキスト(import、`setUpModule`/`setUpClass`、テスト)を付ける `unittest` ラッパー経由で実行 | ラッパーの結果クラス |

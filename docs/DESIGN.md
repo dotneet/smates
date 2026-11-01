@@ -247,7 +247,7 @@ can alter test results.
 | Runner | Unit | Code deps | Data deps | Attribution |
 |---|---|---|---|---|
 | vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
-| node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly) |
+| node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
@@ -369,8 +369,11 @@ package directories named in test string literals (`go run ../../cmd/tool`).
 Per-file status comes from reporters (vitest, jest — injected only when the user configures
 none), the pytest plugin, process exit codes (node:test, bun, go), or a JUnit file. When only
 the run's exit code is known, failures are *inferred*: such units are re-run next time but
-not reported as definite misses. Units that ran but left no trace in a failing run are
-`unknown` (re-run next time). Go packages that fail to build are failures.
+not reported as definite misses; so is a process exit code that covers several units (node
+`--test-isolation=none`). Units that ran but left no trace in a failing run are
+`unknown` (re-run next time), and so are files the vitest reporter saw cut short (`--bail`,
+an interrupted run: never started, or tests that were declared to run but did not
+finish). Go packages that fail to build are failures.
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected

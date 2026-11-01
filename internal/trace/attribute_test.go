@@ -118,6 +118,54 @@ func TestAttributeSharedProcess(t *testing.T) {
 	if a.SharedProcs != 1 {
 		t.Errorf("shared procs %d", a.SharedProcs)
 	}
+	if a.Units["a.test.ts"].Status != "pass" {
+		t.Errorf("a shared process that passed passes its units: %+v", a.Units["a.test.ts"])
+	}
+}
+
+// One process running several test files (node --test --test-isolation=none) that fails
+// does not tell which of them failed: the units get no status of their own (the overall
+// exit code infers it), while a process of its own still decides for its unit.
+func TestAttributeSharedProcessFailing(t *testing.T) {
+	a := attr(Options{},
+		mkProc(10, 1, 0).code("a.test.ts", "b.test.ts", "src/a.ts").exit(1),
+		mkProc(11, 1, 0).code("c.test.ts").exit(1),
+	)
+	for _, id := range []string{"a.test.ts", "b.test.ts"} {
+		if u := a.Units[id]; u == nil || u.Status != "" {
+			t.Errorf("%s: %+v", id, u)
+		}
+	}
+	if u := a.Units["c.test.ts"]; u == nil || u.Status != "fail" {
+		t.Errorf("c: %+v", u)
+	}
+}
+
+// A failing process whose command line names one of the units it ran (node --test's
+// process for test/a.test.js, which loaded the unit test/common.js) failed that unit.
+func TestAttributeSharedProcessNamedUnit(t *testing.T) {
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	unitOf := func(f string) string {
+		if strings.HasPrefix(f, "test/") {
+			return f
+		}
+		return ""
+	}
+	procs := []*Proc{
+		{Pid: 1, Argv: []string{"node", "--test", "test/a.test.js"}, Cwd: root, Code: map[string]bool{"test/a.test.js": true, "test/common.js": true}, Reads: map[string]bool{}, Ctx: map[string]map[string]bool{}},
+		// --test-isolation=none: every file on the command line.
+		{Pid: 2, Argv: []string{"node", "--test", filepath.Join(root, "test/b.test.js"), "test/c.test.js"}, Cwd: root, Code: map[string]bool{"test/b.test.js": true, "test/c.test.js": true}, Reads: map[string]bool{}, Ctx: map[string]map[string]bool{}},
+	}
+	for _, p := range procs {
+		p.Exit = new(int)
+		*p.Exit = 1
+	}
+	a := Attribute(procs, unitOf, Options{Rel: RelFunc(root)})
+	for id, want := range map[string]string{"test/a.test.js": "fail", "test/common.js": "", "test/b.test.js": "", "test/c.test.js": ""} {
+		if u := a.Units[id]; u == nil || u.Status != want {
+			t.Errorf("%s: %+v, want status %q", id, u, want)
+		}
+	}
 }
 
 func TestAttributeChildrenAndThreads(t *testing.T) {
