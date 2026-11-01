@@ -3,6 +3,7 @@ package js
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func obj(fields map[string]any) *Object { return &Object{Fields: fields} }
@@ -214,5 +215,49 @@ func TestConfigObjectMutated(t *testing.T) {
 				t.Errorf("got %#v, %v; want Unknown", v, ok)
 			}
 		})
+	}
+}
+
+// TestConfigObjectTerminates guards against parsing loops: a method body with several
+// statements, and stray ';' or ')' inside an object or array, must neither hang nor
+// end the object early.
+func TestConfigObjectTerminates(t *testing.T) {
+	srcs := []string{
+		"module.exports = {\n  resolver(p, o) { const r = o.defaultResolver(p, o); return r; },\n  testMatch: [\"**/*.e2e.js\"],\n};",
+		"module.exports = {\n  resolver(p, o) { return o.defaultResolver(p, o) },\n  testMatch: [\"**/*.e2e.js\"],\n};",
+		"export default { a: 1; b: 2 }",
+		"module.exports = { testMatch: ['x'; ] }",
+		"export default { ) }",
+		"export default [1; 2)",
+	}
+	for _, src := range srcs {
+		done := make(chan any, 1)
+		go func() {
+			v, _ := ConfigObject([]byte(src))
+			done <- v
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("ConfigObject(%q) does not terminate", src)
+		}
+	}
+	for _, src := range srcs[:2] {
+		v, ok := ConfigObject([]byte(src))
+		o, _ := v.(*Object)
+		if !ok || o == nil {
+			t.Fatalf("ConfigObject(%q) = %#v, %v", src, v, ok)
+		}
+		if tm, known := o.Get("testMatch"); !known || !reflect.DeepEqual(tm, []any{"**/*.e2e.js"}) {
+			t.Errorf("%q: testMatch = %#v, %v", src, tm, known)
+		}
+		if _, known := o.Get("roots"); !known {
+			t.Errorf("%q: roots should be known absent", src)
+		}
+	}
+	// After an unexpected token, later keys may have been missed.
+	v, _ := ConfigObject([]byte("export default { a: 1; b: 2 }"))
+	if o, _ := v.(*Object); o == nil || !o.Spread {
+		t.Errorf("malformed object: got %#v, want Spread", v)
 	}
 }

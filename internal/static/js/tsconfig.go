@@ -26,7 +26,14 @@ type tsConfig struct {
 	hasBase  bool
 	pathsDir string // directory of the config that defined "paths"
 	paths    []pathRule
+	// configDir is the directory of the config the chain was loaded for, which
+	// ${configDir} (TypeScript 5.5) stands for in "paths" targets and "baseUrl", also
+	// when an extended config declares them.
+	configDir string
 }
+
+// configDirVar is the template TypeScript expands to the using config's directory.
+const configDirVar = "${configDir}"
 
 // pathRule is one compiled "paths" entry.
 type pathRule struct {
@@ -55,11 +62,19 @@ func (c *tsConfig) pathsBase() string {
 	return c.pathsDir
 }
 
+// target returns the directory a "paths" target is relative to and the target relative
+// to it: the paths base, or configDir for a target starting with ${configDir}.
+func (c *tsConfig) target(t string) (base, rel string) {
+	if rest, ok := strings.CutPrefix(t, configDirVar); ok {
+		return c.configDir, "./" + strings.TrimLeft(rest, "/")
+	}
+	return c.pathsBase(), t
+}
+
 // resolve resolves a bare specifier through "paths" and then "baseUrl" and reports
 // whether anything was found. Rules are tried most specific first; the first rule whose
 // targets resolve wins, as in TypeScript.
 func (c *tsConfig) resolve(a *Analyzer, spec string, add func(string)) bool {
-	base := c.pathsBase()
 	for _, r := range c.paths {
 		star, ok := r.match(spec)
 		if !ok {
@@ -67,6 +82,7 @@ func (c *tsConfig) resolve(a *Analyzer, spec string, add func(string)) bool {
 		}
 		found := false
 		for _, t := range r.targets {
+			base, t := c.target(t)
 			if r.star {
 				t = strings.Replace(t, "*", star, 1)
 			}
@@ -146,17 +162,18 @@ func (a *Analyzer) dirConfigs(dir string) []*tsConfig {
 // tsconfig returns the config at p with its extends chain applied (nil if unreadable).
 func (a *Analyzer) tsconfig(p string) *tsConfig {
 	return a.tsByPath.get(p, func() *tsConfig {
-		c, ok := a.loadConfig(p, map[string]bool{p: true})
+		c, ok := a.loadConfig(p, path.Dir(p), map[string]bool{p: true})
 		if !ok {
 			return nil
 		}
+		c.configDir = path.Dir(p)
 		return &c
 	})
 }
 
-// loadConfig applies the extends chain of the config at p. visited guards against
-// cycles.
-func (a *Analyzer) loadConfig(p string, visited map[string]bool) (tsConfig, bool) {
+// loadConfig applies the extends chain of the config at p, loaded for a config in
+// leafDir (the expansion of ${configDir}). visited guards against cycles.
+func (a *Analyzer) loadConfig(p, leafDir string, visited map[string]bool) (tsConfig, bool) {
 	raw := a.rawConfig(p)
 	if raw == nil {
 		return tsConfig{}, false
@@ -169,7 +186,7 @@ func (a *Analyzer) loadConfig(p string, visited map[string]bool) (tsConfig, bool
 			continue
 		}
 		visited[ep] = true
-		parent, ok := a.loadConfig(ep, visited)
+		parent, ok := a.loadConfig(ep, leafDir, visited)
 		if !ok {
 			continue
 		}
@@ -181,7 +198,12 @@ func (a *Analyzer) loadConfig(p string, visited map[string]bool) (tsConfig, bool
 		}
 	}
 	if b := raw.CompilerOptions.BaseURL; b != nil {
-		c.baseURL, c.hasBase = path.Join(dir, *b), true
+		if rest, ok := strings.CutPrefix(*b, configDirVar); ok {
+			c.baseURL = path.Join(leafDir, rest)
+		} else {
+			c.baseURL = path.Join(dir, *b)
+		}
+		c.hasBase = true
 	}
 	if raw.CompilerOptions.Paths != nil {
 		c.paths, c.pathsDir = compilePaths(raw.CompilerOptions.Paths), dir
