@@ -184,18 +184,13 @@ func dropSnapshot(st *state.State) {
 	st.Files, st.Commit, st.Created = map[string]string{}, "", time.Time{}
 }
 
-// Save writes the state. In shared mode it writes this worktree's snapshot, then, under
-// the lock, re-reads the shared file and applies this process's changes to it
-// (state.MergeChanges), so concurrent runs in other worktrees keep theirs; st then
-// holds the merged entries.
+// Save writes the state. In shared mode it re-reads the shared file under the lock and
+// applies this process's changes to it (state.MergeChanges), so concurrent runs in
+// other worktrees keep theirs; st then holds the merged entries. This worktree's
+// snapshot is written only after the entries are saved.
 func (s *stateStore) Save(st *state.State) error {
 	if !s.shared {
 		return st.Save(s.path)
-	}
-	snap := state.New()
-	snap.Files, snap.Commit, snap.Created, snap.Tool = st.Files, st.Commit, st.Created, st.Tool
-	if err := snap.Save(s.snapPath); err != nil {
-		return err
 	}
 	lock, err := state.AcquireLock(s.lockPath(), state.LockWait, state.LockStale)
 	if err != nil {
@@ -221,7 +216,12 @@ func (s *stateStore) Save(st *state.State) error {
 	if s.base, err = state.Load(s.path); err != nil {
 		s.base = nil
 	}
-	return nil
+	// The snapshot last, once the entries it goes with are saved: a snapshot ahead of
+	// its entries would hide changes from the next run, one behind only reports some
+	// changes again.
+	snap := state.New()
+	snap.Files, snap.Commit, snap.Created, snap.Tool = st.Files, st.Commit, st.Created, st.Tool
+	return snap.Save(s.snapPath)
 }
 
 // Clear removes the state (in shared mode the shared entries of every worktree and

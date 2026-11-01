@@ -451,3 +451,59 @@ func TestSharedStateLock(t *testing.T) {
 		t.Error("entry not saved")
 	}
 }
+
+// TestSharedFailedSaveKeepsSnapshot: when the shared entries cannot be saved, this
+// worktree's snapshot must not advance either, or the next run would take the new
+// content as tested and skip tests whose results were never recorded.
+func TestSharedFailedSaveKeepsSnapshot(t *testing.T) {
+	g := worktreeFixture(t, "")
+	oldWait := state.LockWait
+	state.LockWait = 100 * time.Millisecond
+	t.Cleanup(func() { state.LockWait = oldWait })
+
+	store := sharedStore(t, g.dir)
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	st.Files, st.Commit, st.Created = map[string]string{"src/lib": "v1"}, "c1", t0
+	st.Suite("s").Tests["x"] = &state.Entry{Status: state.Pass, At: t0}
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	checkSnap := func(what string) {
+		t.Helper()
+		snap := loadState(t, store.snapPath)
+		if snap.Files["src/lib"] != "v1" || snap.Commit != "c1" || !snap.Created.Equal(t0) {
+			t.Errorf("%s: snapshot advanced although the entries were not saved: %v %q %v", what, snap.Files, snap.Commit, snap.Created)
+		}
+	}
+	advance := func() {
+		st.Files, st.Commit, st.Created = map[string]string{"src/lib": "v2"}, "c2", time.Now()
+		st.Suite("s").Tests["x"] = &state.Entry{Status: state.Fail, At: time.Now()}
+	}
+
+	// The lock is held by a live process.
+	lock := store.path + ".lock"
+	if err := os.WriteFile(lock, []byte("pid 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	advance()
+	if err := store.Save(st); !errors.Is(err, state.ErrLocked) {
+		t.Fatalf("save with a held lock: %v", err)
+	}
+	checkSnap("held lock")
+	os.Remove(lock)
+
+	// The shared file cannot be written (a directory is in its way).
+	store.path = filepath.Join(t.TempDir(), "blocked", "state.json.gz")
+	if err := os.MkdirAll(store.path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	advance()
+	if err := store.Save(st); err == nil {
+		t.Fatal("save to an unwritable shared path succeeded")
+	}
+	checkSnap("unwritable shared file")
+}
