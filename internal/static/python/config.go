@@ -17,10 +17,14 @@ func pyprojectRoots(doc string) []string {
 	for _, sec := range []string{"tool.pytest.ini_options", "tool.pytest"} {
 		out = append(out, tomlStrings(doc, sec, "pythonpath")...)
 	}
-	// setuptools: [tool.setuptools.packages.find] where = ["src"] and
-	// [tool.setuptools.package-dir] "" = "src".
+	// setuptools: [tool.setuptools.packages.find] where = ["src"], and
+	// [tool.setuptools.package-dir] "" = "src" or its inline form
+	// [tool.setuptools] package-dir = {"" = "src"}.
 	out = append(out, tomlStrings(doc, "tool.setuptools.packages.find", "where")...)
 	out = append(out, tomlStrings(doc, "tool.setuptools.package-dir", "")...)
+	for _, v := range tomlRaw(doc, "tool.setuptools", "package-dir") {
+		out = append(out, inlineTableValues(v, "")...)
+	}
 	// poetry: packages = [{ include = "pkg", from = "src" }].
 	for _, v := range tomlRaw(doc, "tool.poetry", "packages") {
 		out = append(out, inlineKeyStrings(v, "from")...)
@@ -32,13 +36,34 @@ func pyprojectRoots(doc string) []string {
 	return out
 }
 
+// pyprojectTestGlobs returns the pytest python_files patterns of a pyproject.toml
+// (an array of patterns or a whitespace separated string).
+func pyprojectTestGlobs(doc string) []string {
+	var out []string
+	for _, sec := range []string{"tool.pytest.ini_options", "tool.pytest"} {
+		for _, s := range tomlStrings(doc, sec, "python_files") {
+			out = append(out, strings.Fields(s)...)
+		}
+	}
+	return out
+}
+
 // iniRoots returns the pytest pythonpath entries of an INI-style config file.
 func iniRoots(doc, base string) []string {
-	section := "pytest"
+	return iniValues(doc, iniSection(base), "pythonpath")
+}
+
+// iniTestGlobs returns the pytest python_files patterns of an INI-style config file.
+func iniTestGlobs(doc, base string) []string {
+	return iniValues(doc, iniSection(base), "python_files")
+}
+
+// iniSection is the section of an INI-style config file that holds pytest settings.
+func iniSection(base string) string {
 	if base == "setup.cfg" {
-		section = "tool:pytest"
+		return "tool:pytest"
 	}
-	return iniValues(doc, section, "pythonpath")
+	return "pytest"
 }
 
 // nextLine returns the line starting at doc[i] (without its newline) and the index of
@@ -192,6 +217,50 @@ func inlineKeyStrings(v, key string) []string {
 				s, i = tomlString(v, j)
 				out = append(out, s)
 			}
+		}
+	}
+	return out
+}
+
+// inlineTableValues returns the string values assigned to key (quoted or bare) in a
+// TOML inline table such as {"" = "lib", pkg = "src/pkg"}.
+func inlineTableValues(v, key string) []string {
+	var out []string
+	k, haveKey, afterEq := "", false, false
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case c == '#':
+			for i < len(v) && v[i] != '\n' {
+				i++
+			}
+		case c == '"' || c == '\'':
+			var s string
+			s, i = tomlString(v, i)
+			switch {
+			case afterEq:
+				if k == key {
+					out = append(out, s)
+				}
+				haveKey, afterEq = false, false
+			case !haveKey:
+				k, haveKey = s, true
+			}
+		case c == '=':
+			afterEq = haveKey
+		case c == ',' || c == '{' || c == '}':
+			haveKey, afterEq = false, false
+		case isIdentChar(c) || c == '-':
+			j := i
+			for j < len(v) && (isIdentChar(v[j]) || v[j] == '-') {
+				j++
+			}
+			switch {
+			case afterEq: // a non-string value
+				haveKey, afterEq = false, false
+			case !haveKey:
+				k, haveKey = v[i:j], true
+			}
+			i = j - 1
 		}
 	}
 	return out

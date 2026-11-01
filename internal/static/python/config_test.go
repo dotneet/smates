@@ -21,6 +21,13 @@ func TestPyprojectRoots(t *testing.T) {
 		{"native pytest table", "[ tool . pytest ]\npythonpath = [\"c\"]\n", []string{"c"}},
 		{"setuptools find", "[tool.setuptools.packages.find]\nwhere = [\"lib\"]\n", []string{"lib"}},
 		{"setuptools package-dir", "[tool.setuptools.package-dir]\n\"\" = \"code\"\nother = \"x/other\"\n", []string{"code"}},
+		{"setuptools inline package-dir", "[tool.setuptools]\npackage-dir = {\"\" = \"lib\"}\n", []string{"lib"}},
+		{
+			"setuptools inline package-dir with other keys",
+			"[tool.setuptools]\nzip-safe = false\npackage-dir = { other = \"x/other\", 'x' = \"y\", \"\"='code' }\n",
+			[]string{"code"},
+		},
+		{"setuptools inline package-dir without root", "[tool.setuptools]\npackage-dir = {pkg = \"lib/pkg\"}\n", nil},
 		{
 			"poetry from",
 			"[tool.poetry]\npackages = [\n  { include = \"a\", from = \"lib\" },\n  { include = \"b\" },\n]\n",

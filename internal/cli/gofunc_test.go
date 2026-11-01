@@ -234,7 +234,7 @@ func TestGoFuncSelection(t *testing.T) {
 	if code != 0 || len(res) != 1 || res["calc#TestMul"] != state.Pass {
 		t.Errorf("--no-record after fix: %d %v\n%s", code, res, out)
 	}
-	if _, out, _ := r.run("run", "--dry-run"); !strings.Contains(out, "-run ^(TestMul)$ ./calc") {
+	if _, out, _ := r.run("run", "--dry-run"); !strings.Contains(out, "-run '^(TestMul)$' ./calc") {
 		t.Errorf("dry run: %s", out)
 	}
 
