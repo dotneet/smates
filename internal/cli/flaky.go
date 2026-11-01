@@ -137,7 +137,7 @@ func retryFlaky(ctx context.Context, p *project, rc *runner.RunContext, sr *sele
 		}
 		r2, err := sr.Suite.Adapter.Run(ctx, &again)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: retry: %w", sr.Name, err)
+			return nil, nil, fmt.Errorf("retry: %w", err)
 		}
 		r.Warnings = append(r.Warnings, r2.Warnings...)
 		for by, keys := range r2.ReadsBy {

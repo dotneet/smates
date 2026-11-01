@@ -388,8 +388,20 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	var retried map[string]*runner.Observation
 	if c.record && len(c.f.extra) == 0 {
 		if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
-			return 0, err
+			if buf != nil {
+				c.printFailedBatch(sr, b, buf, nil)
+			}
+			return 0, runError(sr.Name, err)
 		}
+	}
+	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
+	// executable or not installed: when no test reported or left a result, the tests
+	// never ran.
+	if notStarted(r) {
+		if buf != nil {
+			c.printFailedBatch(sr, b, buf, nil)
+		}
+		return 0, envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output above)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
 	for _, w := range r.Warnings {
@@ -614,6 +626,12 @@ func subsetOf(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// notStarted reports a run whose process exited 126 (not executable) or 127 (command
+// not found) without any test reporting or leaving a result.
+func notStarted(r *runner.RunResult) bool {
+	return (r.ExitCode == 126 || r.ExitCode == 127) && len(r.Observations) == 0
 }
 
 // runError classifies an error of a runner that could not run a batch: a suite command

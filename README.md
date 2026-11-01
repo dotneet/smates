@@ -355,7 +355,7 @@ next run. `--report -` writes the JSON report to stdout and everything else to s
 | 1 | tests failed (whatever code the runner exited with; `--report` has it in `exit_code`) |
 | 2 | usage error: invalid command line |
 | 3 | configuration error: invalid `smates.yml`, unknown runner, a suite command that cannot be parsed, a suite or test named on the command line (`--suite`, `--only`) that the configuration does not define, no suites at all |
-| 4 | environment problem: git missing or not a git repository, a runner or tool that is not installed or cannot start (e.g. missing `node_modules`) |
+| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) before any test reported or left a result |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the

@@ -207,6 +207,9 @@ func TestExitCodes(t *testing.T) {
 		{"config: unparsable command", suite(`"sh -c 'exit 0"`), []string{"run", "--all"}, ExitConfig},
 		{"env: runner not installed", suite("smates-no-such-tool-x1"), []string{"run", "--all"}, ExitEnv},
 		{"env: npx tool not installed", suite("npx smates-no-such-tool-x2"), []string{"run", "--all"}, ExitEnv},
+		{"env: launcher exits 127", suite("sh -c 'smates-no-such-tool-x3'"), []string{"run", "--all"}, ExitEnv},
+		{"env: launcher exits 126", suite("sh -c 'exit 126'"), []string{"run", "--all"}, ExitEnv},
+		{"env: launcher exits 127, failures mode", suite("sh -c 'smates-no-such-tool-x4'"), []string{"run", "--all", "--output", "failures"}, ExitEnv},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +218,14 @@ func TestExitCodes(t *testing.T) {
 				t.Errorf("exit %d, want %d\n%s", code, tc.want, errs)
 			}
 		})
+	}
+
+	// The launcher's output (the shell's "not found") is printed in failures mode.
+	write("smates.yml", suite("sh -c 'smates-no-such-tool-x5'"))
+	var o, e bytes.Buffer
+	code := Main([]string{"run", "-C", g.dir, "--no-agent", "--all", "--output", "failures"}, &o, &e)
+	if code != ExitEnv || !strings.Contains(o.String(), "smates-no-such-tool-x5") || !strings.Contains(e.String(), "exited with code 127 before any test reported a result") {
+		t.Errorf("launcher 127: exit %d\n%s\n--- stderr\n%s", code, o.String(), e.String())
 	}
 
 	// Not a git repository.
@@ -318,5 +329,23 @@ func TestPrintFailedBatch(t *testing.T) {
 	c.printFailedBatch(sr, b, buf, obs)
 	if want := "── smates: FAIL web (3 test unit(s) with vitest); its output:\nwhole batch output\n"; w.String() != want {
 		t.Errorf("batch:\n%s", w.String())
+	}
+}
+
+// TestExit127AfterResults: a run that exits 127 after its tests reported results is a
+// test failure, not an environment problem.
+func TestExit127AfterResults(t *testing.T) {
+	dir, write, run := outputFixture(t)
+	_ = dir
+	write("smates.yml", `version: 1
+orphans: ignore
+suites:
+  - name: good
+    runner: custom
+    tests: ["good/*_check.py"]
+    command: sh -c 'for f; do python3 "$f"; done; exit 127' sh
+`)
+	if code, _, errs := run("run", "--all"); code != ExitFailed {
+		t.Errorf("exit %d, want %d\n%s", code, ExitFailed, errs)
 	}
 }

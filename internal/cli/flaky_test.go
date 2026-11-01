@@ -182,6 +182,18 @@ assert not v.startswith("fail"), v
 		t.Fatalf("persistent failure must fail the run\n%s", errs)
 	}
 
+	// A retry whose runner cannot start is an environment error; in failures mode the
+	// first attempt's output is still printed.
+	write("run.sh", "#!/bin/sh\n[ \"$(cat \"$SMATES_COIN\")\" = fail-break ] && chmod -x \"$0\"\nexec python3 run.py \"$@\"\n")
+	os.Chmod(filepath.Join(g.dir, "run.sh"), 0o755)
+	write("smates.yml", strings.Replace(config, "python3 run.py", "./run.sh", 1)+"flaky:\n  retry: 1\n")
+	os.WriteFile(coin, []byte("fail-break"), 0o644)
+	code, out, errs := run("run", "--all", "--output", "failures")
+	if code != ExitEnv || !strings.Contains(errs, "py: retry: ") || strings.Contains(errs, "py: py:") || !strings.Contains(out, "AssertionError: fail-break") {
+		t.Errorf("retry that cannot start: exit %d\n%s\n--- stderr\n%s", code, out, errs)
+	}
+	write("smates.yml", config)
+
 	if code, _, errs := run("flaky", "--clear"); code != 0 || !strings.Contains(errs, "cleared flake evidence of 1") {
 		t.Fatalf("clear: %d %s", code, errs)
 	}
