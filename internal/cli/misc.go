@@ -322,8 +322,12 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 	}
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
-		fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\n", s.Name, s.Runner, s.Root, len(units), s.Command)
+		fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\ttests=%s\n", s.Name, s.Runner, s.Root, len(units), s.Command, s.TestsSource)
+		if s.DiscoveryWarning != "" {
+			fmt.Fprintf(stderr, "smates: suite %s: %s\n", s.Name, s.DiscoveryWarning)
+		}
 		if cf.verbose {
+			fmt.Fprintf(stdout, "  tests from %s: %s\n", s.TestsSource, strings.Join(s.TestPatterns(), " "))
 			for _, u := range units {
 				fmt.Fprintf(stdout, "  %s\n", u)
 			}
@@ -586,9 +590,13 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
 		if len(units) == 0 {
-			warn("suite %s (%s): no test files match %v", s.Name, s.Runner, s.Tests)
+			warn("suite %s (%s): no test files match %v (tests from %s)", s.Name, s.Runner, s.TestPatterns(), s.TestsSource)
 		} else {
 			ok("suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command)
+			ok("suite %s: tests from %s: %s", s.Name, s.TestsSource, strings.Join(s.TestPatterns(), " "))
+		}
+		if s.DiscoveryWarning != "" {
+			warn("suite %s: %s", s.Name, s.DiscoveryWarning)
 		}
 		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
 			warn("suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why)

@@ -115,6 +115,10 @@ dependencies it only knows the static graph and overstates the orphans.
 | `go` | package | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code |
 
+Which files are tests comes from each runner's own configuration (jest `testMatch`,
+vitest `include`, pytest `testpaths`, ...) unless `tests:` is set; see
+[Which files are tests](#which-files-are-tests).
+
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are
 analyzed from their command line and script contents. A command smates cannot see into
@@ -228,7 +232,7 @@ suites:
     runner: vitest
     root: packages/web
     # optional:
-    tests: ["src/**/*.test.ts"]      # test file globs (relative to root)
+    tests: ["src/**/*.test.ts"]      # test file globs (relative to root; default: from the runner config)
     exclude: ["src/legacy/**"]
     command: "pnpm exec vitest run"   # selected files are appended (or put in {tests})
     inputs: ["/proto/**"]            # extra files all tests of the suite depend on ("/" = repo root)
@@ -272,6 +276,34 @@ agent:
   explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
+
+### Which files are tests
+
+Without `tests:`, smates reads the test files of a suite from its runner's configuration,
+statically (config files are never executed):
+
+| runner | read from | options |
+|---|---|---|
+| `jest` | `--config` of the command, else the nearest `jest.config.{js,ts,mjs,cjs,mts,cts,json}` or `package.json` `"jest"` from the suite root up (jest stops at the nearest `package.json`) | `rootDir`, `roots`, `testMatch` (micromatch extglobs such as `?(x)` and `+(spec\|test)` are converted; `!` patterns exclude), `testRegex`, `testPathIgnorePatterns` (`<rootDir>` substituted) |
+| `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), and projects: `test.projects`, `test.workspace` or `vitest.workspace.*` |
+| `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
+
+A JS/TS config is read when it exports an object literal (`module.exports = {...}`,
+`export default {...}`, `defineConfig({...})`, or a `const` it names) and the options are
+string, array or regex literals. Anything else (a function, `testMatch: dirs.map(...)`, a
+`...spread` that may set the option, `jest` `projects`, a `testRegex` with lookaround Go's
+`regexp` lacks) falls back to the default globs, and `smates list` / `smates doctor` warn
+with the reason: set `tests:` (and `exclude:`) in `smates.yml` then. A vitest workspace is
+one suite whose test files are the union of its projects, each project's include/exclude
+applied below its own root; a project whose config cannot be read keeps the defaults for
+its directory. When a root vitest config does not count a nested package's tests (its own
+`vitest.config.*` and no `projects` covering it), auto-detection makes that package a
+separate suite.
+
+`smates list` shows where each suite's tests come from (`tests=jest.config.js testMatch`;
+`-v` adds the patterns), as does `smates doctor`. Unlike `tests:`/`exclude:` in
+`smates.yml`, derived patterns do not make smates pass every file explicitly on a full run
+(`smates run --all`): they describe what the runner discovers by itself.
 
 ### Tests that exercise a server
 

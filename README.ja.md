@@ -158,6 +158,42 @@ Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml`
 smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを許さず、`node_modules/.bin` に
 ないときはエラーにします。
 
+### どのファイルがテストか
+
+`smates.yml` で `tests:` を指定しないスイートでは、テストファイルをランナー自身の設定から
+静的に(設定ファイルを実行せずに)読み取ります。
+
+- **jest**: コマンドの `--config`、なければスイートのルートから上にたどって最も近い
+  `jest.config.{js,ts,mjs,cjs,mts,cts,json}` か `package.json` の `"jest"`(jest と同じく
+  最も近い `package.json` で探索を止めます)。`rootDir`、`roots`、`testMatch`(`?(x)` や
+  `+(spec|test)` などの micromatch の extglob は変換し、`!` のパターンは除外)、`testRegex`、
+  `testPathIgnorePatterns`(`<rootDir>` を置換)を読みます。
+- **vitest**: コマンドの `--config`、なければ上にたどって最も近い `vitest.config.*` /
+  `vite.config.*`。`root`、`test.root`、`test.dir`、`test.include`、`test.exclude`
+  (`...configDefaults.exclude` も解釈)と、プロジェクト(`test.projects`、`test.workspace`、
+  `vitest.workspace.*`)を読みます。ワークスペースは 1 つのスイートとし、各プロジェクトの
+  include/exclude をそのルート以下に適用した和集合をテストファイルとします。読めない設定の
+  プロジェクトは、そのディレクトリに既定のパターンを使います。ルートの vitest 設定がネストした
+  パッケージ(独自の `vitest.config.*` を持ち、`projects` に含まれないもの)のテストを数えない
+  ときは、自動検出でそのパッケージを別スイートにします。
+- **pytest**: スイートのルートから上にたどって最初に見つかる `pytest.ini`、`.pytest.ini`、
+  `pyproject.toml`(`[tool.pytest.ini_options]` / `[tool.pytest]`)、`tox.ini`(`[pytest]`)、
+  `setup.cfg`(`[tool:pytest]`)。`python_files` と、その設定ファイルがスイートのルートにある
+  場合は `testpaths` を読みます(pytest が `testpaths` を使うのは rootdir で引数なしに
+  起動したときだけのため)。
+
+JS/TS の設定は、オブジェクトリテラルを export していて(`module.exports = {...}`、
+`export default {...}`、`defineConfig({...})`、またはそれが指す `const`)、値が文字列・配列・
+正規表現のリテラルのときに読めます。それ以外(関数、`testMatch: dirs.map(...)`、オプションを
+設定しうる `...spread`、jest の `projects`、Go の `regexp` にない先読みを使う `testRegex` など)
+は既定の glob にフォールバックし、`smates list` / `smates doctor` が理由とともに警告します。
+その場合は `smates.yml` に `tests:`(と `exclude:`)を書いてください。
+
+`smates list` は各スイートのテストの出所を表示し(`tests=jest.config.js testMatch`、`-v` で
+パターンも表示)、`smates doctor` も同様です。`smates.yml` の `tests:`/`exclude:` と違い、
+設定から読み取ったパターンは全件実行(`smates run --all`)で全ファイルを明示的に渡す理由には
+なりません。ランナー自身が見つける集合を表しているためです。
+
 ### git フック
 
 `smates hook install` は `pre-push` フック(`--hook pre-commit` で pre-commit)を書き込み、

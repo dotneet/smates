@@ -196,6 +196,15 @@ can alter test results.
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
 
+Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
+the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
+`roots`/`testPathIgnorePatterns`, vitest `include`/`exclude`/`dir` and projects united
+into one suite, pytest `testpaths`/`python_files`) into matchers relative to the
+config's base directory, and falls back to its default globs, with a `doctor` warning,
+when the config is not literal. Derived patterns do not mark the suite narrowed: a full
+run still lets the runner discover its tests, so an approximation (a converted
+extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
+
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
 so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
