@@ -701,6 +701,12 @@ ok  	example.com/shop/internal/store	0.170s
 - Bounded by turns, a wall-clock timeout and a token budget; answers are validated
   against the real test inventory and cached per change. Any failure falls back to
   running the affected suites in full.
+- An external agent (`agent.command`) gets the prompt on stdin and prints its answer on
+  stdout. Without a controlling terminal (CI) it runs in a process group of its own,
+  killed as a whole on the timeout or when smates is stopped (Ctrl-C, SIGTERM, SIGHUP).
+  From a terminal it stays in smates' process group so that it can prompt there (ssh
+  passphrase, pinentry): Ctrl-C stops it with smates, but on the timeout only the
+  command's own process is killed.
 - Fork pull requests get no secrets: smates simply falls back.
 
 ### Letting the calling agent decide
