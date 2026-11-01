@@ -430,4 +430,4 @@ ok  	example.com/shop/internal/store	0.170s
 
 ## License
 
-Not chosen yet (add a LICENSE file before publishing).
+[MIT](LICENSE)
