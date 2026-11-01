@@ -251,3 +251,69 @@ func (r *Repo) BlobContent(sha string) ([]byte, bool) {
 	}
 	return out, true
 }
+
+// Commit is a commit on the first-parent history of HEAD.
+type Commit struct {
+	SHA     string
+	Parent  string // first parent, "" for a root commit
+	Subject string
+}
+
+// FirstParentCommits lists the commits reachable from HEAD by first parents, newest
+// first: those after since (when not "") and at most n of them (n <= 0: no limit).
+func (r *Repo) FirstParentCommits(since string, n int) ([]Commit, error) {
+	args := []string{"log", "--first-parent", "-z", "--format=%H%x09%P%x09%s"}
+	if n > 0 {
+		args = append(args, "-n", strconv.Itoa(n))
+	}
+	rev := "HEAD"
+	if since != "" {
+		rev = since + "..HEAD"
+	}
+	out, err := r.Git(append(args, rev, "--")...)
+	if err != nil {
+		return nil, err
+	}
+	var commits []Commit
+	for _, rec := range strings.Split(out, "\x00") {
+		f := strings.SplitN(strings.TrimSpace(rec), "\t", 3)
+		if len(f) < 3 {
+			continue
+		}
+		c := Commit{SHA: f[0], Subject: f[2]}
+		if ps := strings.Fields(f[1]); len(ps) > 0 {
+			c.Parent = ps[0]
+		}
+		commits = append(commits, c)
+	}
+	return commits, nil
+}
+
+// FileChange is a file a commit changed. Status is git's name-status letter: 'A'
+// (added), 'D' (deleted), 'M' (modified) or 'T' (type changed); renames are reported
+// as a deletion and an addition.
+type FileChange struct {
+	Path   string
+	Status byte
+}
+
+// ChangedInCommit lists the files a commit changed relative to its first parent (every
+// file of a root commit), so a merge contributes what it brought into the branch.
+func (r *Repo) ChangedInCommit(c Commit) ([]FileChange, error) {
+	args := []string{"-c", "core.quotepath=off", "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", "--name-status"}
+	if c.Parent == "" {
+		args = append(args, "--root", c.SHA)
+	} else {
+		args = append(args, c.Parent, c.SHA)
+	}
+	out, err := r.Git(args...)
+	if err != nil {
+		return nil, err
+	}
+	var changes []FileChange
+	f := strings.Split(out, "\x00")
+	for i := 0; i+1 < len(f) && f[i] != ""; i += 2 {
+		changes = append(changes, FileChange{Path: f[i+1], Status: f[i][0]})
+	}
+	return changes, nil
+}

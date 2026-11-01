@@ -304,3 +304,63 @@ func TestDefaultBranch(t *testing.T) {
 		}
 	})
 }
+
+func TestFirstParentHistory(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "1")
+	r.write("b.txt", "1")
+	root := r.commit("root")
+	r.write("a.txt", "2")
+	r.git("mv", "b.txt", "c.txt")
+	second := r.commit("second\twith tab")
+	r.git("checkout", "-q", "-b", "feat")
+	r.write("feat/x.txt", "x")
+	r.commit("feat")
+	r.git("checkout", "-q", "main")
+	r.write("d.txt", "d")
+	r.commit("third")
+	r.git("merge", "-q", "--no-ff", "-m", "merge feat", "feat")
+
+	commits, err := r.repo.FirstParentCommits("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subjects []string
+	for _, c := range commits {
+		subjects = append(subjects, c.Subject)
+	}
+	if strings.Join(subjects, "|") != "merge feat|third|second\twith tab|root" {
+		t.Fatalf("subjects %q", subjects)
+	}
+	if commits[3].SHA != root || commits[3].Parent != "" || commits[2].SHA != second || commits[2].Parent != root {
+		t.Errorf("commits %+v", commits)
+	}
+	if c, _ := r.repo.FirstParentCommits("", 2); len(c) != 2 {
+		t.Errorf("limit: %d", len(c))
+	}
+	if c, _ := r.repo.FirstParentCommits(second, 0); len(c) != 2 || c[1].Subject != "third" {
+		t.Errorf("since: %+v", c)
+	}
+
+	show := func(c Commit) string {
+		ch, err := r.repo.ChangedInCommit(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var s []string
+		for _, x := range ch {
+			s = append(s, string(x.Status)+" "+x.Path)
+		}
+		sort.Strings(s)
+		return strings.Join(s, ",")
+	}
+	if got := show(commits[3]); got != "A a.txt,A b.txt" {
+		t.Errorf("root: %s", got)
+	}
+	if got := show(commits[2]); got != "A c.txt,D b.txt,M a.txt" {
+		t.Errorf("second: %s", got)
+	}
+	if got := show(commits[0]); got != "A feat/x.txt" {
+		t.Errorf("merge (first-parent diff): %s", got)
+	}
+}

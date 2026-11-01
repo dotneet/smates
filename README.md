@@ -91,6 +91,16 @@ tests of the other suites count too). smates then
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
 3. otherwise runs the suites the orphan can affect in full.
 
+Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
+covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
+100 first-parent commits (`--history N`, `--since rev`) against the current dependency
+map with the same rule, ranks the files that would have been orphans, and prints a
+ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency),
+plus how many commits would still have orphans. Files that can change how tests run (CI
+workflows, Makefiles, Dockerfiles, compose files, toolchain pins) are listed for
+`inputs:` or `rules:` instead. Run it after `smates run --all`: without recorded
+dependencies it only knows the static graph and overstates the orphans.
+
 ## Supported runners
 
 | runner | unit | how dependencies are traced | per-file status |
@@ -249,6 +259,7 @@ agent:
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
+| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 

@@ -132,6 +132,14 @@ Orphans go through, in order:
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change).
 
+`smates orphans` replays the first-parent history (each commit's diff against its first
+parent; added and deleted files count as existence changes) against the covered set of an
+all-tests selection (`Result.Covered`) and the reference scan, without running anything.
+It ranks the orphans, suggests `ignore:` globs (a `dir/**` only when no file below it is a
+dependency, named by a test or execution-relevant) and flags CI, build, container and
+toolchain files for `inputs:`/`rules:` instead, since ignoring them would hide changes that
+can alter test results.
+
 ## 2. Tracing per ecosystem
 
 | Runner | Unit | Code deps | Data deps | Attribution |
