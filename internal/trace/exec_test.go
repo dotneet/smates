@@ -132,6 +132,10 @@ func TestExecDepsOperands(t *testing.T) {
 	writeScript(t, root, ".venv/bin/pytest", "#!"+root+"/.venv/bin/python\nimport sys\n")
 	writeScript(t, root, ".venv/bin/ruff", "\x7fELF")
 	writeScript(t, root, "node_modules/.bin/eslint", "#!/usr/bin/env node\nrequire('../eslint')\n")
+	// A repository script that ends by exec'ing node is still a shell script.
+	writeScript(t, root, "run.sh", "#!/bin/sh\ncat data.txt\nexec node app.js\n")
+	writeScript(t, root, "tool", "#!/usr/bin/env -S python3 -u\nimport sys\n")
+	touch(t, root, "lib/x.jq")
 
 	cases := []struct {
 		name string
@@ -153,6 +157,20 @@ func TestExecDepsOperands(t *testing.T) {
 		{"find in a subdirectory", "cd sub; find . -name '*.txt'", []string{"sub/**"}},
 		{"rg pattern path", "rg data sub", []string{"sub/**"}},
 		{"grep -r pattern path", "grep -r --include=*.txt data sub", []string{"sub/**"}},
+		{"ls -r reverses", "ls -r", []string{"./"}},
+		{"find -newer", "find sub -newer list.txt -type f", []string{"list.txt", "sub/**"}},
+
+		// Option arguments.
+		{"grep --exclude-from", "grep --exclude-from list.txt -r data sub", []string{"list.txt", "sub/**"}},
+		{"grep --label", "grep --label x data data.txt", []string{"data.txt"}},
+		{"rg --ignore-file", "rg --ignore-file list.txt data sub", []string{"list.txt", "sub/**"}},
+		{"rg -d", "rg -d 2 data sub", []string{"sub/**"}},
+		{"rg --pre", "rg --pre ./conv data data.txt", []string{"./**", "data.txt"}},
+		{"jq -L", "jq -L lib .x data.txt", []string{"data.txt", "lib/**"}},
+		{"sort --key", "sort --key 2 data.txt", []string{"data.txt"}},
+		{"BSD stat -f", "stat -f %z data.txt", []string{"data.txt"}},
+		{"GNU stat -f", "stat -f data.txt", []string{"data.txt"}},
+		{"[ ] after a file operator", `[ "$X" = -f ]`, nil},
 
 		// Paths that do not exist yet.
 		{"test -f missing", "test -f plugins/extra.py", []string{"plugins/extra.py?"}},
@@ -166,6 +184,16 @@ func TestExecDepsOperands(t *testing.T) {
 		{"glob without matches", "cat sub/*.log", []string{"sub/"}},
 		{"glob", "cat *.txt", []string{"./", "data.txt", "list.txt"}},
 		{"glob in a directory component", "cat */data.txt", []string{"./**", "sub/data.txt"}},
+		{"glob of a runtime", "python -m pytest sub/*.txt", []string{"sub/", "sub/data.txt"}},
+		{"quoted glob characters", `python -c 'print([1,2])'; python -m pytest "sub/data.txt::t[1]"; printf '[%s]\n' x`, nil},
+		{"quoted glob of a reader", `tr '[:upper:]' '[:lower:]' < data.txt; cat 'sub/*.log'`, []string{"data.txt", "sub/*.log?"}},
+		{"echo glob", "echo sub/*.log", nil},
+		{"here-document", "cat <<EOF\nhello $X\nEOF\ncat data.txt", []string{"data.txt"}},
+		{"here-document <<-", "cat <<-'END'\n\tmake\n\tEND\ncat data.txt", []string{"data.txt"}},
+		{"here-string", "cat <<< x", nil},
+		{"shell reading a here-document", "sh <<EOF\ncat data.txt\nEOF", []string{"./**"}},
+		{"trailing backslash", `cat data.txt \`, []string{"data.txt"}},
+		{"line continuation", "cat \\\ndata.txt", []string{"data.txt"}},
 		{"opaque command, missing path outside its directory", "cd sub; ./build ../missing.cfg", []string{"missing.cfg?", "sub/**"}},
 		{"opaque command, missing path inside its directory", "make test", []string{"./**"}},
 
@@ -185,6 +213,10 @@ func TestExecDepsOperands(t *testing.T) {
 		{"bunx unknown tool", "bunx --bun tsc", []string{"./**"}},
 		{"bun x reader", "bun x cat data.txt", []string{"data.txt"}},
 		{"npx is traced", "npx eslint sub", nil},
+		{"uv run shell script", "uv run ./run.sh", []string{"data.txt", "run.sh"}},
+		{"bunx shell script", "bunx ./run.sh", []string{"data.txt", "run.sh"}},
+		{"bun x shell script", "bun x ./run.sh", []string{"data.txt", "run.sh"}},
+		{"uv run python script by path", "uv run ./tool data.txt", []string{"data.txt", "tool"}},
 
 		// Subshells.
 		{"cd in a subshell", "(cd sub && cat data.txt); cat data.txt", []string{"data.txt", "sub/data.txt"}},
@@ -209,5 +241,9 @@ func TestExecDepsOperands(t *testing.T) {
 	// The same launcher as an argv (no shell).
 	if got, want := execKeys(root, []string{"uvx", "ruff", "check", "sub"}, false), []string{"./**", "sub/**"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("argv uvx: %v, want %v", got, want)
+	}
+	// No shell expands an argv's globs: no listing.
+	if got := execKeys(root, []string{"cat", "sub/*.log"}, false); got != nil {
+		t.Errorf("argv glob: %v, want []", got)
 	}
 }
