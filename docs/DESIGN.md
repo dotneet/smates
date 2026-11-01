@@ -141,7 +141,8 @@ Orphans go through, in order:
    so it selects nothing and is reported as a change to untested code. Code configuring
    tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
    directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
-   are left out; so is everything without a recorded state, where `D(T)` holds only the
+   are left out, and so are files under the root of a suite with a test that has no
+recorded entry yet; so is everything without a recorded state, where `D(T)` holds only the
    import closure and files tests read as data are not known yet. Code run by another
    process must be declared (rules), as for any dependency tracing
    cannot see.

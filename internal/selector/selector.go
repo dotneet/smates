@@ -106,6 +106,9 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Unrecorded is set when some test of the suite has no recorded entry: its
+	// dependencies are known from the static closure only.
+	Unrecorded bool `json:"-"`
 }
 
 // Mode is how a selection was computed.
@@ -294,6 +297,9 @@ func Select(in *Input) (*Result, error) {
 			var entry *state.Entry
 			if st != nil {
 				entry = st.Tests[u]
+			}
+			if entry == nil {
+				sr.Unrecorded = true
 			}
 			if entry != nil {
 				for f := range entry.Deps {
@@ -665,6 +671,14 @@ func (r *Result) untested(f string) bool {
 	for _, seg := range strings.Split(path.Dir(f), "/") {
 		if dataDirs[strings.ToLower(seg)] {
 			return false // source files tests read as data
+		}
+	}
+	// Every suite that may run f's code must have recorded all its tests: a test
+	// with no entry is known by its import closure only, which misses code loaded by
+	// name (a settings module, a plugin) and data reads.
+	for _, s := range r.Suites {
+		if s.Unrecorded && pathutil.Under(f, s.Suite.Root) {
+			return false
 		}
 	}
 	for _, s := range r.Suites {

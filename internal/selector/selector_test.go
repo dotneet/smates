@@ -979,6 +979,17 @@ func TestUntested(t *testing.T) {
 	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Untested = %v, want %v", got, want)
 	}
+	// A suite with a test that has no recorded entry knows only its import closure.
+	// (The go suite is rooted at the repository root: unrecorded, it blocks all.)
+	r.Suites[1].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go", "web/src/Button.tsx"}); !reflect.DeepEqual(got, []string{"cmd/tool/main.go"}) {
+		t.Errorf("unrecorded vitest suite: %v", got)
+	}
+	r.Suites[0].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("unrecorded root suite: %v", got)
+	}
+	r.Suites[0].Unrecorded, r.Suites[1].Unrecorded = false, false
 	// Without a recorded state only the static closure is known.
 	r.Mode = ModeDiff
 	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
@@ -1038,5 +1049,17 @@ func TestConfigKeyDisplay(t *testing.T) {
 	}
 	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
 		t.Error("DisplayKey")
+	}
+}
+
+func TestSelectMarksUnrecordedSuites(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	if res := f.sel(st, nil); res.Suites[0].Unrecorded {
+		t.Error("every test recorded")
+	}
+	delete(st.Suites["web"].Tests, "web/src/a.test.ts")
+	if res := f.sel(st, nil); !res.Suites[0].Unrecorded {
+		t.Error("a test without an entry")
 	}
 }
