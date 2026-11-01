@@ -12,6 +12,7 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // TestLiveAgent calls the real API of the selected provider. It runs only with
@@ -29,8 +30,8 @@ func TestLiveAgent(t *testing.T) {
 		t.Skip(why)
 	}
 
-	dir := t.TempDir()
-	gitRun(t, dir, "init", "-q")
+	g := testutil.NewGitRepo(t, nil)
+	dir := g.Dir
 	for p, c := range map[string]string{
 		"package.json":             `{"name":"live","scripts":{"pretest":"sh scripts/gen-users.sh","test":"node --test"}}` + "\n",
 		"scripts/gen-users.sh":     "#!/bin/sh\n# Regenerates the users fixture consumed by the tests.\ncat > fixtures/users.json <<'EOF'\n[{\"name\":\"alice\",\"role\":\"admin\"}]\nEOF\n",
@@ -44,16 +45,15 @@ func TestLiveAgent(t *testing.T) {
 		"README.md":                "# live\n",
 		".github/workflows/ci.yml": "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n",
 	} {
-		writeFile(t, dir, p, c)
+		testutil.Write(t, dir, p, c)
 	}
-	gitRun(t, dir, "add", "-A")
-	gitRun(t, dir, "commit", "-q", "-m", "base")
+	g.Commit("base")
 	repo, err := gitx.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldBlob, _ := gitx.HashFile(filepath.Join(repo.Root, "scripts", "gen-users.sh"))
-	writeFile(t, repo.Root, "scripts/gen-users.sh", "#!/bin/sh\n# Regenerates the users fixture consumed by the tests.\ncat > fixtures/users.json <<'EOF'\n[{\"name\":\"alice\",\"role\":\"member\"}]\nEOF\n")
+	testutil.Write(t, repo.Root, "scripts/gen-users.sh", "#!/bin/sh\n# Regenerates the users fixture consumed by the tests.\ncat > fixtures/users.json <<'EOF'\n[{\"name\":\"alice\",\"role\":\"member\"}]\nEOF\n")
 	newBlob, _ := gitx.HashFile(filepath.Join(repo.Root, "scripts", "gen-users.sh"))
 
 	ids := []string{"tests/math.test.js", "tests/strings.test.js", "tests/users.test.js"}
