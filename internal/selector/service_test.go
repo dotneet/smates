@@ -305,3 +305,15 @@ func TestSelectDependsOnImportWins(t *testing.T) {
 		t.Errorf("changed %v", c)
 	}
 }
+
+// smates orphans replays history against Select(All).Covered/Explains.
+func TestDependsOnCovered(t *testing.T) {
+	f := defaultServiceFixture(t)
+	res := f.sel(f.record(nil, nil), func(in *Input) { in.All = true })
+	if !res.Covered["backend/api/user.go"] || !res.Covered["worker/job.py"] {
+		t.Errorf("declared files not covered")
+	}
+	if !res.Explains("backend/api/gone.go", true) || !res.Explains("worker/old.py", true) || res.Explains("frontend/x.ts", true) {
+		t.Errorf("Explains")
+	}
+}

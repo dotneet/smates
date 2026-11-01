@@ -5,7 +5,9 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: write     # create the release, move the major tag
+  id-token: write     # sign the build provenance attestations (Sigstore, via OIDC)
+  attestations: write # store them in this repository's attestations
 
 jobs:
   goreleaser:
@@ -25,6 +27,23 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Build provenance for every archive and checksums.txt: it binds each file's
+      # SHA-256 to this repository, this workflow and the tagged commit. action.yml
+      # (verify: auto | attestation) and install.sh (SMATES_VERIFY=attestation) check
+      # it with `gh attestation verify`.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/smates_*.tar.gz
+            dist/smates_*.zip
+            dist/checksums.txt
+      # GoReleaser leaves the release as a draft (.goreleaser.yaml); it is published
+      # only once every asset is attested, so no published release lacks attestations
+      # (action.yml relies on that for its own release).
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
       # Moving major tag (v1 -> latest v1.x.y), so `uses: dotneet/smates@v1` follows
       # releases of that major version. Pre-releases do not move it.
       - name: Update major tag

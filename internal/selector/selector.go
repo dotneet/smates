@@ -194,6 +194,12 @@ type Result struct {
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
 	Notes          []string          `json:"notes,omitempty"`
+	// Covered is the union of every test's D(T), including the suites --suite left out
+	// (Input.Others): a changed file it does not explain (Covers) is an orphan.
+	Covered map[string]bool `json:"-"`
+	// declared are the depends_on/serves declarations some test depends on (their
+	// files are in Covered; Explains also matches deleted ones).
+	declared []*ServiceDeps
 }
 
 // HandleOrphans records how orphans were handled; earlier records win.
@@ -293,13 +299,13 @@ func Select(in *Input) (*Result, error) {
 		}
 	}
 	covered := map[string]bool{} // union of all D(T)
+	res.Covered = covered
 	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
 	everySuite := append(slices.Clip(in.Suites), in.Others...)
 	services := newServiceExpander(in.Config, everySuite, files)
-	var declared []*ServiceDeps // declarations some test depends on (they cover changes)
 	for i, su := range everySuite {
 		selecting := i < len(in.Suites) // in.Others only add to covered
 		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
@@ -335,8 +341,11 @@ func Select(in *Input) (*Result, error) {
 			for _, d := range sr.Services {
 				if d.applies(su, u) {
 					deps[d.Key], via[d.Key] = true, ViaService
-					if !slices.Contains(declared, d) {
-						declared = append(declared, d)
+					if !slices.Contains(res.declared, d) {
+						res.declared = append(res.declared, d)
+						for _, f := range d.Files { // once per declaration, not per test
+							covered[f] = true
+						}
 					}
 				}
 			}
@@ -406,12 +415,19 @@ func Select(in *Input) (*Result, error) {
 				continue
 			}
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
-			if Covers(covered, f, existenceChanged) == "" && !slices.ContainsFunc(declared, func(d *ServiceDeps) bool { return d.match(f) }) {
+			if !res.Explains(f, existenceChanged) {
 				res.Orphans = append(res.Orphans, f)
 			}
 		}
 	}
 	return res, nil
+}
+
+// Explains reports whether some test's D(T) explains a change to f (see Covers): f is
+// covered, or belongs to a depends_on/serves declaration some test depends on (also
+// when f no longer exists, which Covered cannot tell).
+func (r *Result) Explains(f string, existenceChanged bool) bool {
+	return Covers(r.Covered, f, existenceChanged) != "" || slices.ContainsFunc(r.declared, func(d *ServiceDeps) bool { return d.match(f) })
 }
 
 // changedSets returns, for each declaration with changed files in changed, those

@@ -57,7 +57,9 @@ api"); only when none of them changed since the snapshot (the change happened be
 the test's run and the snapshot) is the key itself shown ("code of depends_on suite
 api"). `--explain`, `smates why`, the summary and failure hints (which expand the key into
 its files) render it. A changed file a declaration matches is covered for the orphan check
-— also with `--suite`, since the expansion sees `Input.Others`. Older smates versions read
+— also with `--suite`, since the expansion sees `Input.Others`: the declaration's files go
+into `Result.Covered` once, and `Result.Explains` (used by selection and `smates orphans`)
+also matches deleted ones. Older smates versions read
 the key as a missing file and select the test, which is safe.
 
 Dependency keys:
@@ -161,6 +163,14 @@ Orphans go through, in order:
 
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change).
+
+`smates orphans` replays the first-parent history (each commit's diff against its first
+parent; added and deleted files count as existence changes) against the covered set of an
+all-tests selection (`Result.Covered`) and the reference scan, without running anything.
+It ranks the orphans, suggests `ignore:` globs (a `dir/**` only when no file below it is a
+dependency, named by a test or execution-relevant) and flags CI, build, container and
+toolchain files for `inputs:`/`rules:` instead, since ignoring them would hide changes that
+can alter test results.
 
 ## 2. Tracing per ecosystem
 
