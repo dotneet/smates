@@ -1,0 +1,156 @@
+# Documentation site (https://dotneet.github.io/smates/), built from docs/ by
+# .github/workflows/docs.yml. Pages in Japanese sit next to the English ones as
+# page.ja.md; a page without a translation falls back to English.
+site_name: smates
+site_description: Run only the tests your change can affect
+site_url: https://dotneet.github.io/smates/
+repo_url: https://github.com/dotneet/smates
+repo_name: dotneet/smates
+edit_uri: edit/main/docs/
+docs_dir: docs
+copyright: MIT License
+
+# docs/ also holds the Go package that embeds AGENTS.md (`smates guide`).
+exclude_docs: |
+  *.go
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+
+plugins:
+  - search:
+      lang: [en, ja]
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ja
+          name: 日本語
+          build: true
+          site_description: 変更が影響するテストだけを実行する
+          nav_translations:
+            Home: ホーム
+            Getting started: はじめに
+            Install: インストール
+            Quick start: クイックスタート
+            How smates decides: 選択の仕組み
+            Guides: ガイド
+            Configure suites: スイートの設定
+            Languages and runners: 言語とランナー
+            Go test functions: Go のテスト関数単位の選択
+            Tests that talk to a server: サーバーを叩くテスト
+            Environment variables: 環境変数
+            Changes no test explains: どのテストにも紐づかない変更
+            The LLM agent: LLM エージェント
+            Coding agents: コーディングエージェントから使う
+            Git hooks and Claude Code: git フックと Claude Code
+            Watch mode: ウォッチモード
+            Parallel worktrees: 並行する worktree
+            Shadow mode, flaky tests and stats: シャドーモード・flaky・統計
+            Failure hints: 失敗ヒント
+            CI: CI
+            GitHub Actions: GitHub Actions
+            Other CI systems: その他の CI
+            Reference: リファレンス
+            Commands: コマンド
+            smates.yml: smates.yml
+            Exit codes: 終了コード
+            Variables smates reads: smates が読む環境変数
+            Limitations: 制限事項
+            Troubleshooting: トラブルシューティング
+            Internals: 内部設計
+            Design: 設計
+            Agent guide: エージェント向けガイド
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - def_list
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+validation:
+  omitted_files: warn
+  absolute_links: info
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: getting-started/install.md
+      - Quick start: getting-started/quickstart.md
+      - How smates decides: getting-started/how-it-works.md
+  - Guides:
+      - Configure suites: guides/configuration.md
+      - Languages and runners: guides/runners.md
+      - Go test functions: guides/go-test-functions.md
+      - Tests that talk to a server: guides/servers.md
+      - Environment variables: guides/environment.md
+      - Changes no test explains: guides/orphans.md
+      - The LLM agent: guides/agent.md
+      - Coding agents: guides/coding-agents.md
+      - Git hooks and Claude Code: guides/git-hooks.md
+      - Watch mode: guides/watch.md
+      - Parallel worktrees: guides/worktrees.md
+      - Shadow mode, flaky tests and stats: guides/trust.md
+      - Failure hints: guides/failure-hints.md
+  - CI:
+      - GitHub Actions: ci/github-actions.md
+      - Other CI systems: ci/other-ci.md
+  - Reference:
+      - Commands: reference/cli.md
+      - smates.yml: reference/configuration.md
+      - Exit codes: reference/exit-codes.md
+      - Variables smates reads: reference/environment-variables.md
+      - Limitations: reference/limitations.md
+      - Troubleshooting: reference/troubleshooting.md
+  - Internals:
+      - Design: DESIGN.md
+      - Agent guide: AGENTS.md
