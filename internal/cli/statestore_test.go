@@ -139,11 +139,6 @@ func TestSeedFromMainWorktree(t *testing.T) {
 		t.Errorf("the snapshot of an ancestor commit should be kept: commit %q, %d files", seeded.Commit, len(seeded.Files))
 	}
 	// Only once.
-	var dout, derr bytes.Buffer
-	Main([]string{"doctor", "-C", wt}, &dout, &derr)
-	if d := dout.String() + derr.String(); !strings.Contains(d, "2 tests recorded, no snapshot in this worktree yet") || strings.Contains(d, "snapshot from commit") {
-		t.Errorf("doctor in the linked worktree:\n%s", d)
-	}
 	if _, errb := mustRun(t, "select", "-C", wt, "--no-agent"); strings.Contains(errb, "seeded") {
 		t.Errorf("seeded again:\n%s", errb)
 	}
@@ -263,6 +258,11 @@ func checkSharedWorktrees(t *testing.T, g *gitRepo) {
 	out, _ := mustRun(t, "state", "show", "-C", wt)
 	if !strings.Contains(out, "location: shared by all worktrees") || !strings.Contains(out, "snapshot: 0 files") || !strings.Contains(out, "suite s: 2 tests") {
 		t.Errorf("state show in the linked worktree:\n%s", out)
+	}
+	var dout, derr bytes.Buffer
+	Main([]string{"doctor", "-C", wt}, &dout, &derr)
+	if d := dout.String() + derr.String(); !strings.Contains(d, "2 tests recorded, no snapshot in this worktree yet") || strings.Contains(d, "snapshot from commit") {
+		t.Errorf("doctor in the linked worktree:\n%s", d)
 	}
 	if _, errb := mustRun(t, "select", "-C", wt, "--no-agent"); strings.Contains(errb, "seeded") {
 		t.Errorf("seeded although the shared state exists:\n%s", errb)
