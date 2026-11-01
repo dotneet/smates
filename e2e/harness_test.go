@@ -89,6 +89,9 @@ type fixtureSpec struct {
 	// records, so tracing is wasted when the fixture's runners report per-file status
 	// without it (jest, vitest, pytest, go). SMATES_E2E_MUTATION_RECORD=1 records anyway.
 	MutationNoRecord bool `json:"mutation_no_record"`
+	// MutationConfig names a config file in the fixture directory (not copied into the
+	// repository) the sweep runs smates with instead of the repository's smates.yml.
+	MutationConfig string `json:"mutation_config"`
 }
 
 // scenario is one entry of fixtures/<name>/scenarios.json.
@@ -297,7 +300,7 @@ func prepare(t *testing.T, name string, env map[string]string) *repo {
 // prepareIn copies the fixture to dir, installs its dependencies and records a baseline.
 func prepareIn(t *testing.T, dir, name string, spec fixtureSpec) *repo {
 	t.Helper()
-	if err := copyTree(filepath.Join("fixtures", name), dir); err != nil {
+	if err := copyTree(filepath.Join("fixtures", name), dir, spec.MutationConfig); err != nil {
 		t.Fatal(err)
 	}
 	r := &repo{t: t, name: name, dir: dir, spec: spec}
@@ -743,6 +746,13 @@ func TestMutations(t *testing.T) {
 					if noRecord {
 						args = append(args, "--no-record")
 					}
+					if r.spec.MutationConfig != "" {
+						cfg, err := filepath.Abs(filepath.Join("fixtures", name, r.spec.MutationConfig))
+						if err != nil {
+							t.Fatal(err)
+						}
+						args = append(args, "--config", cfg)
+					}
 					out, _ := r.smates(args...)
 					rep := r.readReport()
 					failing := rep.failing()
@@ -870,7 +880,15 @@ func tail(s string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-func copyTree(src, dst string) error {
+// copyTree copies a fixture to dst, without the harness's own files (fixture.json,
+// scenarios.json and the extra ones named).
+func copyTree(src, dst string, extra ...string) error {
+	skip := map[string]bool{"fixture.json": true, "scenarios.json": true}
+	for _, f := range extra {
+		if f != "" {
+			skip[path.Clean(filepath.ToSlash(f))] = true
+		}
+	}
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -879,7 +897,7 @@ func copyTree(src, dst string) error {
 		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".venv" || d.Name() == ".smates") {
 			return filepath.SkipDir
 		}
-		if rel == "fixture.json" || rel == "scenarios.json" {
+		if skip[filepath.ToSlash(rel)] {
 			return nil
 		}
 		target := filepath.Join(dst, rel)

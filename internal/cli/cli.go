@@ -40,6 +40,7 @@ Usage:
   smates deps <test>                    files a test depends on
   smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
   smates stats [--since 30d] [--format json] time saved, shadow misses, orphans and agent use
+  smates orphans [--history 100] [--format json] recent changes no test explains, and ignore globs for them
   smates list                           list suites and test units
   smates state show|path|pull|push|merge|clear
   smates hook install|uninstall|status  run the affected tests from a git pre-push hook
@@ -77,6 +78,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdFlaky(rest, stdout, stderr)
 	case "stats":
 		err = cmdStats(rest, stdout, stderr)
+	case "orphans":
+		err = cmdOrphans(rest, stdout, stderr)
 	case "list", "ls":
 		err = cmdList(rest, stdout, stderr)
 	case "state":
@@ -144,9 +147,6 @@ type project struct {
 	ci        ciInfo
 	log       io.Writer
 	verbose   bool
-	// filtered is set when --suite limited the suites (repository-wide bookkeeping
-	// such as the snapshot is then left alone).
-	filtered bool
 	// others are the suites --suite left out (they still explain changes, see
 	// selector.Input.Others).
 	others []*runner.Suite
@@ -234,7 +234,6 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	p := &project{
 		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, state: st, snap: snap, files: files,
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
-		filtered: len(cf.suites) > 0,
 	}
 	return p, nil
 }

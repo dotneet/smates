@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/dotneet/smates/internal/detect"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 	"gopkg.in/yaml.v3"
@@ -37,6 +37,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	force := fs.Bool("force", false, "overwrite an existing smates.yml")
 	print := fs.Bool("stdout", false, "print the config instead of writing it")
 	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
+	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -58,7 +59,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 	sort.Strings(files)
 	suites := detect.Suites(repo, files)
-	doc := renderConfig(suites)
+	mk := makefileHints(repo.Root, suites)
+	for _, h := range mk {
+		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
+	}
+	doc := renderConfig(suites, configHints(mk))
 	if *print {
 		_, err := io.WriteString(stdout, doc)
 		return err
@@ -73,26 +78,17 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := ensureGitignore(repo.Root); err != nil {
 		fmt.Fprintf(stderr, "smates: could not update .gitignore: %v\n", err)
 	}
-	if *github {
-		wf := filepath.Join(repo.Root, ".github", "workflows", "smates.yml")
-		if _, err := os.Stat(wf); err == nil && !*force {
-			fmt.Fprintf(stderr, "smates: %s exists, not overwritten (use --force)\n", ".github/workflows/smates.yml")
-		} else {
-			if err := os.MkdirAll(filepath.Dir(wf), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(wf, []byte(renderWorkflow(repo, suites)), 0o644); err != nil {
-				return err
-			}
-			fmt.Fprintln(stdout, "wrote .github/workflows/smates.yml (add an ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY secret to enable the agent)")
-		}
-	}
 	fmt.Fprintf(stdout, "wrote smates.yml with %d suite(s):\n", len(suites))
 	for _, s := range suites {
 		fmt.Fprintf(stdout, "  - %s (%s) in %s\n", s.Name, s.Runner, s.Root)
 	}
 	if len(suites) == 0 {
 		fmt.Fprintln(stdout, "  (no test suites detected: add them to smates.yml by hand)")
+	}
+	if *github {
+		if err := initGitHub(repo, suites, files, *force, *patch, stdout, stderr); err != nil {
+			return err
+		}
 	}
 	fmt.Fprint(stdout, `
 Next steps:
@@ -104,13 +100,16 @@ Next steps:
 	return nil
 }
 
-func renderConfig(suites []config.Suite) string {
+// renderConfig renders smates.yml; hints are commented lines written under a suite
+// (by suite name).
+func renderConfig(suites []config.Suite, hints map[string][]string) string {
 	var b strings.Builder
 	b.WriteString(`# smates configuration. Docs: https://github.com/dotneet/smates
 version: 1
 
 # Test suites: one runner invocation each. Paths are relative to the repository root.
-# Optional per suite: tests/exclude (globs relative to root), command, inputs, rules, env,
+# Optional per suite: tests/exclude (globs relative to root), command, inputs, rules,
+# depends_on/serves (code of a server the tests talk to: e.g. depends_on: [api]), env,
 # isolate (jest/bun: one process per file while recording), junit.
 suites:
 `)
@@ -124,6 +123,9 @@ suites:
 			for _, e := range s.Exclude {
 				fmt.Fprintf(&b, "      - %s\n", yamlStr(e))
 			}
+		}
+		for _, l := range hints[s.Name] {
+			b.WriteString("    " + l + "\n")
 		}
 	}
 	b.WriteString(`
@@ -143,109 +145,6 @@ agent:
   # provider: auto      # auto (picked from the API key that is set) | anthropic | openai | openrouter
   # model: claude-haiku-5-5   # default depends on the provider
   # instructions: "Integration tests in e2e/ talk to the API server built from server/."
-`)
-	return b.String()
-}
-
-// renderWorkflow writes a GitHub Actions workflow that sets up the toolchains the
-// detected suites need, installs dependencies and runs smates.
-func renderWorkflow(repo *gitx.Repo, suites []config.Suite) string {
-	has := func(name string) bool {
-		_, err := os.Stat(filepath.Join(repo.Root, filepath.FromSlash(name)))
-		return err == nil
-	}
-	var setup, install []string
-	seen := map[string]bool{}
-	once := func(key string, lines ...string) {
-		if !seen[key] {
-			seen[key] = true
-			setup = append(setup, lines...)
-		}
-	}
-	for _, s := range suites {
-		root := s.Root
-		at := func(f string) string {
-			if root == "." {
-				return f
-			}
-			return root + "/" + f
-		}
-		switch s.Runner {
-		case "go":
-			once("go:"+root, "      - uses: actions/setup-go@v5", "        with:", "          go-version-file: "+at("go.mod"))
-		case "pytest":
-			once("uv", "      - uses: astral-sh/setup-uv@v6")
-		case "bun":
-			once("bun", "      - uses: oven-sh/setup-bun@v2")
-			if !seen["install:"+root] {
-				seen["install:"+root] = true
-				install = append(install, "      - run: bun install --frozen-lockfile", "        working-directory: "+root)
-			}
-		default: // vitest, jest, node
-			version := "22"
-			for _, f := range []string{".nvmrc", ".node-version"} {
-				if data, err := os.ReadFile(filepath.Join(repo.Root, f)); err == nil && strings.TrimSpace(string(data)) != "" {
-					version = strings.TrimPrefix(strings.TrimSpace(string(data)), "v")
-				}
-			}
-			cmd := "npm ci"
-			for d := root; ; d = filepath.ToSlash(filepath.Dir(d)) {
-				rel := func(f string) string {
-					if d == "." {
-						return f
-					}
-					return d + "/" + f
-				}
-				switch {
-				case has(rel("pnpm-lock.yaml")):
-					once("pnpm", "      - uses: pnpm/action-setup@v4")
-					cmd = "pnpm install --frozen-lockfile"
-				case has(rel("bun.lock")) || has(rel("bun.lockb")):
-					once("bun", "      - uses: oven-sh/setup-bun@v2")
-					cmd = "bun install --frozen-lockfile"
-				case has(rel("yarn.lock")):
-					cmd = "yarn install --immutable"
-				case has(rel("package-lock.json")):
-					cmd = "npm ci"
-				default:
-					if d != "." {
-						continue
-					}
-				}
-				if !seen["install:"+d] {
-					seen["install:"+d] = true
-					install = append(install, "      - run: "+cmd, "        working-directory: "+d)
-				}
-				break
-			}
-			once("node", "      - uses: actions/setup-node@v4", "        with:", "          node-version: "+strconv.Quote(version))
-		}
-	}
-	var b strings.Builder
-	b.WriteString(`# Runs only the tests a change can affect. Generated by "smates init --github".
-name: tests
-on:
-  push:
-    branches: [` + repo.DefaultBranch() + `]
-  pull_request:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-`)
-	for _, l := range setup {
-		b.WriteString(l + "\n")
-	}
-	for _, l := range install {
-		b.WriteString(l + "\n")
-	}
-	b.WriteString(`      # On pushes to the default branch every test runs and the recorded state is
-      # refreshed; on pull requests only affected tests run.
-      - uses: dotneet/smates@v1
-        with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional: narrows unattributed changes (or openai-api-key / openrouter-api-key)
 `)
 	return b.String()
 }
@@ -300,7 +199,7 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	if !depkey.IsEnv(target) {
 		target = p.relArg(target)
 	}
-	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
+	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err
 	}
@@ -315,19 +214,26 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			// The same rule the selector uses; existence changes are assumed so that
 			// listings and existence checks are shown too.
 			kind := selector.Covers(deps, target, true)
+			// depends_on/serves: one key stands for the declaration's files.
+			service := s.ServiceVia(t.ID, target)
+			if kind == "" && service != "" {
+				kind = "content"
+			}
 			if kind == "" {
 				continue
 			}
 			var how []string
 			switch kind {
 			case "content":
-				for _, d := range s.Known[t.ID] {
-					if d == target {
-						how = append(how, "static/inputs")
-					}
+				if service != "" {
+					how = append(how, service)
+				} else if slices.Contains(s.Known[t.ID], target) || slices.Contains(s.Known[t.ID], selector.ConfigKey(target)) {
+					how = append(how, "static/inputs")
 				}
 				if st != nil && st.Tests[t.ID] != nil {
-					if _, ok := st.Tests[t.ID].Deps[target]; ok {
+					_, ok := st.Tests[t.ID].Deps[target]
+					_, okCfg := st.Tests[t.ID].Deps[selector.ConfigKey(target)]
+					if ok || okCfg {
 						how = append(how, "recorded")
 					}
 				}
@@ -372,7 +278,7 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	target := p.relArg(fs.Arg(0))
-	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
+	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err
 	}
@@ -389,15 +295,29 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		for _, d := range s.Known[target] {
 			known[d] = true
 		}
+		// The suite's settings key and the file itself print as one line.
+		type source struct{ static, recorded bool }
+		var order []string
+		srcs := map[string]*source{}
 		for _, d := range deps {
+			name := selector.DisplayKey(d)
+			if srcs[name] == nil {
+				order = append(order, name)
+				srcs[name] = &source{}
+			}
+			_, rec := traced[d]
+			srcs[name].static = srcs[name].static || known[d]
+			srcs[name].recorded = srcs[name].recorded || rec
+		}
+		for _, name := range order {
 			var src []string
-			if known[d] {
+			if srcs[name].static {
 				src = append(src, "static")
 			}
-			if _, ok := traced[d]; ok {
+			if srcs[name].recorded {
 				src = append(src, "recorded")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
+			fmt.Fprintf(stdout, "%s\t%s\n", name, strings.Join(src, ","))
 		}
 		return nil
 	}
@@ -686,6 +606,9 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 		} else {
 			ok("suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command)
 		}
+		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
+			warn("suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why)
+		}
 		runners[s.Runner] = true
 	}
 	tool := func(name string, args ...string) string {
@@ -728,6 +651,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 			ok("python %s", py)
 		}
 	}
+	doctorProject(p, func() string { return tool("node", "--version") }, ok, warn, bad)
 	if p.state.Empty() {
 		warn("no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath)
 	} else {
@@ -751,4 +675,44 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 		return 1, nil
 	}
 	return 0, nil
+}
+
+// serverSuiteHint says why suite s looks like end-to-end tests of a server running in
+// another process ("" when it does not, or when it already declares depends_on, serves
+// or rules): its name or root mentions e2e, its command runs Playwright or Cypress, or
+// one of its first test files calls a local HTTP address.
+func serverSuiteHint(repoRoot string, s *runner.Suite, files []string) string {
+	if len(s.DependsOn) > 0 || len(s.Serves) > 0 || len(s.Rules) > 0 {
+		return ""
+	}
+	isE2E := func(v string) bool {
+		v = strings.ToLower(v)
+		return strings.Contains(v, "e2e") || strings.Contains(v, "end-to-end") || strings.Contains(v, "end2end")
+	}
+	switch cmd := strings.ToLower(s.Command); {
+	case isE2E(s.Name):
+		return "name " + s.Name
+	case isE2E(s.Root):
+		return "root " + s.Root
+	case strings.Contains(cmd, "playwright"):
+		return "runs playwright"
+	case strings.Contains(cmd, "cypress"):
+		return "runs cypress"
+	}
+	const maxScanned = 20
+	for i, f := range s.TestFiles(files) {
+		if i == maxScanned {
+			break
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		for _, needle := range []string{"http://localhost", "http://127.0.0.1", "http://0.0.0.0"} {
+			if bytes.Contains(data, []byte(needle)) {
+				return f + " calls " + needle
+			}
+		}
+	}
+	return ""
 }

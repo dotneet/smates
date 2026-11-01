@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,13 +19,16 @@ import (
 // the agent or makes the affected suites run in full, as smates.yml says.
 func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectOptions, base string) {
 	res := sel.res
-	if len(res.Orphans) == 0 {
+	if len(res.Orphans) == 0 && len(res.LeftOut) == 0 {
 		return
 	}
 
-	// 1. Deterministic: tests that mention an orphan by name.
-	refs, explained := res.References(p.graph, res.Orphans)
+	// 1. Deterministic: tests that mention an orphan by name. Changes owned by the
+	// suites --suite left out are searched too: a test of this run that names one is
+	// selected, as in a run over every suite.
+	refs, explained := res.References(p.graph, append(slices.Clip(res.Orphans), res.LeftOut...))
 	res.Apply(refs)
+	explained = intersect(explained, res.Orphans)
 	res.HandleOrphans(explained, selector.OrphanReference)
 	remaining := subtract(res.Orphans, explained)
 	if opt.orphanScope != nil {
@@ -43,7 +47,21 @@ func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectO
 		return
 	}
 
-	// 2. Policy for what is left.
+	// 2. Source code no test reaches: no test can be affected.
+	if untested := res.Untested(remaining); len(untested) > 0 {
+		if p.cfg.Untested == config.UntestedSkip {
+			res.HandleOrphans(untested, selector.OrphanUntested)
+			res.Notes = append(res.Notes, fmt.Sprintf("%d changed source file(s) no test reaches (untested code): no tests to run for them", len(untested)))
+			remaining = subtract(remaining, untested)
+			if len(remaining) == 0 {
+				return
+			}
+		} else {
+			p.debugf("%d unattributed change(s) are source files no test reaches; `untested: skip` would skip them", len(untested))
+		}
+	}
+
+	// 3. Policy for what is left.
 	policy := p.cfg.Orphans
 	if policy == config.OrphansIgnore {
 		res.Notes = append(res.Notes, fmt.Sprintf("ignored %d unattributed change(s) (orphans: ignore)", len(remaining)))
@@ -111,7 +129,7 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 		req.Log = p.log
 	}
 	for _, o := range orphans {
-		old, hadOld := p.state.Files[o]
+		old, hadOld := selector.SnapshotHash(p.state.Files, o)
 		cur, has := p.snap[o]
 		st := "modified"
 		switch {

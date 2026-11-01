@@ -56,7 +56,8 @@ jobs:
         suite:
           - e2e-polyglot-scenarios
           - e2e-polyglot-others
-          - e2e-jest-node
+          - e2e-jest-scenarios
+          - e2e-jest-others
           - e2e-vitest-python
           - e2e-others
     runs-on: ubuntu-latest
@@ -95,6 +96,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Test the action's helpers
+        shell: bash
+        run: |
+          bash action/lib_test.sh
+          bash action/install_test.sh
       - id: smates
         uses: ./
         with:
@@ -106,9 +112,11 @@ jobs:
         env:
           EXIT_CODE: ${{ steps.smates.outputs.exit-code }}
           VERSION: ${{ steps.smates.outputs.version }}
+          VERIFIED: ${{ steps.smates.outputs.verified }}
         run: |
           test "$EXIT_CODE" = 0
           test "$VERSION" = source
+          test "$VERIFIED" = none
           smates version
 
   pr-comment:

@@ -24,13 +24,54 @@ The dependency set used at selection time is
     D(T) = recorded(T)        traced during T's last run (code, data, listings, probes, subprocesses)
          ∪ static(T) at HEAD  import-graph closure computed now
          ∪ suite inputs       lockfiles and manifests (up to the repo root), runner config,
-                              smates.yml, configured globs
+                              configured globs, smates.yml (hashed as the suite's settings)
          ∪ rule deps          declared in smates.yml
+         ∪ cross-suite deps   declared in smates.yml (depends_on / serves), expanded at HEAD
+
+Every test depends on its suite's settings in smates.yml through the key
+`smates.yml#suite`, which hashes as `ConfigHash`: the suite's own entry and the
+top-level `env_track`, not the file's content. A test that reads smates.yml itself
+records the file and depends on its content as usual. The other
+settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
+they affect, input globs and rules add keys of their own, `env_ignore` applies when
+comparing), so editing them selects nothing. Diff mode (no recorded state) still
+compares the file by content. An entry recorded by an older smates holds the file's blob
+hash instead of the key; it counts as unchanged while the file is, until the test runs
+again.
 
 A key present in `D(T)` but absent from the recorded hashes counts as changed, so a newly
 added import, conftest.py, Go file in an imported package or rule target triggers the test
 without having been recorded. Hashes are compared by content, not by git diff: no history
 is needed (`fetch-depth: 1`), dirty working trees work, rebases do not matter.
+
+**Cross-suite dependencies.** Tracing follows the test process and its children; it
+cannot follow a request into a server running in another process or container (an e2e
+suite against a backend started by docker compose). A suite declares that code with
+`depends_on`: `{suite: S}` is S's code — the files under S's root minus test files (of
+any suite: two suites may share a root), ignored and vendored files, and files of other
+suites rooted below S's root (so a suite at the repository root does not swallow the
+others) — and `{paths: [globs]}` is repo-relative globs (a leading `./` is stripped,
+backslashes are rejected); `tests:` narrows the entry to some of the suite's tests.
+`serves: [globs]` is shorthand for a paths entry. The depending suite's own test files are
+never added. Each entry is expanded once per selection (`serviceExpander`; a suite's code
+once however many suites depend on it), not per test.
+
+A declaration is **one dependency key**, `@set:suite:S` or `@set:paths:<globs>`, whose
+hash (`Hasher.WithSets`) is a SHA-1 over the sorted paths and blob hashes of its files at
+HEAD. Like rule deps it is static (in `Known`) and recorded with the test, so the state
+grows with tests × declarations, not tests × server files, and each set is hashed once
+per selection or recording. When the key changed, the explanation names the files of the
+declaration among the selection's changed files (the snapshot or base-revision diff,
+deleted files included: a declaration is also a path predicate, `ServiceDeps.Match`), each
+as `Test.Via = service` with `Test.Service` naming the declaration ("depends_on suite
+api"); only when none of them changed since the snapshot (the change happened between
+the test's run and the snapshot) is the key itself shown ("code of depends_on suite
+api"). `--explain`, `smates why`, the summary and failure hints (which expand the key into
+its files) render it. A changed file a declaration matches is covered for the orphan check
+— also with `--suite`, since the expansion sees `Input.Others`: the declaration's files go
+into `Result.Covered` once, and `Result.Explains` (used by selection and `smates orphans`)
+also matches deleted ones. Older smates versions read
+the key as a missing file and select the test, which is safe.
 
 Dependency keys:
 
@@ -41,11 +82,13 @@ Dependency keys:
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
+| `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
 is the same — modulo nondeterminism and inputs outside the repository (services, network),
-which are handled by global inputs, rules, and the orphan path below.
+which are handled by global inputs, rules, cross-suite dependencies, and the orphan path
+below.
 
 ### Environment variables
 
@@ -115,7 +158,20 @@ listing or existence check of it, but only when the file appeared or disappeared
 edited file that tests merely list may still be read by something untraced); or a
 `dir/**` tree other than the repository root. With `--suite`, the suites left out still
 explain the changes their tests depend on (`Input.Others`), so a run limited to some
-suites selects what a run over every suite selects for them.
+suites selects what a run over every suite selects for them; and a change that only
+suites left out would run for under the orphan policy (it is under their root, not under
+the root of a picked suite, and no suite rooted at the repository root is picked) is not
+an orphan of the run either (`selector.Owned`): the job that runs those suites handles
+it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
+the snapshot for them: a file only its suites own gets its hash; a file the suites left
+out also own (or own alone) gets a marker `?<hash>@<suites>` (`selector.Marker`), the
+content these suites saw, unless its entry already equals the current hash (or holds a
+content hash and only suites left out own it). A later `--suite` run finds a marked
+file unchanged only when every suite it runs saw that content; a run of other suites,
+or of every suite, finds it changed (and, to the agent and failure hints, unrecorded),
+so a shared state (local runs, `state merge`, CI without a `cache-key` per job) never
+hides a change from the suites that have not compared it. Orphans a `--suite` run
+handles are recorded the same way.
 
 Orphans go through, in order:
 
@@ -123,14 +179,34 @@ Orphans go through, in order:
    (fixtures, scripts, schemas referenced as strings) are selected. Files every test of a
    suite depends on (package.json, lockfiles, runner config) only count when no
    test-specific file mentions the orphan.
-2. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
+2. **Untested code** (`untested: skip`, the default): an orphan in a language a suite
+   analyzes statically (Go, Python, JS/TS) under that suite's root is imported by no
+   test, directly or transitively (every test's import closure is in its `D(T)`), and
+   was neither read nor executed by any test in its last run. No test can be affected,
+   so it selects nothing and is reported as a change to untested code. Code configuring
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
+   directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
+   are left out, and so are files under the root of a suite with a test that has no
+recorded entry yet; so is everything without a recorded state, where `D(T)` holds only the
+   import closure and files tests read as data are not known yet. Code run by another
+   process must be declared (rules), as for any dependency tracing
+   cannot see.
+3. **The agent** (Claude Haiku by default) explores the repository with read-only tools and
    adds tests or requests a full run. It can never remove deterministic selections, so a
    wrong or manipulated answer can at worst fail to add tests for the orphan.
-3. **The orphan policy** (default without agent: run the suites the orphan can affect, by
+4. **The orphan policy** (default without agent: run the suites the orphan can affect, by
    suite root).
 
 Orphans handled by a run are written into the snapshot so later runs on the same branch do
 not ask again (and the agent's answers are cached per change).
+
+`smates orphans` replays the first-parent history (each commit's diff against its first
+parent; added and deleted files count as existence changes) against the covered set of an
+all-tests selection (`Result.Covered`) and the reference scan, without running anything.
+It ranks the orphans, suggests `ignore:` globs (a `dir/**` only when no file below it is a
+dependency, named by a test or execution-relevant) and flags CI, build, container and
+toolchain files for `inputs:`/`rules:` instead, since ignoring them would hide changes that
+can alter test results.
 
 ## 2. Tracing per ecosystem
 
@@ -338,7 +414,8 @@ restored from the default branch carries the default branch's records forward.
 job summary and for pull request comments (`--markdown`, `select --format markdown`,
 the action's `comment` input). The selection carries the "why" it needs: for each
 changed dependency of a selected test, `Test.Via` says how it reached the test (the test
-file itself, a suite input or rule, the static import graph, or only the traced reads of
+file itself, a suite input or rule, a `depends_on`/`serves` declaration (named in
+`Test.Service`), the static import graph, or only the traced reads of
 its last run), additions for orphans carry the orphan files (`Addition.Files`), and
 `Result.OrphanHandling` records whether each orphan was explained by a reference scan,
 the agent (or judged irrelevant by it), the `orphans` policy, or ignored. Time saved is

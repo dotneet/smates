@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path"
 	"path/filepath"
@@ -30,6 +31,12 @@ type Hasher struct {
 	ignore []string
 	root   string // repository root for files outside the snapshot ("" = none)
 	env    func(string) (string, bool)
+	// cfg and suite: the config file's key hashes as the part of the configuration
+	// that can change how the suite's tests run (see ConfigHash).
+	cfg   *config.Config
+	suite *runner.Suite
+	// sets are the declared sets of files (depends_on/serves) by key, see WithSets.
+	sets map[string]*ServiceDeps
 	*hashCache
 }
 
@@ -38,6 +45,7 @@ type hashCache struct {
 	disk  map[string]string // memoized hashes of files outside the snapshot
 	dirs  map[string][]string
 	trees map[string]string
+	setv  map[*ServiceDeps]string // memoized hashes of sets
 }
 
 // NewHasher indexes a snapshot. Files matching ignore globs (docs, editor settings) are
@@ -55,13 +63,100 @@ func (h *Hasher) WithRoot(root string) *Hasher {
 	return h
 }
 
+// WithConfig makes the hasher hash the configuration file (c.Path) of a suite (see
+// ForSuite) as ConfigHash instead of its content, so edits that cannot change how the
+// suite's tests run (the ignore list, the agent, another suite) select nothing.
+func (h *Hasher) WithConfig(c *config.Config) *Hasher {
+	h.cfg = c
+	return h
+}
+
 // ForSuite returns a hasher (sharing h's caches) that hashes environment variables as
 // the tests of su see them: the suite's env overrides smates' own environment. Without
 // it, variables are looked up in smates' environment.
 func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
 	c := *h
 	c.env = su.LookupEnv
+	c.suite = su
 	return &c
+}
+
+// ConfigKey is the dependency key every test of a suite has on its settings in the
+// configuration file at path (hashed as ConfigHash). Reading the file itself records
+// path, hashed by content as any file.
+func ConfigKey(path string) string { return path + configKeySuffix }
+
+const configKeySuffix = "#suite"
+
+// DisplayKey is the file a dependency key stands for when it is shown or diffed: the
+// configuration file for its settings key (ConfigKey), the key itself otherwise.
+func DisplayKey(key string) string { return strings.TrimSuffix(key, configKeySuffix) }
+
+// legacyConfig reports whether key is the settings key of an entry an older smates
+// recorded, when every test depended on the configuration file's content: the entry
+// then holds the file's hash instead, and it counts as unchanged while the file is.
+func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
+	if h.cfg == nil || h.cfg.Path == "" || key != ConfigKey(h.cfg.Path) {
+		return false
+	}
+	old, ok := recorded[h.cfg.Path]
+	return ok && old != "" && old == h.file(h.cfg.Path)
+}
+
+// ConfigHash fingerprints the settings of smates.yml that can change how the tests of
+// su run or what they are recorded to depend on: the suite's own entry and the
+// top-level env_track. The rest (ignore, orphans, agent, flaky, state, inputs,
+// env_ignore, full_run_branches, other suites) cannot change a test's outcome: input
+// globs and rules add dependency keys of their own, ignore globs change the "dir/**"
+// hashes they affect, and env_ignore applies when comparing.
+func ConfigHash(c *config.Config, su *config.Suite) string {
+	data, err := json.Marshal(struct {
+		Suite    *config.Suite
+		EnvTrack []string
+	}{su, c.EnvTrack})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return "config:" + hex.EncodeToString(sum[:16])
+}
+
+// WithSets returns a hasher (sharing h's caches) that also hashes the set keys of
+// declarations: one hash over the paths and contents of all their files, so a test
+// records one key per declaration however many files the declaration covers.
+func (h *Hasher) WithSets(decls []*ServiceDeps) *Hasher {
+	if len(decls) == 0 {
+		return h
+	}
+	c := *h
+	c.sets = map[string]*ServiceDeps{}
+	for k, v := range h.sets {
+		c.sets[k] = v
+	}
+	for _, d := range decls {
+		c.sets[d.Key] = d
+	}
+	return &c
+}
+
+func (h *Hasher) set(key string) string {
+	d := h.sets[key]
+	if d == nil {
+		return ""
+	}
+	if v, ok := h.setv[d]; ok {
+		return v
+	}
+	sum := sha1.New()
+	for _, f := range d.Files { // sorted
+		sum.Write([]byte(f + "\x00" + h.file(f) + "\n"))
+	}
+	v := "set:" + hex.EncodeToString(sum.Sum(nil))
+	if h.setv == nil {
+		h.setv = map[*ServiceDeps]string{}
+	}
+	h.setv[d] = v
+	return v
 }
 
 // EnvHash is the hash recorded for an environment variable: "" when it is not set, so
@@ -105,6 +200,8 @@ func (h *Hasher) Hash(key string) string {
 		return EnvHash(lookup(p))
 	case depkey.KindTree:
 		return h.tree(p)
+	case depkey.KindSet:
+		return h.set(key)
 	case depkey.KindExistence:
 		if _, isFile := h.snap[p]; isFile || h.Hash(depkey.Listing(p)) != "" || p == "." {
 			return "exists"
@@ -116,6 +213,12 @@ func (h *Hasher) Hash(key string) string {
 		}
 		return "absent"
 	case depkey.KindContent:
+		if h.cfg != nil && h.cfg.Path != "" && key == ConfigKey(h.cfg.Path) {
+			if h.suite == nil {
+				return ""
+			}
+			return ConfigHash(h.cfg, &h.suite.Suite)
+		}
 		return h.file(key)
 	}
 	if h.dirs == nil {
@@ -240,6 +343,7 @@ type RecordOptions struct {
 // Record also keeps each unit's recent outcomes and returns the units whose outcome
 // flipped between pass and fail while their inputs stayed the same (see flips).
 func Record(st *state.State, sr *Suite, obs map[string]*runner.Observation, h *Hasher, opt RecordOptions) []FlakeEvent {
+	h = h.WithSets(sr.Services) // depends_on/serves: one key per declaration
 	su := st.Suite(sr.Name)
 	old := su.Tests
 	if opt.Full {

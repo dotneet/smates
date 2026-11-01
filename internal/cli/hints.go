@@ -110,7 +110,7 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 	if len(fh.res.Orphans) > 0 {
 		orphans = map[string]string{}
 		for _, o := range fh.res.Orphans {
-			orphans[o] = fh.p.state.Files[o]
+			orphans[o], _ = selector.SnapshotHash(fh.p.state.Files, o)
 		}
 	}
 	st := fh.p.state.Suites[sr.Name]
@@ -133,13 +133,17 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 		}
 		in := hints.Input{
 			Suite: sr.Name, Unit: u, Inferred: o.Inferred, TestFiles: files,
-			Deps: sr.Deps[u], Observed: o.Files, Static: static, Inputs: sr.Inputs,
+			Deps: sr.ExpandSets(sr.Deps[u]), Observed: o.Files, Static: static, Inputs: sr.Inputs,
 			Entry: entry, Changed: changed, Orphans: orphans, Hash: fh.hasher.ForSuite(sr.Suite).Hash, Root: fh.p.repo.Root,
+		}
+		if len(sr.Services) > 0 {
+			in.Service = func(f string) bool { return sr.ServiceVia(u, f) != "" }
 		}
 		if fh.p.graph != nil {
 			in.Direct = fh.p.graph.Direct
 		}
 		h := hints.Compute(in)
+		h.Candidates = displayCandidates(h.Candidates)
 		h.Output = hints.CleanOutput(o.Failure)
 		fh.list = append(fh.list, h)
 		fh.queue(sr, h, o.Failure)
@@ -385,4 +389,28 @@ func shortSHA(s string) string {
 func mdEscape(s string) string {
 	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "\n", " ", "`", "'")
 	return r.Replace(s)
+}
+
+// displayCandidates shows the suite's settings key (selector.ConfigKey) as the config
+// file. Its hashes are settings fingerprints, not blobs: they are cleared so a diff
+// uses the base revision, and a candidate for the file's own content wins over it.
+func displayCandidates(in []hints.Candidate) []hints.Candidate {
+	content := map[string]bool{}
+	for _, c := range in {
+		if selector.DisplayKey(c.Path) == c.Path {
+			content[c.Path] = true
+		}
+	}
+	out := in[:0]
+	for _, c := range in {
+		if p := selector.DisplayKey(c.Path); p != c.Path {
+			if content[p] {
+				continue
+			}
+			c.Path, c.Old, c.New = p, "", ""
+			content[p] = true
+		}
+		out = append(out, c)
+	}
+	return out
 }

@@ -251,3 +251,105 @@ func (r *Repo) BlobContent(sha string) ([]byte, bool) {
 	}
 	return out, true
 }
+
+// Commit is a commit on the first-parent history of HEAD.
+type Commit struct {
+	SHA     string
+	Parent  string // first parent, "" for a root commit or a shallow boundary
+	Subject string
+	// Shallow marks a commit at the boundary of a shallow clone: its parents were not
+	// fetched, so what it changed is unknown (it is not a root commit).
+	Shallow bool
+}
+
+// FirstParentCommits lists the commits reachable from HEAD by first parents, newest
+// first: those after since (when not "") and at most n of them (n <= 0: no limit).
+func (r *Repo) FirstParentCommits(since string, n int) ([]Commit, error) {
+	args := []string{"log", "--first-parent", "-z", "--format=%H%x09%P%x09%s"}
+	if n > 0 {
+		args = append(args, "-n", strconv.Itoa(n))
+	}
+	rev := "HEAD"
+	if since != "" {
+		rev = since + "..HEAD"
+	}
+	out, err := r.Git(append(args, rev, "--")...)
+	if err != nil {
+		return nil, err
+	}
+	shallow, err := r.shallowCommits()
+	if err != nil {
+		return nil, err
+	}
+	var commits []Commit
+	for _, rec := range strings.Split(out, "\x00") {
+		f := strings.SplitN(strings.TrimSpace(rec), "\t", 3)
+		if len(f) < 3 {
+			continue
+		}
+		c := Commit{SHA: f[0], Subject: f[2], Shallow: shallow[f[0]]}
+		if ps := strings.Fields(f[1]); len(ps) > 0 {
+			c.Parent = ps[0]
+		}
+		commits = append(commits, c)
+	}
+	return commits, nil
+}
+
+// shallowCommits returns the boundary commits of a shallow clone (none otherwise).
+func (r *Repo) shallowCommits() (map[string]bool, error) {
+	out, err := r.Git("rev-parse", "--is-shallow-repository")
+	if err != nil || strings.TrimSpace(out) != "true" {
+		return nil, nil // not shallow (or a git too old to say)
+	}
+	p, err := r.Git("rev-parse", "--git-path", "shallow")
+	if err != nil {
+		return nil, err
+	}
+	file := strings.TrimSpace(p)
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(r.Root, file)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("shallow repository: %w", err)
+	}
+	set := map[string]bool{}
+	for _, l := range strings.Fields(string(data)) {
+		set[l] = true
+	}
+	return set, nil
+}
+
+// FileChange is a file a commit changed. Status is git's name-status letter: 'A'
+// (added), 'D' (deleted), 'M' (modified) or 'T' (type changed); renames are reported
+// as a deletion and an addition.
+type FileChange struct {
+	Path   string
+	Status byte
+}
+
+// ChangedInCommit lists the files a commit changed relative to its first parent (every
+// file of a root commit), so a merge contributes what it brought into the branch. It
+// fails for a shallow boundary commit (Commit.Shallow), whose parent is unknown.
+func (r *Repo) ChangedInCommit(c Commit) ([]FileChange, error) {
+	if c.Shallow && c.Parent == "" {
+		return nil, fmt.Errorf("commit %s is at the boundary of a shallow clone: its parent was not fetched", c.SHA)
+	}
+	args := []string{"-c", "core.quotepath=off", "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", "--name-status"}
+	if c.Parent == "" {
+		args = append(args, "--root", c.SHA)
+	} else {
+		args = append(args, c.Parent, c.SHA)
+	}
+	out, err := r.Git(args...)
+	if err != nil {
+		return nil, err
+	}
+	var changes []FileChange
+	f := strings.Split(out, "\x00")
+	for i := 0; i+1 < len(f) && f[i] != ""; i += 2 {
+		changes = append(changes, FileChange{Path: f[i+1], Status: f[i][0]})
+	}
+	return changes, nil
+}
