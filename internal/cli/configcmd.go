@@ -1,12 +1,9 @@
 package cli
 
-// `smates config`: safe edits of smates.yml (no hand-editing YAML), and the --format
-// flag shared by the read commands.
+// `smates config`: safe edits of smates.yml (no hand-editing YAML).
 
 import (
-	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,45 +13,6 @@ import (
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
 )
-
-// formatFlag registers --format text|json.
-func formatFlag(fs *flag.FlagSet) *string {
-	return fs.String("format", "text", "output: text, json")
-}
-
-func checkFormat(f string) error {
-	if f != "text" && f != "json" {
-		return usageError{fmt.Errorf("unknown format %q (want text or json)", f)}
-	}
-	return nil
-}
-
-func writeJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	return enc.Encode(v)
-}
-
-// parseInterspersed parses flags that may come after positional arguments
-// (`smates config add-ignore 'docs/**' --dry-run`); "--" ends the flags.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	var pos []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			return nil, err
-		}
-		rest := fs.Args()
-		if len(rest) == 0 {
-			return pos, nil
-		}
-		if i := len(args) - len(rest) - 1; i >= 0 && args[i] == "--" {
-			return append(pos, rest...), nil // everything after "--" is positional
-		}
-		pos = append(pos, rest[0])
-		args = rest[1:]
-	}
-}
 
 // configEdit is the result of an edit of smates.yml (the JSON schema of `smates config
 // ... --format json`, and of "applied" in `smates orphans --apply --format json`).
@@ -177,17 +135,13 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 		return usageError{errors.New(configUsage)}
 	}
 	sub, rest := args[0], args[1:]
-	fs := flag.NewFlagSet("config "+sub, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("C", "", "run as if started in `dir`")
-	file := fs.String("config", "", "config file (default: smates.yml at the repository root)")
-	dryRun := fs.Bool("dry-run", false, "print the diff instead of writing")
-	format := formatFlag(fs)
-	pos, err := parseInterspersed(fs, rest)
+	c := newCommand("config "+sub, stderr)
+	dir := c.String("C", "", "run as if started in `dir`")
+	file := c.String("config", "", "config file (default: smates.yml at the repository root)")
+	dryRun := c.Bool("dry-run", false, "print the diff instead of writing")
+	c.withFormat("text", "json")
+	pos, err := c.parseInterspersed(rest)
 	if err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
 		return err
 	}
 	var res *configEdit
@@ -229,11 +183,7 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	default:
 		return usageError{fmt.Errorf("unknown config command %q\n%s", sub, configUsage)}
 	}
-	if *format == "json" {
-		return writeJSON(stdout, res)
-	}
-	printConfigEdit(stdout, res)
-	return nil
+	return c.emit(stdout, res, func() { printConfigEdit(stdout, res) })
 }
 
 func printConfigEdit(w io.Writer, res *configEdit) {

@@ -85,23 +85,19 @@ type orphanCommit struct {
 }
 
 func cmdOrphans(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("orphans", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("orphans", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	history := fs.Int("history", 100, "replay the last `n` first-parent commits (0: no limit)")
-	since := fs.String("since", "", "replay the first-parent commits after `rev` (no count limit unless --history is set)")
-	format := formatFlag(fs)
-	apply := fs.Bool("apply", false, "add the suggested ignore globs to smates.yml (and nothing else)")
-	dryRun := fs.Bool("dry-run", false, "with --apply: print the diff instead of writing")
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c.common(&cf)
+	history := c.Int("history", 100, "replay the last `n` first-parent commits (0: no limit)")
+	since := c.String("since", "", "replay the first-parent commits after `rev` (no count limit unless --history is set)")
+	c.withFormat("text", "json")
+	apply := c.Bool("apply", false, "add the suggested ignore globs to smates.yml (and nothing else)")
+	dryRun := c.Bool("dry-run", false, "with --apply: print the diff instead of writing")
+	if err := c.parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v", fs.Args())}
+	if err := c.noArgs(); err != nil {
+		return err
 	}
 	if *dryRun && !*apply {
 		return usageError{errors.New("--dry-run needs --apply")}
@@ -112,7 +108,7 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	n := *history
 	if *since != "" {
 		explicit := false
-		fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "history" })
+		c.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "history" })
 		if !explicit {
 			n = 0
 		}
@@ -176,22 +172,20 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	if *format == "json" {
-		return writeJSON(stdout, rep)
-	}
-	for _, w := range rep.Warnings {
-		fmt.Fprintf(stderr, "smates: warning: %s\n", w)
-	}
-	printOrphanReport(stdout, rep, p.cfg.Path)
-	if rep.Applied != nil {
-		fmt.Fprintln(stdout)
-		if len(rep.Applied.Added)+len(rep.Applied.Present) == 0 {
-			fmt.Fprintln(stdout, "--apply: no ignore globs to add.")
-		} else {
-			printConfigEdit(stdout, rep.Applied)
+	return c.emit(stdout, rep, func() {
+		for _, w := range rep.Warnings {
+			fmt.Fprintf(stderr, "smates: warning: %s\n", w)
 		}
-	}
-	return nil
+		printOrphanReport(stdout, rep, p.cfg.Path)
+		if rep.Applied != nil {
+			fmt.Fprintln(stdout)
+			if len(rep.Applied.Added)+len(rep.Applied.Present) == 0 {
+				fmt.Fprintln(stdout, "--apply: no ignore globs to add.")
+			} else {
+				printConfigEdit(stdout, rep.Applied)
+			}
+		}
+	})
 }
 
 // orphanHistory replays commits against the current dependency map (res, an All

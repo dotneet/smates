@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -29,22 +28,18 @@ import (
 // ---- init ----
 
 func cmdInit(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("C", "", "run as if started in `dir`")
-	force := fs.Bool("force", false, "overwrite an existing smates.yml")
-	print := fs.Bool("stdout", false, "print the config instead of writing it")
-	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
-	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
-	agentsMD := fs.Bool("agents-md", false, "add a short smates section to AGENTS.md (or CLAUDE.md) for coding agents")
-	format := formatFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c := newCommand("init", stderr)
+	dir := c.String("C", "", "run as if started in `dir`")
+	force := c.Bool("force", false, "overwrite an existing smates.yml")
+	print := c.Bool("stdout", false, "print the config instead of writing it")
+	github := c.Bool("github", false, "also write .github/workflows/smates.yml")
+	patch := c.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
+	agentsMD := c.Bool("agents-md", false, "add a short smates section to AGENTS.md (or CLAUDE.md) for coding agents")
+	c.withFormat("text", "json")
+	if err := c.parse(args); err != nil {
 		return err
 	}
-	asJSON := *format == "json"
+	asJSON := c.asJSON()
 	d := *dir
 	if d == "" {
 		d = "."
@@ -291,25 +286,21 @@ type whyTest struct {
 }
 
 func cmdWhy(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("why", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("why", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	format := formatFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c.common(&cf)
+	c.withFormat("text", "json")
+	if err := c.parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return usageError{errors.New("usage: smates why <file or $ENV_VAR>")}
+	target, err := c.oneArg("usage: smates why <file or $ENV_VAR>")
+	if err != nil {
+		return err
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
 	}
-	target := fs.Arg(0)
 	if !depkey.IsEnv(target) {
 		target = p.relArg(target)
 	}
@@ -368,16 +359,14 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			rep.Tests = append(rep.Tests, whyTest{Suite: s.Name, Test: t.ID, Kind: string(kind), How: nonNil(how)})
 		}
 	}
-	if *format == "json" {
-		return writeJSON(stdout, rep)
-	}
-	for _, t := range rep.Tests {
-		fmt.Fprintf(stdout, "%s\t%s\t(%s)\n", t.Suite, t.Test, strings.Join(t.How, ", "))
-	}
-	if len(rep.Tests) == 0 {
-		fmt.Fprintf(stderr, "smates: no test is known to depend on %s\n", target)
-	}
-	return nil
+	return c.emit(stdout, rep, func() {
+		for _, t := range rep.Tests {
+			fmt.Fprintf(stdout, "%s\t%s\t(%s)\n", t.Suite, t.Test, strings.Join(t.How, ", "))
+		}
+		if len(rep.Tests) == 0 {
+			fmt.Fprintf(stderr, "smates: no test is known to depend on %s\n", target)
+		}
+	})
 }
 
 func (p *project) relArg(a string) string {
@@ -417,25 +406,22 @@ type depEntry struct {
 }
 
 func cmdDeps(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("deps", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("deps", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	format := formatFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c.common(&cf)
+	c.withFormat("text", "json")
+	if err := c.parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return usageError{errors.New("usage: smates deps <test file or Go package dir>")}
+	arg, err := c.oneArg("usage: smates deps <test file or Go package dir>")
+	if err != nil {
+		return err
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
 	}
-	target := p.relArg(fs.Arg(0))
+	target := p.relArg(arg)
 	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err
@@ -478,13 +464,11 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 			}
 			rep.Deps = append(rep.Deps, depEntry{Dep: name, Sources: src})
 		}
-		if *format == "json" {
-			return writeJSON(stdout, rep)
-		}
-		for _, d := range rep.Deps {
-			fmt.Fprintf(stdout, "%s\t%s\n", d.Dep, strings.Join(d.Sources, ","))
-		}
-		return nil
+		return c.emit(stdout, rep, func() {
+			for _, d := range rep.Deps {
+				fmt.Fprintf(stdout, "%s\t%s\n", d.Dep, strings.Join(d.Sources, ","))
+			}
+		})
 	}
 	// A Go package directory whose units are its test functions.
 	var funcs []string
@@ -528,44 +512,37 @@ type listSuite struct {
 }
 
 func cmdList(args []string, stdout, stderr io.Writer) error {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	c := newCommand("list", stderr)
 	var cf commonFlags
-	cf.register(fs)
-	format := formatFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c.common(&cf)
+	c.withFormat("text", "json")
+	if err := c.parse(args); err != nil {
 		return err
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
 	}
-	if *format == "json" {
-		rep := listReport{Config: p.cfg.Path, Suites: []listSuite{}}
-		for _, s := range p.suites {
-			units := s.Adapter.Units(s, s.TestFiles(p.files))
-			rep.Suites = append(rep.Suites, listSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Command: s.Command, UnitCount: len(units), Units: nonNil(units),
-				TestsSource: s.TestsSource, TestPatterns: nonNil(s.TestPatterns()), DiscoveryWarning: s.DiscoveryWarning})
-		}
-		return writeJSON(stdout, rep)
-	}
+	rep := listReport{Config: p.cfg.Path, Suites: []listSuite{}}
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
-		fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\ttests=%s\n", s.Name, s.Runner, s.Root, len(units), s.Command, s.TestsSource)
-		if s.DiscoveryWarning != "" {
-			fmt.Fprintf(stderr, "smates: suite %s: %s\n", s.Name, s.DiscoveryWarning)
-		}
-		if cf.verbose {
-			fmt.Fprintf(stdout, "  tests from %s: %s\n", s.TestsSource, strings.Join(s.TestPatterns(), " "))
-			for _, u := range units {
-				fmt.Fprintf(stdout, "  %s\n", u)
+		rep.Suites = append(rep.Suites, listSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Command: s.Command, UnitCount: len(units), Units: nonNil(units),
+			TestsSource: s.TestsSource, TestPatterns: nonNil(s.TestPatterns()), DiscoveryWarning: s.DiscoveryWarning})
+	}
+	return c.emit(stdout, rep, func() {
+		for _, s := range rep.Suites {
+			fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\ttests=%s\n", s.Name, s.Runner, s.Root, s.UnitCount, s.Command, s.TestsSource)
+			if s.DiscoveryWarning != "" {
+				fmt.Fprintf(stderr, "smates: suite %s: %s\n", s.Name, s.DiscoveryWarning)
+			}
+			if cf.verbose {
+				fmt.Fprintf(stdout, "  tests from %s: %s\n", s.TestsSource, strings.Join(s.TestPatterns, " "))
+				for _, u := range s.Units {
+					fmt.Fprintf(stdout, "  %s\n", u)
+				}
 			}
 		}
-	}
-	return nil
+	})
 }
 
 // ---- state ----
@@ -577,23 +554,16 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		return usageError{errors.New("usage: smates state show|path|pull|push|merge|clear")}
 	}
 	sub, rest := args[0], args[1:]
-	fs := flag.NewFlagSet("state "+sub, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("C", "", "run as if started in `dir`")
-	statePath := fs.String("state", "", "state file")
-	remote := fs.String("remote", "origin", "git remote for pull/push")
-	ref := fs.String("ref", "", "git ref for pull/push (default refs/smates/state/<branch>)")
-	format := formatFlag(fs)
-	asJSON := fs.Bool("json", false, "show: print JSON (deprecated: use --format json)")
-	out := fs.String("o", "", "merge: output file (default: the state file)")
-	if err := fs.Parse(rest); err != nil {
-		return usageError{err}
-	}
-	if err := checkFormat(*format); err != nil {
+	c := newCommand("state "+sub, stderr)
+	dir := c.String("C", "", "run as if started in `dir`")
+	statePath := c.String("state", "", "state file")
+	remote := c.String("remote", "origin", "git remote for pull/push")
+	ref := c.String("ref", "", "git ref for pull/push (default refs/smates/state/<branch>)")
+	c.withFormat("text", "json")
+	c.deprecatedJSON("show: print JSON (deprecated: use --format json)")
+	out := c.String("o", "", "merge: output file (default: the state file)")
+	if err := c.parse(rest); err != nil {
 		return err
-	}
-	if *asJSON {
-		*format = "json"
 	}
 	store, err := resolveStore(*dir, *statePath, stderr)
 	if err != nil {
@@ -610,13 +580,13 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return showState(st, store, *format == "json", stdout)
+		return showState(st, store, c.asJSON(), stdout)
 	case "merge":
 		st, err := store.Load()
 		if err != nil {
 			return err
 		}
-		for _, f := range fs.Args() {
+		for _, f := range c.Args() {
 			o, err := state.Load(f)
 			if err != nil {
 				return fmt.Errorf("%s: %w", f, err)
