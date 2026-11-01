@@ -181,8 +181,8 @@ func TestBunRecordWithoutCoverage(t *testing.T) {
 	if o := res.Observations["src/snap.test.ts"]; o != nil && !o.Files["src/__snapshots__/snap.test.ts.snap"] {
 		t.Errorf("snap: %v", o.Files)
 	}
-	if o := res.Observations["ok.test.ts"]; o != nil && o.Files["__snapshots__/ok.test.ts.snap"] {
-		t.Errorf("ok: a snapshot file that does not exist is no dependency: %v", o.Files)
+	if o := res.Observations["ok.test.ts"]; o != nil && (o.Files["__snapshots__/ok.test.ts.snap"] || !o.Files["__snapshots__/ok.test.ts.snap?"]) {
+		t.Errorf("ok: a snapshot file that does not exist is probed, not read: %v", o.Files)
 	}
 }
 

@@ -99,6 +99,16 @@ func TestOnlyChangedInputs(t *testing.T) {
 	}
 }
 
+// A key whose recorded hash still counts as unchanged (recorded without the
+// executable marker) is no candidate.
+func TestUnchangedHook(t *testing.T) {
+	in := baseInput(map[string]string{"src/util/fmt.ts": "f2", "src/cart.ts": "c1+x"})
+	in.Unchanged = func(key, recorded string) bool { return key == "src/cart.ts" && recorded == "c1" }
+	if got := paths(Compute(in).Candidates); !reflect.DeepEqual(got, []string{"src/util/fmt.ts"}) {
+		t.Errorf("candidates %v", got)
+	}
+}
+
 func TestAddedAndDeleted(t *testing.T) {
 	in := baseInput(map[string]string{"src/price.ts": ""})
 	in.Entry.Deps["src/new.ts"] = ""

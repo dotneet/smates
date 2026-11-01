@@ -102,8 +102,12 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.AddFile(f)
 		}
 		o.AddFile(u)
+		// Read by bun natively, not through node:fs; without one, bun would read one
+		// created later.
 		if snap := bunSnapshotFile(u); exists(filepath.Join(rc.Repo.Root, filepath.FromSlash(snap))) {
-			o.AddFile(snap) // read by bun natively, not through node:fs
+			o.AddFile(snap)
+		} else {
+			o.AddFile(depkey.Existence(snap))
 		}
 		setUnitExit(o, codes[u])
 	}
@@ -132,8 +136,9 @@ func bunImportsSource(rc *RunContext, unit string) bool {
 
 // bunSnapshotFile is the snapshot file of test file unit (repo-relative): bun keeps
 // toMatchSnapshot's snapshots in __snapshots__/<file>.snap next to the test file. A
-// file that exists after the run (also one the test just wrote) is recorded as read:
-// bun reads it natively, which the preload shim cannot see.
+// file that exists after the run (also one the test just wrote) is recorded as read,
+// a missing one as probed (creating it selects the test): bun reads it natively, which
+// the preload shim cannot see.
 func bunSnapshotFile(unit string) string {
 	return path.Join(path.Dir(unit), "__snapshots__", path.Base(unit)+".snap")
 }

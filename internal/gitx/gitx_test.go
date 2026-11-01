@@ -266,6 +266,26 @@ func TestSnapshotExecutableBit(t *testing.T) {
 	}
 }
 
+func TestSameHash(t *testing.T) {
+	for _, tc := range []struct {
+		recorded, cur string
+		want          bool
+	}{
+		{"ab", "ab", true},
+		{"ab+x", "ab+x", true},
+		{"ab", "ab+x", true},  // recorded without the marker
+		{"ab+x", "ab", false}, // lost the bit
+		{"ab", "cd+x", false},
+		{"ab+exists", "ab+x+exists", true},
+		{"", "ab+x", false},
+		{"", "", true},
+	} {
+		if got := SameHash(tc.recorded, tc.cur); got != tc.want {
+			t.Errorf("SameHash(%q, %q) = %v, want %v", tc.recorded, tc.cur, got, tc.want)
+		}
+	}
+}
+
 func TestChangedSinceAndMergeBase(t *testing.T) {
 	r := newTestRepo(t)
 	r.write("a.txt", "a")

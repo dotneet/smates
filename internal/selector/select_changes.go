@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/gitx"
 )
 
 // changes computes the changed files (Result.Changed): against the state's snapshot,
@@ -37,20 +38,21 @@ func (s *selection) markerFilter() {
 	names := NewOwnership(in.Suites, in.Others).Picked()
 	for f := range s.changed {
 		v, _ := in.State.Snap(f)
-		if h, ok := v.SeenHash(); ok && h == in.Snap[f] && v.SeenByAll(names) {
+		if h, ok := v.SeenHash(); ok && gitx.SameHash(h, in.Snap[f]) && v.SeenByAll(names) {
 			delete(s.changed, f)
 		}
 	}
 }
 
 // changedFiles returns the files that differ between the snapshot and the state's
-// snapshot (deleted ones included), or, when the state has none, the files changed
-// since Base (none without Base).
+// snapshot (deleted ones included; a hash recorded without the executable marker
+// matches, see gitx.SameHash), or, when the state has none, the files changed since
+// Base (none without Base).
 func changedFiles(in *Input) (map[string]bool, error) {
 	out := map[string]bool{}
 	if len(in.State.Files) > 0 {
 		for f, h := range in.Snap {
-			if in.State.Files[f] != h {
+			if old, ok := in.State.Files[f]; !ok || !gitx.SameHash(old, h) {
 				out[f] = true
 			}
 		}

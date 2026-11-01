@@ -278,6 +278,25 @@ func TestCollectSymlinksInRepo(t *testing.T) {
 	}
 }
 
+// The links of a path are looked up once per trace, not once per process stream.
+func TestLinksCache(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root := repoDir(t)
+	touch(t, root, "data/v2.json")
+	link := filepath.Join(root, "data", "current.json")
+	os.Symlink("v2.json", link)
+	links := linksCache(root)
+	if got := links(link); !reflect.DeepEqual(got, []string{"data/current.json"}) {
+		t.Fatalf("links %v", got)
+	}
+	os.Remove(link)
+	if got := links(link); !reflect.DeepEqual(got, []string{"data/current.json"}) {
+		t.Errorf("not memoized: %v", got)
+	}
+}
+
 func TestCollectPythonContexts(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "tests/test_a.py", "tests/test_b.py", "src/m.py", "data/a.json", "data/db.sql", "tests/conftest.py")

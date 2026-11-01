@@ -74,6 +74,17 @@ const ExecSuffix = "+x"
 // executable marker.
 func Blob(hash string) string { return strings.TrimSuffix(hash, ExecSuffix) }
 
+// SameHash reports whether a recorded hash still matches the current one: they are
+// equal, or recorded has no executable marker and equals cur without its markers.
+// smates before the marker recorded executable files by their blob alone, and an
+// older smates may still be writing the state (on CI); counting those as changed would
+// make every executable file a change after each such recording. The price: a file
+// that only gains the executable bit is no change. Losing a recorded one is.
+func SameHash(recorded, cur string) bool {
+	return recorded == cur ||
+		strings.Contains(cur, ExecSuffix) && !strings.Contains(recorded, ExecSuffix) && recorded == strings.ReplaceAll(cur, ExecSuffix, "")
+}
+
 // Snapshot computes the current content hashes. Unmodified tracked files take their
 // hash from the index, so the cost is one `git ls-files` plus hashing of dirty files.
 func (r *Repo) Snapshot() (Snapshot, error) {

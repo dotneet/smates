@@ -53,12 +53,27 @@ is needed (`fetch-depth: 1`), dirty working trees work, rebases do not matter.
 A file's hash is its blob SHA-1 followed by `+x` (`gitx.ExecSuffix`) when git records it
 as executable (mode 100755: in the index, or for a dirty or untracked file the owner's
 executable bit on disk; with `core.fileMode=false` the bit on disk is ignored as git
-ignores it: a tracked file keeps the index's mode, an untracked one is not executable), so a `chmod -x` on a script a test runs selects the test, committed or not.
-git status and git diff report a mode-only change as a modification, so the snapshot,
-diff mode and watch mode see it too. A symlink hashes as its target path (as git stores
-it), a submodule as `commit:` and its pinned commit. Entries recorded before the marker
-existed hold the plain blob of executable files: tests depending on one run once more
-after upgrading, then settle.
+ignores it: a tracked file keeps the index's mode, an untracked one is not executable),
+so a `chmod -x` on a script a test runs selects the test, committed or not. git status
+and git diff report a mode-only change as a modification, so the snapshot, diff mode
+and watch mode see it too. A symlink hashes as its target path (as git stores it), a
+submodule as `commit:` and its pinned commit.
+
+Compatibility: an older smates recorded executable files by their blob alone, and may
+still be writing the state (CI on an older version, a shared or cached state). Entries
+carry no version of their own, so a recorded hash without the marker matches the
+current hash with it (`gitx.SameHash`, used for the snapshot's changed files and the
+`--suite` markers, `Hasher.Unchanged` for dependency keys, the flaky comparison and
+failure hints): a `dir/**` tree or an `@set:` declaration recorded that way matches
+while the same sum over its files' blobs without the marker does. Otherwise every
+executable file (`gradlew`, `scripts/*.sh`, `.husky/*`) would be a change, an orphan or
+a changed tree after each such recording. The price: a file that only gains the
+executable bit, with its content unchanged, is no change, against any state; losing
+the bit is one against an entry that recorded it (against an older smates' entry it
+goes unnoticed until the test is recorded again). A test that failed because the bit was missing is selected anyway
+(its last run failed). The orphan agent's diff (`git_diff`) reads the recorded blob
+without the marker and names a change of the bit alone ("mode changed (+x removed),
+no content change").
 
 A path a test reads through a symlink inside the repository depends on the file it
 resolves to and on every link on the way (`pathutil.Links`: the file itself, a linked
@@ -326,7 +341,7 @@ can alter test results.
 | vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
 | node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
-| bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
+| bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run, else its existence (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |

@@ -312,7 +312,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		return p
 	}
-	rel := relCache(repoRoot)
+	rel, links := relCache(repoRoot), linksCache(repoRoot)
 
 	entries, err := os.ReadDir(traceDir)
 	if err != nil {
@@ -325,7 +325,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		pid, _ := strconv.Atoi(m[1])
 		tid, _ := strconv.Atoi(m[2])
-		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, repoRoot); err != nil {
+		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, links, repoRoot); err != nil {
 			return nil, err
 		}
 	}
@@ -396,7 +396,22 @@ func relCache(root string) func(string) (string, bool) {
 	}
 }
 
-func readStream(file string, p *Proc, rel func(string) (string, bool), root string) error {
+// linksCache returns a memoized pathutil.Links for root.
+func linksCache(root string) func(string) []string {
+	cache := map[string][]string{}
+	return func(p string) []string {
+		l, ok := cache[p]
+		if !ok {
+			l = pathutil.Links(root, p)
+			cache[p] = l
+		}
+		return l
+	}
+}
+
+// readStream reads one process's event stream into p. rel and links are shared by the
+// streams of one trace (relCache, linksCache).
+func readStream(file string, p *Proc, rel func(string) (string, bool), links func(string) []string, root string) error {
 	f, err := os.Open(file)
 	if err != nil {
 		return err
@@ -417,15 +432,6 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			p.SpawnFiles[spawn][key] = true
 		}
 		return key
-	}
-	linkCache := map[string][]string{}
-	links := func(path string) []string {
-		l, ok := linkCache[path]
-		if !ok {
-			l = pathutil.Links(root, path)
-			linkCache[path] = l
-		}
-		return l
 	}
 	for sc.Scan() {
 		var ev event

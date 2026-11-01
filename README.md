@@ -64,8 +64,9 @@ Hashes are compared by content, not with `git diff`, so selection needs no histo
 rebases or merge commits. The executable bit is part of a file's hash (`chmod -x` on a
 script a test runs selects the test), and a file read through a symlink in the
 repository depends on the link too (retargeting it selects the tests that read it).
-Upgrading from a version without the executable bit in the hash reruns the tests that
-depend on executable files once.
+A state written by an older smates (which hashed content only) stays valid, also while
+CI keeps writing it with that version; the price is that a file only gaining the
+executable bit is no change (see [Limitations](#limitations)).
 
 **Environment variables.** A variable a test reads (`process.env.X` in Node and Bun,
 also through jest's and vitest's per-file copies and `import.meta.env`; `os.environ` /
@@ -809,6 +810,11 @@ instead.
   graph covers it then; set it in the environment or the suite `env` instead), and c8 writes no
   `coverage/tmp` while smates records (`c8 report` afterwards has nothing to read; let c8
   report in the same command).
+- Gaining the executable bit alone (`chmod +x` without a content change) selects
+  nothing: a state written by an older smates recorded every file without the bit, and
+  the two cannot be told apart. Losing it (`chmod -x`) is a change once a state written
+  by this version recorded the bit (against an older smates' state it goes unnoticed
+  until the next recording).
 - A module Node or Bun loads through a symlink is traced by its target only (the
   runtime resolves the link first): retargeting such a link may be an orphan. Files read
   through a link (`fs`, `open`, Go's `os.Open`) depend on the link as well.
