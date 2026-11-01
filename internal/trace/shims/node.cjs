@@ -1,7 +1,8 @@
 'use strict';
 // smates trace shim for Node.js (and Bun via --preload).
 //
-// Loaded into every Node process of a test run through NODE_OPTIONS=--require, it appends
+// Loaded into every Node process of a test run through NODE_OPTIONS=--require (Bun:
+// BUN_OPTIONS=--preload, and bun test --preload), it appends
 // one JSON object per line to $SMATES_TRACE_DIR/proc-<pid>-<threadId>.jsonl:
 //   {"k":"start", pid, ppid, tid, argv, cwd, t, lang}
 //   {"k":"read","p":"/abs/path"}   a file under the repository was opened for reading
@@ -116,25 +117,26 @@
   // (it may return other arguments to call orig with) and has orig's properties. A
   // util.promisify.custom implementation is wrapped the same way: those of
   // child_process.exec and execFile call the internal functions, not the exports.
-  // spawning is above zero while a wrapped isSpawn function runs, so that the functions
-  // it calls (exec calls execFile, Bun's child_process calls Bun.spawn) record nothing.
+  // A depth counter ({n}) given is above zero while orig runs: spawning, so that the
+  // functions a spawn function calls (exec calls execFile, Bun's child_process calls
+  // Bun.spawn) record nothing; cloning, likewise for the cloning functions.
   let promisifyCustom = null;
   try {
     promisifyCustom = require('util').promisify.custom;
   } catch (_) {}
-  let spawning = 0;
-  const wrapFn = (orig, before, isSpawn) => {
+  const spawning = { n: 0 };
+  const wrapFn = (orig, before, depth) => {
     const wrapped = function () {
       let args = arguments;
       try {
         args = before.apply(null, arguments) || arguments;
       } catch (_) {}
-      if (!isSpawn) return orig.apply(this, args);
-      spawning++;
+      if (!depth) return orig.apply(this, args);
+      depth.n++;
       try {
         return orig.apply(this, args);
       } finally {
-        spawning--;
+        depth.n--;
       }
     };
     Object.defineProperty(wrapped, '__smates', { value: true });
@@ -144,7 +146,7 @@
       if (k === 'length' || k === 'name' || k === 'prototype') continue;
       try {
         const d = Object.getOwnPropertyDescriptor(orig, k);
-        if (k === promisifyCustom && typeof d.value === 'function') d.value = wrapFn(d.value, before, isSpawn);
+        if (k === promisifyCustom && typeof d.value === 'function') d.value = wrapFn(d.value, before, depth);
         Object.defineProperty(wrapped, k, d);
       } catch (_) {}
     }
@@ -229,9 +231,10 @@
     } catch (_) {}
   };
   // A child given an environment of its own ({env: {PATH}}) would start untraced, and
-  // smates trusts Node and Python children to trace themselves: the tracing variables
-  // (as NodeEnv and PythonEnv set them) are added to a copy of it. Values the caller set
-  // are kept; NODE_OPTIONS, PYTHONPATH and PYTEST_PLUGINS get the shims' entries added.
+  // smates trusts Node, Bun and Python children to trace themselves: the tracing
+  // variables (as NodeEnv and PythonEnv set them) are added to a copy of it. Values the
+  // caller set are kept; NODE_OPTIONS, BUN_OPTIONS, PYTHONPATH and PYTEST_PLUGINS get the
+  // shims' entries added.
   const optionValue = (s) => (s.startsWith('"') ? JSON.parse(s) : s);
   let shimPath = __filename; // as NODE_OPTIONS names it, if it does
   for (const m of env0.NODE_OPTIONS.matchAll(/--(?:require|preload)[= ]("(?:[^"\\]|\\.)*"|\S+)/g)) {
@@ -241,6 +244,9 @@
     } catch (_) {}
   }
   const shimOption = '--require=' + (/[\s"'\\]/.test(shimPath) ? JSON.stringify(shimPath) : shimPath);
+  // Bun ignores NODE_OPTIONS --require; it reads BUN_OPTIONS, which has no escapes but
+  // takes a whole argument in quotes (as NodeEnv quotes it).
+  const bunShimOption = /\s/.test(shimPath) ? `"--preload=${shimPath}"` : '--preload=' + shimPath;
   // The Python shims are extracted next to the Node one (shims/node_modules/smates).
   let pyEntry;
   const pythonEntry = () => {
@@ -297,6 +303,12 @@
       e[nodeOptions] = (shimOption + ' ' + opts).trim();
       changed = true;
     }
+    const bunOptions = keyOf('BUN_OPTIONS');
+    const bunOpts = get(bunOptions);
+    if (!shimNames.some((n) => bunOpts.includes(n))) {
+      e[bunOptions] = (bunOpts + ' ' + bunShimOption).trim();
+      changed = true;
+    }
     if (pythonEntry()) {
       add('PYTHONPATH', pyEntry, path.delimiter, true);
       if (env0.PYTEST_PLUGINS.split(',').includes('smates_pytest')) add('PYTEST_PLUGINS', 'smates_pytest', ',', false);
@@ -322,12 +334,12 @@
       cp[name] = wrapFn(
         orig,
         function () {
-          if (spawning) return;
+          if (spawning.n) return;
           const i = at(arguments);
           if (ev) ev(arguments, i);
           return withEnv(arguments, i, true);
         },
-        true,
+        spawning,
       );
     };
     // (file, args?, options?, callback?): args may be omitted or null.
@@ -344,6 +356,59 @@
     // fork starts a Node child, which traces itself.
     wrapCP('fork', null, fileOpts);
   } catch (_) {}
+  // process.env is traced through a proxy (below), and a proxy cannot be cloned: what
+  // clones its argument (structuredClone, postMessage, workerData, v8.serialize) gets
+  // the environment object itself instead, also one level down ({env: process.env}).
+  const envTargets = new WeakMap(); // proxy -> the environment object it traces
+  const unproxy = (v) => {
+    if (!v || typeof v !== 'object') return v;
+    const t = envTargets.get(v);
+    if (t) return t;
+    const proto = Object.getPrototypeOf(v);
+    const arr = Array.isArray(v);
+    if (arr ? v.length > 64 : proto !== Object.prototype && proto !== null) return v;
+    // Data properties only: a getter runs once, when the value is cloned.
+    let copy = null;
+    for (const k of Object.keys(v)) {
+      const d = Object.getOwnPropertyDescriptor(v, k);
+      const tx = d && 'value' in d && d.value && typeof d.value === 'object' && envTargets.get(d.value);
+      if (!tx) continue;
+      if (!copy) copy = arr ? v.slice() : Object.assign(Object.create(proto), v);
+      copy[k] = tx;
+    }
+    return copy || v;
+  };
+  // cloneArg returns a wrapFn hook that unproxies argument i. cloning is above zero
+  // while a wrapped function runs: Node 18's structuredClone posts its value through
+  // MessagePort.prototype.postMessage, which then has nothing to do.
+  const cloning = { n: 0 };
+  const cloneArg = (i) =>
+    function () {
+      if (cloning.n) return;
+      const v = arguments[i];
+      const u = unproxy(v);
+      if (u === v) return;
+      const a = Array.prototype.slice.call(arguments);
+      a[i] = u;
+      return a;
+    };
+  const wrapClone = (obj, name) => {
+    const orig = obj && obj[name];
+    if (typeof orig !== 'function' || orig.__smates) return;
+    try {
+      obj[name] = wrapFn(orig, cloneArg(0), cloning);
+    } catch (_) {}
+  };
+  wrapClone(globalThis, 'structuredClone');
+  try {
+    const wt = require('worker_threads');
+    for (const C of [wt.MessagePort, wt.BroadcastChannel]) wrapClone(C && C.prototype, 'postMessage');
+  } catch (_) {}
+  try {
+    const v8 = require('v8');
+    wrapClone(v8, 'serialize');
+    wrapClone(v8.Serializer && v8.Serializer.prototype, 'writeValue');
+  } catch (_) {}
   // Worker threads trace themselves too, given an environment that enables it.
   try {
     const wt = require('worker_threads');
@@ -354,6 +419,12 @@
           let args = arguments;
           try {
             args = withEnv(arguments, 1) || arguments;
+            const o = args[1];
+            const data = o && typeof o === 'object' && unproxy(o.workerData);
+            if (data && data !== o.workerData) {
+              args = Array.prototype.slice.call(args);
+              args[1] = Object.assign(Object.create(Object.getPrototypeOf(o)), o, { workerData: data });
+            }
           } catch (_) {}
           super(...args);
         }
@@ -398,11 +469,16 @@
           proto[name] = function (opts) {
             try {
               const cwd = path.resolve((opts && typeof opts === 'object' && opts.cwd) || (typeof opts === 'string' ? opts : process.cwd()));
-              const pat = patterns.get(this) || '**';
-              const fixed = pat.split('/').filter((s, i, a) => i < a.length - 1 && !/[*?[{]/.test(s));
-              const dir = path.join(cwd, ...fixed);
-              if (pat.includes('**')) write({ k: 'tree', p: dir });
-              else record('dir', path.join(cwd, ...pat.split('/').slice(0, -1)));
+              // The literal directories before the first glob segment are where the scan
+              // starts: it lists that directory when only the last segment is a glob
+              // (data/*.json), and may read anything below it when a directory segment
+              // is (data/*/x.txt, data/**/fixtures/*.json).
+              const segs = (patterns.get(this) || '**').split('/');
+              let g = segs.findIndex((s) => /[*?[{]/.test(s));
+              if (g < 0) g = segs.length - 1;
+              const dir = path.resolve(cwd, segs.slice(0, g).join('/') || '.');
+              if (g < segs.length - 1 || segs[g].includes('**')) write({ k: 'tree', p: dir });
+              else record('dir', dir);
             } catch (_) {}
             return orig.apply(this, arguments);
           };
@@ -419,7 +495,7 @@
         const orig = Bun[name];
         if (typeof orig !== 'function' || orig.__smates) continue;
         Bun[name] = wrapFn(orig, function (cmd, opts) {
-          if (spawning) return;
+          if (spawning.n) return;
           const i = Array.isArray(cmd) ? 1 : 0;
           const argv = i ? cmd : cmd && cmd.cmd;
           if (Array.isArray(argv)) execEv(argv, false, arguments[i]);
@@ -521,7 +597,7 @@
         else descAt++;
         return true;
       };
-      return new Proxy(target, {
+      const p = new Proxy(target, {
         get(env, name) {
           if (!enumerated(name, true)) note(env, name);
           return env[name];
@@ -552,6 +628,8 @@
           return true;
         },
       });
+      envTargets.set(p, target);
+      return p;
     };
     let proxy = envProxy(process.env);
     Object.defineProperty(process, 'env', {
@@ -634,13 +712,23 @@
     } catch (_) {}
   }
 
+  // Bun has no V8 coverage: the module cache tells which modules were loaded (lcov
+  // leaves out files it has no lines for, such as JSON required at run time).
+  const loadedModules = () => {
+    if (typeof Bun === 'undefined') return;
+    try {
+      for (const k of Object.keys(require.cache)) record('code', k);
+    } catch (_) {}
+  };
+  // bun test emits no exit event: a global afterAll hook (registered from a preload)
+  // runs after the last file instead. Outside the test runner afterAll throws.
+  if (typeof Bun !== 'undefined' && isMainThread) {
+    try {
+      require('bun:test').afterAll(loadedModules);
+    } catch (_) {}
+  }
   process.on('exit', (code) => {
-    // Bun has no V8 coverage: the module cache tells which modules were loaded.
-    if (typeof Bun !== 'undefined') {
-      try {
-        for (const k of Object.keys(require.cache)) record('code', k);
-      } catch (_) {}
-    }
+    loadedModules();
     write({ k: 'exit', code, t: Date.now() });
   });
 
