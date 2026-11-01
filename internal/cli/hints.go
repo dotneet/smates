@@ -136,6 +136,9 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 			Deps: sr.Deps[u], Observed: o.Files, Static: static, Inputs: sr.Inputs,
 			Entry: entry, Changed: changed, Orphans: orphans, Hash: fh.hasher.ForSuite(sr.Suite).Hash, Root: fh.p.repo.Root,
 		}
+		if len(sr.Services) > 0 {
+			in.Service = func(f string) bool { return sr.ServiceVia(u, f) != "" }
+		}
 		if fh.p.graph != nil {
 			in.Direct = fh.p.graph.Direct
 		}

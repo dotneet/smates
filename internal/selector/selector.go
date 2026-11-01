@@ -35,6 +35,7 @@ const (
 const (
 	ViaTest      = "test"      // the test's own file
 	ViaInput     = "input"     // a suite or global input, or a rule in smates.yml
+	ViaService   = "service"   // depends_on/serves in smates.yml (Test.Service says which)
 	ViaImport    = "import"    // the static import graph
 	ViaTraced    = "traced"    // recorded by tracing a previous run (reads, listings, commands)
 	ViaReference = "reference" // the test names an orphan file
@@ -81,7 +82,10 @@ type Test struct {
 	Detail   string   `json:"detail,omitempty"`
 	Changed  []string `json:"changed,omitempty"`
 	// Via says, for each entry of Changed, how it reached the test (Via* constants).
-	Via      map[string]string `json:"via,omitempty"`
+	Via map[string]string `json:"via,omitempty"`
+	// Service names, for each entry of Changed reached via ViaService, the declaration
+	// that added it ("depends_on suite api", "serves backend/**").
+	Service  map[string]string `json:"service,omitempty"`
 	Duration int64             `json:"duration_ms,omitempty"`
 	// Shard is the shard owning the test when the selection is sharded (1-based).
 	Shard int `json:"shard,omitempty"`
@@ -105,6 +109,37 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Services are the suite's depends_on/serves declarations, expanded at HEAD.
+	Services []*ServiceDeps `json:"-"`
+}
+
+// ServiceDeps is one depends_on/serves declaration of a suite expanded to files: code
+// the suite's tests exercise across a boundary tracing cannot follow (a server running
+// in another process or container).
+type ServiceDeps struct {
+	// Label describes the declaration ("depends_on suite api", "serves backend/**").
+	Label string
+	// Tests narrow the units that get the dependency (globs relative to the suite
+	// root; empty: all).
+	Tests []string
+	Files []string
+	set   map[string]bool
+}
+
+// applies reports whether the declaration covers a unit of suite su.
+func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
+	return len(d.Tests) == 0 || pathutil.Match(d.Tests, pathutil.RelTo(unit, su.Root))
+}
+
+// ServiceVia returns the label of the first depends_on/serves declaration through
+// which unit depends on file f ("" when none does).
+func (s *Suite) ServiceVia(unit, f string) string {
+	for _, d := range s.Services {
+		if d.set[f] && d.applies(s.Suite, unit) {
+			return d.Label
+		}
+	}
+	return ""
 }
 
 // Mode is how a selection was computed.
@@ -228,10 +263,13 @@ func Select(in *Input) (*Result, error) {
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
-	for i, su := range append(slices.Clip(in.Suites), in.Others...) {
+	everySuite := append(slices.Clip(in.Suites), in.Others...)
+	services := newServiceExpander(in.Config, everySuite, files)
+	for i, su := range everySuite {
 		selecting := i < len(in.Suites) // in.Others only add to covered
 		hs := hasher.ForSuite(su)
 		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
+		sr.Services = services.forSuite(su)
 		if selecting {
 			res.Suites = append(res.Suites, sr)
 		}
@@ -255,6 +293,13 @@ func Select(in *Input) (*Result, error) {
 		for _, u := range units {
 			deps := map[string]bool{}
 			via := map[string]string{} // known deps by strongest explanation
+			for _, d := range sr.Services {
+				if d.applies(su, u) {
+					for _, f := range d.Files {
+						deps[f], via[f] = true, ViaService
+					}
+				}
+			}
 			if config.Bool(su.Static, true) && in.Graph != nil {
 				for _, f := range in.Graph.Closure(unitFiles[u]...) {
 					deps[f], via[f] = true, ViaImport
@@ -312,8 +357,14 @@ func Select(in *Input) (*Result, error) {
 					t.Via = map[string]string{}
 				}
 				t.Via[c] = via[c]
-				if t.Via[c] == "" {
+				switch t.Via[c] {
+				case "":
 					t.Via[c] = ViaTraced
+				case ViaService:
+					if t.Service == nil {
+						t.Service = map[string]string{}
+					}
+					t.Service[c] = sr.ServiceVia(u, c)
 				}
 			}
 			sr.Tests = append(sr.Tests, t)
@@ -493,6 +544,79 @@ func suiteInputFiles(su *runner.Suite, files []string) []string {
 	return out
 }
 
+// serviceExpander expands depends_on/serves declarations to files, each suite's code
+// once per selection however many suites and tests depend on it.
+type serviceExpander struct {
+	ignore []string
+	suites []*runner.Suite
+	files  []string
+	code   map[string][]string // suite name -> its code
+}
+
+func newServiceExpander(c *config.Config, suites []*runner.Suite, files []string) *serviceExpander {
+	return &serviceExpander{ignore: IgnoreGlobs(c), suites: suites, files: files, code: map[string][]string{}}
+}
+
+// suiteCode is what {suite: name} stands for: the files under the suite's root other
+// than its test files, ignored and vendored files, and files of other suites rooted
+// below it (a suite at the repository root does not take in every other suite).
+func (e *serviceExpander) suiteCode(name string) []string {
+	if out, ok := e.code[name]; ok {
+		return out
+	}
+	var target *runner.Suite
+	var nested []string
+	for _, s := range e.suites {
+		if s.Name == name {
+			target = s
+		}
+	}
+	if target == nil {
+		// Validation guarantees the suite exists; a caller that passed only some suites
+		// (neither Suites nor Others has it) gets no dependency rather than a guess.
+		e.code[name] = nil
+		return nil
+	}
+	for _, s := range e.suites {
+		if s.Root != target.Root && pathutil.Under(s.Root, target.Root) {
+			nested = append(nested, s.Root)
+		}
+	}
+	var out []string
+	for _, f := range e.files {
+		if !pathutil.Under(f, target.Root) || target.IsTestFile(f) || pathutil.IsVendored(f) || pathutil.Match(e.ignore, f) ||
+			slices.ContainsFunc(nested, func(r string) bool { return pathutil.Under(f, r) }) {
+			continue
+		}
+		out = append(out, f)
+	}
+	e.code[name] = out
+	return out
+}
+
+// forSuite expands the declarations of su. The suite's own test files are left out: a
+// test does not depend on the other tests of its suite.
+func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
+	var out []*ServiceDeps
+	for _, d := range su.Dependencies() {
+		var cand []string
+		if d.Suite != "" {
+			cand = e.suiteCode(d.Suite)
+		} else {
+			cand = expandInputs(d.Paths, e.files)
+		}
+		sd := &ServiceDeps{Label: d.String(), Tests: d.Tests, set: map[string]bool{}}
+		for _, f := range cand {
+			if !su.IsTestFile(f) && !pathutil.IsVendored(f) {
+				sd.Files = append(sd.Files, f)
+				sd.set[f] = true
+			}
+		}
+		out = append(out, sd)
+	}
+	return out
+}
+
 func ruleDeps(su *runner.Suite, unit string, files []string) []string {
 	var out []string
 	rel := pathutil.RelTo(unit, su.Root)
@@ -542,7 +666,7 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 			if a.Test == "" || t.ID == a.Test {
 				found = true
 				if !t.Selected {
-					t.Selected, t.Reason, t.Detail, t.Changed, t.Via = true, a.Reason, a.Detail, nil, nil
+					t.Selected, t.Reason, t.Detail, t.Changed, t.Via, t.Service = true, a.Reason, a.Detail, nil, nil, nil
 					for _, f := range a.Files {
 						if t.Via == nil {
 							t.Via = map[string]string{}

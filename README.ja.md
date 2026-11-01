@@ -35,6 +35,7 @@ D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込み
                    T のコードが読んだ環境変数
      ∪ static(T)   現時点で計算した import グラフの閉包(新しい import も即座に反映)
      ∪ inputs      lockfile、マニフェスト、ランナー設定、smates.yml、指定した glob
+     ∪ depends_on  テストが別プロセスで叩くサーバーのコード(宣言したもの)
 ```
 
 前回成功していて、`D(T)` の全ファイルのハッシュが今も同じときだけ `T` を **スキップ**し、
@@ -84,6 +85,38 @@ env_track: [LANG]
    ツールでリポジトリを調べ、特定のテストを追加するか全実行を求めます。テストを削除する
    ことはできないため、誤答や指示注入があっても「追加し損ねる」以上の害はありません。
 3. それ以外の場合は、そのファイルが影響しうるスイートを丸ごと実行します。
+
+### サーバーを叩くテスト
+
+E2E テスト(Playwright、vitest の e2e、HTTP API に対する pytest など)は、別プロセスや
+コンテナで動くサーバー(docker compose で起動した Go のバックエンドなど)にアクセスする
+ことがよくあります。トレースが見るのはテストのプロセスでサーバーではないため、サーバーの
+コードを変えてもこれらのテストは選ばれません。E2E スイートに依存を宣言してください。
+
+```yaml
+  - name: e2e
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on: [api]              # スイート api のコード
+    # または: depends_on: [{paths: ["backend/**", "docker-compose.yml"], tests: ["admin/**"]}]
+    # または: serves: ["backend/**"]
+```
+
+`{suite: api}`(または単に `api`)は、そのスイートの root 以下のファイルから、そのスイートの
+テストファイル、無視・vendor 扱いのファイル、さらに下に root を持つ別スイートのファイルを
+除いたものです。`paths` はリポジトリ相対の glob、`tests`(スイートの root からの相対)で
+依存を付けるテストを絞れます。これらのファイルは inputs と同じく `D(T)` に加わる(HEAD で
+計算し、テスト実行時にハッシュを記録)ので、変更するとテストが選ばれ、`--suite` で絞っても
+オーファンになりません。`--explain`、`smates why`、プルリクエストのサマリには宣言名が出ます。
+
+```
++ e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]
+```
+
+`smates doctor` は、E2E らしいのに `depends_on`・`serves`・`rules` のどれもないスイート
+(名前や root に e2e を含む、コマンドが Playwright や Cypress を実行する、テストが
+`http://localhost` を呼ぶ)を指摘します。
 
 ## クイックスタート
 

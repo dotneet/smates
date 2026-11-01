@@ -23,6 +23,7 @@ import (
 	"github.com/dotneet/smates/internal/detect"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 	"gopkg.in/yaml.v3"
@@ -110,7 +111,8 @@ func renderConfig(suites []config.Suite) string {
 version: 1
 
 # Test suites: one runner invocation each. Paths are relative to the repository root.
-# Optional per suite: tests/exclude (globs relative to root), command, inputs, rules, env,
+# Optional per suite: tests/exclude (globs relative to root), command, inputs, rules,
+# depends_on/serves (code of a server the tests talk to: e.g. depends_on: [api]), env,
 # isolate (jest/bun: one process per file while recording), junit.
 suites:
 `)
@@ -300,7 +302,7 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	if !depkey.IsEnv(target) {
 		target = p.relArg(target)
 	}
-	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
+	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err
 	}
@@ -321,10 +323,10 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			var how []string
 			switch kind {
 			case "content":
-				for _, d := range s.Known[t.ID] {
-					if d == target {
-						how = append(how, "static/inputs")
-					}
+				if label := s.ServiceVia(t.ID, target); label != "" {
+					how = append(how, label)
+				} else if slices.Contains(s.Known[t.ID], target) {
+					how = append(how, "static/inputs")
 				}
 				if st != nil && st.Tests[t.ID] != nil {
 					if _, ok := st.Tests[t.ID].Deps[target]; ok {
@@ -372,7 +374,7 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	target := p.relArg(fs.Arg(0))
-	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
+	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err
 	}
@@ -686,6 +688,9 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 		} else {
 			ok("suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command)
 		}
+		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
+			warn("suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why)
+		}
 		runners[s.Runner] = true
 	}
 	tool := func(name string, args ...string) string {
@@ -751,4 +756,44 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 		return 1, nil
 	}
 	return 0, nil
+}
+
+// serverSuiteHint says why suite s looks like end-to-end tests of a server running in
+// another process ("" when it does not, or when it already declares depends_on, serves
+// or rules): its name or root mentions e2e, its command runs Playwright or Cypress, or
+// one of its first test files calls a local HTTP address.
+func serverSuiteHint(repoRoot string, s *runner.Suite, files []string) string {
+	if len(s.DependsOn) > 0 || len(s.Serves) > 0 || len(s.Rules) > 0 {
+		return ""
+	}
+	isE2E := func(v string) bool {
+		v = strings.ToLower(v)
+		return strings.Contains(v, "e2e") || strings.Contains(v, "end-to-end") || strings.Contains(v, "end2end")
+	}
+	switch cmd := strings.ToLower(s.Command); {
+	case isE2E(s.Name):
+		return "name " + s.Name
+	case isE2E(s.Root):
+		return "root " + s.Root
+	case strings.Contains(cmd, "playwright"):
+		return "runs playwright"
+	case strings.Contains(cmd, "cypress"):
+		return "runs cypress"
+	}
+	const maxScanned = 20
+	for i, f := range s.TestFiles(files) {
+		if i == maxScanned {
+			break
+		}
+		data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		for _, needle := range []string{"http://localhost", "http://127.0.0.1", "http://0.0.0.0"} {
+			if bytes.Contains(data, []byte(needle)) {
+				return f + " calls " + needle
+			}
+		}
+	}
+	return ""
 }

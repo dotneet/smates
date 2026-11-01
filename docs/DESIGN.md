@@ -26,11 +26,27 @@ The dependency set used at selection time is
          ∪ suite inputs       lockfiles and manifests (up to the repo root), runner config,
                               smates.yml, configured globs
          ∪ rule deps          declared in smates.yml
+         ∪ cross-suite deps   declared in smates.yml (depends_on / serves), expanded at HEAD
 
 A key present in `D(T)` but absent from the recorded hashes counts as changed, so a newly
 added import, conftest.py, Go file in an imported package or rule target triggers the test
 without having been recorded. Hashes are compared by content, not by git diff: no history
 is needed (`fetch-depth: 1`), dirty working trees work, rebases do not matter.
+
+**Cross-suite dependencies.** Tracing follows the test process and its children; it
+cannot follow a request into a server running in another process or container (an e2e
+suite against a backend started by docker compose). A suite declares that code with
+`depends_on`: `{suite: S}` is S's code — the files under S's root minus S's test files,
+ignored and vendored files, and files of other suites rooted below S's root (so a suite at
+the repository root does not swallow the others) — and `{paths: [globs]}` is repo-relative
+globs; `tests:` narrows the entry to some of the suite's tests. `serves: [globs]` is
+shorthand for a paths entry. The depending suite's own test files are never added. Each
+entry is expanded once per selection (`serviceExpander`; a suite's code once however many
+suites depend on it), not per test. Like rule deps the files are static: part of
+`Known`, hashed when the test runs, and they cover changes for the orphan check — also
+with `--suite`, since the expansion sees `Input.Others`. The explanation is
+`Test.Via = service` with `Test.Service` naming the declaration ("depends_on suite api"),
+which `--explain`, `smates why`, the summary and failure hints render.
 
 Dependency keys:
 
@@ -45,7 +61,8 @@ Dependency keys:
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
 is the same — modulo nondeterminism and inputs outside the repository (services, network),
-which are handled by global inputs, rules, and the orphan path below.
+which are handled by global inputs, rules, cross-suite dependencies, and the orphan path
+below.
 
 ### Environment variables
 
@@ -338,7 +355,8 @@ restored from the default branch carries the default branch's records forward.
 job summary and for pull request comments (`--markdown`, `select --format markdown`,
 the action's `comment` input). The selection carries the "why" it needs: for each
 changed dependency of a selected test, `Test.Via` says how it reached the test (the test
-file itself, a suite input or rule, the static import graph, or only the traced reads of
+file itself, a suite input or rule, a `depends_on`/`serves` declaration (named in
+`Test.Service`), the static import graph, or only the traced reads of
 its last run), additions for orphans carry the orphan files (`Addition.Files`), and
 `Result.OrphanHandling` records whether each orphan was explained by a reference scan,
 the agent (or judged irrelevant by it), the `orphans` policy, or ignored. Time saved is
