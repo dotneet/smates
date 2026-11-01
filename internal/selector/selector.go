@@ -55,6 +55,10 @@ type Input struct {
 	Repo   *gitx.Repo
 	Config *config.Config
 	Suites []*runner.Suite
+	// Others are the configured suites left out (--suite): none of their tests is
+	// selected, but a change one of them depends on is not an orphan, so that the
+	// selection of Suites is the same as in a run over every suite.
+	Others []*runner.Suite
 	State  *state.State
 	Snap   gitx.Snapshot
 	Graph  *static.Graph
@@ -221,9 +225,12 @@ func Select(in *Input) (*Result, error) {
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
-	for _, su := range in.Suites {
+	for i, su := range append(slices.Clip(in.Suites), in.Others...) {
+		selecting := i < len(in.Suites) // in.Others only add to covered
 		sr := &Suite{Suite: su, Name: su.Name, Deps: map[string][]string{}, Known: map[string][]string{}, Inputs: map[string]bool{}}
-		res.Suites = append(res.Suites, sr)
+		if selecting {
+			res.Suites = append(res.Suites, sr)
+		}
 		tests := su.TestFiles(files)
 		units := su.Adapter.Units(su, tests)
 		unitFiles := groupUnitFiles(su, tests)
@@ -280,6 +287,9 @@ func Select(in *Input) (*Result, error) {
 			}
 			sort.Strings(dl)
 			sr.Deps[u] = dl
+			if !selecting {
+				continue
+			}
 
 			t := &Test{ID: u}
 			if entry != nil {

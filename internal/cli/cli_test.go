@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -311,6 +313,79 @@ func TestAutoBase(t *testing.T) {
 	single := newGitRepo(t)
 	if got := autoBase(ciInfo{}, single.repo); got != "" {
 		t.Errorf("single commit: %q", got)
+	}
+}
+
+// TestSuiteFilterOrphans checks that --suite selects what a run over every suite selects
+// for those suites: a change another suite depends on is not an orphan.
+func TestSuiteFilterOrphans(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	write := func(rel, content string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("smates.yml", `version: 1
+orphans: all
+suites:
+  - name: a
+    runner: custom
+    root: a
+    tests: ["*_check.sh"]
+    command: "true"
+    rules: [{tests: ["*"], deps: ["src/a/**"]}]
+  - name: b
+    runner: custom
+    root: b
+    tests: ["*_check.sh"]
+    command: "true"
+    rules: [{tests: ["*"], deps: ["src/b/**"]}]
+`)
+	write("a/x_check.sh", "")
+	write("b/x_check.sh", "")
+	write("src/a/lib", "1")
+	write("src/b/lib", "1")
+	g.git("add", "-A")
+	base := g.commit("fixture")
+	selectA := func() (string, []string) {
+		var out, errb bytes.Buffer
+		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--base", base, "--suite", "a", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+			t.Fatalf("select: %d %s", code, errb.String())
+		}
+		var js struct {
+			Suites []struct {
+				Name  string `json:"name"`
+				Tests []struct {
+					Reason string `json:"reason"`
+				} `json:"tests"`
+			} `json:"suites"`
+			Orphans []string `json:"orphans"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &js); err != nil {
+			t.Fatalf("%v\n%s", err, out.String())
+		}
+		if len(js.Suites) != 1 || js.Suites[0].Name != "a" || len(js.Suites[0].Tests) != 1 {
+			t.Fatalf("suites: %+v", js.Suites)
+		}
+		return js.Suites[0].Tests[0].Reason, js.Orphans
+	}
+
+	write("src/b/lib", "2")
+	if reason, orphans := selectA(); reason != "unaffected" || len(orphans) != 0 {
+		t.Errorf("a change only suite b depends on: %s, orphans %v", reason, orphans)
+	}
+	write("Dockerfile", "FROM x")
+	if reason, orphans := selectA(); reason != "orphan" || !reflect.DeepEqual(orphans, []string{"Dockerfile"}) {
+		t.Errorf("a change no suite depends on: %s, orphans %v", reason, orphans)
+	}
+
+	var out, errb bytes.Buffer
+	if code := Main([]string{"select", "-C", g.dir, "--suite", "nope"}, &out, &errb); code == 0 || !strings.Contains(errb.String(), "unknown suite") {
+		t.Errorf("unknown suite: %d %s", code, errb.String())
 	}
 }
 

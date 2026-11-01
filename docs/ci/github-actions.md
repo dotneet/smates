@@ -157,7 +157,8 @@ The runner OS is already part of the key.
 
 **Monorepos.** A single smates step covers every suite of the repository (smates.yml
 at the repository root lists them). If you split suites across jobs, use `args: --suite
-<name>` and a distinct `cache-key` per job.
+<name>` and a distinct `cache-key` per job. Each job then selects what a single step would
+select for its suites: a change another suite's tests depend on is not an orphan in it.
 
 **Shadow mode.** `args: --shadow` runs the full suite and reports what selection would
 have done, to build confidence before trusting it.

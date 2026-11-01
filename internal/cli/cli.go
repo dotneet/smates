@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,6 +141,9 @@ type project struct {
 	// filtered is set when --suite limited the suites (repository-wide bookkeeping
 	// such as the snapshot is then left alone).
 	filtered bool
+	// others are the suites --suite left out (they still explain changes, see
+	// selector.Input.Others).
+	others []*runner.Suite
 }
 
 func load(cf *commonFlags, log io.Writer) (*project, error) {
@@ -186,17 +190,26 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	if err != nil {
 		return nil, err
 	}
+	var roots []string
+	for _, s := range suites {
+		for _, r := range s.PythonRoots {
+			roots = append(roots, filepath.ToSlash(filepath.Join(s.Root, r)))
+		}
+	}
+	var others []*runner.Suite
 	if len(cf.suites) > 0 {
-		var keep []*runner.Suite
-		for _, s := range suites {
-			for _, n := range cf.suites {
-				if s.Name == n {
-					keep = append(keep, s)
-				}
+		for _, n := range cf.suites {
+			if !slices.ContainsFunc(suites, func(s *runner.Suite) bool { return s.Name == n }) {
+				return nil, usageError{fmt.Errorf("unknown suite in %v (have: %s)", []string(cf.suites), suiteNames(suites))}
 			}
 		}
-		if len(keep) != len(cf.suites) {
-			return nil, usageError{fmt.Errorf("unknown suite in %v (have: %s)", []string(cf.suites), suiteNames(suites))}
+		var keep []*runner.Suite
+		for _, s := range suites {
+			if slices.Contains(cf.suites, s.Name) {
+				keep = append(keep, s)
+			} else {
+				others = append(others, s)
+			}
 		}
 		suites = keep
 	}
@@ -212,14 +225,8 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	if err != nil {
 		return nil, err
 	}
-	var roots []string
-	for _, s := range suites {
-		for _, r := range s.PythonRoots {
-			roots = append(roots, filepath.ToSlash(filepath.Join(s.Root, r)))
-		}
-	}
 	p := &project{
-		repo: repo, cfg: cfg, suites: suites, statePath: statePath, state: st, snap: snap, files: files,
+		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, state: st, snap: snap, files: files,
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
 		filtered: len(cf.suites) > 0,
 	}
@@ -289,7 +296,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		}
 	}
 	res, err := selector.Select(&selector.Input{
-		Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, Base: base, All: opt.all,
+		Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, Base: base, All: opt.all,
 		DiffUnrecorded: diffUnrecorded,
 	})
 	if err != nil {

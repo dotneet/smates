@@ -487,6 +487,37 @@ func TestSelectMultipleSuitesShareCoverage(t *testing.T) {
 	}
 }
 
+func TestSelectOthersOnlyCover(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"api/test_api.py":  "import shared.util\n",
+		"shared/util.py":   "",
+		"web/a.test.ts":    "",
+		"e2e/test_e2e.py":  "",
+		"server/handler.x": "",
+	})
+	f.suites = []*runner.Suite{
+		suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}}),
+		suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.ts"}}),
+		suite(t, config.Suite{Name: "e2e", Runner: "pytest", Root: "e2e", Tests: []string{"test_*.py"},
+			Rules: []config.Rule{{Tests: []string{"test_e2e.py"}, Deps: []string{"server/**"}}}}),
+	}
+	st := f.record(map[string][]string{"api/test_api.py": {"shared/util.py"}}, nil)
+	f.write("shared/util.py", "x = 1")
+	f.write("server/handler.x", "y")
+	f.write("Dockerfile", "FROM x")
+	// --suite web: the suites left out still explain the changes they depend on.
+	res := f.sel(st, func(in *Input) { in.Suites, in.Others = f.suites[1:2], []*runner.Suite{f.suites[0], f.suites[2]} })
+	if len(res.Suites) != 1 || res.Suites[0].Name != "web" {
+		t.Fatalf("only the given suites are decided: %+v", res.Suites)
+	}
+	if d := decisions(res); d["web/a.test.ts"] != "-unaffected" {
+		t.Errorf("%v", d)
+	}
+	if !reflect.DeepEqual(res.Orphans, []string{"Dockerfile"}) {
+		t.Errorf("only a change no suite depends on is an orphan: %v", res.Orphans)
+	}
+}
+
 // ---- diff mode ----
 
 func gitFixture(t *testing.T, f *fixture) (*gitx.Repo, string) {
