@@ -103,6 +103,37 @@ func TestAttributeSingleUnitWorkers(t *testing.T) {
 	}
 }
 
+// With one runner per test file (isolate), a runner whose test process left no trace
+// (a jest worker force-killed before writing its coverage) is still a runner: the tree
+// its crawl or watchman probe stands for is not a read of the other tests. A setup
+// script the suite command runs before the runner (sh -c "node setup.js && jest": no
+// traced parent, no test of its own, no test on its command line) still gives every
+// test what it reads.
+func TestAttributeRunnerWithoutTracedTest(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "a.test.ts", "b.test.ts", "src/a.ts", "jest.config.js", "setup.js", "seed.json")
+	jest := func(pid int, test string) *pb {
+		b := mkProc(pid, 1, 0).code("jest.config.js").read("./**")
+		b.p.Argv, b.p.Cwd = []string{"node", "node_modules/.bin/jest", "--runTestsByPath", test}, root
+		return b
+	}
+	setup := mkProc(30, 1, 0).code("setup.js").read("seed.json")
+	setup.p.Argv, setup.p.Cwd = []string{"node", "setup.js"}, root
+	a := attr(Options{Rel: RelFunc(root)},
+		jest(10, "a.test.ts"),
+		mkProc(11, 10, 0).code("a.test.ts", "src/a.ts").exit(0),
+		jest(20, filepath.Join(root, "b.test.ts")),
+		mkProc(21, 20, 0), // the worker of b.test.ts, killed: no coverage
+		setup,
+	)
+	if got := unitFiles(a, "a.test.ts"); !reflect.DeepEqual(got, []string{"a.test.ts", "src/a.ts"}) {
+		t.Errorf("a: %v", got)
+	}
+	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"jest.config.js", "seed.json", "setup.js"}) {
+		t.Errorf("global: %v, want the runners' code and the setup script's files", got)
+	}
+}
+
 func TestAttributeSharedProcess(t *testing.T) {
 	a := attr(Options{},
 		mkProc(10, 1, 0),
@@ -349,6 +380,32 @@ func TestAttributeHelperOfTest(t *testing.T) {
 	}
 	if s := a.Units["test_a.py"].Status; s != "" {
 		t.Errorf("test_a.py status %q (the helper's exit code is not the test's)", s)
+	}
+}
+
+// A helper of a test whose traced ancestry is broken (no traced parent, its ancestor
+// not in the trace) that names a test file of the suite on its command line is still
+// the test's helper, not a runner without a traced test; a runner smates started that
+// names one (no test context exported to it) still is.
+func TestAttributeHelperVersusRunner(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "test_a.py", "test_b.py", "sub/test_sub.py", "helper.py", "sub.txt", "conftest.py", "tree.txt")
+	py := mkProc(100, 1, 0).ctx(10, "test:test_a.py", "test_a.py").ctx(50, "")
+	meta := mkProc(200, 999, 0).times(20, 30).code("sub/test_sub.py", "helper.py").read("sub.txt").exit(1)
+	meta.p.SpawnKey, meta.p.SpawnCtx, meta.p.Anc = "100-0", "test:test_a.py", "998-0"
+	meta.p.Argv, meta.p.Cwd = []string{"python", "-m", "pytest", "sub/test_sub.py"}, root
+	runner := mkProc(300, 1, 0).code("conftest.py").read("tree.txt")
+	runner.p.Argv, runner.p.Cwd = []string{"python", "-m", "pytest", "test_b.py"}, root
+	a := attr(Options{Rel: RelFunc(root)}, py, meta, runner)
+	if got, want := unitFiles(a, "test_a.py"), []string{"helper.py", "sub.txt", "sub/test_sub.py", "test_a.py"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("test_a.py: got %v, want %v", got, want)
+	}
+	// The runner's code is global, its reads are no one's; the helper's are the test's.
+	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"conftest.py"}) {
+		t.Errorf("global %v", got)
+	}
+	if u := a.Units["sub/test_sub.py"]; u != nil {
+		t.Errorf("unit of the helper: %+v", u)
 	}
 }
 

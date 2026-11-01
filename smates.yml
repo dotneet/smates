@@ -46,7 +46,7 @@ suites:
       - tests: ["."]
         deps: &pytest ["internal/runner/pytest.go", "internal/runner/discover_pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
       - tests: ["."]
-        deps: &gotest ["internal/runner/{gotest,gofunc,gofunc_parse,gofunc_select,gofunc_flags,gofunc_record,gofunc_output}.go", "internal/static/golang/**"]
+        deps: &gotest ["internal/runner/{gotest,gofunc,gofunc_parse,gofunc_select,gofunc_flags,gofunc_record,gofunc_output,gofunc_build}.go", "internal/static/golang/**"]
       - tests: ["."]
         deps: &polyglot ["e2e/fixtures/polyglot/**"]
 
