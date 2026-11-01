@@ -487,7 +487,7 @@ func TestUntestedCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Suites["go"] = &state.Suite{Tests: map[string]*state.Entry{"lib": {Deps: map[string]string{"lib/lib.go": st.Files["lib/lib.go"]}, Status: state.Pass}}}
+	st.Suites["go"] = &state.Suite{Tests: map[string]*state.Entry{"lib": {Deps: map[string]string{"lib/lib.go": st.Files["lib/lib.go"], "smates.yml": st.Files["smates.yml"]}, Status: state.Pass}}}
 	if err := st.Save(statePath); err != nil {
 		t.Fatal(err)
 	}
@@ -503,12 +503,12 @@ func TestUntestedCode(t *testing.T) {
 	// The suite's settings key is shown as the file: why and deps.
 	out.Reset()
 	errb.Reset()
-	if code := Main([]string{"why", "-C", g.dir, "smates.yml"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "lib") {
+	if code := Main([]string{"why", "-C", g.dir, "smates.yml"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "lib\t(static/inputs") {
 		t.Errorf("why smates.yml: %d %s %s", code, out.String(), errb.String())
 	}
 	out.Reset()
 	errb.Reset()
-	if code := Main([]string{"deps", "-C", g.dir, "lib"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "smates.yml\t") || strings.Contains(out.String(), "#suite") {
+	if code := Main([]string{"deps", "-C", g.dir, "lib"}, &out, &errb); code != 0 || strings.Count(out.String(), "smates.yml\t") != 1 || !strings.Contains(out.String(), "smates.yml\tstatic,recorded") || strings.Contains(out.String(), "#suite") {
 		t.Errorf("deps lib: %d %s %s", code, out.String(), errb.String())
 	}
 }
