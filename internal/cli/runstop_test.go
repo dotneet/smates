@@ -104,14 +104,31 @@ func TestEnvErrorWithFailingTests(t *testing.T) {
 	}
 }
 
+// A batch that fails with no unit known to have failed (TestMain exits 1 after the
+// tests passed) is a test failure too, next to an environment error: exit 1.
+func TestEnvErrorWithFailingBatch(t *testing.T) {
+	r := newGoFuncRepo(t, "go test")
+	r.write("smates.yml", "version: 1\norphans: ignore\nsuites:\n  - name: go\n    runner: go\n    granularity: func\n"+
+		"  - name: pt\n    runner: pytest\n    tests: [\"pt/test_*.py\"]\n    command: sh -c 'smates-no-such-pytest-x6' sh\n")
+	r.write("pt/test_x.py", "def test_x():\n    pass\n")
+	r.write("calc/main_test.go", "package calc\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) { m.Run(); os.Exit(1) }\n")
+	var out, errb bytes.Buffer
+	code := Main([]string{"run", "-C", r.g.dir, "--no-agent", "--all"}, &out, &errb)
+	if code != ExitFailed || !strings.Contains(errb.String(), "exited with code 127 before any test reported a result") {
+		t.Errorf("failing go batch and an env error: exit %d, want %d\n%s", code, ExitFailed, errb.String())
+	}
+}
+
 func TestDryRun(t *testing.T) {
 	_, _, run := outputFixture(t)
 	code, out, errs := run("run", "--all", "--dry-run")
 	if code != 0 || !strings.Contains(out, `(cd . && sh -c 'rc=0; [ $# -gt 0 ] || set -- good/*_check.py; for f; do python3 "$f" || rc=1; done; exit $rc' sh good/a_check.py)`) {
 		t.Errorf("commands must be quoted for the shell: %d\n%s\n%s", code, out, errs)
 	}
-	if code, _, errs := run("run", "--dry-run", "--report", "r.json"); code != ExitUsage {
-		t.Errorf("--dry-run --report: exit %d, want %d\n%s", code, ExitUsage, errs)
+	for _, flag := range []string{"--report", "--markdown", "--summary"} {
+		if code, _, errs := run("run", "--dry-run", flag, "out.txt"); code != ExitUsage {
+			t.Errorf("--dry-run %s: exit %d, want %d\n%s", flag, code, ExitUsage, errs)
+		}
 	}
 }
 

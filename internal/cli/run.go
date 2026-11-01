@@ -126,8 +126,8 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	if f.shadow && f.failFast {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
 	}
-	if f.dryRun && f.report != "" {
-		return nil, usageError{fmt.Errorf("--dry-run runs nothing and cannot be combined with --report (use `smates select --format json` for the selection)")}
+	if f.dryRun && (f.report != "" || f.markdown != "" || f.summary != "") {
+		return nil, usageError{fmt.Errorf("--dry-run runs nothing and cannot be combined with --report, --markdown or --summary (use `smates select --format json|markdown` for the selection)")}
 	}
 	return &f, nil
 }
@@ -269,8 +269,10 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 	}
 	if c.interrupted {
-		if saveErr != nil {
-			p.logf("%v", saveErr)
+		for _, err := range []error{c.envErr, saveErr} {
+			if err != nil {
+				p.logf("%v", err)
+			}
 		}
 		return c.worst, errors.New("interrupted")
 	}
@@ -281,7 +283,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		if saveErr != nil {
 			p.logf("%v", saveErr)
 		}
-		if c.anyFailed() {
+		if c.testsFailed {
 			p.logf("%v", c.envErr)
 			return c.worst, nil
 		}
@@ -327,30 +329,20 @@ type cycle struct {
 	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
 	// failedBatches are the batches that exited non-zero.
 	failedBatches []failedBatch
-	// envErr is set when a batch's tests never started (notStarted).
-	envErr   error
-	started  map[string][]string     // suite -> units started
-	notRun   map[string][]string     // --fail-fast, interrupt: suite -> units not started (or cut short)
-	stopped  bool                    // --fail-fast (or an interrupt) stopped the run
-	results  map[string]*suiteResult // suite -> outcomes to record
-	escapes  []string                // shadow: failing tests the selection would have skipped
-	possible []string                // shadow: skipped tests failed only by the run's exit code
-	flakes   []flakeReport
+	// envErr is set when a batch's tests never started (notStarted); testsFailed when
+	// another batch exited non-zero.
+	envErr      error
+	testsFailed bool
+	started     map[string][]string     // suite -> units started
+	notRun      map[string][]string     // --fail-fast, interrupt: suite -> units not started (or cut short)
+	stopped     bool                    // --fail-fast (or an interrupt) stopped the run
+	results     map[string]*suiteResult // suite -> outcomes to record
+	escapes     []string                // shadow: failing tests the selection would have skipped
+	possible    []string                // shadow: skipped tests failed only by the run's exit code
+	flakes      []flakeReport
 	// interrupted: the run was cancelled (Ctrl-C); the batch it cut short counts as
 	// not run.
 	interrupted bool
-}
-
-// anyFailed reports whether a test unit of the run failed.
-func (c *cycle) anyFailed() bool {
-	for _, units := range c.ran {
-		for _, st := range units {
-			if st == state.Fail {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
@@ -504,7 +496,11 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
 	// executable or not installed: when tests that report results reported none, they
 	// never ran. The batch is still handled as a failure below.
-	if c.envErr == nil && notStarted(sr.Suite.Runner, c.record, r) {
+	if !notStarted(sr.Suite.Runner, c.record, r) {
+		// Any other failing batch failed tests, even when no unit is known to have
+		// failed (TestMain exiting 1, a teardown error, a coverage threshold).
+		c.testsFailed = c.testsFailed || r.ExitCode != 0
+	} else if c.envErr == nil {
 		c.envErr = envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
