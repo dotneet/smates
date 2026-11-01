@@ -140,16 +140,38 @@ type ServiceDeps struct {
 // exists).
 func (d *ServiceDeps) Match(f string) bool { return d.match(f) }
 
-// applies reports whether the declaration covers a unit of suite su.
-func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
-	return len(d.Tests) == 0 || pathutil.Match(d.Tests, pathutil.RelTo(unit, su.Root))
+// applies reports whether the declaration covers a unit of suite su whose test files
+// are files.
+func (d *ServiceDeps) applies(su *runner.Suite, unit string, files []string) bool {
+	return len(d.Tests) == 0 || UnitMatches(su, unit, files, d.Tests)
+}
+
+// UnitMatches reports whether the tests globs of a rule or a depends_on declaration
+// (relative to the suite root) select unit, whose test files are files. A Go test
+// function ("dir#TestName") is matched by its package directory, like the package unit
+// it belongs to, and by the test file defining it.
+func UnitMatches(su *runner.Suite, unit string, files, globs []string) bool {
+	if pathutil.Match(globs, pathutil.RelTo(unit, su.Root)) {
+		return true
+	}
+	if dir, _, ok := runner.SplitFuncUnit(unit); ok {
+		if pathutil.Match(globs, pathutil.RelTo(dir, su.Root)) {
+			return true
+		}
+		for _, f := range files {
+			if pathutil.Match(globs, pathutil.RelTo(f, su.Root)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ServiceVia returns the label of the first depends_on/serves declaration through
 // which unit depends on file f ("" when none does).
 func (s *Suite) ServiceVia(unit, f string) string {
 	for _, d := range s.Services {
-		if d.match(f) && d.applies(s.Suite, unit) {
+		if d.match(f) && d.applies(s.Suite, unit, s.Files[unit]) {
 			return d.Label
 		}
 	}
@@ -344,7 +366,7 @@ func Select(in *Input) (*Result, error) {
 			deps := map[string]bool{}
 			via := map[string]string{} // known deps by strongest explanation
 			for _, d := range sr.Services {
-				if d.applies(su, u) {
+				if d.applies(su, u, unitFiles[u]) {
 					deps[d.Key], via[d.Key] = true, ViaService
 					if !slices.Contains(res.declared, d) {
 						res.declared = append(res.declared, d)
@@ -366,7 +388,7 @@ func Select(in *Input) (*Result, error) {
 			for _, f := range suiteInputs {
 				deps[f], via[f] = true, ViaInput
 			}
-			for _, f := range ruleDeps(su, u, files) {
+			for _, f := range ruleDeps(su, u, unitFiles[u], files) {
 				deps[f], via[f] = true, ViaInput
 			}
 			for _, f := range unitFiles[u] {
@@ -771,11 +793,12 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 	return out
 }
 
-func ruleDeps(su *runner.Suite, unit string, files []string) []string {
+// ruleDeps are the files the suite's rules declare for unit (with test files
+// unitFiles), among files.
+func ruleDeps(su *runner.Suite, unit string, unitFiles, files []string) []string {
 	var out []string
-	rel := pathutil.RelTo(unit, su.Root)
 	for _, r := range su.Rules {
-		if !pathutil.Match(r.Tests, rel) {
+		if !UnitMatches(su, unit, unitFiles, r.Tests) {
 			continue
 		}
 		out = append(out, expandInputs(r.Deps, files)...)
