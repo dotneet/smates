@@ -139,8 +139,10 @@ func TestNodeShimChildWithOwnEnv(t *testing.T) {
 		"fork.cjs":   "require('fs').readFileSync('fork.txt');\n",
 		"shell.cjs":  "require('fs').readFileSync('shell.txt');\n",
 		"worker.cjs": "require('fs').readFileSync('worker.txt');\n",
-		"child.py":   "open('py.txt').read()\n",
-		"child.txt":  "", "child2.txt": "", "fork.txt": "", "shell.txt": "", "worker.txt": "", "py.txt": "",
+		// child_process takes inherited variables too (for...in).
+		"proto.cjs": "require('fs').readFileSync('proto.txt');\nif (!process.env.PATH || process.env.HOME !== process.env.WANT_HOME || process.env.FOO !== 'bar') process.exit(5);\n",
+		"child.py":  "open('py.txt').read()\n",
+		"child.txt": "", "child2.txt": "", "fork.txt": "", "shell.txt": "", "worker.txt": "", "py.txt": "", "proto.txt": "",
 	}
 	_, pyErr := exec.LookPath("python3")
 	script := `
@@ -152,6 +154,15 @@ cp.execFileSync(node, ['child.cjs'], { env });
 const r = cp.spawnSync(node, ['child2.cjs'], { env: { PATH: process.env.PATH, KEEP: 'yes', NODE_OPTIONS: '--no-deprecation' }, stdio: 'inherit' });
 if (r.status !== 0) throw new Error('child2: ' + r.status);
 cp.execSync(JSON.stringify(node) + ' shell.cjs', { env });
+const inherit = Object.create(process.env);
+inherit.FOO = 'bar';
+inherit.WANT_HOME = process.env.HOME;
+cp.execFileSync(node, ['proto.cjs'], { env: inherit });
+class Env { constructor() { this.FOO = 'bar'; this.WANT_HOME = process.env.HOME; } }
+Object.assign(Env.prototype, { PATH: process.env.PATH, HOME: process.env.HOME });
+cp.execFileSync(node, ['proto.cjs'], { env: new Env() });
+const sh = cp.spawnSync('/bin/sh', ['-c', 'test "$HOME" = "$WANT_HOME" && test "$FOO" = bar'], { env: inherit });
+if (sh.status !== 0) throw new Error('sh: inherited variables lost');
 ` + map[bool]string{true: "cp.execFileSync('python3', ['child.py'], { env });\n"}[pyErr == nil] + `
 const f = cp.fork('fork.cjs', { env });
 f.on('exit', (code) => {
@@ -162,7 +173,7 @@ f.on('exit', (code) => {
 `
 	procs := traceNode(t, root, files, script)
 	nodeVersion(t)
-	checkDeps(t, readsOf(procs, "node"), []string{"child.txt", "child2.txt", "fork.txt", "shell.txt", "worker.txt"}, nil)
+	checkDeps(t, readsOf(procs, "node"), []string{"child.txt", "child2.txt", "fork.txt", "shell.txt", "worker.txt", "proto.txt"}, nil)
 	if pyErr == nil {
 		checkDeps(t, readsOf(procs, "python"), []string{"py.txt"}, nil)
 	}
@@ -177,8 +188,8 @@ f.on('exit', (code) => {
 			t.Errorf("%v: not linked to its parent", p.Argv)
 		}
 	}
-	if n != 6 {
-		t.Errorf("%d node processes and threads traced, want 6", n)
+	if n != 8 {
+		t.Errorf("%d node processes and threads traced, want 8", n)
 	}
 }
 

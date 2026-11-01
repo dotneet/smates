@@ -139,6 +139,7 @@
     };
     Object.defineProperty(wrapped, '__smates', { value: true });
     Object.defineProperty(wrapped, 'name', { value: orig.name });
+    Object.defineProperty(wrapped, 'length', { value: orig.length });
     for (const k of Reflect.ownKeys(orig)) {
       if (k === 'length' || k === 'name' || k === 'prototype') continue;
       try {
@@ -256,17 +257,32 @@
     }
     return pyEntry;
   };
-  const tracedEnv = (env) => {
-    const e = Object.assign({}, env);
+  // Ways NODE_OPTIONS may name the shim already: Go quotes paths with backslashes
+  // (Windows), escaping them.
+  const shimNames = [shimPath, __filename, JSON.stringify(shimPath).slice(1, -1), JSON.stringify(__filename).slice(1, -1)];
+  // inherited: child_process takes the environment's inherited variables too (for...in:
+  // env: Object.create(process.env)); Worker and Bun.spawn take its own ones only.
+  const tracedEnv = (env, inherited) => {
+    const e = inherited ? {} : Object.assign({}, env);
+    if (inherited) for (const k in env) e[k] = env[k];
     let changed = false;
+    // Windows variable names are case-insensitive: Path, Node_Options...
+    const keyOf = (k) => {
+      if (process.platform !== 'win32') return k;
+      const u = k.toUpperCase();
+      return Object.keys(e).find((x) => x.toUpperCase() === u) || k;
+    };
+    const get = (k) => (e[k] === undefined || e[k] === null ? '' : String(e[k]));
     const set = (k, v) => {
+      k = keyOf(k);
       if (v && e[k] === undefined) {
         e[k] = v;
         changed = true;
       }
     };
     const add = (k, entry, sep, first) => {
-      const cur = e[k] === undefined || e[k] === null ? '' : String(e[k]);
+      k = keyOf(k);
+      const cur = get(k);
       if (cur.split(sep).some((s) => s.trim() === entry)) return;
       e[k] = !cur ? entry : first ? entry + sep + cur : cur + sep + entry;
       changed = true;
@@ -275,9 +291,10 @@
     set('SMATES_REPO_ROOT', repoRoot);
     set('SMATES_TRACE_PARENT', `${process.pid}-${threadId}`);
     set('NODE_V8_COVERAGE', env0.NODE_V8_COVERAGE);
-    const opts = e.NODE_OPTIONS === undefined || e.NODE_OPTIONS === null ? '' : String(e.NODE_OPTIONS);
-    if (!opts.includes(shimPath) && !opts.includes(__filename)) {
-      e.NODE_OPTIONS = (shimOption + ' ' + opts).trim();
+    const nodeOptions = keyOf('NODE_OPTIONS');
+    const opts = get(nodeOptions);
+    if (!shimNames.some((n) => opts.includes(n))) {
+      e[nodeOptions] = (shimOption + ' ' + opts).trim();
       changed = true;
     }
     if (pythonEntry()) {
@@ -288,10 +305,10 @@
   };
   // withEnv returns args with the options at index i given a traced environment, or
   // nothing when they need none.
-  const withEnv = (args, i) => {
+  const withEnv = (args, i, inherited) => {
     const o = args[i];
     if (!o || typeof o !== 'object' || !o.env || typeof o.env !== 'object') return;
-    const env = tracedEnv(o.env);
+    const env = tracedEnv(o.env, inherited);
     if (env === o.env) return;
     const a = Array.prototype.slice.call(args);
     a[i] = Object.assign(Object.create(Object.getPrototypeOf(o)), o, { env });
@@ -308,7 +325,7 @@
           if (spawning) return;
           const i = at(arguments);
           if (ev) ev(arguments, i);
-          return withEnv(arguments, i);
+          return withEnv(arguments, i, true);
         },
         true,
       );
@@ -342,6 +359,7 @@
         }
       };
       Object.defineProperty(Worker, '__smates', { value: true });
+      Object.defineProperty(Worker, 'length', { value: Orig.length });
       wt.Worker = Worker;
     }
   } catch (_) {}
