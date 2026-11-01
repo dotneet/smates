@@ -1,10 +1,12 @@
 package selector
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 
 	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -12,6 +14,7 @@ import (
 // explains how its changed dependencies reached it, then marks the suites whose every
 // test is selected (Suite.All).
 func (s *selection) decideTests() {
+	s.unrecordedReads = s.findUnrecordedReads()
 	for _, ss := range s.suites {
 		if !ss.selecting {
 			continue
@@ -23,9 +26,58 @@ func (s *selection) decideTests() {
 	}
 }
 
+// findUnrecordedReads returns, in a DiffUnrecorded selection with a suite that has
+// units with no recorded entry, the files changed since Base that diff mode would find
+// orphans (no dependency known without a recording explains them) but the recorded
+// dependencies of other units explain, by the suites the orphan policy would run for
+// them (by root, see orphanOwners). Tests read such a file as data, so a unit that has
+// never run may read it too, which its static closure cannot tell. The changes nothing
+// explains are orphans of this selection and left to the orphan policy. Like orphans,
+// these files select nothing when the run applies no orphan policy
+// (Input.NoOrphanPolicy).
+func (s *selection) findUnrecordedReads() map[string][]string {
+	in, res := s.in, s.res
+	if s.baseChanged == nil || !slices.ContainsFunc(s.suites, func(ss *suiteSel) bool { return ss.selecting && ss.sr.Unrecorded }) {
+		return nil
+	}
+	own := NewOwnership(in.Suites, in.Others)
+	ignore := IgnoreGlobs(in.Config)
+	files := make([]string, 0, len(s.baseChanged))
+	for f := range s.baseChanged {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	out := map[string][]string{}
+	n := 0
+	for _, f := range files {
+		if pathutil.IsVendored(f) || pathutil.Match(ignore, f) {
+			continue
+		}
+		// Whether f was added since Base is not known: only a deletion counts as an
+		// existence change, as for diff mode's orphans (existedBefore).
+		if depkey.Covers(s.knownCovered, f, in.Snap[f] == "") != depkey.CoverNone || slices.ContainsFunc(res.declared, func(d *ServiceDeps) bool { return d.match(f) }) {
+			continue
+		}
+		if !res.Explains(f, in.Snap[f] == "" || !existedBefore(in, f)) {
+			continue // the orphan policy's (or handled by it before the snapshot)
+		}
+		n++
+		for _, name := range own.Owners(f) {
+			out[name] = append(out[name], f)
+		}
+	}
+	if n > 0 && in.NoOrphanPolicy {
+		res.Notes = append(res.Notes, fmt.Sprintf("%d file(s) changed since the base revision that tests read may affect tests with no recorded run: none selected for them (no orphan policy)", n))
+		return nil
+	}
+	return out
+}
+
 // decideUnit decides one unit against its D(T): in a DiffUnrecorded selection a unit
-// with no recorded entry is decided by static analysis against Base, any other in the
-// selection's mode against its entry (see decide).
+// with no recorded entry is decided by static analysis against Base, and selected when
+// tests read a file of its suite that changed since Base and that diff mode would find
+// an orphan (findUnrecordedReads); any other in the selection's mode against its entry
+// (see decide).
 func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	t := &Test{ID: u.id}
 	if u.entry != nil {
@@ -36,6 +88,13 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil {
 		decide(t, ModeDiff, nil, deps, ss.hasher, ss.baseChanged)
 		sets = ss.setChangedBase
+		if reads := s.unrecordedReads[ss.sr.Name]; !t.Selected && len(reads) > 0 {
+			t.Selected, t.Reason = true, ReasonNew
+			t.Detail = "no recorded run, and tests read " + reads[0] + " (changed since the base revision)"
+			if len(reads) > 1 {
+				t.Detail = fmt.Sprintf("no recorded run, and tests read %s and %d more file(s) changed since the base revision", reads[0], len(reads)-1)
+			}
+		}
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changed)
 	}

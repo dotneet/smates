@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -204,6 +205,52 @@ func TestLockStale(t *testing.T) {
 	}
 	if _, err := AcquireLock(path, 50*time.Millisecond, time.Minute); !errors.Is(err, ErrLocked) {
 		t.Fatalf("fresh lock: err = %v, want ErrLocked", err)
+	}
+}
+
+// TestLockUnwritable: a lock file that cannot be created (no lock file in the way) is
+// the file system's error, returned at once instead of ErrLocked after the wait.
+func TestLockUnwritable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions enforced")
+	}
+	dir := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	begin := time.Now()
+	_, err := AcquireLock(filepath.Join(dir, "state.lock"), 2*time.Second, time.Minute)
+	if err == nil || errors.Is(err, ErrLocked) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err = %v, want a permission error", err)
+	}
+	if time.Since(begin) > time.Second {
+		t.Errorf("waited %v", time.Since(begin))
+	}
+}
+
+// TestLockFileJustDeleted: on Windows creating the lock file fails with access denied
+// while its holder deletes it; when the file is gone by the time smates looks, it tries
+// again at once instead of failing.
+func TestLockFileJustDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+	calls := 0
+	open := openLock
+	openLock = func(p string) (*os.File, error) {
+		calls++
+		if calls == 1 {
+			return nil, &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+		}
+		return open(p)
+	}
+	t.Cleanup(func() { openLock = open })
+	l, err := AcquireLock(path, 0, time.Minute)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	l.Release()
+	if calls != 2 {
+		t.Errorf("%d attempts, want 2", calls)
 	}
 }
 

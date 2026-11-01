@@ -33,8 +33,10 @@ type SnapValue struct {
 
 // ParseSnap reads a snapshot entry. A value starting with "?" is a marker: "?" alone
 // is Unrecorded, otherwise the hash runs up to the first "@" and comma-separated suite
-// names follow ("?<hash>" without "@" reads as a marker no suite has seen yet). Every
-// other value is a content hash.
+// names follow ("?<hash>" without "@" reads as a marker no suite has seen yet), with
+// "%" and "," in a name escaped as "%25" and "%2C": a suite named after its root may
+// hold any character a directory can (the hash, hex, never holds "@"). Every other
+// value is a content hash.
 func ParseSnap(v string) SnapValue {
 	rest, ok := strings.CutPrefix(v, unrecordedPrefix)
 	switch {
@@ -47,9 +49,18 @@ func ParseSnap(v string) SnapValue {
 	var seen []string
 	if names != "" {
 		seen = strings.Split(names, ",")
+		for i, n := range seen {
+			seen[i] = unescapeName.Replace(n)
+		}
 	}
 	return SnapValue{kind: snapMarker, hash: hash, seen: seen}
 }
+
+// escapeName and unescapeName escape the separator of the suite names of a marker.
+var (
+	escapeName   = strings.NewReplacer("%", "%25", ",", "%2C")
+	unescapeName = strings.NewReplacer("%2C", ",", "%25", "%")
+)
 
 // HashSnap is the entry of a file every suite has compared with content hash h
 // ("" = absent, see Absent).
@@ -72,7 +83,11 @@ func (v SnapValue) String() string {
 	case snapUnrecorded:
 		return unrecordedPrefix
 	case snapMarker:
-		return unrecordedPrefix + v.hash + "@" + strings.Join(v.seen, ",")
+		names := make([]string, len(v.seen))
+		for i, n := range v.seen {
+			names[i] = escapeName.Replace(n)
+		}
+		return unrecordedPrefix + v.hash + "@" + strings.Join(names, ",")
 	}
 	return v.hash
 }
@@ -94,6 +109,13 @@ func (v SnapValue) Unrecorded() bool { return v.kind != snapHash }
 // Absent reports whether v is the empty content hash: the file does not exist, and
 // the snapshot holds no entry for it.
 func (v SnapValue) Absent() bool { return v.kind == snapHash && v.hash == "" }
+
+// Existed reports whether the file existed as far as v tells: v holds a content hash, or
+// a marker's suites saw one, other than absent. An entry no suite has compared ("?")
+// does not tell and counts as existing.
+func (v SnapValue) Existed() bool {
+	return v.kind == snapUnrecorded || v.hash != ""
+}
 
 // SeenHash returns the hash the marker's suites saw ("" = absent) and whether v is
 // Unrecorded (a bare "?" has seen the absent file, by no suite).
