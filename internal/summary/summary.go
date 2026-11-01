@@ -264,7 +264,7 @@ func (v *view) run(b *strings.Builder) {
 		b.WriteString("\n**Shadow mode:** ✅ every failing test unit was selected.\n")
 	}
 	if len(r.Possible) > 0 {
-		fmt.Fprintf(b, "\n%s not selected failed only by inference (the runner reports no per-file status):\n", plural(len(r.Possible), "test unit"))
+		fmt.Fprintf(b, "\n%s not selected may have failed (the run failed without a status of their own):\n", plural(len(r.Possible), "test unit"))
 		list(b, r.Possible, maxItems)
 	}
 }

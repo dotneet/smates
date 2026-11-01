@@ -16,7 +16,7 @@ This change affects **8 test units in 2 of 3 suites**; 6 skipped, saving about *
 > **Shadow mode:** 1 test unit failed but would **not** have been selected:
 > - `py: py/tests/test_a.py`
 
-1 test unit not selected failed only by inference (the runner reports no per-file status):
+1 test unit not selected may have failed (the run failed without a status of their own):
 - `api: api/store`
 
 <details open><summary>Why these 8 test units (7 changed files, 3 other reasons)</summary>

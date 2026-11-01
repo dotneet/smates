@@ -7,10 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"testing"
 
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -336,5 +338,39 @@ suites:
 	}
 	if after, _ := os.ReadFile(statePath); !bytes.Equal(before, after) {
 		t.Error("--no-record changed the state")
+	}
+}
+
+// In shadow mode, an unselected unit a failed run said nothing about (no trace while
+// recording, no reported status without) may have failed: it is a possible escape,
+// in both modes. Units that passed, or of a run that passed, are not.
+func TestCheckShadowUnreported(t *testing.T) {
+	sr := &selector.Suite{Name: "s", Tests: []*selector.Test{
+		{ID: "sel"}, {ID: "fail"}, {ID: "pass"}, {ID: "silent"},
+	}}
+	sr.Tests[0].Selected = true
+	units := []string{"sel", "fail", "pass", "silent"}
+	for _, record := range []bool{true, false} {
+		for _, exit := range []int{1, 0} {
+			r := &runner.RunResult{ExitCode: exit, Observations: map[string]*runner.Observation{
+				"sel":  {Status: state.Fail},
+				"fail": {Status: state.Fail},
+				"pass": {Status: state.Pass},
+			}}
+			unreported := unreportedUnits(r, units)
+			settleOutcomes(r, units, record, false)
+			c := &cycle{}
+			c.checkShadow(sr, r.Observations, unreported)
+			wantPossible := []string{"s: silent"}
+			if exit == 0 {
+				wantPossible = nil
+			}
+			if !slices.Equal(c.escapes, []string{"s: fail"}) || !slices.Equal(c.possible, wantPossible) {
+				t.Errorf("record=%v exit=%d: escapes %v possible %v", record, exit, c.escapes, c.possible)
+			}
+			if exit != 0 && r.Observations["silent"].Status != state.Unknown {
+				t.Errorf("record=%v: silent %+v", record, r.Observations["silent"])
+			}
+		}
 	}
 }

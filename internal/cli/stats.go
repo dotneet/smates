@@ -406,7 +406,7 @@ func printStats(w io.Writer, rep *statsReport, recent int) {
 		}
 		row("misses", "%s", miss)
 		if s.Possible > 0 {
-			row("possible", "%d more marked failed only by the run's exit code", s.Possible)
+			row("possible", "%d more that may have failed (no status of their own in a failed run)", s.Possible)
 		}
 	}
 

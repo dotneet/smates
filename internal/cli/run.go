@@ -313,7 +313,7 @@ type cycle struct {
 	stopped  bool                    // --fail-fast stopped the run
 	results  map[string]*suiteResult // suite -> outcomes to record
 	escapes  []string                // shadow: failing tests the selection would have skipped
-	possible []string                // shadow: skipped tests failed only by the run's exit code
+	possible []string                // shadow: skipped tests a failed run gave no status of their own
 	flakes   []flakeReport
 }
 
@@ -723,7 +723,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 			p.logf("shadow: every failing test was selected (%d/%d would have run)", selected, total)
 		}
 		if len(c.possible) > 0 {
-			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
+			p.logf("shadow: %d unselected test(s) may have failed: the run failed without a status of their own (the runner reports no per-file status, or none for them): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
 	} else if n := countUnits(c.notRun); n > 0 {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; --fail-fast left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.worst, n)
