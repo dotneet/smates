@@ -405,6 +405,7 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	f.dir = repo.Root
 	code, err := runCycle(ctx, f, stdout, stderr, nil)
+	code = testsExitCode(code)
 	if code != 0 || err != nil {
 		skip := "git push --no-verify"
 		if kind == "pre-commit" {

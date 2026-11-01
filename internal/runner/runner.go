@@ -209,12 +209,21 @@ func (rc *RunContext) RelArgs(prefix string) []string {
 	return out
 }
 
+// CommandError is a suite command that cannot be parsed (a configuration error).
+type CommandError struct {
+	Suite string
+	Err   error
+}
+
+func (e *CommandError) Error() string { return fmt.Sprintf("suite %q command: %v", e.Suite, e.Err) }
+func (e *CommandError) Unwrap() error { return e.Err }
+
 // CommandLine builds argv from the suite command: "{tests}" is replaced by testArgs,
 // otherwise testArgs are appended; extra args go before the tests.
 func (rc *RunContext) CommandLine(extra []string, testArgs []string) ([]string, error) {
 	words, err := SplitWords(rc.Suite.Command)
 	if err != nil {
-		return nil, fmt.Errorf("suite %q command: %w", rc.Suite.Name, err)
+		return nil, &CommandError{Suite: rc.Suite.Name, Err: err}
 	}
 	var argv []string
 	replaced := false
