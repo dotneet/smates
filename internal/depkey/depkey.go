@@ -5,6 +5,7 @@
 //	path?     whether a path exists (it was probed, possibly before it existed)
 //	dir/**    every file below a directory (a command smates cannot see into ran there)
 //	$NAME     the value of an environment variable (it was read)
+//	@set:ID   a set of files declared in smates.yml (depends_on/serves), hashed as one
 //
 // Paths are repo-relative slash paths; the repository root is ".". A path at the
 // repository root whose name starts with "$" cannot be told from an environment
@@ -22,6 +23,7 @@ const (
 	KindExistence             // path?
 	KindTree                  // dir/**
 	KindEnv                   // $NAME
+	KindSet                   // @set:ID
 )
 
 const (
@@ -29,6 +31,7 @@ const (
 	existenceSuffix = "?"
 	treeSuffix      = "/**"
 	envPrefix       = "$"
+	setPrefix       = "@set:"
 )
 
 // Listing is the key of a directory listing.
@@ -43,6 +46,12 @@ func Tree(dir string) string { return strings.TrimSuffix(dir, "/") + treeSuffix 
 // Env is the key of an environment variable.
 func Env(name string) string { return envPrefix + name }
 
+// Set is the key of a declared set of files (id names the declaration).
+func Set(id string) string { return setPrefix + id }
+
+// IsSet reports whether a key is a declared set of files.
+func IsSet(key string) bool { return strings.HasPrefix(key, setPrefix) }
+
 // Make is the key of kind for path p (the variable name for KindEnv).
 func Make(k Kind, p string) string {
 	switch k {
@@ -54,13 +63,19 @@ func Make(k Kind, p string) string {
 		return Tree(p)
 	case KindEnv:
 		return Env(p)
+	case KindSet:
+		return Set(p)
 	}
 	return p
 }
 
 // Parse returns the kind of a key and the path it names (the directory of a listing
-// or tree, the probed path of an existence check, the name of a variable).
+// or tree, the probed path of an existence check, the name of a variable, the id of a
+// set).
 func Parse(key string) (Kind, string) {
+	if id, ok := strings.CutPrefix(key, setPrefix); ok {
+		return KindSet, id
+	}
 	if name, ok := strings.CutPrefix(key, envPrefix); ok {
 		return KindEnv, name
 	}
@@ -83,7 +98,7 @@ func KindOf(key string) Kind {
 }
 
 // IsPseudo reports whether a key stands for something other than a file's content (a
-// listing, an existence check, a tree or an environment variable).
+// listing, an existence check, a tree, an environment variable or a declared set).
 func IsPseudo(key string) bool { return KindOf(key) != KindContent }
 
 // IsEnv reports whether a key is an environment variable.

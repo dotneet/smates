@@ -8,9 +8,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -61,8 +63,15 @@ type Suite struct {
 	Command string `yaml:"command"`
 	// Inputs are extra globs (relative to Root, or repo-relative with a leading "/")
 	// every test of the suite depends on.
-	Inputs []string          `yaml:"inputs"`
-	Rules  []Rule            `yaml:"rules"`
+	Inputs []string `yaml:"inputs"`
+	Rules  []Rule   `yaml:"rules"`
+	// DependsOn declares code the suite's tests exercise across a process boundary
+	// tracing cannot follow (a server started by docker compose, an HTTP API): another
+	// suite's code, or repo-relative globs.
+	DependsOn []Dependency `yaml:"depends_on"`
+	// Serves: repo-relative globs of the code of a server the suite's tests talk to;
+	// shorthand for depends_on: [{paths: [...]}].
+	Serves []string          `yaml:"serves"`
 	Env    map[string]string `yaml:"env"`
 	// Isolate re-runs each test file in its own process while recording, for runners
 	// that share worker processes between files (jest, vitest with isolate: false).
@@ -88,6 +97,127 @@ type Rule struct {
 	// Tests: globs relative to the suite root; Deps: repo-relative globs.
 	Tests []string `yaml:"tests"`
 	Deps  []string `yaml:"deps"`
+}
+
+// Dependency is one entry of Suite.DependsOn: exactly one of Suite and Paths. A plain
+// string in smates.yml is a suite name.
+type Dependency struct {
+	// Suite: the tests depend on that suite's code, i.e. the files under its root
+	// except its test files, ignored and vendored files, and files of other suites
+	// rooted below it.
+	Suite string `yaml:"suite"`
+	// Paths: repo-relative globs.
+	Paths []string `yaml:"paths"`
+	// Tests: globs relative to the suite root narrowing the tests that get the
+	// dependency (default: all).
+	Tests []string `yaml:"tests"`
+	// FromServes marks the entry Suite.Dependencies derives from serves.
+	FromServes bool `yaml:"-"`
+}
+
+// UnmarshalYAML accepts a suite name as a plain string.
+func (d *Dependency) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&d.Suite)
+	}
+	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			switch k := n.Content[i]; k.Value {
+			case "suite", "paths", "tests":
+			default:
+				return fmt.Errorf("line %d: field %s not found in depends_on entry (suite, paths, tests)", k.Line, k.Value)
+			}
+		}
+	}
+	type plain Dependency
+	return n.Decode((*plain)(d))
+}
+
+// String describes the dependency in explanations ("depends_on suite api",
+// "serves backend/**").
+func (d Dependency) String() string {
+	if d.Suite != "" {
+		return "depends_on suite " + d.Suite
+	}
+	what := strings.Join(d.Paths, ", ")
+	if len(d.Paths) > 2 {
+		what = strings.Join(d.Paths[:2], ", ") + ", …"
+	}
+	if d.FromServes {
+		return "serves " + what
+	}
+	return "depends_on " + what
+}
+
+// Dependencies returns depends_on with serves appended as a paths entry.
+func (s *Suite) Dependencies() []Dependency {
+	out := slices.Clone(s.DependsOn)
+	if len(s.Serves) > 0 {
+		out = append(out, Dependency{Paths: s.Serves, FromServes: true})
+	}
+	return out
+}
+
+// checkDependencies validates depends_on and serves, and strips a leading "./" from
+// their globs (which would otherwise match nothing).
+func checkDependencies(s *Suite, names map[string]bool) error {
+	where := fmt.Sprintf("suite %q", s.Name)
+	trimDotSlash(s.Serves)
+	for i, d := range s.DependsOn {
+		trimDotSlash(d.Paths)
+		trimDotSlash(d.Tests)
+		at := fmt.Sprintf("%s: depends_on[%d]", where, i)
+		switch {
+		case d.Suite != "" && len(d.Paths) > 0:
+			return fmt.Errorf("%s: set either suite or paths, not both", at)
+		case d.Suite == "" && len(d.Paths) == 0:
+			return fmt.Errorf("%s: needs suite or paths", at)
+		case d.Suite == s.Name:
+			return fmt.Errorf("%s: a suite cannot depend on itself", at)
+		case d.Suite != "" && !names[d.Suite]:
+			return fmt.Errorf("%s: unknown suite %q", at, d.Suite)
+		}
+		if err := checkRepoGlobs(at+": paths", d.Paths); err != nil {
+			return err
+		}
+		if err := checkGlobs(at+": tests", d.Tests); err != nil {
+			return err
+		}
+	}
+	return checkRepoGlobs(where+": serves", s.Serves)
+}
+
+// trimDotSlash removes leading "./" from globs in place.
+func trimDotSlash(globs []string) {
+	for i, g := range globs {
+		for strings.HasPrefix(g, "./") {
+			g = g[2:]
+		}
+		globs[i] = g
+	}
+}
+
+func checkGlobs(where string, globs []string) error {
+	for _, g := range globs {
+		if strings.Contains(g, "\\") {
+			return fmt.Errorf("%s: %q: use / as the path separator (a backslash escapes the next character in a glob)", where, g)
+		}
+		if g == "" || !doublestar.ValidatePattern(g) {
+			return fmt.Errorf("%s: bad glob %q", where, g)
+		}
+	}
+	return nil
+}
+
+// checkRepoGlobs validates repo-relative globs.
+func checkRepoGlobs(where string, globs []string) error {
+	for _, g := range globs {
+		if strings.HasPrefix(g, "/") || g == ".." || strings.HasPrefix(g, "../") {
+			return fmt.Errorf("%s: %q must be relative to the repository root", where, g)
+		}
+	}
+	return checkGlobs(where, globs)
 }
 
 // AgentConfig configures the LLM agent used for orphan files.
@@ -332,6 +462,11 @@ func (c *Config) Normalize() error {
 			return fmt.Errorf("suite %q: custom runner needs a command", s.Name)
 		}
 		if err := checkEnvPatterns(fmt.Sprintf("suite %q", s.Name), s.EnvIgnore, s.EnvTrack); err != nil {
+			return err
+		}
+	}
+	for i := range c.Suites {
+		if err := checkDependencies(&c.Suites[i], names); err != nil {
 			return err
 		}
 	}
