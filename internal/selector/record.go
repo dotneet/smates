@@ -35,6 +35,8 @@ type Hasher struct {
 	// that can change how the suite's tests run (see ConfigHash).
 	cfg   *config.Config
 	suite *runner.Suite
+	// sets are the declared sets of files (depends_on/serves) by key, see WithSets.
+	sets map[string]*ServiceDeps
 	*hashCache
 }
 
@@ -43,6 +45,7 @@ type hashCache struct {
 	disk  map[string]string // memoized hashes of files outside the snapshot
 	dirs  map[string][]string
 	trees map[string]string
+	setv  map[*ServiceDeps]string // memoized hashes of sets
 }
 
 // NewHasher indexes a snapshot. Files matching ignore globs (docs, editor settings) are
@@ -118,6 +121,44 @@ func ConfigHash(c *config.Config, su *config.Suite) string {
 	return "config:" + hex.EncodeToString(sum[:16])
 }
 
+// WithSets returns a hasher (sharing h's caches) that also hashes the set keys of
+// declarations: one hash over the paths and contents of all their files, so a test
+// records one key per declaration however many files the declaration covers.
+func (h *Hasher) WithSets(decls []*ServiceDeps) *Hasher {
+	if len(decls) == 0 {
+		return h
+	}
+	c := *h
+	c.sets = map[string]*ServiceDeps{}
+	for k, v := range h.sets {
+		c.sets[k] = v
+	}
+	for _, d := range decls {
+		c.sets[d.Key] = d
+	}
+	return &c
+}
+
+func (h *Hasher) set(key string) string {
+	d := h.sets[key]
+	if d == nil {
+		return ""
+	}
+	if v, ok := h.setv[d]; ok {
+		return v
+	}
+	sum := sha1.New()
+	for _, f := range d.Files { // sorted
+		sum.Write([]byte(f + "\x00" + h.file(f) + "\n"))
+	}
+	v := "set:" + hex.EncodeToString(sum.Sum(nil))
+	if h.setv == nil {
+		h.setv = map[*ServiceDeps]string{}
+	}
+	h.setv[d] = v
+	return v
+}
+
 // EnvHash is the hash recorded for an environment variable: "" when it is not set, so
 // an unset variable and an empty one differ. Only the hash of a value is stored, never
 // the value.
@@ -159,6 +200,8 @@ func (h *Hasher) Hash(key string) string {
 		return EnvHash(lookup(p))
 	case depkey.KindTree:
 		return h.tree(p)
+	case depkey.KindSet:
+		return h.set(key)
 	case depkey.KindExistence:
 		if _, isFile := h.snap[p]; isFile || h.Hash(depkey.Listing(p)) != "" || p == "." {
 			return "exists"
@@ -300,6 +343,7 @@ type RecordOptions struct {
 // Record also keeps each unit's recent outcomes and returns the units whose outcome
 // flipped between pass and fail while their inputs stayed the same (see flips).
 func Record(st *state.State, sr *Suite, obs map[string]*runner.Observation, h *Hasher, opt RecordOptions) []FlakeEvent {
+	h = h.WithSets(sr.Services) // depends_on/serves: one key per declaration
 	su := st.Suite(sr.Name)
 	old := su.Tests
 	if opt.Full {

@@ -37,6 +37,7 @@ D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込み
      ∪ inputs      lockfile、マニフェスト、ランナー設定、指定した glob、smates.yml の
                    そのスイート自身の設定(ignore・agent・orphans や他スイートの
                    変更ではテストを再実行しません)
+     ∪ depends_on  テストが別プロセスで叩くサーバーのコード(宣言したもの)
 ```
 
 前回成功していて、`D(T)` の全ファイルのハッシュが今も同じときだけ `T` を **スキップ**し、
@@ -106,6 +107,40 @@ first-parent コミット(既定 100 件。`--history N`、`--since rev`)を現�
 いないと静的解析だけで判定するため結果は悲観的になります。先に `smates run --all` を実行して
 ください(`--format json` で機械可読な出力)。
 
+### サーバーを叩くテスト
+
+E2E テスト(Playwright、vitest の e2e、HTTP API に対する pytest など)は、別プロセスや
+コンテナで動くサーバー(docker compose で起動した Go のバックエンドなど)にアクセスする
+ことがよくあります。トレースが見るのはテストのプロセスでサーバーではないため、サーバーの
+コードを変えてもこれらのテストは選ばれません。E2E スイートに依存を宣言してください。
+
+```yaml
+  - name: e2e
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on: [api]              # スイート api のコード
+    # または: depends_on: [{paths: ["backend/**", "docker-compose.yml"], tests: ["admin/**"]}]
+    # または: serves: ["backend/**"]
+```
+
+`{suite: api}`(または単に `api`)は、そのスイートの root 以下のファイルから、(どの
+スイートのものであれ)テストファイル、無視・vendor 扱いのファイル、さらに下に root を持つ
+別スイートのファイルを除いたものです。`paths` はリポジトリ相対の glob、`tests`(スイートの
+root からの相対)で依存を付けるテストを絞れます。宣言ごとに、全ファイルをまとめたハッシュを
+持つ 1 つのキーとして `D(T)` に加わる(HEAD で計算し、テスト実行時に記録。サーバーの規模に
+比例して状態が大きくなることはありません)ので、変更するとテストが選ばれ、`--suite` で
+絞ってもオーファンになりません。`--explain`、`smates why`、プルリクエストのサマリには
+変更されたファイルと宣言名が出ます。
+
+```
++ e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]
+```
+
+`smates doctor` は、E2E らしいのに `depends_on`・`serves`・`rules` のどれもないスイート
+(名前や root に e2e を含む、コマンドが Playwright や Cypress を実行する、テストが
+`http://localhost` を呼ぶ)を指摘します。
+
 ## クイックスタート
 
 ```bash
@@ -119,6 +154,19 @@ smates why src/pricing.ts     # このファイルに依存するテストは?
 smates deps src/cart.test.ts  # このテストは何に依存している?
 smates hook install  # 任意: git push の前に影響するテストを実行
 ```
+
+`init --github` は `mise.toml`/`.tool-versions`(`jdx/mise-action` を使用)、
+`.nvmrc`/`.node-version` または `package.json` の `engines.node`/`volta`、`.python-version`
+からツールチェーンを設定します。`docker-compose.yml`/`compose.yaml` のデータベースやコード中の
+`localhost` URL、`.env.example` にありコードが読む環境変数は、確認して有効にするための
+コメントアウトされた `services:`/`env:` ブロックになります。既存のワークフローがすでにテストを
+実行している場合は 2 つ目のワークフローを書かず(`--force` で書く)、そのステップを smates
+アクションに置き換えるパッチを表示します(`--patch FILE` で `git apply` 用に書き出し)。
+Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml` にコメントの
+`command:`/`env:` ヒントとして書かれます。`smates doctor` も同じ内容に加えて、
+`node_modules` の欠如、`engines.node` を満たさない Node、起動していないサービスを報告します。
+smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを許さず、`node_modules/.bin` に
+ないときはエラーにします。
 
 ### git フック
 

@@ -13,7 +13,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4   # plus whatever toolchains your tests need
         with:
           node-version: 22
@@ -25,6 +25,9 @@ jobs:
 
 A complete, commented workflow is in
 [`.github/workflows/smates.yml`](../../.github/workflows/smates.yml).
+`smates init --github` generates one for your project; when an existing workflow already
+runs the tests, it prints (or, with `--patch FILE`, writes) a patch that replaces those
+steps with the action instead of adding a second workflow.
 
 ## What the action does
 
@@ -138,7 +141,7 @@ jobs:
     outputs:
       skip: ${{ steps.select.outputs.skip }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: select
         uses: dotneet/smates@vX.Y.Z
         with:

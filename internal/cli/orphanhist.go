@@ -188,7 +188,7 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 			if pathutil.IsVendored(f) || pathutil.Match(ignore, f) {
 				continue
 			}
-			if selector.Covers(res.Covered, f, c.Status == 'A' || c.Status == 'D') == "" {
+			if !res.Explains(f, c.Status == 'A' || c.Status == 'D') {
 				perCommit[i] = append(perCommit[i], f)
 				count[f]++
 			}
