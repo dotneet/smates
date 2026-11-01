@@ -579,12 +579,12 @@ func TestOwned(t *testing.T) {
 		{"api/a.py", 3, true},   // every suite selected
 	}
 	for _, c := range cases {
-		if got := Owned(c.f, all, c.n); got != c.want {
+		if got := NewOwnership(all[:c.n], all[c.n:]).Owned(c.f); got != c.want {
 			t.Errorf("Owned(%q, n=%d) = %v, want %v", c.f, c.n, got, c.want)
 		}
 	}
 	// The root suite selected alone owns every file.
-	if !Owned("api/a.py", []*runner.Suite{mk("."), mk("api")}, 1) {
+	if !NewOwnership([]*runner.Suite{mk(".")}, []*runner.Suite{mk("api")}).Owned("api/a.py") {
 		t.Error("root suite owns api/a.py")
 	}
 }
@@ -1198,18 +1198,6 @@ func TestSelectConfigReadByTest(t *testing.T) {
 	}
 }
 
-func TestSnapshotHash(t *testing.T) {
-	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
-	for f, want := range map[string]struct {
-		h  string
-		ok bool
-	}{"a": {"h1", true}, "b": {"", false}, "c": {"", false}, "d": {"", false}} {
-		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
-			t.Errorf("%s: %q %v", f, h, ok)
-		}
-	}
-}
-
 func TestSelectMarksUnrecordedSuites(t *testing.T) {
 	f := webFixture(t)
 	st := f.record(nil, nil)
@@ -1222,29 +1210,39 @@ func TestSelectMarksUnrecordedSuites(t *testing.T) {
 	}
 }
 
-func TestMarkers(t *testing.T) {
-	m := Marker("h1", []string{"b", "a", "a"})
-	if m != "?h1@a,b" {
-		t.Fatalf("Marker: %q", m)
+func TestOwnership(t *testing.T) {
+	mk := func(name, root string) *runner.Suite {
+		return &runner.Suite{Suite: config.Suite{Name: name, Root: root}}
 	}
-	if h, seen, ok := ParseMarker(m); !ok || h != "h1" || !reflect.DeepEqual(seen, []string{"a", "b"}) {
-		t.Errorf("ParseMarker: %q %v %v", h, seen, ok)
+	a, b, root := mk("a", "a"), mk("b", "b"), mk("root", ".")
+	cases := []struct {
+		picked, left []*runner.Suite
+		f            string
+		owners       []string
+		owned, only  bool
+	}{
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "a/x", []string{"a"}, true, true},
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "b/x", []string{"b"}, false, false},
+		{[]*runner.Suite{a}, []*runner.Suite{b}, "Dockerfile", []string{"a", "b"}, true, false},
+		{[]*runner.Suite{a, b}, nil, "Dockerfile", []string{"a", "b"}, true, true},
+		{[]*runner.Suite{a}, []*runner.Suite{root}, "a/x", []string{"a", "root"}, true, false},
+		{[]*runner.Suite{root}, []*runner.Suite{a}, "a/x", []string{"root", "a"}, true, false},
+		{[]*runner.Suite{root}, []*runner.Suite{a}, "z", []string{"root", "a"}, true, false},
+		{nil, []*runner.Suite{a}, "a/x", []string{"a"}, false, false},
 	}
-	if _, _, ok := ParseMarker("h1"); ok {
-		t.Error("a content hash is no marker")
+	for _, c := range cases {
+		o := NewOwnership(c.picked, c.left)
+		if got := o.Owners(c.f); !reflect.DeepEqual(got, c.owners) {
+			t.Errorf("Owners(%q) = %v, want %v", c.f, got, c.owners)
+		}
+		if got := o.Owned(c.f); got != c.owned {
+			t.Errorf("Owned(%q) = %v, want %v", c.f, got, c.owned)
+		}
+		if got := o.OwnedOnly(c.f); got != c.only {
+			t.Errorf("OwnedOnly(%q) = %v, want %v", c.f, got, c.only)
+		}
 	}
-	if got := MarkSeen(m, "h1", []string{"c"}); got != "?h1@a,b,c" {
-		t.Errorf("same hash: %q", got)
-	}
-	if got := MarkSeen(m, "h2", []string{"c"}); got != "?h2@c" {
-		t.Errorf("new hash: %q", got)
-	}
-	if got := MarkSeen("h0", "", []string{"a"}); got != "?@a" {
-		t.Errorf("absent: %q", got)
-	}
-	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
-	all := []*runner.Suite{mk("a"), mk("b")}
-	if !OwnedOnly("a/x", all, 1) || OwnedOnly("Dockerfile", all, 1) || OwnedOnly("b/x", all, 1) || !OwnedOnly("Dockerfile", all, 2) {
-		t.Error("OwnedOnly")
+	if got := NewOwnership([]*runner.Suite{b, a}, []*runner.Suite{root}).Picked(); !reflect.DeepEqual(got, []string{"b", "a"}) {
+		t.Errorf("Picked = %v", got)
 	}
 }

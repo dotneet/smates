@@ -224,8 +224,8 @@ type Result struct {
 	Changed []string `json:"changed"`
 	Orphans []string `json:"orphans"`
 	// LeftOut are the changes no test depends on that only suites left out by --suite
-	// own (see Owned): not orphans of this run (the jobs running those suites handle
-	// them), but tests of this run that name them are still selected (References).
+	// own (see Ownership.Owned): not orphans of this run (the jobs running those suites
+	// handle them), but tests of this run that name them are still selected (References).
 	LeftOut []string `json:"left_out,omitempty"`
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
@@ -315,12 +315,10 @@ func Select(in *Input) (*Result, error) {
 		if len(in.Others) > 0 && len(in.State.Files) > 0 {
 			// Entries --suite runs wrote as markers (cli saveState): unchanged
 			// for this run when every suite it runs saw the current content.
-			var names []string
-			for _, s := range in.Suites {
-				names = append(names, s.Name)
-			}
+			names := NewOwnership(in.Suites, in.Others).Picked()
 			for f := range changedSet {
-				if h, seen, ok := ParseMarker(in.State.Files[f]); ok && h == in.Snap[f] && subset(names, seen) {
+				v, _ := in.State.Snap(f)
+				if h, ok := v.SeenHash(); ok && h == in.Snap[f] && v.SeenByAll(names) {
 					delete(changedSet, f)
 				}
 			}
@@ -492,14 +490,14 @@ func Select(in *Input) (*Result, error) {
 	}
 
 	if res.Mode != ModeAll {
-		all := append(slices.Clip(in.Suites), in.Others...)
+		own := NewOwnership(in.Suites, in.Others)
 		for _, f := range res.Changed {
 			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
 				continue
 			}
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
 			if !res.Explains(f, existenceChanged) {
-				if len(in.Others) > 0 && !Owned(f, all, len(in.Suites)) {
+				if len(in.Others) > 0 && !own.Owned(f) {
 					res.LeftOut = append(res.LeftOut, f)
 					continue
 				}
@@ -612,30 +610,10 @@ func IgnoreGlobs(c *config.Config) []string {
 // revision in diff mode; unknown counts as existing, which keeps f an orphan).
 func existedBefore(in *Input, f string) bool {
 	if len(in.State.Files) > 0 {
-		_, ok := SnapshotHash(in.State.Files, f)
+		_, ok := in.State.FileHash(f)
 		return ok
 	}
 	return true
-}
-
-func subset(a, b []string) bool {
-	for _, x := range a {
-		if !slices.Contains(b, x) {
-			return false
-		}
-	}
-	return true
-}
-
-// SnapshotHash returns the hash a snapshot holds for f and whether it holds one. An
-// Unrecorded entry counts as none: the hash after the marker is only what --suite runs
-// of other suites compare (Select), never content the file's own suites have seen.
-func SnapshotHash(files map[string]string, f string) (string, bool) {
-	v, ok := files[f]
-	if strings.HasPrefix(v, Unrecorded) {
-		return "", false
-	}
-	return v, ok
 }
 
 func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
@@ -934,64 +912,61 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	return adds
 }
 
-// Unrecorded prefixes a snapshot entry that only some suites have compared: a
-// --suite run records a file the suites left out also own (or own alone) as
-// "?<hash>@<suites>", the hash it saw and the suites it ran (Marker). A --suite run
-// whose suites all saw that hash finds the file unchanged; any other run, a run over
-// every suite included, finds it changed until it records the file itself.
-const Unrecorded = "?"
-
-// Marker is the snapshot entry saying that suites saw a file with hash ("" = absent).
-func Marker(hash string, suites []string) string {
-	s := slices.Clone(suites)
-	sort.Strings(s)
-	return Unrecorded + hash + "@" + strings.Join(slices.Compact(s), ",")
+// Ownership answers which suites own a change for a --suite run: the suites the
+// orphan policy over every suite would run for it (see orphanOwners), among the suites
+// the run picked and the suites it left out.
+type Ownership struct {
+	all   []*runner.Suite
+	roots []string
+	n     int // the first n of all are picked
 }
 
-// ParseMarker splits a Marker entry; ok is false for a content hash.
-func ParseMarker(v string) (hash string, suites []string, ok bool) {
-	rest, ok := strings.CutPrefix(v, Unrecorded)
-	if !ok {
-		return "", nil, false
-	}
-	hash, names, _ := strings.Cut(rest, "@")
-	if names != "" {
-		suites = strings.Split(names, ",")
-	}
-	return hash, suites, true
-}
-
-// MarkSeen returns the entry after suites saw a file with hash: the suites that
-// already saw that same hash keep it, the others do not.
-func MarkSeen(v, hash string, suites []string) string {
-	if h, seen, ok := ParseMarker(v); ok && h == hash {
-		return Marker(hash, append(seen, suites...))
-	}
-	return Marker(hash, suites)
-}
-
-// Owners returns the names of the suites of all the orphan policy would run for f.
-func Owners(f string, all []*runner.Suite) []string {
+// NewOwnership returns the ownership of changes between the suites a --suite run
+// picked and the suites it left out.
+func NewOwnership(picked, left []*runner.Suite) Ownership {
+	all := append(slices.Clip(picked), left...)
 	roots := make([]string, len(all))
 	for i, s := range all {
 		roots[i] = s.Root
 	}
+	return Ownership{all: all, roots: roots, n: len(picked)}
+}
+
+// Picked returns the names of the suites the run picked.
+func (o Ownership) Picked() []string {
 	var out []string
-	for _, i := range orphanOwners(f, roots) {
-		out = append(out, all[i].Name)
+	for _, s := range o.all[:o.n] {
+		out = append(out, s.Name)
 	}
 	return out
 }
 
-// OwnedOnly reports whether every suite the orphan policy would run for f (see Owned)
-// is one of the first n suites of all.
-func OwnedOnly(f string, all []*runner.Suite, n int) bool {
-	roots := make([]string, len(all))
-	for i, s := range all {
-		roots[i] = s.Root
+// Owners returns the names of the suites the orphan policy would run for f.
+func (o Ownership) Owners(f string) []string {
+	var out []string
+	for _, i := range orphanOwners(f, o.roots) {
+		out = append(out, o.all[i].Name)
 	}
-	for _, i := range orphanOwners(f, roots) {
-		if i >= n {
+	return out
+}
+
+// Owned reports whether a change belongs to at least one of the picked suites: the
+// orphan policy over every suite would run one of them for it. A change only suites
+// left out own is theirs to handle, in the job that runs them.
+func (o Ownership) Owned(f string) bool {
+	for _, i := range orphanOwners(f, o.roots) {
+		if i < o.n {
+			return true
+		}
+	}
+	return false
+}
+
+// OwnedOnly reports whether every suite the orphan policy would run for f is a picked
+// one.
+func (o Ownership) OwnedOnly(f string) bool {
+	for _, i := range orphanOwners(f, o.roots) {
+		if i >= o.n {
 			return false
 		}
 	}
@@ -1022,23 +997,6 @@ func orphanOwners(o string, roots []string) []int {
 	}
 	sort.Ints(out)
 	return out
-}
-
-// Owned reports whether a change belongs to at least one of the first n suites of all
-// (the suites a --suite run selects; the rest are the suites left out): the orphan
-// policy over every suite would run one of them for it. A change only suites left out
-// own is theirs to handle, in the job that runs them.
-func Owned(f string, all []*runner.Suite, n int) bool {
-	roots := make([]string, len(all))
-	for i, s := range all {
-		roots[i] = s.Root
-	}
-	for _, i := range orphanOwners(f, roots) {
-		if i < n {
-			return true
-		}
-	}
-	return false
 }
 
 // Mention is a test that names a changed file in one of its own sources or

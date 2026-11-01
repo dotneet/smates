@@ -111,7 +111,7 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 	if len(fh.res.Orphans) > 0 {
 		orphans = map[string]string{}
 		for _, o := range fh.res.Orphans {
-			orphans[o], _ = selector.SnapshotHash(fh.p.state.Files, o)
+			orphans[o], _ = fh.p.state.FileHash(o)
 		}
 	}
 	st := fh.p.state.Suites[sr.Name]
