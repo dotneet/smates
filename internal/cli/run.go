@@ -600,7 +600,7 @@ func (c *cycle) saveState() error {
 	case len(p.others) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
 		// Every test of the suites --suite picked ran. Files only they own get their
 		// hash; files suites left out also own (or own alone) are marked as seen by
-		// the picked suites (selector.Marker), so the suites left out still find
+		// the picked suites (state.MarkerSnap), so the suites left out still find
 		// them changed on a shared state (locally, after `state merge`, or in CI
 		// without a cache-key per job). Commit and Created stay as they were on
 		// purpose: a partial refresh must not win State.Merge over a full
@@ -608,12 +608,13 @@ func (c *cycle) saveState() error {
 		if p.state.Files == nil {
 			p.state.Files = map[string]string{}
 		}
+		own := selector.NewOwnership(p.suites, p.others)
 		for f, h := range p.snap {
-			p.recordSeen(f, h)
+			p.recordSeen(own, f, h)
 		}
 		for f := range p.state.Files {
 			if _, ok := p.snap[f]; !ok {
-				p.recordSeen(f, "")
+				p.recordSeen(own, f, "")
 			}
 		}
 	case res.Mode == selector.ModeAll || c.f.shadow:
@@ -625,9 +626,10 @@ func (c *cycle) saveState() error {
 		// affected suites): remember their current content so the next run on this
 		// branch does not ask again. Other files stay as recorded; per-test entries
 		// track them.
+		own := selector.NewOwnership(p.suites, p.others)
 		for _, o := range res.Orphans {
 			if len(p.others) > 0 {
-				p.recordSeen(o, p.snap[o])
+				p.recordSeen(own, o, p.snap[o])
 			} else if h, ok := p.snap[o]; ok {
 				p.state.Files[o] = h
 			} else {
@@ -642,51 +644,23 @@ func (c *cycle) saveState() error {
 	return nil
 }
 
-// recordSeen records in the snapshot that the suites of a --suite run saw f with hash h
-// ("" = absent): the hash itself when no suite left out owns f, a marker otherwise
-// (selector.Marker). An entry still equal to h stays as it is, and so does the content
-// hash of a file only suites left out own (they have not compared it yet).
-func (p *project) recordSeen(f, h string) {
-	all := append(slices.Clip(p.suites), p.others...)
-	n := len(p.suites)
-	v, ok := p.state.Files[f]
-	_, _, marked := selector.ParseMarker(v)
+// recordSeen records in the snapshot that the suites of a --suite run (own's picked
+// suites) saw f with hash h ("" = absent): the hash itself when no suite left out owns
+// f, a marker otherwise (state.MarkerSnap). An entry still equal to h stays as it is,
+// and so does the content hash of a file only suites left out own (they have not
+// compared it yet).
+func (p *project) recordSeen(own selector.Ownership, f, h string) {
+	v, ok := p.state.Snap(f)
 	switch {
-	case selector.OwnedOnly(f, all, n):
-		if h == "" {
-			delete(p.state.Files, f)
-		} else {
-			p.state.Files[f] = h
-		}
-	case ok && !marked && v == h:
-	case ok && !marked && !selector.Owned(f, all, n):
+	case own.OwnedOnly(f):
+		p.state.SetSnap(f, state.HashSnap(h))
+	case ok && !v.Unrecorded() && v.String() == h:
+	case ok && !v.Unrecorded() && !own.Owned(f):
 	case !ok && h == "":
 	default:
-		var names []string
-		for _, s := range p.suites {
-			names = append(names, s.Name)
-		}
-		m := selector.MarkSeen(v, h, names)
-		if _, seen, _ := selector.ParseMarker(m); subsetOf(selector.Owners(f, all), seen) {
-			// Every suite that owns f has now seen this content: a plain entry.
-			if h == "" {
-				delete(p.state.Files, f)
-			} else {
-				p.state.Files[f] = h
-			}
-			return
-		}
-		p.state.Files[f] = m
+		// Once every suite that owns f has seen this content, a plain entry.
+		p.state.SetSnap(f, v.MarkSeen(h, own.Picked()).CollapseIfComplete(own.Owners(f)))
 	}
-}
-
-func subsetOf(a, b []string) bool {
-	for _, x := range a {
-		if !slices.Contains(b, x) {
-			return false
-		}
-	}
-	return true
 }
 
 // notStarted reports a batch whose process exited 126 (not executable) or 127

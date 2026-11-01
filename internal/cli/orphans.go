@@ -335,7 +335,7 @@ func (p *project) orphanCandidates(sel *selection) []orphanCandidate {
 
 // orphanStatus says whether an orphan was added, modified or deleted.
 func (p *project) orphanStatus(o string) string {
-	_, hadOld := selector.SnapshotHash(p.state.Files, o)
+	_, hadOld := p.state.FileHash(o)
 	_, has := p.snap[o]
 	switch {
 	case !has:
@@ -384,7 +384,7 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 		req.Log = p.log
 	}
 	for _, o := range orphans {
-		old, _ := selector.SnapshotHash(p.state.Files, o)
+		old, _ := p.state.FileHash(o)
 		req.Orphans = append(req.Orphans, agent.Orphan{Path: o, Status: p.orphanStatus(o), OldBlob: old, NewBlob: p.snap[o], Base: base})
 	}
 	key := agent.CacheKey(req)

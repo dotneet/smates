@@ -163,10 +163,10 @@ explain the changes their tests depend on (`Input.Others`), so a run limited to 
 suites selects what a run over every suite selects for them; and a change that only
 suites left out would run for under the orphan policy (it is under their root, not under
 the root of a picked suite, and no suite rooted at the repository root is picked) is not
-an orphan of the run either (`selector.Owned`): the job that runs those suites handles
+an orphan of the run either (`selector.Ownership.Owned`): the job that runs those suites handles
 it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
 the snapshot for them: a file only its suites own gets its hash; a file the suites left
-out also own (or own alone) gets a marker `?<hash>@<suites>` (`selector.Marker`), the
+out also own (or own alone) gets a marker `?<hash>@<suites>` (`state.MarkerSnap`), the
 content these suites saw, unless its entry already equals the current hash (or holds a
 content hash and only suites left out own it). A later `--suite` run finds a marked
 file unchanged only when every suite it runs saw that content; a run of other suites,

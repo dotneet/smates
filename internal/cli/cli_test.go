@@ -421,7 +421,7 @@ suites:
 	if strings.Contains(out.String(), "Dockerfile") {
 		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
 	}
-	if h := st.Files["b/notes.cfg"]; !strings.HasPrefix(h, selector.Unrecorded) || len(h) == 1 {
+	if h := st.Files["b/notes.cfg"]; !state.ParseSnap(h).Unrecorded() || len(h) == 1 {
 		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run: %q", h)
 	}
 	out.Reset()
@@ -441,7 +441,7 @@ suites:
 	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "b", "--all"}, &out, &errb); code != 0 {
 		t.Fatalf("run --suite b --all: %d %s", code, errb.String())
 	}
-	if st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil || st.Files["Dockerfile"] == "" || strings.HasPrefix(st.Files["Dockerfile"], selector.Unrecorded) {
+	if st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil || st.Files["Dockerfile"] == "" || state.ParseSnap(st.Files["Dockerfile"]).Unrecorded() {
 		t.Errorf("Dockerfile after both suites ran: %v %q", err, st.Files["Dockerfile"])
 	}
 
