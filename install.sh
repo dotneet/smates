@@ -8,6 +8,11 @@
 # checksums.txt (SHA-256) and installs the smates binary. Needs curl or wget, tar
 # (unzip on Windows) and one of sha256sum, shasum or openssl. No API token is used.
 #
+# SMATES_VERIFY=attestation additionally verifies the archive's build provenance
+# attestation with `gh attestation verify` (needs the gh CLI, logged in or with
+# GH_TOKEN set): it must have been built by smates' release workflow from the
+# release's tag. Releases published before attestations were introduced have none.
+#
 # Options:
 #   -b DIR   install directory (default: $SMATES_INSTALL_DIR, else /usr/local/bin when
 #            writable, else ~/.local/bin)
@@ -37,6 +42,8 @@ usage: install.sh [-b bindir] [version]
            when writable, else ~/.local/bin)
   -h       show this help
   version  release to install, e.g. v1.2.3 (default: $SMATES_VERSION, else latest)
+
+  SMATES_VERIFY=attestation also verifies the build provenance attestation with gh
 EOF
 }
 
@@ -137,6 +144,19 @@ main() {
 	}
 	version=${1:-${SMATES_VERSION:-latest}}
 	bindir=${bindir:-$(default_bindir)}
+	verify=${SMATES_VERIFY:-checksum}
+	case "$verify" in
+	checksum) ;;
+	attestation)
+		has gh || die "SMATES_VERIFY=attestation needs the gh CLI (https://cli.github.com)"
+		gh_help=$(gh attestation verify --help 2>&1) || true
+		case "$gh_help" in
+		*--source-ref*) ;;
+		*) die "SMATES_VERIFY=attestation needs a gh CLI with 'gh attestation verify --source-ref' (upgrade gh)" ;;
+		esac
+		;;
+	*) die "invalid SMATES_VERIFY: $verify (want checksum or attestation)" ;;
+	esac
 
 	os=$(detect_os)
 	arch=$(detect_arch)
@@ -172,6 +192,14 @@ main() {
 	[ -n "$expected" ] || die "$archive is not listed in checksums.txt"
 	actual=$(sha256 "$tmp/$archive")
 	[ "$expected" = "$actual" ] || die "checksum mismatch for $archive: expected $expected, got $actual"
+
+	if [ "$verify" = attestation ]; then
+		log "verifying the build provenance attestation of $archive"
+		gh attestation verify "$tmp/$archive" --repo "$REPO" \
+			--signer-workflow "$REPO/.github/workflows/release.yml" \
+			--source-ref "refs/tags/$version" --deny-self-hosted-runners >&2 ||
+			die "the build provenance attestation of $archive does not verify (releases published before attestations were introduced have none: unset SMATES_VERIFY)"
+	fi
 
 	case "$ext" in
 	tar.gz) tar -xzf "$tmp/$archive" -C "$tmp" "smates$exe" ;;

@@ -95,6 +95,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Test the action's helpers
+        shell: bash
+        run: bash action/lib_test.sh
       - id: smates
         uses: ./
         with:
@@ -106,9 +109,11 @@ jobs:
         env:
           EXIT_CODE: ${{ steps.smates.outputs.exit-code }}
           VERSION: ${{ steps.smates.outputs.version }}
+          VERIFIED: ${{ steps.smates.outputs.verified }}
         run: |
           test "$EXIT_CODE" = 0
           test "$VERSION" = source
+          test "$VERIFIED" = none
           smates version
 
   pr-comment:

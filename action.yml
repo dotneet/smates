@@ -12,9 +12,19 @@ inputs:
     description: >-
       smates release to install ("v1.2.3" or "1.2.3"), "latest", or "source" to build
       from the action's own checkout with Go. Default: the action's ref when it is a
-      release tag (e.g. dotneet/smates@v1.2.3), otherwise "latest".
+      release tag (e.g. dotneet/smates@v1.2.3) or the commit of one (dotneet/smates@<sha>),
+      otherwise "latest".
     required: false
     default: ''
+  verify:
+    description: >-
+      How the downloaded release is verified. "auto": the SHA-256 in the release's
+      checksums.txt, plus the build provenance attestation when gh can check it and the
+      release has one (releases published before attestations have none and are checked
+      by checksum, with a notice). "attestation": the attestation must exist and verify.
+      "checksum": checksums.txt only. A verification failure always fails the job.
+    required: false
+    default: auto
   command:
     description: >-
       smates subcommand to run: "run" (select, run and record), "select" (only compute
@@ -84,7 +94,7 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: Token used to post the comment.
+    description: Token used to post the comment and to look up build provenance attestations.
     required: false
     default: ${{ github.token }}
 
@@ -113,6 +123,11 @@ outputs:
   version:
     description: The smates version that was installed ("source" for source builds).
     value: ${{ steps.install.outputs.version }}
+  verified:
+    description: >-
+      How the installed release was verified: "attestation" (checksum and build
+      provenance), "checksum", or "none" (built from source).
+    value: ${{ steps.install.outputs.verified }}
   comment-url:
     description: URL of the pull request comment, when one was posted or updated.
     value: ${{ steps.comment.outputs.url }}
@@ -125,6 +140,7 @@ runs:
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        INPUT_VERIFY: ${{ inputs.verify }}
         INPUT_WORKDIR: ${{ inputs.working-directory }}
         INPUT_STATE_PATH: ${{ inputs.state-path }}
         INPUT_CACHE_KEY: ${{ inputs.cache-key }}
@@ -155,17 +171,54 @@ runs:
           *) arch='' ;;
         esac
 
-        # Version: explicit input, else the action ref when it is a release tag.
-        # github.action_ref is empty inside composite actions on some runners, so the
-        # ref is also recovered from the action path (.../_actions/<owner>/<repo>/<ref>).
+        lib=$SMATES_ACTION_PATH/action/lib.sh
+        if command -v cygpath >/dev/null 2>&1; then
+          lib=$(cygpath -u "$lib")
+        fi
+        # shellcheck source=action/lib.sh
+        . "$lib"
+
+        verify=${INPUT_VERIFY:-auto}
+        case "$verify" in
+          auto | attestation | checksum) ;;
+          *) echo "::error::smates: invalid verify '$verify' (want auto, attestation or checksum)"; exit 1 ;;
+        esac
+
+        # Version: explicit input, else the action ref when it is a release tag (or the
+        # commit of one). github.action_ref is empty inside composite actions on some
+        # runners, so the ref is also recovered from the action path
+        # (.../_actions/<owner>/<repo>/<ref>).
+        # attestation_required: the release is the action's own, published by the
+        # release workflow of this very checkout, which attests every archive; a
+        # missing attestation then means a replaced asset, not an old release.
+        # source_digest: the commit the attestation must name, when it is known.
+        attestation_required=false
+        source_digest=
         version=$INPUT_VERSION
         if [ -z "$version" ]; then
           ref=${SMATES_ACTION_REF:-$(basename "$SMATES_ACTION_PATH")}
-          if [[ $ref =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$ ]]; then
+          if smates_is_release_tag "$ref"; then
             version=$ref
-          elif [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
-            # Pinned to a commit: build exactly that commit.
-            version=source
+            attestation_required=true
+          elif [[ $ref =~ ^[0-9a-fA-F]{40}$ ]]; then
+            # Pinned to a commit: install the release tagged at exactly that commit,
+            # else build that commit from source.
+            status=0
+            tags=$(smates_release_for_commit "$ref" "$SMATES_ACTION_PATH" "https://github.com/$repo.git") || status=$?
+            case "$status" in
+              0)
+                echo "::notice title=smates::the pinned commit $ref is release $tags; installing its release binary"
+                version=$tags
+                source_digest=$(printf '%s' "$ref" | tr 'A-F' 'a-f')
+                attestation_required=true
+                ;;
+              1) echo "::notice title=smates::the pinned commit $ref is not a release; building it from source (needs Go)" ;;
+              2) echo "::notice title=smates::the pinned commit $ref has several release tags (${tags//$'\n'/, }); building it from source (needs Go)" ;;
+              *) echo "::warning::smates: could not list the tags of $repo to match the pinned commit $ref; building it from source (needs Go)" ;;
+            esac
+            if [ "$status" != 0 ]; then
+              version=source
+            fi
           elif [[ $ref =~ ^v[0-9]+(\.[0-9]+)?$ ]]; then
             # A moving major/minor tag: the newest release of that line (from the
             # releases feed, which needs no API token).
@@ -206,9 +259,12 @@ runs:
         else
           bin_dir=$(to_path "$tool_root/smates/$version/${os}-${arch}")
         fi
+        archive=smates_${os}_${arch}.$archive_ext
         present=false
-        if [ -x "$bin_dir/smates$exe" ] && [ "$version" != source ]; then
-          present=true # persistent tool cache on self-hosted runners
+        if [ -f "$bin_dir/$archive" ] && [ "$version" != source ]; then
+          # Persistent tool cache on self-hosted runners. The archive is kept next to
+          # the binary and verified again before every use.
+          present=true
         fi
 
         # State cache key parts. Cache keys may not contain commas.
@@ -240,9 +296,15 @@ runs:
           echo "os=$os"
           echo "arch=$arch"
           echo "exe=$exe"
-          echo "archive=smates_${os}_${arch}.$archive_ext"
+          echo "archive=$archive"
           echo "bin-dir=$bin_dir"
           echo "present=$present"
+          echo "verify=$verify"
+          echo "attestation-required=$attestation_required"
+          if [ "$version" != source ]; then
+            echo "source-ref=refs/tags/$version"
+          fi
+          echo "source-digest=$source_digest"
           echo "state-dir=$(to_path "$state_dir")"
           # Unique per invocation, so two smates steps in one run (select, then run)
           # both save; restores pick the newest entry by prefix.
@@ -251,40 +313,46 @@ runs:
           echo "state-restore-default=$prefix$default_branch-"
         } >>"$GITHUB_OUTPUT"
 
+    # The cache holds the release archive (and the binary unpacked from it). A restored
+    # archive is verified exactly like a fresh download before it is unpacked again, so
+    # whoever can write this repository's cache cannot get an unverified binary run.
     - name: Restore smates binary
       id: bin-cache
       if: steps.resolve.outputs.version != 'source' && steps.resolve.outputs.present != 'true'
       uses: actions/cache/restore@v4
       with:
         path: ${{ steps.resolve.outputs.bin-dir }}
-        key: smates-bin-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
+        key: smates-archive-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
 
     - name: Install smates
       id: install
       shell: bash
       env:
+        GH_TOKEN: ${{ inputs.github-token }}
         SMATES_REPO: ${{ steps.resolve.outputs.repo }}
         SMATES_VERSION: ${{ steps.resolve.outputs.version }}
         SMATES_ARCHIVE: ${{ steps.resolve.outputs.archive }}
         SMATES_EXE: ${{ steps.resolve.outputs.exe }}
         SMATES_BIN_DIR: ${{ steps.resolve.outputs.bin-dir }}
         SMATES_CACHED: ${{ steps.resolve.outputs.present == 'true' || steps.bin-cache.outputs.cache-hit == 'true' }}
+        SMATES_VERIFY: ${{ steps.resolve.outputs.verify }}
+        SMATES_ATTESTATION_REQUIRED: ${{ steps.resolve.outputs.attestation-required }}
+        SMATES_SOURCE_REF: ${{ steps.resolve.outputs.source-ref }}
+        SMATES_SOURCE_DIGEST: ${{ steps.resolve.outputs.source-digest }}
         SMATES_ACTION_PATH: ${{ github.action_path }}
         SMATES_ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
+        lib=$SMATES_ACTION_PATH/action/lib.sh
+        if command -v cygpath >/dev/null 2>&1; then
+          lib=$(cygpath -u "$lib")
+        fi
+        # shellcheck source=action/lib.sh
+        . "$lib"
+
         bin_dir=$SMATES_BIN_DIR
         bin="$bin_dir/smates$SMATES_EXE"
-
-        sha256() {
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$1" | awk '{print $1}'
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "$1" | awk '{print $1}'
-          else
-            openssl dgst -sha256 -r "$1" | awk '{print $1}'
-          fi
-        }
+        cached_archive="$bin_dir/$SMATES_ARCHIVE"
 
         fetch() {
           curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"
@@ -306,22 +374,50 @@ runs:
           esac
         }
 
-        download() {
-          local base tmp expected actual
+        # install_release gets the archive (from the cache or the release), verifies it
+        # and unpacks it. Status 1: the release could not be reached; 2: verification
+        # failed (never fall back to anything then).
+        install_release() {
+          local base tmp expected actual status
           base="https://github.com/$SMATES_REPO/releases/download/$SMATES_VERSION"
           tmp=$(mktemp -d)
-          echo "Downloading $base/$SMATES_ARCHIVE"
-          fetch "$base/$SMATES_ARCHIVE" "$tmp/$SMATES_ARCHIVE" || return 1
+          if [ "$SMATES_CACHED" = true ] && [ -f "$cached_archive" ]; then
+            echo "Verifying the cached $SMATES_ARCHIVE ($SMATES_VERSION)"
+            cp "$cached_archive" "$tmp/$SMATES_ARCHIVE"
+          else
+            echo "Downloading $base/$SMATES_ARCHIVE"
+            fetch "$base/$SMATES_ARCHIVE" "$tmp/$SMATES_ARCHIVE" || return 1
+            method=download
+          fi
+          # checksums.txt is always fetched afresh: a cached copy would be as trusted as
+          # the cache entry it came with.
           fetch "$base/checksums.txt" "$tmp/checksums.txt" || return 1
           expected=$(awk -v f="$SMATES_ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/checksums.txt")
-          actual=$(sha256 "$tmp/$SMATES_ARCHIVE")
+          actual=$(smates_sha256 "$tmp/$SMATES_ARCHIVE")
           if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
             echo "::error::smates: checksum mismatch for $SMATES_ARCHIVE (expected '${expected:-<missing>}', got '$actual')"
+            if [ "$method" = cached ]; then
+              echo "::error::smates: the cached archive does not match the release; delete the 'smates-archive-$SMATES_VERSION-*' cache entry if the release was re-published"
+            fi
             return 2
           fi
-          mkdir -p "$SMATES_BIN_DIR"
-          unpack "$tmp/$SMATES_ARCHIVE" "$SMATES_BIN_DIR" || return 1
+          if [ "$SMATES_VERIFY" != checksum ]; then
+            status=0
+            smates_verify_attestation "$tmp/$SMATES_ARCHIVE" "$SMATES_REPO" "$SMATES_SOURCE_REF" \
+              "$SMATES_SOURCE_DIGEST" "$SMATES_VERIFY" "$SMATES_ATTESTATION_REQUIRED" || status=$?
+            if [ "$status" -eq 2 ]; then
+              return 2
+            elif [ "$status" -eq 0 ]; then
+              verified=attestation
+            fi
+          fi
+          mkdir -p "$bin_dir"
+          rm -f "$bin"
+          unpack "$tmp/$SMATES_ARCHIVE" "$bin_dir" || return 2
           chmod +x "$bin"
+          if [ "$method" = download ]; then
+            cp "$tmp/$SMATES_ARCHIVE" "$cached_archive"
+          fi
           rm -rf "$tmp"
         }
 
@@ -350,25 +446,31 @@ runs:
         }
 
         method=cached
+        verified=checksum
         version=$SMATES_VERSION
         if [ "$SMATES_VERSION" = source ]; then
+          if [ "$SMATES_VERIFY" = attestation ]; then
+            echo "::notice title=smates::building from the action's own checkout: nothing is downloaded, so there is no attestation to verify"
+          fi
           build_from_source
           method=source
-        elif [ "$SMATES_CACHED" != true ] || [ ! -x "$bin" ]; then
+          verified=none
+        else
           status=0
-          download || status=$?
-          if [ "$status" -eq 0 ]; then
-            method=download
-          elif [ "$status" -eq 2 ]; then
-            exit 1 # never fall back on a checksum mismatch
-          elif command -v go >/dev/null 2>&1; then
-            echo "::warning::smates: downloading $SMATES_VERSION failed; building from source instead"
-            build_from_source
-            method=source
-            version=source
-          else
-            echo "::error::smates: could not download $SMATES_VERSION ($SMATES_ARCHIVE) and Go is not available to build from source"
-            exit 1
+          install_release || status=$?
+          if [ "$status" -eq 2 ]; then
+            exit 1 # never fall back after a failed verification
+          elif [ "$status" -ne 0 ]; then
+            if command -v go >/dev/null 2>&1; then
+              echo "::warning::smates: could not get release $SMATES_VERSION; building from source instead"
+              build_from_source
+              method=source
+              version=source
+              verified=none
+            else
+              echo "::error::smates: could not download $SMATES_VERSION ($SMATES_ARCHIVE) and Go is not available to build from source"
+              exit 1
+            fi
           fi
         fi
 
@@ -381,6 +483,7 @@ runs:
         {
           echo "method=$method"
           echo "version=$version"
+          echo "verified=$verified"
         } >>"$GITHUB_OUTPUT"
 
     - name: Save smates binary
@@ -388,7 +491,7 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.resolve.outputs.bin-dir }}
-        key: smates-bin-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
+        key: smates-archive-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
 
     - name: Restore smates state
       if: inputs.cache == 'true'

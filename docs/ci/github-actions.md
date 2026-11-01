@@ -29,10 +29,11 @@ A complete, commented workflow is in
 ## What the action does
 
 1. **Install.** Downloads `smates_<os>_<arch>` from the release, verifies it against
-   the release's `checksums.txt` and puts it on `PATH`. The binary is cached per
-   version, OS and architecture. With `version: source`, or when the download fails and
-   Go is on `PATH`, it is built from the action's own checkout instead. A checksum
-   mismatch always fails the job; it never falls back.
+   the release's `checksums.txt` and its build provenance attestation (see
+   [`verify`](#verification)) and puts it on `PATH`. The archive is cached per version,
+   OS and architecture, and verified again on every cache hit. With `version: source`,
+   or when the download fails and Go is on `PATH`, it is built from the action's own
+   checkout instead. A failed verification always fails the job; it never falls back.
 2. **Restore state** (`.smates/`) from the Actions cache: the newest state of this
    branch, else the newest state of the default branch, else none (cold start).
 3. **Run** `smates <command> <args>` in `working-directory`. The step's exit code is
@@ -61,7 +62,8 @@ branch's state.
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | action ref | Release to install (`v1.2.3`), `latest`, or `source`. Defaults to the ref in `uses:` when it is a release tag, otherwise `latest`. |
+| `version` | action ref | Release to install (`v1.2.3`), `latest`, or `source`. Defaults to the ref in `uses:` when it is a release tag or the commit of one, otherwise `latest`. |
+| `verify` | `auto` | How the download is verified: `auto`, `attestation` or `checksum` ([below](#verification)). |
 | `command` | `run` | Subcommand. `select` defaults to `--format github`. |
 | `args` | | Extra arguments, shell-parsed: `--shard 1/4 -- --reporter=dot`. Do not interpolate untrusted values (PR titles, branch names). |
 | `working-directory` | `.` | Where smates runs. |
@@ -73,7 +75,7 @@ branch's state.
 | `state-path` | `.smates` | State directory, relative to `working-directory`. Must match `state` in `smates.yml`. |
 | `comment` | `false` | `true` posts the summary as a pull request comment, updated in place ([below](#pull-request-comment)). |
 | `comment-key` | | Separates the comments of several smates jobs in one pull request. |
-| `github-token` | `github.token` | Token used for the comment. |
+| `github-token` | `github.token` | Token used for the comment and to look up attestations. |
 
 Cache key: `smates-state-<runner.os>-[<cache-key>-]<branch>-<run_id>-<run_attempt>`,
 restored by prefix `...-<branch>-`, then `...-<default branch>-`.
@@ -90,12 +92,28 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 | `flaky` | Number of test units `run` proved flaky (outcome flipped with unchanged inputs). |
 | `flaky-tests` | JSON array of those units (`"suite: unit"`); see `smates flaky`. |
 | `version` | Installed smates version (`source` for source builds). |
+| `verified` | How it was verified: `attestation`, `checksum`, or `none` (source build). |
 | `comment-url` | URL of the pull request comment, when one was posted or updated. |
 
 ## Patterns
 
 **Pin the version.** `uses: dotneet/smates@v1.2.3` installs exactly v1.2.3. Let
 Dependabot (`package-ecosystem: github-actions`) bump it.
+
+To pin by commit, as many security policies require, use the commit of a release tag;
+Dependabot and Renovate keep the comment in sync:
+
+```yaml
+      - uses: dotneet/smates@0123456789abcdef0123456789abcdef01234567 # v1.2.3
+        with:
+          verify: attestation   # optional: refuse anything without valid provenance
+```
+
+The action finds the release tag that points at exactly that commit (from its own
+checkout's tags, else `git ls-remote`, no API token) and installs that release's
+binary; with an attestation, it must name that commit. A commit that is not a release
+(or carries several release tags) is built from source, with a notice, and needs Go
+(`actions/setup-go`) on the runner.
 
 **Skip expensive setup when nothing is affected.** Run `select` first in the same job:
 
@@ -207,6 +225,37 @@ depends on was handled (named by a test, the agent, the `orphans` policy); and, 
 
 **Your own storage.** `cache: false` and manage `.smates/` yourself, e.g. with
 `smates state pull` / `smates state push` (see [other CI systems](other-ci.md)).
+
+<a id="verification"></a>
+## Verification
+
+Release archives and `checksums.txt` carry a [build provenance
+attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
+signed by smates' release workflow. Unlike `checksums.txt`, which is downloaded from the
+same release as the archive, it cannot be produced by someone who can only edit the
+release: it is signed with a short-lived certificate for `dotneet/smates`'
+`.github/workflows/release.yml`, run on a GitHub-hosted runner for the release's tag.
+The action checks it with `gh attestation verify` (`--repo dotneet/smates
+--signer-workflow dotneet/smates/.github/workflows/release.yml --source-ref
+refs/tags/<version> --deny-self-hosted-runners`, plus `--source-digest <commit>` when
+pinned by commit) using `github-token`.
+
+| `verify` | Behaviour |
+|---|---|
+| `auto` (default) | Checksum, plus the attestation when `gh` can check it and the archive has one. Releases published before attestations were introduced have none: checksum only, with a notice. When the release is the action's own (`uses: dotneet/smates@v1.2.3` or its commit, no `version` input), it is known to be attested, so a missing attestation fails the job. Without a usable `gh` (some self-hosted runners) it is checksum only, with a notice. |
+| `attestation` | Checksum and attestation; anything else fails the job (no `gh`, no attestation, an older release). |
+| `checksum` | `checksums.txt` only (the behaviour before attestations). |
+
+An attestation that exists but does not verify always fails the job, as does a checksum
+mismatch; the action never falls back to another method or to a source build after a
+failed verification. `version: source` downloads nothing, so there is nothing to verify.
+
+**The binary cache does not skip verification.** The cache entry holds the release
+archive, and a restored archive goes through the same checks as a fresh download
+(`checksums.txt` is fetched again, the attestation looked up again) before the binary is
+unpacked from it. Anyone who can write the repository's cache can at worst make the job
+fail, not run another binary. The cost is one small request per run (plus the
+attestation lookup), and a cache hit no longer works offline.
 
 ## Notes
 

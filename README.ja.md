@@ -89,6 +89,7 @@ env_track: [LANG]
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
+# (SMATES_VERIFY=attestation で gh CLI によるビルドプロベナンスの検証も行います)
 
 smates init --github # スイート検出、smates.yml(と GitHub ワークフロー)生成、.smates/ を gitignore
 smates run --all     # 一度すべて実行して各テストの依存を記録
@@ -132,7 +133,10 @@ smates が書いた部分だけを削除し、`smates hook status` はフック�
 
 デフォルトブランチへの push では全テストを実行して状態を更新し、プルリクエストでは
 影響のあるテストだけを実行します。状態はブランチごとに Actions cache に保存され、
-デフォルトブランチの状態にフォールバックします。詳細は
+デフォルトブランチの状態にフォールバックします。`uses: dotneet/smates@<コミット SHA> # v1.2.3`
+のようにコミット SHA で固定しても、そのコミットのリリースバイナリがインストールされます。
+リリースのアーカイブにはビルドプロベナンスの attestation が付いており、`verify: attestation`
+で必須にできます(既定の `auto` は検証できるときに検証)。詳細は
 [docs/ci/github-actions.md](docs/ci/github-actions.md)、他の CI は
 [docs/ci/other-ci.md](docs/ci/other-ci.md) を参照してください。
 
