@@ -16,8 +16,10 @@ suites:
   # Go units are packages, so the e2e package is a single unit. One suite per CI shard
   # (SMATES_E2E_FIXTURE picks its fixtures) makes the selection per fixture: each one
   # depends on the core of smates, the runner code its fixtures use and the fixtures
-  # themselves ("." is the e2e package, whose own files every suite depends on). A
-  # change no suite names (a new fixture or source file) runs them all as an orphan.
+  # themselves ("." is the e2e package, whose own files every suite depends on). A new
+  # fixture runs them all as an orphan. A new source file of smates is not an orphan (the
+  # go suite depends on it), so cmd/smates/e2e_rules_test.go fails until a rule below
+  # names it.
   - name: e2e-polyglot-scenarios
     runner: go
     root: e2e
