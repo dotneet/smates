@@ -31,7 +31,8 @@ A complete, commented workflow is in
 1. **Install.** Downloads `smates_<os>_<arch>` from the release, verifies it against
    the release's `checksums.txt` and its build provenance attestation (see
    [`verify`](#verification)) and puts it on `PATH`. The archive is cached per version,
-   OS and architecture, and verified again on every cache hit. With `version: source`,
+   OS and architecture, and verified again on every cache hit (which still needs network
+   access for `checksums.txt`). With `version: source`,
    or when the download fails and Go is on `PATH`, it is built from the action's own
    checkout instead. A failed verification always fails the job; it never falls back.
 2. **Restore state** (`.smates/`) from the Actions cache: the newest state of this
@@ -250,12 +251,19 @@ An attestation that exists but does not verify always fails the job, as does a c
 mismatch; the action never falls back to another method or to a source build after a
 failed verification. `version: source` downloads nothing, so there is nothing to verify.
 
-**The binary cache does not skip verification.** The cache entry holds the release
-archive, and a restored archive goes through the same checks as a fresh download
-(`checksums.txt` is fetched again, the attestation looked up again) before the binary is
-unpacked from it. Anyone who can write the repository's cache can at worst make the job
-fail, not run another binary. The cost is one small request per run (plus the
-attestation lookup), and a cache hit no longer works offline.
+**The binary cache does not skip verification.** The cache entry (and, on self-hosted
+runners, the tool cache) holds only the release archive. It is restored into a staging
+directory that is never put on `PATH`; the action copies just the archive out of it and
+puts it through the same checks as a fresh download (`checksums.txt` is fetched again,
+the attestation looked up again), then unpacks the `smates` binary into a new directory
+that holds nothing else and puts that on `PATH`. Anyone who can write the repository's
+cache can at worst make the job fail: not run another binary, and not plant other
+executables (`git`, `go`, ...) on `PATH`.
+
+**Cached installs still need network access.** Every run, including a cache hit,
+downloads `checksums.txt` from the release (plus the attestation lookup when `verify`
+is not `checksum`), so a cache hit does not work offline; the cost is one small request
+per run.
 
 ## Notes
 

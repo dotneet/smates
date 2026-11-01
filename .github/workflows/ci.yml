@@ -97,7 +97,9 @@ jobs:
           go-version-file: go.mod
       - name: Test the action's helpers
         shell: bash
-        run: bash action/lib_test.sh
+        run: |
+          bash action/lib_test.sh
+          bash action/install_test.sh
       - id: smates
         uses: ./
         with:

@@ -253,17 +253,16 @@ runs:
           version=source
         fi
 
+        # Only release archives are kept between runs: in the tool cache (persistent on
+        # self-hosted runners) and in the Actions cache, which restores into its own
+        # staging directory. The install step takes nothing else from either, verifies
+        # the archive and unpacks the binary into a fresh directory for PATH.
         tool_root=${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}
-        if [ "$version" = source ]; then
-          bin_dir=$(to_path "$RUNNER_TEMP/smates-source/bin")
-        else
-          bin_dir=$(to_path "$tool_root/smates/$version/${os}-${arch}")
-        fi
+        tool_dir=$(to_path "$tool_root/smates/$version/${os}-${arch}")
+        cache_dir=$(to_path "$RUNNER_TEMP/smates-archive-cache/$version-${os}-${arch}")
         archive=smates_${os}_${arch}.$archive_ext
         present=false
-        if [ -f "$bin_dir/$archive" ] && [ "$version" != source ]; then
-          # Persistent tool cache on self-hosted runners. The archive is kept next to
-          # the binary and verified again before every use.
+        if [ -f "$tool_dir/$archive" ] && [ "$version" != source ]; then
           present=true
         fi
 
@@ -297,7 +296,8 @@ runs:
           echo "arch=$arch"
           echo "exe=$exe"
           echo "archive=$archive"
-          echo "bin-dir=$bin_dir"
+          echo "tool-dir=$tool_dir"
+          echo "cache-dir=$cache_dir"
           echo "present=$present"
           echo "verify=$verify"
           echo "attestation-required=$attestation_required"
@@ -313,15 +313,17 @@ runs:
           echo "state-restore-default=$prefix$default_branch-"
         } >>"$GITHUB_OUTPUT"
 
-    # The cache holds the release archive (and the binary unpacked from it). A restored
-    # archive is verified exactly like a fresh download before it is unpacked again, so
-    # whoever can write this repository's cache cannot get an unverified binary run.
-    - name: Restore smates binary
+    # The Actions cache holds only the release archive, restored into a staging
+    # directory that never goes on PATH. The install step copies just the archive out
+    # of it, verifies it exactly like a fresh download and unpacks the binary into a
+    # fresh directory, so whoever can write this repository's cache can neither get an
+    # unverified binary run nor plant other executables (git, go, ...) on PATH.
+    - name: Restore smates archive
       id: bin-cache
       if: steps.resolve.outputs.version != 'source' && steps.resolve.outputs.present != 'true'
       uses: actions/cache/restore@v4
       with:
-        path: ${{ steps.resolve.outputs.bin-dir }}
+        path: ${{ steps.resolve.outputs.cache-dir }}
         key: smates-archive-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
 
     - name: Install smates
@@ -333,8 +335,10 @@ runs:
         SMATES_VERSION: ${{ steps.resolve.outputs.version }}
         SMATES_ARCHIVE: ${{ steps.resolve.outputs.archive }}
         SMATES_EXE: ${{ steps.resolve.outputs.exe }}
-        SMATES_BIN_DIR: ${{ steps.resolve.outputs.bin-dir }}
-        SMATES_CACHED: ${{ steps.resolve.outputs.present == 'true' || steps.bin-cache.outputs.cache-hit == 'true' }}
+        SMATES_TOOL_DIR: ${{ steps.resolve.outputs.tool-dir }}
+        SMATES_CACHE_DIR: ${{ steps.resolve.outputs.cache-dir }}
+        SMATES_PRESENT: ${{ steps.resolve.outputs.present }}
+        SMATES_CACHE_HIT: ${{ steps.bin-cache.outputs.cache-hit }}
         SMATES_VERIFY: ${{ steps.resolve.outputs.verify }}
         SMATES_ATTESTATION_REQUIRED: ${{ steps.resolve.outputs.attestation-required }}
         SMATES_SOURCE_REF: ${{ steps.resolve.outputs.source-ref }}
@@ -343,16 +347,20 @@ runs:
         SMATES_ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
-        lib=$SMATES_ACTION_PATH/action/lib.sh
-        if command -v cygpath >/dev/null 2>&1; then
-          lib=$(cygpath -u "$lib")
-        fi
+        unix_path() {
+          if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s\n' "$1"; fi
+        }
         # shellcheck source=action/lib.sh
-        . "$lib"
+        . "$(unix_path "$SMATES_ACTION_PATH/action/lib.sh")"
 
-        bin_dir=$SMATES_BIN_DIR
+        # Scratch space for the download, removed on every exit path.
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        # The directory that goes on PATH: new for this step, and it only ever
+        # receives the smates binary.
+        temp_root=$(unix_path "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")
+        bin_dir=$(mktemp -d "$temp_root/smates-bin.XXXXXX")
         bin="$bin_dir/smates$SMATES_EXE"
-        cached_archive="$bin_dir/$SMATES_ARCHIVE"
 
         fetch() {
           curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"
@@ -374,36 +382,41 @@ runs:
           esac
         }
 
-        # install_release gets the archive (from the cache or the release), verifies it
-        # and unpacks it. Status 1: the release could not be reached; 2: verification
-        # failed (never fall back to anything then).
+        # install_release gets the archive (from the tool cache, the Actions cache or
+        # the release), verifies it and installs the binary unpacked from it. Only the
+        # archive file is read from a cache directory. Status 1: the release could not
+        # be reached; 2: verification failed (never fall back to anything then).
         install_release() {
-          local base tmp expected actual status
+          local base archive=$tmp/$SMATES_ARCHIVE expected actual status cached='' dir
           base="https://github.com/$SMATES_REPO/releases/download/$SMATES_VERSION"
-          tmp=$(mktemp -d)
-          if [ "$SMATES_CACHED" = true ] && [ -f "$cached_archive" ]; then
+          if [ "$SMATES_PRESENT" = true ] && [ -f "$SMATES_TOOL_DIR/$SMATES_ARCHIVE" ]; then
+            cached="$SMATES_TOOL_DIR/$SMATES_ARCHIVE"
+          elif [ "$SMATES_CACHE_HIT" = true ] && [ -f "$SMATES_CACHE_DIR/$SMATES_ARCHIVE" ]; then
+            cached="$SMATES_CACHE_DIR/$SMATES_ARCHIVE"
+          fi
+          if [ -n "$cached" ]; then
             echo "Verifying the cached $SMATES_ARCHIVE ($SMATES_VERSION)"
-            cp "$cached_archive" "$tmp/$SMATES_ARCHIVE"
+            cp "$cached" "$archive"
           else
             echo "Downloading $base/$SMATES_ARCHIVE"
-            fetch "$base/$SMATES_ARCHIVE" "$tmp/$SMATES_ARCHIVE" || return 1
+            fetch "$base/$SMATES_ARCHIVE" "$archive" || return 1
             method=download
           fi
           # checksums.txt is always fetched afresh: a cached copy would be as trusted as
           # the cache entry it came with.
           fetch "$base/checksums.txt" "$tmp/checksums.txt" || return 1
           expected=$(awk -v f="$SMATES_ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/checksums.txt")
-          actual=$(smates_sha256 "$tmp/$SMATES_ARCHIVE")
+          actual=$(smates_sha256 "$archive")
           if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
             echo "::error::smates: checksum mismatch for $SMATES_ARCHIVE (expected '${expected:-<missing>}', got '$actual')"
-            if [ "$method" = cached ]; then
-              echo "::error::smates: the cached archive does not match the release; delete the 'smates-archive-$SMATES_VERSION-*' cache entry if the release was re-published"
+            if [ -n "$cached" ]; then
+              echo "::error::smates: the cached $cached does not match the release; delete it (or the 'smates-archive-$SMATES_VERSION-*' cache entry) if the release was re-published"
             fi
             return 2
           fi
           if [ "$SMATES_VERIFY" != checksum ]; then
             status=0
-            smates_verify_attestation "$tmp/$SMATES_ARCHIVE" "$SMATES_REPO" "$SMATES_SOURCE_REF" \
+            smates_verify_attestation "$archive" "$SMATES_REPO" "$SMATES_SOURCE_REF" \
               "$SMATES_SOURCE_DIGEST" "$SMATES_VERIFY" "$SMATES_ATTESTATION_REQUIRED" || status=$?
             if [ "$status" -eq 2 ]; then
               return 2
@@ -411,24 +424,23 @@ runs:
               verified=attestation
             fi
           fi
-          mkdir -p "$bin_dir"
-          rm -f "$bin"
-          unpack "$tmp/$SMATES_ARCHIVE" "$bin_dir" || return 2
+          mkdir "$tmp/unpacked"
+          unpack "$archive" "$tmp/unpacked" || return 2
+          cp "$tmp/unpacked/smates$SMATES_EXE" "$bin" || return 2
           chmod +x "$bin"
           if [ "$method" = download ]; then
-            cp "$tmp/$SMATES_ARCHIVE" "$cached_archive"
+            # Keep only the verified archive for later runs: the persistent tool cache
+            # and the staging directory the "Save smates archive" step stores.
+            for dir in "$SMATES_TOOL_DIR" "$SMATES_CACHE_DIR"; do
+              if ! { mkdir -p "$dir" && cp "$archive" "$dir/$SMATES_ARCHIVE"; }; then
+                echo "::warning::smates: could not keep $SMATES_ARCHIVE in $dir"
+              fi
+            done
           fi
-          rm -rf "$tmp"
         }
 
         build_from_source() {
           local label=source
-          # Never put a source build where a release binary is expected: tool cache
-          # directories persist on self-hosted runners.
-          if [ "$SMATES_VERSION" != source ]; then
-            bin_dir="${RUNNER_TEMP:-$(dirname "$SMATES_BIN_DIR")}/smates-source/bin"
-            bin="$bin_dir/smates$SMATES_EXE"
-          fi
           if ! command -v go >/dev/null 2>&1; then
             echo "::error::smates: Go is required to build from source; add actions/setup-go before this action or pin a released version"
             return 1
@@ -436,7 +448,6 @@ runs:
           if [ -n "${SMATES_ACTION_REF:-}" ]; then
             label="source-$SMATES_ACTION_REF"
           fi
-          mkdir -p "$bin_dir"
           echo "Building smates from $SMATES_ACTION_PATH with $(go version)"
           (
             cd "$SMATES_ACTION_PATH"
@@ -486,11 +497,11 @@ runs:
           echo "verified=$verified"
         } >>"$GITHUB_OUTPUT"
 
-    - name: Save smates binary
+    - name: Save smates archive
       if: steps.install.outputs.method == 'download'
       uses: actions/cache/save@v4
       with:
-        path: ${{ steps.resolve.outputs.bin-dir }}
+        path: ${{ steps.resolve.outputs.cache-dir }}
         key: smates-archive-${{ steps.resolve.outputs.version }}-${{ steps.resolve.outputs.os }}-${{ steps.resolve.outputs.arch }}
 
     - name: Restore smates state
