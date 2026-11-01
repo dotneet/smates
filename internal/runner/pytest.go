@@ -33,18 +33,29 @@ func (pytest) Defaults(repo *gitx.Repo, root string) Defaults {
 // pythonCommand picks how to start pytest: uv when the project uses it, else a local
 // virtualenv, else python3 from PATH.
 func pythonCommand(repoRoot, dir string) string {
+	uv, py := pythonInterpreter(repoRoot, dir)
+	if uv {
+		return "uv run pytest"
+	}
+	return py + " -m pytest"
+}
+
+// pythonInterpreter finds the Python of the project at dir: uv (reported as uv=true, with
+// py "uv run python") when the project uses it, else a local virtualenv (relative to
+// dir), else python3 from PATH.
+func pythonInterpreter(repoRoot, dir string) (uv bool, py string) {
 	for d := dir; ; d = filepath.Dir(d) {
 		if exists(filepath.Join(d, "uv.lock")) {
-			return "uv run pytest"
+			return true, "uv run python"
 		}
 		if data, err := os.ReadFile(filepath.Join(d, "pyproject.toml")); err == nil && strings.Contains(string(data), "[tool.uv") {
-			return "uv run pytest"
+			return true, "uv run python"
 		}
 		for _, venv := range []string{".venv", "venv"} {
 			py := filepath.Join(d, venv, "bin", "python")
 			if exists(py) {
 				if r, err := filepath.Rel(dir, py); err == nil {
-					return "./" + filepath.ToSlash(r) + " -m pytest"
+					return false, "./" + filepath.ToSlash(r)
 				}
 			}
 		}
@@ -52,7 +63,7 @@ func pythonCommand(repoRoot, dir string) string {
 			break
 		}
 	}
-	return "python3 -m pytest"
+	return false, "python3"
 }
 
 func exists(p string) bool {

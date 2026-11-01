@@ -575,7 +575,7 @@ func TestExtractShims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{sh.Node, filepath.Join(sh.Python, "smates_trace.py"), filepath.Join(sh.Python, "sitecustomize.py"), filepath.Join(sh.Python, "smates_pytest.py"), filepath.Join(dir, "vitest-reporter.mjs"), filepath.Join(dir, "jest-reporter.cjs")} {
+	for _, p := range []string{sh.Node, filepath.Join(sh.Python, "smates_trace.py"), filepath.Join(sh.Python, "sitecustomize.py"), filepath.Join(sh.Python, "smates_pytest.py"), filepath.Join(sh.Python, "smates_unittest.py"), filepath.Join(dir, "vitest-reporter.mjs"), filepath.Join(dir, "jest-reporter.cjs")} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}

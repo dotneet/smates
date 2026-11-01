@@ -182,7 +182,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkOK, "toolchain-go", "%s", v)
 		}
 	}
-	if runners["pytest"] {
+	if runners["pytest"] || runners["unittest"] {
 		py := tool("python3", "-c", "import sys;print('%d.%d'%sys.version_info[:2])")
 		if py == "" {
 			r.add(checkWarn, "toolchain-python", "python3 not found on PATH (fine if the suite command provides Python, e.g. uv)").fix(doctorFix{Doc: "https://docs.astral.sh/uv/"})

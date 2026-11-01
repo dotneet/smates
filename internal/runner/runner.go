@@ -33,6 +33,14 @@ type Adapter interface {
 	Run(ctx context.Context, rc *RunContext) (*RunResult, error)
 }
 
+// CommandDefaulter is implemented by adapters whose defaults depend on the configured
+// command (unittest: the discovery start directory and pattern name the test files).
+// Resolve then calls DefaultsFor instead of Defaults; command is "" when none is
+// configured.
+type CommandDefaulter interface {
+	DefaultsFor(repo *gitx.Repo, root, command string) Defaults
+}
+
 // StaticMapper is implemented by adapters whose units depend on less than the static
 // import closure of their test files (Go test functions): MapStatic returns the
 // dependency keys of unit given that closure.
@@ -176,7 +184,12 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 	if !ok {
 		return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
 	}
-	d := a.Defaults(repo, c.Root)
+	var d Defaults
+	if cd, ok := a.(CommandDefaulter); ok {
+		d = cd.DefaultsFor(repo, c.Root, c.Command)
+	} else {
+		d = a.Defaults(repo, c.Root)
+	}
 	s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
 	if repo != nil {
 		s.RepoRoot = repo.Root

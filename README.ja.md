@@ -1,7 +1,7 @@
 # smates
 
 **変更が影響しうるテストだけを実行する** — TypeScript/JavaScript (vitest, jest,
-`node --test`, bun)、Go、Python (pytest, uv) 対応。CI でもローカルでも使えます。
+`node --test`, bun)、Go、Python (pytest, unittest, uv) 対応。CI でもローカルでも使えます。
 
 smates は実際のテスト実行をトレースして、各テストが *本当に使ったもの*
 (実行されたコード、読まれたファイル、列挙されたディレクトリ、起動された子プロセス)を学習し、
@@ -178,6 +178,47 @@ root からの相対)で依存を付けるテストを絞れます。宣言ご�
 `smates doctor` は、E2E らしいのに `depends_on`・`serves`・`rules` のどれもないスイート
 (名前や root に e2e を含む、コマンドが Playwright や Cypress を実行する、テストが
 `http://localhost` を呼ぶ)を指摘します。
+
+## 対応ランナー
+
+| ランナー | 単位 | 依存のトレース方法 | ファイルごとの結果 |
+|---|---|---|---|
+| `vitest` | テストファイル | ワーカーごとの V8 カバレッジ + fs フック。globalSetup の読み取りは全テストの依存 | 注入するレポーター |
+| `jest` | テストファイル | ワーカーごとの V8 カバレッジ + fs フック。ワーカーはファイルごとに作り直す(`isolate: true` で厳密に 1 ファイル 1 プロセス) | 注入するレポーター |
+| `node`(`node --test`) | テストファイル | テストプロセスごとの V8 カバレッジ + fs フック | プロセスの終了コード |
+| `bun` | テストファイル | ファイルごとの `bun test --coverage` + モジュールキャッシュ、`node:fs`・`Bun.file`・`Bun.Glob` の preload フック(記録時) | プロセスの終了コード |
+| `pytest` | テストファイル | `sys.monitoring`(3.12+)/ `sys.setprofile`、audit フック。テスト・fixture・収集したモジュールごと、モジュールレベルの読み取りも | プラグイン |
+| `unittest`(`python -m unittest`) | テストモジュール | Python と同じトレース。選択したモジュールを 1 プロセスで、モジュールごとのコンテキスト(import、`setUpModule`/`setUpClass`、テスト)を付ける `unittest` ラッパー経由で実行 | ラッパーの結果クラス |
+| `go` | パッケージ | 静的 import 閉包(Go では正確)+ `go test -exec` 経由の `-test.testlogfile`。テストの Node/Python 子プロセス | バイナリの終了コード、ビルド失敗 |
+| `custom` | テストファイル | コマンドが起動する Node/Python プロセス | 全体の終了コード |
+
+Python のプロジェクトは、pytest を使っている形跡があれば `pytest`、なければ `unittest`
+として検出します。形跡とは、`pytest.ini` や `conftest.py`、プロジェクトかその上位
+ディレクトリのマニフェスト・ロックファイル・タスクファイル(`pyproject.toml`、`setup.cfg`、
+`setup.py`、`tox.ini`、`noxfile.py`、`Pipfile`、`poetry.lock`/`pdm.lock`/`uv.lock`、
+`*requirements*.txt`/`.in`、`requirements/` 配下のファイル)での pytest への言及、pytest を
+実行する GitHub ワークフロー、pytest 向けに書かれたテストファイル(`import pytest`、
+モジュールレベルの `def test_…` 関数)です。`unittest`
+ランナーのテストファイルはディスカバリーに従い、既定はスイート root 以下の `test*.py`、
+`python -m unittest discover …` のコマンドなら `-s`/`-p`/`-t`(開始ディレクトリ、パターン、
+トップレベルディレクトリ)で決まります。選択したファイルは常にトップレベルディレクトリからの
+ドット区切りのモジュール名で渡します(全実行でも同じなので、`__init__.py` のない
+ディレクトリも飛ばされません)。モジュール名にならないパスのファイルはテストとみなしません。
+記録時は選択したモジュールを Python シムに同梱の `python -m smates_unittest` で 1 プロセスで
+実行し、モジュールの import 中に送出された例外は実行全体の中断ではなくそのモジュールの失敗に
+なります。`isolate: true` ならモジュールごとに 1 プロセスで実行します。unittest のテストを
+1 つも実行しなかったモジュールはソースで区別します。パターンに一致しただけの補助モジュールは
+成功として記録し(`exclude` を勧める警告付き)、pytest 向けに書かれたもの(`import pytest`、
+モジュールレベルの `def test_…` 関数)は成功として記録せず、結果を unknown として次回も
+実行し、`runner: pytest` を勧めるメッセージを出します。どのモジュールもテストを実行しなかった
+実行は、その中に pytest 向けのものがある場合だけ(unittest の終了コード 5 のまま)失敗になります。
+
+```yaml
+  - name: legacy
+    runner: unittest                 # python -m unittest(pytest 不要)
+    root: legacy
+    command: "python3 -m unittest discover -s tests -p '*_check.py'"  # -s/-p/-t でテストファイルを指定
+```
 
 ## クイックスタート
 
