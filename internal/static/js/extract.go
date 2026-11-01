@@ -231,7 +231,8 @@ func (p *parser) appendArg(refs []ref, i int) []ref {
 // import.meta.dirname: path.join(__dirname, "../src", "a") is "../src/a". Arguments
 // after the first non-literal one are unknown, so the literals before it become the
 // static prefix of a template (path.join(__dirname, "fixtures", name) loads any file
-// under ./fixtures/). An absolute segment (which path.resolve restarts at) is refused.
+// under ./fixtures/); without a literal before it (path.join(__dirname, name)) the call
+// is left to tracing. An absolute segment (which path.resolve restarts at) is refused.
 func (p *parser) pathJoin(i int) (ref, bool) {
 	j := i
 	if p.ident(j, "path") && p.punct(j+1, '.') {
@@ -281,6 +282,11 @@ func (p *parser) pathJoin(i int) (ref, bool) {
 		if lit && p.punct(k+1, '+') {
 			segs = append(segs, p.text(k))
 			return ref{kind: refTemplate, spec: joined()}, true
+		}
+		if len(segs) == 1 {
+			// Nothing static after the directory (path.join(__dirname, name)): every
+			// file next to the importing one would match, which says nothing.
+			return ref{}, false
 		}
 		pre := joined()
 		if !strings.HasSuffix(pre, "/") {

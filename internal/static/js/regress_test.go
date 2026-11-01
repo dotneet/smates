@@ -33,7 +33,11 @@ func TestRequirePathJoin(t *testing.T) {
 			"const d = require(path.join(__dirname, 'gen/p-' + n))\n" +
 			"const e = require(path.join('/abs', 'src/e'))\n" +
 			"const f = require(path.resolve(__dirname, '/src/f'))\n" +
-			"const g = require(other.join(__dirname, 'src/g'))\n",
+			"const g = require(other.join(__dirname, 'src/g'))\n" +
+			"const h = require(path.join(__dirname, name))\n" +
+			"const i = require(path.join(__dirname, ['plug', 'in'].join('') + '.js'))\n",
+		"test/plugin.js":      "",
+		"test/handler.js":     "",
 		"src/a.js":            "",
 		"src/b.js":            "",
 		"test/fixtures/x.js":  "",
