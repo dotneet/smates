@@ -118,6 +118,7 @@ directly), uv / virtualenvs for Python. Monorepos with several suites, workspace
 ```bash
 # install (Linux/macOS; or download a release, or `go install github.com/dotneet/smates/cmd/smates@latest`)
 curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
+# (SMATES_VERIFY=attestation also checks the build provenance with the gh CLI)
 
 smates init --github # detect suites, write smates.yml (+ a GitHub workflow), gitignore .smates/
 smates run --all     # run everything once and record what each test uses
@@ -183,7 +184,8 @@ let you skip downstream jobs, and a summary is written to the job page. With
 pull request comment, updated on every push: how many tests in which suites the change
 affects, which changed file selected which test and how it depends on it, how changes
 no test depends on were handled, and the recorded test time skipped. See
-[docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices) and
+[docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices, pinning by
+commit SHA, `verify: attestation` for the release's build provenance) and
 [docs/ci/other-ci.md](docs/ci/other-ci.md) (GitLab, CircleCI, Buildkite, Jenkins).
 
 ### Other CI systems
