@@ -1,14 +1,13 @@
 package detect
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 type got struct{ Name, Root, Runner string }
@@ -18,11 +17,7 @@ func detect(t *testing.T, files map[string]string) ([]got, []config.Suite) {
 	dir := t.TempDir()
 	var list []string
 	for f, c := range files {
-		p := filepath.Join(dir, filepath.FromSlash(f))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(c), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Write(t, dir, f, c)
 		list = append(list, f)
 	}
 	sort.Strings(list)

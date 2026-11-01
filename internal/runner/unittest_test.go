@@ -3,15 +3,14 @@ package runner
 import (
 	"bytes"
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/testutil"
 	"github.com/dotneet/smates/internal/trace"
 )
 
@@ -134,13 +133,7 @@ func TestUnittestRunRecords(t *testing.T) {
 		t.Skip("python3 not on PATH")
 	}
 	repo := tempRepo(t)
-	write := func(rel, content string) {
-		p := filepath.Join(repo.Root, filepath.FromSlash(rel))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	write := func(rel, content string) { testutil.Write(t, repo.Root, rel, content) }
 	write("lib/pkg/__init__.py", "")
 	write("lib/pkg/a.py", "V = 1\n")
 	write("lib/pkg/b.py", "W = 2\n")

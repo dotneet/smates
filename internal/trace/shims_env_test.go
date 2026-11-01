@@ -3,11 +3,12 @@ package trace
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // runShim runs a script of the repository root with tracing (argv[0] is the interpreter
@@ -21,9 +22,7 @@ func runShim(t *testing.T, root, script, code string, argv ...string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, script), []byte(code), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.Write(t, root, script, code)
 	td := t.TempDir()
 	for i, a := range argv {
 		argv[i] = strings.NewReplacer("{node}", sh.Node).Replace(a)

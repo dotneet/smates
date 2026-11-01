@@ -1,12 +1,12 @@
 package trace
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // execKeys runs execDeps in root and returns the sorted, deduplicated keys.
@@ -20,11 +20,7 @@ func execKeys(root string, args []string, shell bool) []string {
 
 func writeScript(t *testing.T, root, rel, body string) {
 	t.Helper()
-	p := filepath.Join(root, filepath.FromSlash(rel))
-	os.MkdirAll(filepath.Dir(p), 0o755)
-	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteMode(t, root, rel, body, 0o755)
 }
 
 func TestExecDeps(t *testing.T) {

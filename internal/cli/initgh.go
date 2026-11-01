@@ -305,11 +305,24 @@ jobs:
 	return b.String()
 }
 
+// initWorkflow is what `smates init --github` did with the workflow (the "workflow"
+// object of `smates init --format json`).
+type initWorkflow struct {
+	File    string `json:"file"`
+	Written bool   `json:"written"`
+	// Skipped says why File was not written.
+	Skipped string `json:"skipped,omitempty"`
+	// Patch replaces the test steps of existing workflows with the smates action
+	// (written to PatchFile when --patch was given).
+	Patch     string `json:"patch,omitempty"`
+	PatchFile string `json:"patch_file,omitempty"`
+}
+
 // initGitHub is the --github part of init. When existing workflows already run the
 // tests, it does not add a second workflow running them again (unless force): it
 // proposes a patch replacing those steps with the smates action instead, printed or
 // written to patchFile, and never edits the user's workflows itself.
-func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bool, patchFile string, stdout, stderr io.Writer) error {
+func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bool, patchFile string, stdout, stderr io.Writer) (*initWorkflow, error) {
 	in := inspect(repo.Root, suites, files)
 	for _, h := range in.Services {
 		fmt.Fprintf(stderr, "smates: the tests appear to need %s (%s, from %s): see the commented services:/env: blocks in the workflow\n", h.Name, h.Image, h.Source)
@@ -321,6 +334,7 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 		fmt.Fprintf(stderr, "smates: %s reads %s (listed in %s): set it in the workflow's env: (commented out)\n", e.ReadBy, e.Name, e.Source)
 	}
 	const wfRel = ".github/workflows/smates.yml"
+	res := &initWorkflow{File: wfRel}
 	wf := filepath.Join(repo.Root, filepath.FromSlash(wfRel))
 	var steps []testStep
 	for _, st := range workflowTestSteps(repo.Root) {
@@ -341,6 +355,9 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 			duplicate = duplicate || (!st.Other && len(stepSuites(st, suites)) > 0)
 		}
 		patch, notes := workflowPatch(repo.Root, steps, suites)
+		if duplicate {
+			res.Patch = patch
+		}
 		for _, n := range notes {
 			fmt.Fprintf(stderr, "  note: %s\n", n)
 		}
@@ -350,29 +367,33 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 			fmt.Fprintf(stderr, "  replace those steps with `uses: %s` (with `args: --suite <name>` and a distinct `cache-key` per job when the suites run in separate jobs)\n", actSmates)
 		case patchFile != "":
 			if err := os.WriteFile(patchFile, []byte(patch), 0o644); err != nil {
-				return err
+				return nil, err
 			}
+			res.PatchFile = patchFile
 			fmt.Fprintf(stderr, "  wrote %s: it replaces those steps with the smates action; review it, then `git apply %s`\n", patchFile, patchFile)
 		default:
 			fmt.Fprintf(stderr, "  this patch replaces them with the smates action (review it, then save it and `git apply` it, or rerun with --patch FILE):\n\n%s\n", patch)
 		}
 		if duplicate && !force {
 			fmt.Fprintf(stderr, "smates: not writing %s, which would run the same tests a second time (use --force to write it anyway)\n", wfRel)
-			return nil
+			res.Skipped = "existing workflows already run the tests: apply the patch instead (or rerun with --force)"
+			return res, nil
 		}
 	}
 	if _, err := os.Stat(wf); err == nil && !force {
 		fmt.Fprintf(stderr, "smates: %s exists, not overwritten (use --force)\n", wfRel)
-		return nil
+		res.Skipped = "it exists (rerun with --force to overwrite it)"
+		return res, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(wf), 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.WriteFile(wf, []byte(renderWorkflow(repo, suites, in)), 0o644); err != nil {
-		return err
+		return nil, err
 	}
+	res.Written = true
 	fmt.Fprintln(stdout, "wrote "+wfRel+" (add an ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY secret to enable the agent)")
-	return nil
+	return res, nil
 }
 
 // ---- combined ----
@@ -402,6 +423,25 @@ func inspect(root string, suites []config.Suite, files []string) inspection {
 	return in
 }
 
+// serviceLines is the GitHub Actions services: entry for a service (indented relative
+// to services:).
+func serviceLines(h serviceHint) []string {
+	d := serviceDefaults[h.Kind]
+	out := []string{h.Name + ":", "  image: " + h.Image}
+	if env := serviceEnv(h); len(env) > 0 {
+		out = append(out, "  env:")
+		for _, kv := range env {
+			out = append(out, "    "+kv[0]+": "+yamlStr(kv[1]))
+		}
+	}
+	out = append(out, fmt.Sprintf("  ports: [\"%d:%d\"]", d.port, d.port))
+	health := d.health
+	if h.Kind == "postgres" {
+		health = "pg_isready -U " + envValue(serviceEnv(h), "POSTGRES_USER", "postgres")
+	}
+	return append(out, "  options: >-", "    --health-cmd "+strconv.Quote(health)+" --health-interval 5s --health-timeout 5s --health-retries 10")
+}
+
 // renderServices writes the commented services: and env: blocks of the test job.
 func renderServices(b *strings.Builder, in inspection) {
 	if len(in.Services) > 0 {
@@ -416,20 +456,9 @@ func renderServices(b *strings.Builder, in inspection) {
 		b.WriteString("    # file or are the images' usual defaults, not verified. Check them, then uncomment.\n")
 		b.WriteString("    # services:\n")
 		for _, h := range in.Services {
-			d := serviceDefaults[h.Kind]
-			fmt.Fprintf(b, "    #   %s:\n    #     image: %s\n", h.Name, h.Image)
-			if env := serviceEnv(h); len(env) > 0 {
-				b.WriteString("    #     env:\n")
-				for _, kv := range env {
-					fmt.Fprintf(b, "    #       %s: %s\n", kv[0], yamlStr(kv[1]))
-				}
+			for _, l := range serviceLines(h) {
+				b.WriteString("    #   " + l + "\n")
 			}
-			fmt.Fprintf(b, "    #     ports: [\"%d:%d\"]\n", d.port, d.port)
-			health := d.health
-			if h.Kind == "postgres" {
-				health = "pg_isready -U " + envValue(serviceEnv(h), "POSTGRES_USER", "postgres")
-			}
-			fmt.Fprintf(b, "    #     options: >-\n    #       --health-cmd %s --health-interval 5s --health-timeout 5s --health-retries 10\n", strconv.Quote(health))
 		}
 	}
 	var env [][2]string

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // TestUnittestEndToEnd drives `smates run` / `smates select` through Main on a small
@@ -28,13 +30,7 @@ func TestUnittestEndToEnd(t *testing.T) {
 	// (validated by mtime and size) would not notice.
 	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
 	g := newGitRepo(t)
-	write := func(rel, content string) {
-		p := filepath.Join(g.dir, filepath.FromSlash(rel))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	write := func(rel, content string) { testutil.Write(t, g.dir, rel, content) }
 	write(".gitignore", ".smates/\n")
 	write("pyproject.toml", "[project]\nname = \"shop\"\nversion = \"0.1\"\n")
 	write("shop/__init__.py", "")

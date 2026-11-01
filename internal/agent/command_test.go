@@ -9,16 +9,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // writeScript writes an executable shell script outside the repository.
 func writeScript(t *testing.T, body string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "agent.sh")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return p
+	return testutil.WriteMode(t, t.TempDir(), "agent.sh", "#!/bin/sh\n"+body, 0o755)
 }
 
 func TestCommandBackend(t *testing.T) {
