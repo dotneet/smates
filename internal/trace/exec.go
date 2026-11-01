@@ -239,12 +239,18 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 		if len(seg) > 0 && isAssignments(seg) {
 			for _, w := range seg {
 				name, value, _ := strings.Cut(w, "=")
-				vars[name] = []string{value}
+				vars[name] = []string{globChars.Replace(value)}
 			}
 			continue
 		}
 		if len(seg) >= 3 && seg[0] == "for" && seg[2] == "in" {
-			vars[seg[1]] = append([]string{}, seg[3:]...)
+			// Quoting protects glob characters only where they are written: an unquoted
+			// use of the variable expands them ($P with P='src/*.py').
+			var vals []string
+			for _, w := range seg[3:] {
+				vals = append(vals, globChars.Replace(w))
+			}
+			vars[seg[1]] = vals
 			continue
 		}
 		if len(seg) > 0 && (a.funcs[seg[0]] || strings.HasSuffix(seg[0], "()")) {
@@ -1028,6 +1034,7 @@ const (
 var (
 	quoteMarks   = strings.NewReplacer("*", literalStar, "?", literalQuery, "[", literalSet)
 	unquoteMarks = strings.NewReplacer(literalDollar, "$", literalStar, "*", literalQuery, "?", literalSet, "[")
+	globChars    = strings.NewReplacer(literalStar, "*", literalQuery, "?", literalSet, "[") // keeps literalDollar
 )
 
 func literal(word string) string { return unquoteMarks.Replace(word) }
@@ -1048,6 +1055,19 @@ func expand(word, cwd string) []string {
 		return m
 	}
 	return []string{p}
+}
+
+// arithmetic reports whether cmd[i:] starts a (( expression )) command: "((" not right
+// after another "(" (nested subshells), closed by "))" with no parenthesis between.
+func arithmetic(cmd string, i int) bool {
+	if !strings.HasPrefix(cmd[i:], "((") {
+		return false
+	}
+	if before := strings.TrimRight(cmd[:i], " \t"); strings.HasSuffix(before, "(") {
+		return false
+	}
+	end := strings.Index(cmd[i+2:], "))")
+	return end >= 0 && !strings.ContainsAny(cmd[i+2:i+2+end], "()")
 }
 
 // Segments of splitShell that open and close a ( ... ) subshell.
@@ -1110,6 +1130,9 @@ func splitShell(cmd string) [][]string {
 			for ; i < len(cmd) && cmd[i] != '"'; i++ {
 				if cmd[i] == '\\' && i+1 < len(cmd) {
 					i++
+					if cmd[i] == '\n' {
+						continue // line continuation
+					}
 				}
 				cur.WriteString(quoteMarks.Replace(cmd[i : i+1]))
 			}
@@ -1124,6 +1147,10 @@ func splitShell(cmd string) [][]string {
 				op = ">>"
 			}
 			words = append(words, op)
+		case c == '(' && arithmetic(cmd, i) && !inWord && len(words) == 0:
+			// (( expression )): reads no file; its << and < are operators.
+			flushSeg()
+			i += 2 + strings.Index(cmd[i+2:], "))") + 1
 		case c == '(' || c == ')':
 			flushSeg()
 			if c == '(' {
@@ -1132,25 +1159,31 @@ func splitShell(cmd string) [][]string {
 				segs = append(segs, []string{subshellClose})
 			}
 		case c == '\n' && len(heredocs) > 0:
-			// Skip the bodies of the here-documents started on this line.
+			// Skip the bodies of the here-documents started on this line, when each ends
+			// with its delimiter line (otherwise it is not one: keep parsing).
 			flushSeg()
+			j := i
 			for _, h := range heredocs {
-				for i < len(cmd) {
-					line := cmd[i+1:]
+				found := false
+				for !found && j < len(cmd) {
+					line := cmd[j+1:]
 					end := strings.IndexByte(line, '\n')
 					if end < 0 {
 						end = len(line)
 					}
 					line = line[:end]
-					i += end + 1
+					j += end + 1
 					if h.tabs {
 						line = strings.TrimLeft(line, "\t")
 					}
-					if line == h.delim {
-						break
-					}
+					found = line == h.delim
+				}
+				if !found {
+					j = i
+					break
 				}
 			}
+			i = j
 			heredocs = nil
 		case c == '|' || c == ';' || c == '&' || c == '\n':
 			flushSeg()
