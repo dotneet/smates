@@ -111,19 +111,39 @@ func craCommand(repoRoot, dir, script string) (string, map[string]string) {
 	return runner.JSBinCommand(repoRoot, dir, bin, strings.Join(args, " ")), env
 }
 
-// nodeValueOpts are node options whose value may be the next word.
+// nodeValueOpts are node options whose value may be the next word: those node 24's
+// --help lists as --name=... (watch options aside, see nodeTestOptions), and options of
+// older versions.
 var nodeValueOpts = map[string]bool{
-	"--import": true, "--loader": true, "--experimental-loader": true, "-r": true, "--require": true,
-	"--env-file": true, "--env-file-if-exists": true, "-C": true, "--conditions": true,
-	"--test-reporter": true, "--test-reporter-destination": true, "--test-name-pattern": true,
-	"--test-skip-pattern": true, "--test-concurrency": true, "--test-timeout": true, "--test-shard": true,
-	"--test-isolation": true, "--experimental-test-isolation": true, "--test-coverage-include": true,
-	"--test-coverage-exclude": true, "--test-coverage-lines": true, "--test-coverage-branches": true,
-	"--test-coverage-functions": true, "--test-random-seed": true, "--test-rerun-failures": true,
-	"--experimental-test-tag-filter": true, "--test-global-setup": true, "--experimental-config-file": true,
-	"--unhandled-rejections": true, "--input-type": true, "--experimental-specifier-resolution": true,
-	"--disable-warning": true, "--redirect-warnings": true, "--title": true, "--inspect-port": true,
-	"--experimental-policy": true, "--localstorage-file": true,
+	"--allow-fs-read": true, "--allow-fs-write": true, "--build-snapshot-config": true,
+	"-C": true, "--conditions": true, "--cpu-prof-dir": true, "--cpu-prof-interval": true,
+	"--cpu-prof-name": true, "--diagnostic-dir": true, "--disable-proto": true,
+	"--disable-warning": true, "--dns-result-order": true, "--env-file": true,
+	"--env-file-if-exists": true, "-e": true, "--eval": true,
+	"--experimental-config-file": true, "--loader": true, "--experimental-loader": true,
+	"--experimental-package-map": true, "--experimental-sea-config": true,
+	"--experimental-test-tag-filter": true, "--heap-prof-dir": true,
+	"--heap-prof-interval": true, "--heap-prof-name": true,
+	"--heapsnapshot-near-heap-limit": true, "--heapsnapshot-signal": true,
+	"--icu-data-dir": true, "--import": true, "--input-type": true,
+	"--inspect-publish-uid": true, "--localstorage-file": true, "--max-http-header-size": true,
+	"--max-old-space-size-percentage": true, "--network-family-autoselection-attempt-timeout": true,
+	"--openssl-config": true, "--redirect-warnings": true, "--report-directory": true, "--report-dir": true,
+	"--report-filename": true, "--report-signal": true, "-r": true, "--require": true,
+	"--run": true, "--secure-heap": true, "--secure-heap-min": true, "--snapshot-blob": true,
+	"--test-concurrency": true, "--test-coverage-branches": true,
+	"--test-coverage-exclude": true, "--test-coverage-functions": true,
+	"--test-coverage-include": true, "--test-coverage-lines": true,
+	"--test-global-setup": true, "--experimental-test-isolation": true,
+	"--test-isolation": true, "--test-name-pattern": true, "--test-random-seed": true,
+	"--test-reporter": true, "--test-reporter-destination": true,
+	"--test-rerun-failures": true, "--test-shard": true, "--test-skip-pattern": true,
+	"--test-timeout": true, "--title": true, "--tls-cipher-list": true, "--tls-keylog": true,
+	"--trace-event-categories": true, "--trace-event-file-pattern": true,
+	"--trace-require-module": true, "--unhandled-rejections": true, "--use-largepages": true,
+	"--v8-pool-size": true,
+	// Older versions.
+	"--experimental-specifier-resolution": true, "--inspect-port": true, "--experimental-policy": true,
 }
 
 // nodeTest finds a `node [options] --test` invocation in an npm script (also inside a
@@ -171,7 +191,7 @@ func nodeTestOptions(args []string) ([]string, bool) {
 		case !strings.HasPrefix(a, "-"):
 			return nil, false
 		case name == "--watch" || name == "--watch-preserve-output":
-		case name == "--watch-path":
+		case name == "--watch-path" || name == "--watch-kill-signal":
 			if !hasValue {
 				k++
 			}

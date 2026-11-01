@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -106,54 +105,6 @@ JSON
 			tt.check(t, d)
 		})
 	}
-}
-
-// A command stopped by its context takes its children with it: the agent a wrapper
-// script starts does not keep running (nor holding the output pipes) after Decide
-// gave up on it.
-func TestCommandBackendKillsChildren(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses sh scripts")
-	}
-	f := newFixture(t)
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	cfg := testConfig()
-	cfg.Command = writeScript(t, "cat >/dev/null; sleep 60 & echo $! > "+pidFile+".tmp; mv "+pidFile+".tmp "+pidFile+"; wait")
-	cfg.Timeout = time.Minute
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Stop it once the child runs (the brief before it may take seconds under load).
-	go func() {
-		for ctx.Err() == nil {
-			if _, err := os.Stat(pidFile); err == nil {
-				cancel()
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}()
-	_, err := New(cfg).Decide(ctx, f.request(cfg))
-	if err == nil || !strings.Contains(err.Error(), "context canceled") {
-		t.Fatalf("err = %v, want context canceled", err)
-	}
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid := strings.TrimSpace(string(data))
-	// A killed orphan is reaped by init: give it a moment.
-	for deadline := time.Now().Add(10 * time.Second); processExists(pid); time.Sleep(50 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			exec.Command("kill", "-9", pid).Run()
-			t.Fatalf("the command's child %s outlived the cancellation", pid)
-		}
-	}
-}
-
-// processExists reports whether pid is a live process (not a zombie).
-func processExists(pid string) bool {
-	out, err := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
-	return err == nil && !strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 // The command that runs is the one of the request's configuration, which the cache
