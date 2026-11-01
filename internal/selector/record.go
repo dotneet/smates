@@ -50,18 +50,15 @@ type hashCache struct {
 	dirs  map[string][]string
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
-	// since is shortly before the tests started (see PinBefore); zero when not pinned.
+	// since is when the tests started (see PinBefore); zero when not pinned.
 	since time.Time
 }
 
-// Unsettled is the hash of a path outside the snapshot that changed while the tests ran
-// and whose state before the run is not known: it matches no hash, so the tests that
-// depend on it run again (and then record the state it had before that run).
+// Unsettled is the hash of an existence check of a path outside the snapshot that was
+// created or modified while the tests ran and whose state before the run is not known:
+// it matches no hash, so the tests that probed it run again (and then record the state
+// it had before that run, PinBefore).
 const Unsettled = "unsettled"
-
-// settleMargin widens the window in which a modification time counts as during the
-// run, for file systems with coarse timestamps (FAT: two seconds).
-const settleMargin = 2 * time.Second
 
 // NewHasher indexes a snapshot. Files matching ignore globs (docs, editor settings) are
 // left out of "dir/**" tree hashes, so editing a README does not re-run every test that
@@ -78,13 +75,20 @@ func (h *Hasher) WithRoot(root string) *Hasher {
 	return h
 }
 
-// PinBefore makes the hasher hash the paths outside the snapshot as they were before
-// the tests ran, like the snapshot itself: Record hashes after the run, and tests may
-// write git-ignored files (caches, generated code, .env) or create paths they probed.
-// It is called before the first test starts (at start) and reads now what the entries
-// of the given suites depend on outside the snapshot. A path first read later that was
-// modified at or after start (give or take settleMargin) may have been written by the
-// tests and hashes as Unsettled; one absent when read is taken to have been absent.
+// PinBefore makes the hasher hash existence checks of paths outside the snapshot as
+// they were before the tests ran, like the snapshot itself: Record hashes after the
+// run, and a test that probes a path and then creates it (an output directory) would
+// otherwise be recorded as having seen it exist. It is called before the first test
+// starts (at start) and checks now the paths outside the snapshot that the entries of
+// the given suites probed. A path first probed later that exists and was modified at or
+// after start may have been created by the tests and hashes as Unsettled; one absent
+// when checked is taken to have been absent.
+//
+// The content of files outside the snapshot (git-ignored caches, reports, generated
+// code) is hashed as the run left it: tests commonly rewrite what they read there
+// (a timestamped report, a cache), and the state before the run would never match
+// again. A git-ignored input edited by hand while the run is in progress is therefore
+// recorded with its new content.
 func (h *Hasher) PinBefore(st *state.State, suites []string, start time.Time) {
 	if h.root == "" {
 		return
@@ -96,36 +100,28 @@ func (h *Hasher) PinBefore(st *state.State, suites []string, start time.Time) {
 		}
 		for _, e := range su.Tests {
 			for k := range e.Deps {
-				h.pin(k)
+				if depkey.KindOf(k) == depkey.KindExistence {
+					h.Hash(k)
+				}
 			}
 		}
 	}
-	h.since = start.Add(-settleMargin)
+	h.since = start
 }
 
-// pin reads what key depends on outside the snapshot, if anything, into the caches.
-func (h *Hasher) pin(key string) {
-	if _, ok := h.snap[key]; ok {
-		return // most keys: a file of the snapshot
-	}
-	switch kind, p := depkey.Parse(key); kind {
-	case depkey.KindContent:
-		h.file(key)
-	case depkey.KindConfig:
-		if !h.isConfig(key) {
-			h.file(key)
-		}
-	case depkey.KindDecls:
-		h.file(p)
-	case depkey.KindExistence:
-		h.Hash(key)
-	}
-}
-
-// modifiedDuringRun reports whether a path outside the snapshot, read for the first
-// time, was modified since the tests started (PinBefore).
+// modifiedDuringRun reports whether a path outside the snapshot, checked for the first
+// time, was modified since the tests started (PinBefore). A modification time in whole
+// seconds comes from a file system with coarse timestamps (HFS+, ext3), on which a path
+// created in the second the run started may look older than the start.
 func (h *Hasher) modifiedDuringRun(fi os.FileInfo) bool {
-	return !h.since.IsZero() && !fi.ModTime().Before(h.since)
+	if h.since.IsZero() {
+		return false
+	}
+	since, mt := h.since, fi.ModTime()
+	if mt.Nanosecond() == 0 {
+		since = since.Truncate(time.Second)
+	}
+	return !mt.Before(since)
 }
 
 // WithConfig makes the hasher hash the settings key (depkey.Config) of the
@@ -166,17 +162,18 @@ func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
 
 // ConfigHash fingerprints the settings of smates.yml that can change how the tests of
 // su run or what they are recorded to depend on: the suite's own entry and the
-// top-level env_track and env_ignore (a variable env_ignore lists is not recorded, so
-// taking it out of the list must run the tests again to record who reads it). The rest
-// (ignore, orphans, agent, flaky, state, inputs, full_run_branches, other suites)
-// cannot change a test's outcome: input globs and rules add dependency keys of their
-// own, and ignore globs change the "dir/**" hashes they affect.
+// top-level env_track. The rest (ignore, orphans, agent, flaky, state, inputs,
+// env_ignore, full_run_branches, other suites) cannot change a test's outcome: input
+// globs and rules add dependency keys of their own, ignore globs change the "dir/**"
+// hashes they affect, and env_ignore applies when comparing. (A variable the top-level
+// env_ignore listed was not recorded, so taking it out of the list selects nothing
+// until the tests reading it run again; hashing the list here would instead run every
+// test whenever a name is added, the usual remedy for a noisy variable.)
 func ConfigHash(c *config.Config, su *config.Suite) string {
 	data, err := json.Marshal(struct {
-		Suite     *config.Suite
-		EnvTrack  []string
-		EnvIgnore []string `json:",omitempty"`
-	}{su, c.EnvTrack, c.EnvIgnore})
+		Suite    *config.Suite
+		EnvTrack []string
+	}{su, c.EnvTrack})
 	if err != nil {
 		return ""
 	}
@@ -243,11 +240,7 @@ func (h *Hasher) file(p string) string {
 	if v, ok := h.disk[p]; ok {
 		return v
 	}
-	abs := filepath.Join(h.root, filepath.FromSlash(p))
-	v, _ := gitx.HashFile(abs)
-	if fi, err := os.Lstat(abs); v != "" && err == nil && h.modifiedDuringRun(fi) {
-		v = Unsettled
-	}
+	v, _ := gitx.HashFile(filepath.Join(h.root, filepath.FromSlash(p)))
 	if h.disk == nil {
 		h.disk = map[string]string{}
 	}

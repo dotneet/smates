@@ -99,9 +99,6 @@ func TestParseErrors(t *testing.T) {
 		{"missing runner", "suites:\n  - name: x\n", "runner is required"},
 		{"duplicate names", "suites:\n  - runner: go\n  - runner: go\n", "duplicate suite name"},
 		{"duplicate explicit names", "suites:\n  - {name: a, runner: go}\n  - {name: a, runner: pytest}\n", "duplicate suite name"},
-		{"comma in suite name", "suites:\n  - {name: \"a,b\", runner: go}\n", "must not contain"},
-		{"at sign in suite name", "suites:\n  - {name: a@b, runner: go}\n", "must not contain"},
-		{"comma in derived suite name", "suites:\n  - {runner: go, root: \"x,y\"}\n", "must not contain"},
 		{"root outside", "suites:\n  - runner: go\n    root: ../x\n", "inside the repository"},
 		{"root escapes after clean", "suites:\n  - runner: go\n    root: a/../../x\n", "inside the repository"},
 		{"absolute root", "suites:\n  - runner: go\n    root: /abs\n", "inside the repository"},
@@ -178,6 +175,18 @@ func TestRootCleaning(t *testing.T) {
 		if got := c.Suites[0].Root; got != want {
 			t.Errorf("root %q -> %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Suite names derived from roots may hold any character a directory can (a scoped
+// package, a comma): the state escapes them where it lists suites (state.MarkerSnap).
+func TestDerivedSuiteNames(t *testing.T) {
+	c, err := Parse([]byte("suites:\n  - {runner: vitest, root: packages/@scope/pkg}\n  - {runner: go, root: \"a,b\"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Suites[0].Name != "packages/@scope/pkg" || c.Suites[1].Name != "a,b" {
+		t.Errorf("names %q %q", c.Suites[0].Name, c.Suites[1].Name)
 	}
 }
 

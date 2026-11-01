@@ -32,7 +32,9 @@ func (s *selection) decideTests() {
 // dependencies of other units explain, by the suites the orphan policy would run for
 // them (by root, see orphanOwners). Tests read such a file as data, so a unit that has
 // never run may read it too, which its static closure cannot tell. The changes nothing
-// explains are orphans of this selection and left to the orphan policy.
+// explains are orphans of this selection and left to the orphan policy. Like orphans,
+// these files select nothing when the run applies no orphan policy
+// (Input.NoOrphanPolicy).
 func (s *selection) findUnrecordedReads() map[string][]string {
 	in, res := s.in, s.res
 	if s.baseChanged == nil || !slices.ContainsFunc(s.suites, func(ss *suiteSel) bool { return ss.selecting && ss.sr.Unrecorded }) {
@@ -46,6 +48,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 	}
 	sort.Strings(files)
 	out := map[string][]string{}
+	n := 0
 	for _, f := range files {
 		if pathutil.IsVendored(f) || pathutil.Match(ignore, f) {
 			continue
@@ -58,9 +61,14 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 		if !res.Explains(f, in.Snap[f] == "" || !existedBefore(in, f)) {
 			continue // the orphan policy's (or handled by it before the snapshot)
 		}
+		n++
 		for _, name := range own.Owners(f) {
 			out[name] = append(out[name], f)
 		}
+	}
+	if n > 0 && in.NoOrphanPolicy {
+		res.Notes = append(res.Notes, fmt.Sprintf("%d file(s) changed since the base revision that tests read may affect tests with no recorded run: none selected for them (no orphan policy)", n))
+		return nil
 	}
 	return out
 }

@@ -229,6 +229,31 @@ func TestLockUnwritable(t *testing.T) {
 	}
 }
 
+// TestLockFileJustDeleted: on Windows creating the lock file fails with access denied
+// while its holder deletes it; when the file is gone by the time smates looks, it tries
+// again at once instead of failing.
+func TestLockFileJustDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+	calls := 0
+	open := openLock
+	openLock = func(p string) (*os.File, error) {
+		calls++
+		if calls == 1 {
+			return nil, &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+		}
+		return open(p)
+	}
+	t.Cleanup(func() { openLock = open })
+	l, err := AcquireLock(path, 0, time.Minute)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	l.Release()
+	if calls != 2 {
+		t.Errorf("%d attempts, want 2", calls)
+	}
+}
+
 func TestLockExcludes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.lock")
 	var mu sync.Mutex

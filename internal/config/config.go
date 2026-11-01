@@ -484,10 +484,6 @@ func (c *Config) Normalize() error {
 				s.Name = s.Root
 			}
 		}
-		// The state lists suites joined by "," after "@" (state.MarkerSnap).
-		if strings.ContainsAny(s.Name, ",@") {
-			return fmt.Errorf("suite %q: the name must not contain \",\" or \"@\" (set name: to one without them)", s.Name)
-		}
 		if names[s.Name] {
 			return fmt.Errorf("duplicate suite name %q", s.Name)
 		}

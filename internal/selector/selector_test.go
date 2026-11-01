@@ -1276,24 +1276,25 @@ func TestSelectDiffUnrecordedReadsData(t *testing.T) {
 	if len(res.Orphans) != 0 {
 		t.Errorf("orphans %v", res.Orphans)
 	}
+	// Without an orphan policy (orphans: ignore, --orphans=skip) such a change selects
+	// nothing, as it would as an orphan.
+	res = f.sel(st, func(in *Input) { diff(in); in.NoOrphanPolicy = true })
+	if d := decisions(res)["web/db/q.test.ts"]; d != "-unaffected" {
+		t.Errorf("no orphan policy: %s", d)
+	}
+	if len(res.Notes) == 0 {
+		t.Error("no note for the change left unhandled")
+	}
 }
 
-// TestConfigHashEnvIgnore: the top-level env_ignore decides what is recorded, so taking
-// a name out of it selects the tests again.
+// TestConfigHashEnvIgnore: adding a name to the top-level env_ignore (the remedy for a
+// noisy variable) selects nothing; the list is not part of the suite's settings.
 func TestConfigHashEnvIgnore(t *testing.T) {
 	f := webFixture(t)
-	f.cfg.EnvIgnore = []string{"APP_SECRET"}
 	st := f.record(nil, nil)
+	f.cfg.EnvIgnore = []string{"APP_SECRET"}
 	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
-		t.Fatalf("unchanged: %v", d)
-	}
-	f.cfg.EnvIgnore = nil
-	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != ReasonChanged {
-		t.Errorf("env_ignore changed: %v", d)
-	}
-	su := &f.suites[0].Suite
-	if ConfigHash(&config.Config{}, su) != ConfigHash(&config.Config{EnvIgnore: []string{}}, su) {
-		t.Error("an empty env_ignore hashes as none")
+		t.Errorf("env_ignore added: %v", d)
 	}
 }
 

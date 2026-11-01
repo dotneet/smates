@@ -25,6 +25,11 @@ var (
 // ErrLocked is returned when the lock could not be taken in time.
 var ErrLocked = errors.New("state is locked")
 
+// openLock creates the lock file (a variable for tests).
+var openLock = func(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
 // AcquireLock takes the lock file at path, waiting up to wait for a live holder to
 // release it. A lock file whose modification time is older than stale is removed.
 func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
@@ -33,8 +38,9 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 	}
 	deadline := time.Now().Add(wait)
 	delay := 5 * time.Millisecond
+	gone := false // the last attempt failed with no lock file left to wait for
 	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := openLock(path)
 		if err == nil {
 			host, _ := os.Hostname()
 			fmt.Fprintf(f, "pid %d on %s at %s\n", os.Getpid(), host, time.Now().UTC().Format(time.RFC3339))
@@ -43,9 +49,17 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 		}
 		if !errors.Is(err, os.ErrExist) {
 			// Windows reports a lock file being deleted by its owner as access denied:
-			// retried while the file is there. Without one the error is the file system's
-			// (a read-only file system, a directory without write permission).
-			if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) || time.Now().After(deadline) {
+			// retried while the file is there, and once more at once when it has just
+			// gone. Failing again without one, the error is the file system's (a
+			// read-only file system, a directory without write permission).
+			if _, serr := os.Stat(path); errors.Is(serr, os.ErrNotExist) {
+				if gone {
+					return nil, err
+				}
+				gone = true
+				continue
+			}
+			if time.Now().After(deadline) {
 				return nil, err
 			}
 		} else if fi, serr := os.Stat(path); serr == nil && time.Since(fi.ModTime()) > stale {
@@ -54,6 +68,7 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 			_ = os.Remove(path)
 			continue
 		}
+		gone = false
 		if time.Now().After(deadline) {
 			holder, _ := os.ReadFile(path)
 			return nil, fmt.Errorf("%w: %s held by %s (remove it if no smates process is running)", ErrLocked, path, strings.TrimSpace(string(holder)))
