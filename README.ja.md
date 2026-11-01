@@ -339,3 +339,7 @@ ok  	example.com/shop/internal/store	0.170s
   `smates run --no-agent` と同じく、影響しうるスイートを丸ごと実行します。
 
 設定・コマンド・制限事項の詳細は [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を参照してください。
+
+## ライセンス
+
+[MIT](LICENSE)
