@@ -62,6 +62,14 @@ type Suite struct {
 	// Narrowed is set when smates.yml configures tests or exclude: the runner's own
 	// discovery would then run a different set of files, so units are always passed.
 	Narrowed bool
+	// Discovered selects test files from the runner's own configuration (see
+	// Discovery); when set it replaces Tests.
+	Discovered []Matcher
+	// TestsSource says where the test patterns come from: SourceConfig, SourceDefaults
+	// or the runner configuration they were read from.
+	TestsSource string
+	// DiscoveryWarning says why the runner configuration could not be read.
+	DiscoveryWarning string
 	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
 	// units are found in the test files' contents.
 	RepoRoot string
@@ -152,29 +160,51 @@ func Names() []string {
 func Resolve(repo *gitx.Repo, cs []config.Suite) ([]*Suite, error) {
 	var out []*Suite
 	for _, c := range cs {
-		a, ok := Get(c.Runner)
-		if !ok {
-			return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
-		}
-		d := a.Defaults(repo, c.Root)
-		s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0}
-		if repo != nil {
-			s.RepoRoot = repo.Root
-		}
-		if len(s.Tests) == 0 {
-			s.Tests = d.Tests
-		}
-		s.Exclude = append(append([]string{}, d.Exclude...), s.Exclude...)
-		s.Inputs = append(append([]string{}, d.Inputs...), s.Inputs...)
-		if s.Command == "" {
-			s.Command = d.Command
-		}
-		if s.Command == "" {
-			return nil, fmt.Errorf("suite %q: no command configured and none could be inferred", c.Name)
+		s, err := NewSuite(repo, c)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// NewSuite applies adapter defaults, and the test files the runner's configuration
+// describes, to a configured suite.
+func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
+	a, ok := Get(c.Runner)
+	if !ok {
+		return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
+	}
+	d := a.Defaults(repo, c.Root)
+	s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
+	if repo != nil {
+		s.RepoRoot = repo.Root
+	}
+	if s.Command == "" {
+		s.Command = d.Command
+	}
+	if s.Command == "" {
+		return nil, fmt.Errorf("suite %q: no command configured and none could be inferred", c.Name)
+	}
+	exclude := d.Exclude
+	if len(s.Tests) == 0 {
+		s.Tests = d.Tests
+		s.TestsSource = SourceDefaults
+		if dc, ok := a.(discoverer); ok && repo != nil {
+			disc := dc.Discover(repo, s)
+			s.DiscoveryWarning = disc.Warning
+			if len(disc.Matchers) > 0 {
+				s.Discovered, s.TestsSource, s.Tests = disc.Matchers, disc.Source, nil
+				if disc.Exclude != nil {
+					exclude = disc.Exclude
+				}
+			}
+		}
+	}
+	s.Exclude = append(append([]string{}, exclude...), s.Exclude...)
+	s.Inputs = append(append([]string{}, d.Inputs...), s.Inputs...)
+	return s, nil
 }
 
 // TestFiles returns the repo-relative test files of the suite among files.
@@ -195,7 +225,18 @@ func (s *Suite) IsTestFile(f string) bool {
 		return false
 	}
 	rel := pathutil.RelTo(f, s.Root)
-	return pathutil.Match(s.Tests, rel) && !pathutil.Match(s.Exclude, rel)
+	if pathutil.Match(s.Exclude, rel) {
+		return false
+	}
+	if len(s.Discovered) > 0 {
+		for i := range s.Discovered {
+			if s.Discovered[i].Match(f) {
+				return true
+			}
+		}
+		return false
+	}
+	return pathutil.Match(s.Tests, rel)
 }
 
 // InputMatch reports whether a repo-relative path matches the suite's inputs.

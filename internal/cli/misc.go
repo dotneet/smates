@@ -490,6 +490,15 @@ type listSuite struct {
 	// UnitCount and Units: the suite's test units (test files, or Go packages).
 	UnitCount int      `json:"unit_count"`
 	Units     []string `json:"units"`
+	// TestsSource says where the test patterns come from: "smates.yml tests",
+	// "runner defaults", or the runner configuration they were read from (e.g.
+	// "jest.config.js testMatch"); TestPatterns describes them (globs relative to the
+	// root, "!" for exclusions, "regex ..." for jest regexes).
+	TestsSource  string   `json:"tests_source"`
+	TestPatterns []string `json:"test_patterns"`
+	// DiscoveryWarning says why the runner configuration could not be read (the
+	// default patterns are used then).
+	DiscoveryWarning string `json:"discovery_warning,omitempty"`
 }
 
 func cmdList(args []string, stdout, stderr io.Writer) error {
@@ -512,14 +521,19 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 		rep := listReport{Config: p.cfg.Path, Suites: []listSuite{}}
 		for _, s := range p.suites {
 			units := s.Adapter.Units(s, s.TestFiles(p.files))
-			rep.Suites = append(rep.Suites, listSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Command: s.Command, UnitCount: len(units), Units: nonNil(units)})
+			rep.Suites = append(rep.Suites, listSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Command: s.Command, UnitCount: len(units), Units: nonNil(units),
+				TestsSource: s.TestsSource, TestPatterns: nonNil(s.TestPatterns()), DiscoveryWarning: s.DiscoveryWarning})
 		}
 		return writeJSON(stdout, rep)
 	}
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
-		fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\n", s.Name, s.Runner, s.Root, len(units), s.Command)
+		fmt.Fprintf(stdout, "%s\trunner=%s\troot=%s\tunits=%d\tcommand=%s\ttests=%s\n", s.Name, s.Runner, s.Root, len(units), s.Command, s.TestsSource)
+		if s.DiscoveryWarning != "" {
+			fmt.Fprintf(stderr, "smates: suite %s: %s\n", s.Name, s.DiscoveryWarning)
+		}
 		if cf.verbose {
+			fmt.Fprintf(stdout, "  tests from %s: %s\n", s.TestsSource, strings.Join(s.TestPatterns(), " "))
 			for _, u := range units {
 				fmt.Fprintf(stdout, "  %s\n", u)
 			}

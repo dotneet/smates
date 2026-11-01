@@ -78,6 +78,35 @@ func TestDetectLayouts(t *testing.T) {
 			want: []got{{"vitest", ".", "vitest"}},
 		},
 		{
+			name: "root vitest projects own nested packages",
+			files: map[string]string{
+				"package.json": vitestPkg, "vitest.config.ts": "export default { test: { projects: ['packages/*'] } }",
+				"packages/a/package.json": vitestPkg, "packages/a/a.test.ts": "",
+				"packages/b/package.json": vitestPkg, "packages/b/vitest.config.ts": "export default { test: { include: ['test/**/*.ts'] } }",
+				"packages/b/test/b.ts": "",
+			},
+			want: []got{{"vitest", ".", "vitest"}},
+		},
+		{
+			name: "root vitest include not covering a nested package",
+			files: map[string]string{
+				"package.json": vitestPkg, "vitest.config.ts": "export default { test: { include: ['src/**/*.test.ts'] } }",
+				"src/root.test.ts":        "",
+				"packages/a/package.json": vitestPkg, "packages/a/a.test.ts": "", "packages/a/vitest.config.ts": "export default {}",
+				// Vitest finds the root config from packages/b: no tests there.
+				"packages/b/package.json": vitestPkg, "packages/b/b.test.ts": "",
+			},
+			want: []got{{"vitest:root", ".", "vitest"}, {"vitest:packages/a", "packages/a", "vitest"}},
+		},
+		{
+			name: "pytest testpaths in pyproject",
+			files: map[string]string{
+				"pyproject.toml":    "[tool.pytest.ini_options]\ntestpaths = [\"checks\"]\npython_files = [\"check_*.py\"]\n",
+				"checks/check_a.py": "", "src/test_unrelated.py": "",
+			},
+			want: []got{{"pytest", ".", "pytest"}},
+		},
+		{
 			name: "root vitest without config does not own nested packages",
 			files: map[string]string{
 				"package.json": vitestPkg, "root.test.ts": "",

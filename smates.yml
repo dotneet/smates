@@ -36,14 +36,14 @@ suites:
           - "internal/static/*.go"
           - "internal/static/host/**"
           - "internal/trace/*.go"
-          - "internal/runner/{runner,common,custom,preflight,procgroup*}.go"
+          - "internal/runner/{runner,common,custom,preflight,procgroup*,discover}.go"
       - tests: ["."]
         # vitest, jest, node --test and bun.
-        deps: &js ["internal/runner/node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
+        deps: &js ["internal/runner/node.go", "internal/runner/discover_node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
       - tests: ["."]
         deps: &vitest ["internal/trace/shims/vitest-reporter.mjs"]
       - tests: ["."]
-        deps: &pytest ["internal/runner/pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
+        deps: &pytest ["internal/runner/pytest.go", "internal/runner/discover_pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
       - tests: ["."]
         deps: &gotest ["internal/runner/{gotest,gofunc}.go", "internal/static/golang/**"]
       - tests: ["."]

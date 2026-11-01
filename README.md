@@ -164,6 +164,10 @@ time as `-p` allows (in the command or `GOFLAGS`; default GOMAXPROCS). Test flag
 `-timeout`, `-short`, `-count` or `-v`, in the command or in `GOFLAGS`, reach every
 function's process.
 
+Which files are tests comes from each runner's own configuration (jest `testMatch`,
+vitest `include`, pytest `testpaths`, ...) unless `tests:` is set; see
+[Which files are tests](#which-files-are-tests).
+
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are
 analyzed from their command line and script contents. A command smates cannot see into
@@ -310,7 +314,7 @@ suites:
     runner: vitest
     root: packages/web
     # optional:
-    tests: ["src/**/*.test.ts"]      # test file globs (relative to root)
+    tests: ["src/**/*.test.ts"]      # test file globs (relative to root; default: from the runner config)
     exclude: ["src/legacy/**"]
     command: "pnpm exec vitest run"   # selected files are appended (or put in {tests})
     inputs: ["/proto/**"]            # extra files all tests of the suite depend on ("/" = repo root)
@@ -360,6 +364,34 @@ agent:
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
 
+### Which files are tests
+
+Without `tests:`, smates reads the test files of a suite from its runner's configuration,
+statically (config files are never executed):
+
+| runner | read from | options |
+|---|---|---|
+| `jest` | `--config` of the command, else the nearest `jest.config.{js,ts,mjs,cjs,mts,cts,json}` or `package.json` `"jest"` from the suite root up (jest stops at the nearest `package.json`) | `rootDir`, `roots`, `testMatch` (micromatch extglobs such as `?(x)` and `+(spec\|test)` are converted; `!` patterns exclude), `testRegex`, `testPathIgnorePatterns` (`<rootDir>` substituted) |
+| `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), and projects: `test.projects`, `test.workspace` or `vitest.workspace.*` |
+| `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
+
+A JS/TS config is read when it exports an object literal (`module.exports = {...}`,
+`export default {...}`, `defineConfig({...})`, or a top-level `const` it names) and the options are
+string, array or regex literals. Anything else (a function, another call such as `mergeConfig(base, ...)`, `testMatch: dirs.map(...)`, a `const` the module changes later such as `config.roots.push(...)`, a
+`...spread` that may set the option, `jest` `projects`, a `testRegex` with lookaround Go's
+`regexp` lacks) falls back to the default globs, and `smates list` / `smates doctor` warn
+with the reason: set `tests:` (and `exclude:`) in `smates.yml` then. A vitest workspace is
+one suite whose test files are the union of its projects, each project's include/exclude
+applied below its own root; a project whose config cannot be read keeps the defaults for
+its directory. When a root vitest config does not count a nested package's tests (its own
+`vitest.config.*` and no `projects` covering it), auto-detection makes that package a
+separate suite.
+
+`smates list` shows where each suite's tests come from (`tests=jest.config.js testMatch`;
+`-v` adds the patterns), as does `smates doctor`. Unlike `tests:`/`exclude:` in
+`smates.yml`, derived patterns do not make smates pass every file explicitly on a full run
+(`smates run --all`): they describe what the runner discovers by itself.
+
 ### Tests that exercise a server
 
 End-to-end tests (Playwright, vitest e2e, pytest against an HTTP API) often talk to a
@@ -402,7 +434,7 @@ declare none of `depends_on`, `serves` or `rules`.
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md`, `--add`, `--orphans` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
 | `smates init [--github]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
-| `smates list` / `doctor` | suites and test units; setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
+| `smates list` / `doctor` | suites, test units and where the test patterns come from (`tests_source`, `test_patterns`, `discovery_warning` in JSON); setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable): `--format text\|json` |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
