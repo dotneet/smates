@@ -100,6 +100,8 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 		out = append(out, a.resolve(imp, dir)...)
 	}
 
+	out = append(out, a.cgoHeaders(dir, src)...)
+
 	if bytes.Contains(src, []byte("go:embed")) {
 		for _, pat := range embedPatterns(src) {
 			out = append(out, a.expandEmbed(dir, pat)...)
@@ -148,8 +150,16 @@ func packageLiterals(src []byte) []string {
 
 // resolvePackageLiteral maps a package reference found in a test's string literals to
 // that package's compiled files (only when it names a Go package of the repository).
+// A path to an existing .go file relative to the test's directory (go run
+// ../../cmd/tool/main.go, testdata/gen.go) maps to that file, whose imports the
+// closure then follows.
 func (a *Analyzer) resolvePackageLiteral(lit, fromDir string) []string {
 	ix := a.index()
+	if strings.HasSuffix(lit, ".go") {
+		if f, ok := cleanRel(joinRel(fromDir, lit)); ok && !excluded(f) && a.h.Has(f) {
+			return []string{f}
+		}
+	}
 	if strings.HasPrefix(lit, "./") || strings.HasPrefix(lit, "../") {
 		d, ok := cleanRel(joinRel(fromDir, lit))
 		if !ok || ix.dirs[d] == nil || len(ix.dirs[d].src) == 0 {
