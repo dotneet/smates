@@ -78,6 +78,51 @@ func TestGitRepo(t *testing.T) {
 	}
 }
 
+// TestGitRepoIgnoresParentGitEnv checks that git variables of a parent process (as set
+// when tests run from a git hook) do not redirect the temporary repository.
+func TestGitRepoIgnoresParentGitEnv(t *testing.T) {
+	bogus := filepath.Join(t.TempDir(), "bogus")
+	t.Setenv("GIT_DIR", filepath.Join(bogus, ".git"))
+	t.Setenv("GIT_WORK_TREE", bogus)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(bogus, "index"))
+	t.Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(bogus, "objects"))
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
+	t.Setenv("GIT_CONFIG_VALUE_0", "leaked")
+
+	r := NewGitRepo(t, map[string]string{"a.txt": "1"})
+	r.Write("b.txt", "2")
+	sha := r.Commit("second")
+	if got := r.Git("rev-parse", "--show-toplevel"); !sameDir(t, got, r.Dir) {
+		t.Errorf("toplevel %q, want %q", got, r.Dir)
+	}
+	if got := r.Git("rev-parse", "HEAD"); got != sha {
+		t.Errorf("HEAD %q, want %q", got, sha)
+	}
+	if got := r.Git("log", "--format=%an %s"); got != "smates second\nsmates initial" {
+		t.Errorf("log %q", got)
+	}
+	if got := r.Git("ls-files"); got != "a.txt\nb.txt" {
+		t.Errorf("ls-files %q", got)
+	}
+	if _, err := os.Stat(bogus); !os.IsNotExist(err) {
+		t.Errorf("git wrote to the parent's GIT_DIR/GIT_INDEX_FILE: %v", err)
+	}
+}
+
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, err := filepath.EvalSymlinks(filepath.FromSlash(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ra == rb
+}
+
 // TestOnlyImportedByTests checks that no non-test Go file of the module imports
 // testutil, so it is never linked into the smates binary.
 func TestOnlyImportedByTests(t *testing.T) {
