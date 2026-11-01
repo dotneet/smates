@@ -125,9 +125,11 @@ func addGlobs(path, display, key string, globs []string, dryRun bool) (*configEd
 	return res, err
 }
 
-const configUsage = `usage: smates config add-ignore <glob>...   add changes that never require tests (top-level ignore:)
+const configCommands = `usage: smates config add-ignore <glob>...   add changes that never require tests (top-level ignore:)
        smates config add-input <glob>...    add files every test depends on (top-level inputs:)
-       smates config set <key> <value>      set a scalar key (orphans, untested, state, agent.model, flaky.retry, ...)
+       smates config set <key> <value>      set a scalar key (orphans, untested, state, agent.model, flaky.retry, ...)`
+
+const configUsage = configCommands + `
 flags: --dry-run (print the diff, write nothing), --format text|json, -C dir, --config file`
 
 func cmdConfig(args []string, stdout, stderr io.Writer) error {
@@ -140,6 +142,10 @@ func cmdConfig(args []string, stdout, stderr io.Writer) error {
 	file := c.String("config", "", "config file (default: smates.yml at the repository root)")
 	dryRun := c.Bool("dry-run", false, "print the diff instead of writing")
 	c.withFormat("text", "json")
+	if isHelp(sub) {
+		printGroupHelp(stdout, configCommands, c)
+		return nil
+	}
 	pos, err := c.parseInterspersed(rest)
 	if err != nil {
 		return err

@@ -25,6 +25,8 @@ type command struct {
 	bareFormatError bool
 	// jsonAlias is the deprecated --json (nil without deprecatedJSON).
 	jsonAlias *bool
+	// pos are the positional arguments of the last parse or parseInterspersed.
+	pos []string
 }
 
 // newCommand is the flag set of the command name ("list", "state show", ...); flag
@@ -57,6 +59,7 @@ func (c *command) parse(args []string) error {
 	if err := c.Parse(args); err != nil {
 		return usageError{err}
 	}
+	c.pos = c.Args()
 	return c.checkFormat()
 }
 
@@ -80,6 +83,7 @@ func (c *command) parseInterspersed(args []string) ([]string, error) {
 		pos = append(pos, rest[0])
 		args = rest[1:]
 	}
+	c.pos = pos
 	return pos, c.checkFormat()
 }
 
@@ -116,18 +120,34 @@ func (c *command) emit(w io.Writer, report any, text func()) error {
 
 // noArgs rejects positional arguments.
 func (c *command) noArgs() error {
-	if c.NArg() > 0 {
-		return usageError{fmt.Errorf("unexpected arguments %v", c.Args())}
+	if len(c.pos) > 0 {
+		return usageError{fmt.Errorf("unexpected arguments %v", c.pos)}
 	}
 	return nil
 }
 
 // oneArg returns the single positional argument; usage is the error otherwise.
 func (c *command) oneArg(usage string) (string, error) {
-	if c.NArg() != 1 {
+	if len(c.pos) != 1 {
 		return "", usageError{errors.New(usage)}
 	}
-	return c.Arg(0), nil
+	return c.pos[0], nil
+}
+
+// isHelp reports whether arg asks for help (-h, -help, --help).
+func isHelp(arg string) bool {
+	return arg == "-h" || arg == "-help" || arg == "--help"
+}
+
+// printGroupHelp prints the usage of a command with subcommands (`smates config -h`)
+// and the flags of c, to w.
+func printGroupHelp(w io.Writer, usage string, c *command) {
+	fmt.Fprintln(w, usage)
+	fmt.Fprintln(w, "\nFlags:")
+	out := c.Output()
+	c.SetOutput(w)
+	c.PrintDefaults()
+	c.SetOutput(out)
 }
 
 // writeJSON writes v as indented JSON (HTML characters unescaped).
