@@ -118,10 +118,8 @@ func (fr *funcRecorder) listPackages(ctx context.Context, pkg string) (*goPackag
 			continue
 		}
 		gp.dirs[f[0]] = f[1]
-		if rel, ok := pathutil.Rel(rc.Repo.Root, f[1]); ok {
+		if rel, ok := repoDir(rc.Repo.Root, f[1]); ok {
 			gp.linked[rel] = true
-		} else if filepath.Clean(f[1]) == rc.Repo.Root {
-			gp.linked["."] = true
 		}
 	}
 	if len(gp.dirs) == 0 {
@@ -247,10 +245,8 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	argv := append(slices.Clone(fr.flags.exec), bin, "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.coverprofile="+profile,
 		"-test.testlogfile="+testLog, "-test.paniconexit0")
 	argv = append(append(argv, fr.flags.test...), fr.flags.tail...)
-	base := suiteEnv(rc.Suite)
 	env := []string{"GOCOVERDIR=" + covDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
-	env = append(env, trace.NodeEnv(work, rc.Repo.Root, rc.Shims(), base)...)
-	env = append(env, trace.PythonEnv(work, rc.Repo.Root, rc.Shims(), base)[2:3]...) // PYTHONPATH only
+	env = append(env, childTraceEnv(rc, work)...)
 	var buf bytes.Buffer
 	start := time.Now()
 	code, err := rc.ExecIn(ctx, pkgDir, argv, env, &buf, &buf)
@@ -265,11 +261,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	o := &Observation{Files: map[string]bool{}, DurationMs: elapsed.Milliseconds()}
 	setUnitExit(o, code)
 	if code != 0 {
-		msg := buf.Bytes()
-		if len(msg) > trace.MaxMessage {
-			msg = msg[len(msg)-trace.MaxMessage:]
-		}
-		o.Failure = string(msg)
+		o.Failure = string(lastMessage(buf.Bytes()))
 	}
 	files, envs := trace.ParseTestLog(testLog, pkgDir)
 	addTestLog(o, rc.Repo.Root, files, envs)

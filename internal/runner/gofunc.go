@@ -110,26 +110,14 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 		return [][]string{argv}, err
 	}
 	if len(pkgs) > 0 {
-		var args []string
-		for _, u := range pkgs {
-			args = append(args, pkgArg(rc.Suite, u))
-		}
-		argv, err := rc.CommandLine(nil, args)
+		argv, err := rc.CommandLine(nil, pkgArgs(rc.Suite, pkgs))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, argv)
 	}
 	for _, inv := range plainInvocations(dirs, funcs) {
-		var args []string
-		for _, d := range inv.dirs {
-			args = append(args, pkgArg(rc.Suite, d))
-		}
-		var extra []string
-		if inv.run != "" {
-			extra = []string{"-run", inv.run}
-		}
-		argv, err := rc.CommandLine(extra, args)
+		argv, err := rc.CommandLine(runFlag(inv.run), pkgArgs(rc.Suite, inv.dirs))
 		if err != nil {
 			return nil, err
 		}

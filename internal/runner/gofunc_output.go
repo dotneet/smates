@@ -205,11 +205,7 @@ func (g *goOutcomes) failure(ip, name string) string {
 	if p == nil || p.tests[name] != state.Fail {
 		return ""
 	}
-	out := p.fails[name]
-	if len(out) > trace.MaxMessage {
-		out = out[len(out)-trace.MaxMessage:]
-	}
-	return out
+	return lastMessage(p.fails[name])
 }
 
 var _ io.Writer = (*goOutcomes)(nil)
