@@ -104,7 +104,8 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 		covered := false
 		for root, rr := range jsRoots {
-			if rr == r && root != d && pathutil.Under(d, root) && (r == "vitest" || r == "jest") && rootOwnsWorkspace(dirFiles[root], r) {
+			if rr == r && root != d && pathutil.Under(d, root) && (r == "vitest" || r == "jest") && rootOwnsWorkspace(dirFiles[root], r) &&
+				rootCovers(repo, root, r, d, files) {
 				covered = true
 			}
 		}
@@ -132,21 +133,18 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 	}
 
-	// Keep suites that have tests; give them unique names.
+	// Keep suites that have tests (as the runner's configuration or the default
+	// patterns describe them); give them unique names.
 	var kept []config.Suite
 	for _, s := range out {
-		a, _ := runner.Get(s.Runner)
-		rs := &runner.Suite{Suite: s, Adapter: a}
-		d := a.Defaults(repo, s.Root)
-		rs.Tests, rs.Exclude = d.Tests, d.Exclude
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {
 			if o.Runner == s.Runner && o.Root != s.Root && pathutil.Under(o.Root, s.Root) {
-				rs.Exclude = append(rs.Exclude, pathutil.RelTo(o.Root, s.Root)+"/**")
 				s.Exclude = append(s.Exclude, pathutil.RelTo(o.Root, s.Root)+"/**")
 			}
 		}
-		if len(rs.TestFiles(files)) == 0 {
+		rs, err := runner.NewSuite(repo, s)
+		if err != nil || len(rs.TestFiles(files)) == 0 {
 			continue
 		}
 		kept = append(kept, s)
@@ -181,6 +179,26 @@ func rootOwnsWorkspace(names []string, r string) bool {
 		}
 	}
 	return false
+}
+
+// rootCovers reports whether the suite of runner r at root counts test files under the
+// package directory d as its configuration (include, testMatch, projects) describes
+// them; with the default patterns (or no test files under d at all) it does.
+func rootCovers(repo *gitx.Repo, root, r, d string, files []string) bool {
+	rs, err := runner.NewSuite(repo, config.Suite{Root: root, Runner: r})
+	if err != nil || len(rs.Discovered) == 0 {
+		return true
+	}
+	any := false
+	for _, f := range files {
+		if pathutil.Under(f, d) && !pathutil.IsVendored(f) {
+			if rs.IsTestFile(f) {
+				return true
+			}
+			any = true
+		}
+	}
+	return !any
 }
 
 func underTestdata(d string) bool {

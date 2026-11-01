@@ -57,7 +57,10 @@ need tests belong in `ignore:`: `smates config add-ignore 'deploy/**'` (`--dry-r
 - `smates select` (or `smates run --explain`): what would run and why.
 - `smates why <file>`: the tests that depend on a file.
 - `smates deps <test file or Go package dir>`: the files a test depends on.
-- `smates list`: suites and test units (the names `--only` and `--suite` take).
+- `smates list`: suites and test units (the names `--only` and `--suite` take); its
+  `tests=` column says where the test patterns come from (e.g. `jest.config.js testMatch`).
+  `smates list -v` prints the patterns and every unit: a new test file missing there is
+  not seen as a test (fix the runner config or `tests:`; `smates doctor` warns too).
 
 `why`, `deps`, `list`, `doctor` and `init` take `--format json`.
 
