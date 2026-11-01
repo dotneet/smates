@@ -356,7 +356,19 @@ func TestPrintFailedBatch(t *testing.T) {
 // although no test reported a result is an environment problem; a custom runner, or a
 // run with --no-record, may report nothing when its tests ran: a test failure.
 func TestExit126And127(t *testing.T) {
-	_, write, run := outputFixture(t) // records traced results for good/a_check.py
+	dir, write, run := outputFixture(t) // records traced results for good/a_check.py
+	failedRuns := func() int {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if code := Main([]string{"stats", "-C", dir, "--format", "json"}, &out, &errb); code != 0 {
+			t.Fatalf("stats: %d %s", code, errb.String())
+		}
+		var st statsReport
+		if err := json.Unmarshal(out.Bytes(), &st); err != nil {
+			t.Fatalf("%v\n%s", err, out.String())
+		}
+		return st.FailedRuns
+	}
 	cfg := func(runner, tests, command string) string {
 		return "version: 1\norphans: ignore\nsuites:\n  - name: s\n    runner: " + runner + "\n    tests: [\"" + tests + "\"]\n    command: " + command + "\n"
 	}
@@ -378,11 +390,28 @@ func TestExit126And127(t *testing.T) {
 	// pytest launched through a shell that cannot find it: no test ran.
 	write("pt/test_x.py", "def test_x():\n    pass\n")
 	write("smates.yml", cfg("pytest", "pt/test_*.py", "sh -c 'smates-no-such-pytest-x6' sh"))
+	// Failures mode says the unit did not start (smates exits 4), not that it failed.
 	code, out, errs := run("run", "--all", "--output", "failures")
 	if code != ExitEnv || !strings.Contains(out, "smates-no-such-pytest-x6") ||
-		!strings.Contains(errs, "exited with code 127 before any test reported a result") || !strings.Contains(errs, "smates: FAILED") {
+		!strings.Contains(errs, "exited with code 127 before any test reported a result") ||
+		!strings.Contains(errs, "smates: NOT STARTED: a runner that could not start left 1 selected test unit(s) not started (they stay selected); 0 of 1 selected unit(s) ran") ||
+		strings.Contains(errs, "smates: FAILED") || strings.Contains(errs, "PASSED") {
 		t.Errorf("pytest, missing tool: exit %d\n%s\n--- stderr\n%s", code, out, errs)
 	}
+	// The full output says so too.
+	if code, _, errs := run("run", "--all"); code != ExitEnv || !strings.Contains(errs, "exit code 4; a runner that could not start left 1 selected unit(s) not started") {
+		t.Errorf("pytest, missing tool, full output: exit %d\n%s", code, errs)
+	}
+	// A run that exits 4 counts as failed in the stats, although no runner failed tests.
+	write("smates.yml", cfg("pytest", "pt/test_*.py", "smates-no-such-pytest-x7"))
+	before := failedRuns()
+	if code, _, errs := run("run", "--all"); code != ExitEnv {
+		t.Errorf("pytest not installed: exit %d, want %d\n%s", code, ExitEnv, errs)
+	}
+	if after := failedRuns(); after != before+1 {
+		t.Errorf("failed runs %d after a run that could not start, want %d", after, before+1)
+	}
+	write("smates.yml", cfg("pytest", "pt/test_*.py", "sh -c 'smates-no-such-pytest-x6' sh"))
 	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
 		t.Errorf("pytest, missing tool, --no-record: exit %d, want %d\n%s", code, ExitFailed, errs)
 	}
