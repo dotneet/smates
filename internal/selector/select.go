@@ -48,6 +48,12 @@ type selection struct {
 	// baseChanged are the files changed since Base, used to decide the tests with no
 	// recorded entry by static analysis (Input.DiffUnrecorded); nil otherwise.
 	baseChanged map[string]bool
+	// knownCovered is, with baseChanged, the union of the dependencies known without a
+	// recording (Suite.Known): what diff mode would cover (see unrecordedReads).
+	knownCovered map[string]bool
+	// unrecordedReads are, by suite, the files decideTests selects the suite's units
+	// with no recorded entry for (see unrecordedReads).
+	unrecordedReads map[string][]string
 	// globalInputs are the files every test depends on (top-level inputs and the
 	// settings key of the configuration file).
 	globalInputs []string

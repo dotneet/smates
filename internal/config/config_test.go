@@ -178,6 +178,18 @@ func TestRootCleaning(t *testing.T) {
 	}
 }
 
+// Suite names derived from roots may hold any character a directory can (a scoped
+// package, a comma): the state escapes them where it lists suites (state.MarkerSnap).
+func TestDerivedSuiteNames(t *testing.T) {
+	c, err := Parse([]byte("suites:\n  - {runner: vitest, root: packages/@scope/pkg}\n  - {runner: go, root: \"a,b\"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Suites[0].Name != "packages/@scope/pkg" || c.Suites[1].Name != "a,b" {
+		t.Errorf("names %q %q", c.Suites[0].Name, c.Suites[1].Name)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	c, err := Load(dir)

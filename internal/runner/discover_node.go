@@ -339,7 +339,7 @@ func jestDiscovery(file string, obj *js.Object, s *Suite) (Discovery, error) {
 		}
 		if len(res) > 0 {
 			m.TestRegex = res
-			exclude = jsExclude
+			exclude = jsOutputExclude
 			keys = append(keys, "testRegex")
 		}
 	}
@@ -367,7 +367,7 @@ func jestDiscovery(file string, obj *js.Object, s *Suite) (Discovery, error) {
 				m.Tests = append(m.Tests, conv)
 			}
 		}
-		exclude = jsExclude
+		exclude = jsOutputExclude
 		keys = append(keys, "testMatch")
 	}
 	if len(m.TestRegex) == 0 && len(m.Tests) == 0 {

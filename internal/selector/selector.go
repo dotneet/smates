@@ -69,6 +69,10 @@ type Input struct {
 	// against Base instead of selecting them as new (local use, where the state only
 	// covers the tests that ran on this machine).
 	DiffUnrecorded bool
+	// NoOrphanPolicy: the run applies no orphan policy (orphans: ignore,
+	// --orphans=skip), so the changes that would be orphans for the tests
+	// DiffUnrecorded decides by static analysis select none of them either.
+	NoOrphanPolicy bool
 }
 
 // Test is the decision for one test unit.

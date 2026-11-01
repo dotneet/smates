@@ -45,8 +45,14 @@ type unitSel struct {
 func (s *selection) suiteDeps() {
 	in, res := s.in, s.res
 	res.Covered = map[string]bool{}
+	if s.baseChanged != nil {
+		s.knownCovered = map[string]bool{}
+	}
 	if in.Config.Path != "" {
 		res.Covered[in.Config.Path] = true // explained by depkey.Config
+		if s.knownCovered != nil {
+			s.knownCovered[in.Config.Path] = true
+		}
 	}
 	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
@@ -106,6 +112,9 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		for f := range via {
 			deps[f] = true
 			known = append(known, f)
+			if s.knownCovered != nil {
+				s.knownCovered[f] = true
+			}
 		}
 		sort.Strings(known)
 		sr.Known[u] = known

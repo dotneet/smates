@@ -89,6 +89,24 @@ func TestSnapConstructors(t *testing.T) {
 	}
 }
 
+// Suite names are escaped where a marker lists them: a name derived from a root may
+// hold ",", "@" or "%".
+func TestSnapMarkerNames(t *testing.T) {
+	names := []string{"vitest:packages/@scope/pkg", "a,b", "x%2Cy", "go"}
+	m := MarkerSnap("h1", names)
+	want := "?h1@a%2Cb,go,vitest:packages/@scope/pkg,x%252Cy"
+	if got := m.String(); got != want {
+		t.Fatalf("String = %q, want %q", got, want)
+	}
+	back := ParseSnap(want)
+	if h, ok := back.SeenHash(); !ok || h != "h1" || !back.SeenByAll(names) || len(back.SeenBy()) != len(names) {
+		t.Errorf("reparsed %q: %v", want, back.SeenBy())
+	}
+	if back.Seen("a") || back.Seen("b") {
+		t.Error("a name with a comma read as two")
+	}
+}
+
 func TestSnapMarkSeen(t *testing.T) {
 	m := MarkerSnap("h1", []string{"b", "a"})
 	cases := []struct {

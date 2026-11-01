@@ -86,6 +86,25 @@ Dependency keys:
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
+The hashes are those of the snapshot taken before the run. Paths git does not list
+(ignored files such as `.env`, caches, reports, generated code) are read from disk
+instead. Existence checks of them are taken before the first test starts, for the
+paths the entries of the suites being run probed (`Hasher.PinBefore`), so a test that
+probes an output directory and then creates it is recorded as having seen it absent
+(it runs once more, then settles on `exists`). A path first probed when the run is
+recorded that exists and was modified since the run started may have been created by
+the tests: it is recorded as `unsettled`, which matches nothing, so the test runs again
+and then records the path's state before that run. "Since" allows 100ms before the
+start, since file systems date files with a coarser clock than smates' (Linux: the
+kernel tick); a path generated more than that before the run (`make gen && smates run`)
+existed before it. Whole-second timestamps (HFS+, ext3) count from the start's second;
+on FAT, with two-second timestamps, a path created in the first second of the run can
+still look older and be recorded as existing before it. The *content* of such files is
+hashed as the run left it: tests commonly rewrite what they read there (a timestamped
+report, a cache, Go tests creating files in the package), and their state before the
+run would never match again. Known limitation: a git-ignored input edited by hand while
+the run is in progress is recorded with its new content, so the edit selects nothing.
+
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
 is the same — modulo nondeterminism and inputs outside the repository (services, network),
@@ -132,8 +151,12 @@ test that touches one of them on the first local run, which defeats pulling the 
 They are therefore ignored by default (`config.DefaultEnvIgnore`); `env_ignore` adds to
 the list, `env_track` takes names out of it (top level or per suite), and the ignore list
 is applied both when recording and when comparing, so adding a name stops it from
-selecting tests at once, without a new recording. What remains tracked are the variables
-a project defines (`DATABASE_URL`, `APP_*`), `TZ`, `NODE_ENV` and the like. When one of
+selecting tests at once, without a new recording. Known limitation: a name taken out of
+the top-level `env_ignore` was never recorded, so that selects nothing either; the tests
+reading the variable depend on it from their next run on (`smates run --all` records it
+for every test). (`env_track` and a suite's own lists are part of the suite's settings,
+`smates.yml#suite`, and changing them reruns the suite.) What remains tracked are the
+variables a project defines (`DATABASE_URL`, `APP_*`), `TZ`, `NODE_ENV` and the like. When one of
 them differs between CI and a laptop, the tests reading it do run locally — they may
 behave differently there, which is the point — and only those tests.
 
@@ -224,7 +247,7 @@ can alter test results.
 | Runner | Unit | Code deps | Data deps | Attribution |
 |---|---|---|---|---|
 | vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
-| node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly) |
+| node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
@@ -346,8 +369,11 @@ package directories named in test string literals (`go run ../../cmd/tool`).
 Per-file status comes from reporters (vitest, jest — injected only when the user configures
 none), the pytest plugin, process exit codes (node:test, bun, go), or a JUnit file. When only
 the run's exit code is known, failures are *inferred*: such units are re-run next time but
-not reported as definite misses. Units that ran but left no trace in a failing run are
-`unknown` (re-run next time). Go packages that fail to build are failures.
+not reported as definite misses; so is a process exit code that covers several units (node
+`--test-isolation=none`). Units that ran but left no trace in a failing run are
+`unknown` (re-run next time), and so are files the vitest reporter saw cut short (`--bail`,
+an interrupted run: never started, or tests that were declared to run but did not
+finish). Go packages that fail to build are failures.
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected

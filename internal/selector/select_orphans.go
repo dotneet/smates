@@ -44,11 +44,12 @@ func (r *Result) Explains(f string, existenceChanged bool) bool {
 }
 
 // existedBefore reports whether f existed when the state was recorded (or at the base
-// revision in diff mode; unknown counts as existing, which keeps f an orphan).
+// revision in diff mode; unknown counts as existing, which keeps f an orphan). A marker
+// of --suite runs tells by the hash its suites saw (state.SnapValue.Existed).
 func existedBefore(in *Input, f string) bool {
 	if len(in.State.Files) > 0 {
-		_, ok := in.State.FileHash(f)
-		return ok
+		v, ok := in.State.Snap(f)
+		return ok && v.Existed()
 	}
 	return true
 }

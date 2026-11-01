@@ -15,7 +15,9 @@
 // Paths are repo-relative slash paths; the repository root is ".". A path at the
 // repository root whose name starts with "$" cannot be told from an environment
 // variable, nor a file whose name ends in "#decls" or "#suite" from those keys; such
-// files are not expected in practice.
+// files are not expected in practice. A file whose name ends in "?" parses as an
+// existence check; the hasher (selector.Hasher) hashes such a key as both when the
+// snapshot holds the file, so that editing it still selects the tests that read it.
 //
 // This package owns the syntax: other packages build keys with the constructors
 // (Listing, Env, Config, ...), take them apart with Parse and ask for their properties

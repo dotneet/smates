@@ -2,6 +2,7 @@ package trace
 
 import (
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -204,6 +205,7 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		for f := range extra[p] {
 			files[f] = true
 		}
+		named := namedUnit(p, units, unitOf, opt.Rel)
 		for _, id := range units {
 			u := unit(id)
 			for f := range files {
@@ -213,7 +215,12 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			if len(units) == 1 && p.End > p.Start && p.Start > 0 {
 				u.Ms += p.End - p.Start
 			}
-			if p.Exit != nil {
+			// A failing process that ran several units says which one failed only when its
+			// command line names exactly one of them (node --test's process for
+			// test/a.test.js, which also loaded the unit test/common.js). Otherwise
+			// (node --test --test-isolation=none names every file) they are left to the
+			// overall exit code: an inferred failure, run again next time.
+			if p.Exit != nil && (*p.Exit == 0 || len(units) == 1 || id == named) {
 				st := state.Pass
 				if *p.Exit != 0 {
 					st = state.Fail
@@ -223,6 +230,33 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 	}
 	return res
+}
+
+// namedUnit returns the one unit among units that p's command line names (arguments
+// resolved against its working directory), "" when none or several are named.
+func namedUnit(p *Proc, units []string, unitOf func(string) string, rel func(string) (string, bool)) string {
+	if len(units) < 2 || rel == nil {
+		return ""
+	}
+	named := ""
+	for _, a := range p.Argv {
+		if !filepath.IsAbs(a) {
+			a = filepath.Join(p.Cwd, a)
+		}
+		r, ok := rel(a)
+		if !ok {
+			continue
+		}
+		u := unitOf(r)
+		if u == "" || u == named || !slices.Contains(units, u) {
+			continue
+		}
+		if named != "" {
+			return ""
+		}
+		named = u
+	}
+	return named
 }
 
 func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *Unit) {

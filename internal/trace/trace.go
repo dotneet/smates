@@ -504,7 +504,9 @@ func v8URLs(file string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasSuffix(bytes.TrimSpace(data), []byte("}")) {
+	// A file cut short anywhere (even right after a range object) is incomplete: the
+	// scripts after the cut would be missing.
+	if !json.Valid(data) {
 		return nil, fmt.Errorf("truncated coverage file")
 	}
 	var urls []string

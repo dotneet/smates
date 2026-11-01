@@ -1246,3 +1246,90 @@ func TestOwnership(t *testing.T) {
 		t.Errorf("Picked = %v", got)
 	}
 }
+
+// TestSelectDiffUnrecordedReadsData: a unit with no recorded entry, decided against
+// Base by its static closure, is still selected when a file of its suite changed that
+// other tests read (their recordings explain it, so it is no orphan) and that no
+// static closure explains: in diff mode it would have been an orphan.
+func TestSelectDiffUnrecordedReadsData(t *testing.T) {
+	f := webFixture(t)
+	repo, base := gitFixture(t, f)
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"web/fixtures/users.json"}}, nil)
+	delete(st.Suites["web"].Tests, "web/db/q.test.ts")
+	diff := func(in *Input) { in.Repo, in.Base, in.DiffUnrecorded = repo, base, true }
+	if d := decisions(f.sel(st, diff))["web/db/q.test.ts"]; d != "-unaffected" {
+		t.Errorf("nothing changed: %s", d)
+	}
+	f.write("web/src/a.ts", "changed") // in a static closure: decided by it
+	if d := decisions(f.sel(st, diff)); d["web/db/q.test.ts"] != "-unaffected" || d["web/src/a.test.ts"] != ReasonChanged {
+		t.Errorf("import changed: %v", d)
+	}
+	f.write("web/fixtures/users.json", "[1]")
+	res := f.sel(st, diff)
+	want := map[string]string{
+		"web/src/a.test.ts": ReasonChanged, "web/src/b.test.ts": "-unaffected",
+		"web/src/c.test.ts": ReasonChanged, "web/db/q.test.ts": ReasonNew,
+	}
+	if d := decisions(res); !reflect.DeepEqual(d, want) {
+		t.Errorf("got %v want %v", d, want)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	// Without an orphan policy (orphans: ignore, --orphans=skip) such a change selects
+	// nothing, as it would as an orphan.
+	res = f.sel(st, func(in *Input) { diff(in); in.NoOrphanPolicy = true })
+	if d := decisions(res)["web/db/q.test.ts"]; d != "-unaffected" {
+		t.Errorf("no orphan policy: %s", d)
+	}
+	if len(res.Notes) == 0 {
+		t.Error("no note for the change left unhandled")
+	}
+}
+
+// TestConfigHashEnvIgnore: adding a name to the top-level env_ignore (the remedy for a
+// noisy variable) selects nothing; the list is not part of the suite's settings.
+func TestConfigHashEnvIgnore(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	f.cfg.EnvIgnore = []string{"APP_SECRET"}
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
+		t.Errorf("env_ignore added: %v", d)
+	}
+}
+
+// TestOrphanEditedMarkedFile: a file whose snapshot entry is a marker of --suite runs
+// existed, so editing it is no existence change a listing could explain.
+func TestOrphanEditedMarkedFile(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(map[string][]string{"web/src/b.test.ts": {"web/fixtures/"}}, nil)
+	st.SetSnap("web/fixtures/users.json", state.MarkerSnap(st.Files["web/fixtures/users.json"], []string{"other"}))
+	f.write("web/fixtures/users.json", "[1]")
+	if res := f.sel(st, nil); !reflect.DeepEqual(res.Orphans, []string{"web/fixtures/users.json"}) {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	// A marker of the absent file: the file appeared, which the listing explains.
+	st.SetSnap("web/fixtures/users.json", state.MarkerSnap("", []string{"other"}))
+	if res := f.sel(st, nil); len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+}
+
+// TestSelectFileNamedLikeProbe: a file whose name ends in "?" parses as an existence
+// check, yet editing it selects the tests that read it.
+func TestSelectFileNamedLikeProbe(t *testing.T) {
+	f := webFixture(t)
+	f.write("web/fixtures/odd?", "1")
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"web/fixtures/odd?"}}, nil)
+	if d := decisions(f.sel(st, nil))["web/src/c.test.ts"]; d != "-unaffected" {
+		t.Fatalf("unchanged: %s", d)
+	}
+	f.write("web/fixtures/odd?", "2")
+	res := f.sel(st, nil)
+	if d := decisions(res)["web/src/c.test.ts"]; d != ReasonChanged {
+		t.Errorf("edited: %s", d)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+}

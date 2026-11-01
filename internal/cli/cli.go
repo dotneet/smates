@@ -383,6 +383,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	res, err := selector.Select(&selector.Input{
 		Repo: p.repo, Config: p.cfg, Suites: p.suites, Others: p.others, State: p.state, Snap: p.snap, Graph: p.graph, Base: base, All: opt.all,
 		DiffUnrecorded: diffUnrecorded,
+		NoOrphanPolicy: opt.orphans == orphansSkip || opt.orphans == "" && p.cfg.Orphans == config.OrphansIgnore,
 	})
 	if err != nil {
 		return nil, err
