@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,9 +46,10 @@ type Hasher struct {
 
 // hashCache is shared by the hashers derived from one with ForSuite.
 type hashCache struct {
-	disk  map[string]string // memoized hashes of files outside the snapshot
-	exist map[string]string // memoized existence checks of paths outside the snapshot
-	dirs  map[string][]string
+	disk  map[string]string   // memoized hashes of files outside the snapshot
+	exist map[string]string   // memoized existence checks of paths outside the snapshot
+	dirs  map[string][]string // the snapshot's directories and their entries
+	lists map[string]string   // memoized listing hashes (see listing)
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
 	// since is when the tests started (see PinBefore); zero when not pinned.
@@ -169,15 +171,34 @@ func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
 	return ok && old != "" && old == h.file(h.cfg.Path)
 }
 
+// legacySuite reports whether recorded is the hash an older smates recorded for the
+// settings key, over the suite with the adapter's defaults applied (the command, the
+// excludes and inputs, which depend on the machine: a virtualenv, GOWORK): it counts
+// as unchanged while those settings are the same.
+func (h *Hasher) legacySuite(key, recorded string) bool {
+	return h.isConfig(key) && h.suite != nil && recorded != "" && recorded == ConfigHash(h.cfg, &h.suite.Suite)
+}
+
+// configured is the suite's entry as smates.yml has it (runner.Suite.Configured), or
+// the suite itself when it was not made by runner.NewSuite.
+func configured(su *runner.Suite) *config.Suite {
+	if su.Configured.Name == "" && su.Configured.Runner == "" {
+		return &su.Suite
+	}
+	return &su.Configured
+}
+
 // ConfigHash fingerprints the settings of smates.yml that can change how the tests of
-// su run or what they are recorded to depend on: the suite's own entry and the
-// top-level env_track. The rest (ignore, orphans, agent, flaky, state, inputs,
-// env_ignore, full_run_branches, other suites) cannot change a test's outcome: input
-// globs and rules add dependency keys of their own, ignore globs change the "dir/**"
-// hashes they affect, and env_ignore applies when comparing. (A variable the top-level
-// env_ignore listed was not recorded, so taking it out of the list selects nothing
-// until the tests reading it run again; hashing the list here would instead run every
-// test whenever a name is added, the usual remedy for a noisy variable.)
+// su run or what they are recorded to depend on: the suite's own entry as written (not
+// the defaults the adapter fills in, which differ between CI and a laptop with a
+// virtualenv) and the top-level env_track. The rest (ignore, orphans, agent, flaky,
+// state, inputs, env_ignore, full_run_branches, other suites) cannot change a test's
+// outcome: input globs and rules add dependency keys of their own, ignore globs change
+// the "dir/**" hashes they affect, and env_ignore applies when comparing. (A variable
+// the top-level env_ignore listed was not recorded, so taking it out of the list
+// selects nothing until the tests reading it run again; hashing the list here would
+// instead run every test whenever a name is added, the usual remedy for a noisy
+// variable.)
 func ConfigHash(c *config.Config, su *config.Suite) string {
 	data, err := json.Marshal(struct {
 		Suite    *config.Suite
@@ -296,8 +317,12 @@ func (h *Hasher) Hash(key string) string {
 		return h.set(key)
 	case depkey.KindExistence:
 		v := "exists"
-		if _, isFile := h.snap[p]; !isFile && h.Hash(depkey.Listing(p)) == "" && p != "." {
-			v = h.exists(p)
+		// A path outside the snapshot is checked on disk (and pinned, see PinBefore);
+		// not through the listing, which reads directories git ignores from disk.
+		if _, isFile := h.snap[p]; !isFile && p != "." {
+			if _, isDir := h.snapEntries(depkey.Listing(p)); !isDir {
+				v = h.exists(p)
+			}
 		}
 		if blob, ok := h.snap[key]; ok {
 			// A file whose name ends in "?" (see depkey): the key is its content or an
@@ -312,12 +337,19 @@ func (h *Hasher) Hash(key string) string {
 		if h.suite == nil {
 			return ""
 		}
-		return ConfigHash(h.cfg, &h.suite.Suite)
+		return ConfigHash(h.cfg, configured(h.suite))
 	case depkey.KindContent:
 		return h.file(key)
 	case depkey.KindDecls:
 		return h.decls(p)
 	}
+	return h.listing(key)
+}
+
+// snapEntries returns the entry names of directory key ("dir/") in the snapshot
+// (subdirectories with a trailing "/"), sorted; ok is false when no file of the
+// snapshot is below it.
+func (h *Hasher) snapEntries(key string) (names []string, ok bool) {
 	if h.dirs == nil {
 		h.dirs = map[string][]string{}
 		for f := range h.snap {
@@ -340,12 +372,53 @@ func (h *Hasher) Hash(key string) string {
 			h.dirs[k] = uniq(v)
 		}
 	}
-	list, ok := h.dirs[key]
-	if !ok {
-		return ""
+	names, ok = h.dirs[key]
+	return names, ok
+}
+
+// listing hashes the entry names of a directory (key "dir/"). A directory the snapshot
+// has files below hashes as the snapshot's entries alone: entries git ignores inside it
+// (a log a test writes into its package, a test binary, editor and Finder files) are
+// not part of its listing, or one of them would rerun every test listing the directory
+// (with granularity: func, every test function of a Go package), and on every fresh
+// checkout where a test creates it. A directory the snapshot has no file below (one git
+// ignores entirely: generated fixtures, build output) is listed from disk, with a root,
+// except vendored entries and those the ignore globs match; it hashes as "" when it
+// does not exist. Like the content of files outside the snapshot, it is listed when
+// first hashed, which for a recording is after the run: a test that adds a file to the
+// directory it lists (a timestamped report) then finds the listing it left.
+func (h *Hasher) listing(key string) string {
+	if v, ok := h.lists[key]; ok {
+		return v
 	}
-	sum := sha1.Sum([]byte(strings.Join(list, "\n")))
-	return "dir:" + hex.EncodeToString(sum[:])
+	names, ok := h.snapEntries(key)
+	if !ok && h.root != "" {
+		dir := strings.TrimSuffix(key, "/")
+		if entries, err := os.ReadDir(filepath.Join(h.root, filepath.FromSlash(dir))); err == nil {
+			ok = true
+			for _, e := range entries {
+				n := e.Name()
+				if p := path.Join(dir, n); pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
+					continue
+				}
+				if e.IsDir() {
+					n += "/"
+				}
+				names = append(names, n)
+			}
+			sort.Strings(names)
+		}
+	}
+	v := ""
+	if ok {
+		sum := sha1.Sum([]byte(strings.Join(names, "\n")))
+		v = "dir:" + hex.EncodeToString(sum[:])
+	}
+	if h.lists == nil {
+		h.lists = map[string]string{}
+	}
+	h.lists[key] = v
+	return v
 }
 
 // declsCache maps a Go file's blob hash to the hash of its declarations.
@@ -376,28 +449,89 @@ func (h *Hasher) decls(p string) string {
 }
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
-// commands smates cannot see into.
+// commands smates cannot see into. Files git ignores below a directory the snapshot
+// lists are left out (build output, caches). A directory the snapshot has no file below
+// (one git ignores entirely: a command ran in build/) is read from disk instead, as the
+// run left it (see diskTree).
 func (h *Hasher) tree(dir string) string {
 	if v, ok := h.trees[dir]; ok {
 		return v
 	}
-	var files []string
-	for f := range h.snap {
-		if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
-			files = append(files, f)
+	var v string
+	if _, listed := h.snapEntries(depkey.Listing(dir)); !listed && h.root != "" && dir != "." && !pathutil.IsVendored(dir) {
+		v = h.diskTree(dir)
+	} else {
+		var files []string
+		for f := range h.snap {
+			if (dir == "." || pathutil.Under(f, dir)) && !pathutil.IsVendored(f) && !pathutil.Match(h.ignore, f) {
+				files = append(files, f)
+			}
 		}
+		sort.Strings(files)
+		sum := sha1.New()
+		for _, f := range files {
+			sum.Write([]byte(f + "\x00" + h.snap[f] + "\n"))
+		}
+		v = "tree:" + hex.EncodeToString(sum.Sum(nil))
 	}
-	sort.Strings(files)
-	sum := sha1.New()
-	for _, f := range files {
-		sum.Write([]byte(f + "\x00" + h.snap[f] + "\n"))
-	}
-	v := "tree:" + hex.EncodeToString(sum.Sum(nil))
 	if h.trees == nil {
 		h.trees = map[string]string{}
 	}
 	h.trees[dir] = v
 	return v
+}
+
+// maxDiskTree caps the entries diskTree walks (a variable for tests).
+var maxDiskTree = 20000
+
+// diskTree hashes a directory outside the snapshot from disk: the paths and sizes of
+// the files below it, without vendored ones and those the ignore globs match. Contents
+// are not read: such trees are build output (build/, target/, dist/), gigabytes to hash
+// on every selection, and a build that is not reproducible would rerun the tests
+// forever. A tree of more than maxDiskTree entries hashes as a constant (it stays the
+// same while the tree is that large: its changes select nothing).
+func (h *Hasher) diskTree(dir string) string {
+	type file struct {
+		p    string
+		size int64
+	}
+	var files []file
+	n := 0
+	_ = filepath.WalkDir(filepath.Join(h.root, filepath.FromSlash(dir)), func(abs string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable: what can be read still counts
+		}
+		if n++; n > maxDiskTree {
+			return filepath.SkipAll
+		}
+		rel, rerr := filepath.Rel(h.root, abs)
+		if rerr != nil {
+			return nil
+		}
+		p := filepath.ToSlash(rel)
+		if pathutil.IsVendored(p) || pathutil.Match(h.ignore, p) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			var size int64
+			if fi, err := d.Info(); err == nil {
+				size = fi.Size()
+			}
+			files = append(files, file{p, size})
+		}
+		return nil
+	})
+	if n > maxDiskTree {
+		return "tree:over:" + strconv.Itoa(maxDiskTree)
+	}
+	sum := sha1.New()
+	for _, f := range files { // WalkDir walks in lexical order
+		sum.Write([]byte(f.p + "\x00" + strconv.FormatInt(f.size, 10) + "\n"))
+	}
+	return "tree:" + hex.EncodeToString(sum.Sum(nil))
 }
 
 func uniq(s []string) []string {
