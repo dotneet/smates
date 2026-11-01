@@ -40,6 +40,7 @@ Usage:
   smates flaky [--format json] [--clear] tests whose outcome flipped with unchanged inputs
   smates list                           list suites and test units
   smates state show|path|pull|push|merge|clear
+  smates hook install|uninstall|status  run the affected tests from a git pre-push hook
   smates doctor                         check setup
   smates version
 
@@ -76,6 +77,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		err = cmdList(rest, stdout, stderr)
 	case "state":
 		err = cmdState(rest, stdout, stderr)
+	case "hook":
+		code, err = cmdHook(ctx, rest, os.Stdin, stdout, stderr)
 	case "doctor":
 		code, err = cmdDoctor(rest, stdout, stderr)
 	case "version", "--version", "-v":
