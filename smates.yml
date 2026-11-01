@@ -36,7 +36,7 @@ suites:
           - "internal/static/*.go"
           - "internal/static/host/**"
           - "internal/trace/*.go"
-          - "internal/runner/{runner,common,custom,procgroup*}.go"
+          - "internal/runner/{runner,common,custom,preflight,procgroup*}.go"
       - tests: ["."]
         # vitest, jest, node --test and bun.
         deps: &js ["internal/runner/node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]

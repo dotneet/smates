@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +36,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	force := fs.Bool("force", false, "overwrite an existing smates.yml")
 	print := fs.Bool("stdout", false, "print the config instead of writing it")
 	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
+	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -58,7 +58,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 	sort.Strings(files)
 	suites := detect.Suites(repo, files)
-	doc := renderConfig(suites)
+	mk := makefileHints(repo.Root, suites)
+	for _, h := range mk {
+		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
+	}
+	doc := renderConfig(suites, configHints(mk))
 	if *print {
 		_, err := io.WriteString(stdout, doc)
 		return err
@@ -73,26 +77,17 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := ensureGitignore(repo.Root); err != nil {
 		fmt.Fprintf(stderr, "smates: could not update .gitignore: %v\n", err)
 	}
-	if *github {
-		wf := filepath.Join(repo.Root, ".github", "workflows", "smates.yml")
-		if _, err := os.Stat(wf); err == nil && !*force {
-			fmt.Fprintf(stderr, "smates: %s exists, not overwritten (use --force)\n", ".github/workflows/smates.yml")
-		} else {
-			if err := os.MkdirAll(filepath.Dir(wf), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(wf, []byte(renderWorkflow(repo, suites)), 0o644); err != nil {
-				return err
-			}
-			fmt.Fprintln(stdout, "wrote .github/workflows/smates.yml (add an ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY secret to enable the agent)")
-		}
-	}
 	fmt.Fprintf(stdout, "wrote smates.yml with %d suite(s):\n", len(suites))
 	for _, s := range suites {
 		fmt.Fprintf(stdout, "  - %s (%s) in %s\n", s.Name, s.Runner, s.Root)
 	}
 	if len(suites) == 0 {
 		fmt.Fprintln(stdout, "  (no test suites detected: add them to smates.yml by hand)")
+	}
+	if *github {
+		if err := initGitHub(repo, suites, files, *force, *patch, stdout, stderr); err != nil {
+			return err
+		}
 	}
 	fmt.Fprint(stdout, `
 Next steps:
@@ -104,7 +99,9 @@ Next steps:
 	return nil
 }
 
-func renderConfig(suites []config.Suite) string {
+// renderConfig renders smates.yml; hints are commented lines written under a suite
+// (by suite name).
+func renderConfig(suites []config.Suite, hints map[string][]string) string {
 	var b strings.Builder
 	b.WriteString(`# smates configuration. Docs: https://github.com/dotneet/smates
 version: 1
@@ -125,6 +122,9 @@ suites:
 				fmt.Fprintf(&b, "      - %s\n", yamlStr(e))
 			}
 		}
+		for _, l := range hints[s.Name] {
+			b.WriteString("    " + l + "\n")
+		}
 	}
 	b.WriteString(`
 # Changed files no test is known to depend on ("orphans"): agent | all | ignore.
@@ -143,109 +143,6 @@ agent:
   # provider: auto      # auto (picked from the API key that is set) | anthropic | openai | openrouter
   # model: claude-haiku-5-5   # default depends on the provider
   # instructions: "Integration tests in e2e/ talk to the API server built from server/."
-`)
-	return b.String()
-}
-
-// renderWorkflow writes a GitHub Actions workflow that sets up the toolchains the
-// detected suites need, installs dependencies and runs smates.
-func renderWorkflow(repo *gitx.Repo, suites []config.Suite) string {
-	has := func(name string) bool {
-		_, err := os.Stat(filepath.Join(repo.Root, filepath.FromSlash(name)))
-		return err == nil
-	}
-	var setup, install []string
-	seen := map[string]bool{}
-	once := func(key string, lines ...string) {
-		if !seen[key] {
-			seen[key] = true
-			setup = append(setup, lines...)
-		}
-	}
-	for _, s := range suites {
-		root := s.Root
-		at := func(f string) string {
-			if root == "." {
-				return f
-			}
-			return root + "/" + f
-		}
-		switch s.Runner {
-		case "go":
-			once("go:"+root, "      - uses: actions/setup-go@v5", "        with:", "          go-version-file: "+at("go.mod"))
-		case "pytest":
-			once("uv", "      - uses: astral-sh/setup-uv@v6")
-		case "bun":
-			once("bun", "      - uses: oven-sh/setup-bun@v2")
-			if !seen["install:"+root] {
-				seen["install:"+root] = true
-				install = append(install, "      - run: bun install --frozen-lockfile", "        working-directory: "+root)
-			}
-		default: // vitest, jest, node
-			version := "22"
-			for _, f := range []string{".nvmrc", ".node-version"} {
-				if data, err := os.ReadFile(filepath.Join(repo.Root, f)); err == nil && strings.TrimSpace(string(data)) != "" {
-					version = strings.TrimPrefix(strings.TrimSpace(string(data)), "v")
-				}
-			}
-			cmd := "npm ci"
-			for d := root; ; d = filepath.ToSlash(filepath.Dir(d)) {
-				rel := func(f string) string {
-					if d == "." {
-						return f
-					}
-					return d + "/" + f
-				}
-				switch {
-				case has(rel("pnpm-lock.yaml")):
-					once("pnpm", "      - uses: pnpm/action-setup@v4")
-					cmd = "pnpm install --frozen-lockfile"
-				case has(rel("bun.lock")) || has(rel("bun.lockb")):
-					once("bun", "      - uses: oven-sh/setup-bun@v2")
-					cmd = "bun install --frozen-lockfile"
-				case has(rel("yarn.lock")):
-					cmd = "yarn install --immutable"
-				case has(rel("package-lock.json")):
-					cmd = "npm ci"
-				default:
-					if d != "." {
-						continue
-					}
-				}
-				if !seen["install:"+d] {
-					seen["install:"+d] = true
-					install = append(install, "      - run: "+cmd, "        working-directory: "+d)
-				}
-				break
-			}
-			once("node", "      - uses: actions/setup-node@v4", "        with:", "          node-version: "+strconv.Quote(version))
-		}
-	}
-	var b strings.Builder
-	b.WriteString(`# Runs only the tests a change can affect. Generated by "smates init --github".
-name: tests
-on:
-  push:
-    branches: [` + repo.DefaultBranch() + `]
-  pull_request:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-`)
-	for _, l := range setup {
-		b.WriteString(l + "\n")
-	}
-	for _, l := range install {
-		b.WriteString(l + "\n")
-	}
-	b.WriteString(`      # On pushes to the default branch every test runs and the recorded state is
-      # refreshed; on pull requests only affected tests run.
-      - uses: dotneet/smates@v1
-        with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional: narrows unattributed changes (or openai-api-key / openrouter-api-key)
 `)
 	return b.String()
 }
@@ -728,6 +625,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 			ok("python %s", py)
 		}
 	}
+	doctorProject(p, func() string { return tool("node", "--version") }, ok, warn, bad)
 	if p.state.Empty() {
 		warn("no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath)
 	} else {
