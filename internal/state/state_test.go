@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func sample() *State {
@@ -195,8 +197,7 @@ func TestLoadSave(t *testing.T) {
 		}
 	}
 	// Corrupt file: error (not silently empty).
-	bad := filepath.Join(dir, "bad.json.gz")
-	os.WriteFile(bad, []byte("garbage"), 0o644)
+	bad := testutil.Write(t, dir, "bad.json.gz", "garbage")
 	if _, err := Load(bad); err == nil {
 		t.Error("corrupt file must fail to load")
 	}

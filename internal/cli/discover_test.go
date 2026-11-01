@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -67,5 +68,47 @@ func TestListShowsRunnerDiscovery(t *testing.T) {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("doctor output lacks %q:\n%s", s, out.String())
 		}
+	}
+
+	// The JSON forms carry the same information.
+	code, js, errs := smatesCmd(t, g.dir, "list", "--format", "json")
+	if code != 0 {
+		t.Fatalf("list --format json: exit %d: %s", code, errs)
+	}
+	rep := decodeJSON[listReport](t, js)
+	bySuite := map[string]listSuite{}
+	for _, s := range rep.Suites {
+		bySuite[s.Name] = s
+	}
+	if s := bySuite["jest"]; s.TestsSource != "web/jest.config.js testMatch, testPathIgnorePatterns" ||
+		!reflect.DeepEqual(s.TestPatterns, []string{"specs/**/*.spec.js", "!regex /node_modules/", "!regex /specs/slow/"}) ||
+		s.DiscoveryWarning != "" || !reflect.DeepEqual(s.Units, []string{"web/specs/a.spec.js"}) {
+		t.Errorf("jest suite: %+v", s)
+	}
+	if s := bySuite["vitest"]; s.TestsSource != "runner defaults" || !strings.Contains(s.DiscoveryWarning, "api/vitest.config.ts: test.include is not a literal") {
+		t.Errorf("vitest suite: %+v", s)
+	}
+	if s := bySuite["pytest"]; s.TestsSource != "tools/pyproject.toml [tool.pytest.ini_options] testpaths, python_files" ||
+		!reflect.DeepEqual(s.TestPatterns, []string{"checks/**/check_*.py"}) {
+		t.Errorf("pytest suite: %+v", s)
+	}
+
+	_, js, _ = smatesCmd(t, g.dir, "doctor", "--format", "json")
+	doc := decodeJSON[doctorReport](t, js)
+	var source, warning *doctorCheck
+	for _, c := range doc.Checks {
+		switch {
+		case c.ID == "suite-tests-source" && c.Subject == "jest":
+			source = c
+		case c.ID == "suite-test-discovery" && c.Subject == "vitest":
+			warning = c
+		}
+	}
+	if source == nil || source.Status != "ok" || !strings.Contains(source.Message, "tests from web/jest.config.js testMatch") {
+		t.Errorf("tests source check: %+v", source)
+	}
+	if warning == nil || warning.Status != "warn" || warning.Fix == nil || warning.Fix.Config == nil || warning.Fix.Config.Key != "suites.vitest.tests" ||
+		!strings.Contains(warning.Message, "test.include is not a literal") {
+		t.Errorf("discovery warning check: %+v", warning)
 	}
 }

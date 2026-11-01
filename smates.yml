@@ -45,7 +45,7 @@ suites:
       - tests: ["."]
         deps: &pytest ["internal/runner/pytest.go", "internal/runner/discover_pytest.go", "internal/static/python/**", "internal/trace/shims/py/**"]
       - tests: ["."]
-        deps: &gotest ["internal/runner/gotest.go", "internal/static/golang/**"]
+        deps: &gotest ["internal/runner/{gotest,gofunc}.go", "internal/static/golang/**"]
       - tests: ["."]
         deps: &polyglot ["e2e/fixtures/polyglot/**"]
 
@@ -64,17 +64,29 @@ suites:
       - { tests: ["."], deps: *gotest }
       - { tests: ["."], deps: *polyglot }
 
-  - name: e2e-jest-node
+  - name: e2e-jest-scenarios
     runner: go
     root: e2e
-    command: go test -tags e2e -timeout 40m
+    command: go test -tags e2e -timeout 40m -run TestScenarios
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
-    env: { SMATES_E2E_FIXTURE: "jest-npm,node-test" }
+    env: { SMATES_E2E_FIXTURE: jest-npm }
     rules:
       - { tests: ["."], deps: *core }
       - { tests: ["."], deps: *js }
-      - { tests: ["."], deps: ["internal/trace/shims/jest-reporter.cjs", "e2e/fixtures/{jest-npm,node-test}/**"] }
+      - { tests: ["."], deps: &jest ["internal/trace/shims/jest-reporter.cjs", "e2e/fixtures/jest-npm/**"] }
+
+  - name: e2e-jest-others
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m -skip TestScenarios
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: jest-npm }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: *js }
+      - { tests: ["."], deps: *jest }
 
   - name: e2e-vitest-python
     runner: go
@@ -97,14 +109,14 @@ suites:
     command: go test -tags e2e -timeout 40m
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
-    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv" }
+    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv" }
     rules:
       - { tests: ["."], deps: *core }
       - { tests: ["."], deps: *js }
       - { tests: ["."], deps: *vitest } # pnpm-monorepo
       - { tests: ["."], deps: *gotest }
       - { tests: ["."], deps: *pytest } # env (Python through a custom runner)
-      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,pnpm-monorepo}/**"] }
+      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,node-test,pnpm-monorepo}/**"] }
 
 # Release packaging and CI files that no test reads; action.yml is covered by the
 # action job in .github/workflows/ci.yml.

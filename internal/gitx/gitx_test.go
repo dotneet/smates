@@ -2,16 +2,18 @@ package gitx
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // testRepo is a temporary git repository.
 type testRepo struct {
+	*testutil.GitRepo
 	t    *testing.T
 	dir  string
 	repo *Repo
@@ -19,51 +21,27 @@ type testRepo struct {
 
 func newTestRepo(t *testing.T) *testRepo {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not on PATH")
-	}
-	dir := t.TempDir()
-	r := &testRepo{t: t, dir: dir}
-	r.git("init", "-q", "-b", "main")
-	r.git("config", "user.email", "t@example.com")
-	r.git("config", "user.name", "t")
-	r.git("config", "commit.gpgsign", "false")
-	r.git("config", "core.autocrlf", "false")
-	repo, err := Open(dir)
+	g := testutil.NewGitRepo(t, nil)
+	repo, err := Open(g.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.repo = repo
-	return r
+	return &testRepo{GitRepo: g, t: t, dir: g.Dir, repo: repo}
 }
 
 func (r *testRepo) git(args ...string) string {
 	r.t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = r.dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		r.t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
+	return r.Git(args...)
 }
 
 func (r *testRepo) write(rel, content string) {
 	r.t.Helper()
-	p := filepath.Join(r.dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		r.t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		r.t.Fatal(err)
-	}
+	r.Write(rel, content)
 }
 
 func (r *testRepo) commit(msg string) string {
-	r.git("add", "-A")
-	r.git("commit", "-q", "-m", msg)
-	return r.git("rev-parse", "HEAD")
+	r.t.Helper()
+	return r.Commit(msg)
 }
 
 func TestOpenResolvesRootFromSubdir(t *testing.T) {

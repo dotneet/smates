@@ -1,11 +1,11 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func TestParseDefaults(t *testing.T) {
@@ -184,18 +184,18 @@ func TestLoad(t *testing.T) {
 	if c != nil || err != nil {
 		t.Fatalf("no config: %v %v", c, err)
 	}
-	os.WriteFile(filepath.Join(dir, ".smates.yaml"), []byte("orphans: ignore\n"), 0o644)
+	testutil.Write(t, dir, ".smates.yaml", "orphans: ignore\n")
 	c, err = Load(dir)
 	if err != nil || c.Path != ".smates.yaml" || c.Orphans != "ignore" {
 		t.Fatalf("got %+v %v", c, err)
 	}
 	// smates.yml wins over later names.
-	os.WriteFile(filepath.Join(dir, "smates.yml"), []byte("orphans: all\n"), 0o644)
+	testutil.Write(t, dir, "smates.yml", "orphans: all\n")
 	c, err = Load(dir)
 	if err != nil || c.Path != "smates.yml" || c.Orphans != "all" {
 		t.Fatalf("got %+v %v", c, err)
 	}
-	os.WriteFile(filepath.Join(dir, "smates.yml"), []byte("bogus: 1\n"), 0o644)
+	testutil.Write(t, dir, "smates.yml", "bogus: 1\n")
 	if _, err := Load(dir); err == nil || !strings.HasPrefix(err.Error(), "smates.yml:") {
 		t.Fatalf("error should name the file: %v", err)
 	}

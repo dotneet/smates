@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // fsHost implements host.Host over a directory. Every file under the root is part of
@@ -34,13 +36,7 @@ func newHost(t *testing.T, files map[string]string) *fsHost {
 	root := t.TempDir()
 	h := &fsHost{root: root, files: map[string]bool{}}
 	for p, content := range files {
-		abs := filepath.Join(root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Write(t, root, p, content)
 		h.files[p] = true
 	}
 	return h

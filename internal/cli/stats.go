@@ -9,14 +9,11 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dotneet/smates/internal/config"
-	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/summary"
@@ -322,11 +319,12 @@ func cmdStats(args []string, stdout, stderr io.Writer) error {
 		}
 		f.since = t
 	}
-	path, err := resolveStatePath(*dir, *statePath)
+	store, err := resolveStore(*dir, *statePath, stderr)
 	if err != nil {
 		return err
 	}
-	st, err := state.Load(path)
+	path := store.path
+	st, err := store.Load()
 	if err != nil {
 		return err
 	}
@@ -339,29 +337,6 @@ func cmdStats(args []string, stdout, stderr io.Writer) error {
 	}
 	printStats(stdout, rep, *recent)
 	return nil
-}
-
-// resolveStatePath finds the state file the way `smates state` does.
-func resolveStatePath(dir, path string) (string, error) {
-	if path != "" {
-		return path, nil
-	}
-	if dir == "" {
-		dir = "."
-	}
-	repo, err := gitx.Open(dir)
-	if err != nil {
-		return "", err
-	}
-	cfg, err := config.Load(repo.Root)
-	if err != nil {
-		return "", err
-	}
-	if cfg == nil {
-		cfg = &config.Config{}
-		_ = cfg.Normalize()
-	}
-	return filepath.Join(repo.Root, filepath.FromSlash(cfg.State)), nil
 }
 
 // parseSince parses --since: a date, an RFC 3339 time, or an age (30d, 2w, 12h, 90m).
@@ -443,8 +418,8 @@ func printStats(w io.Writer, rep *statsReport, recent int) {
 		row("files", "none")
 	} else {
 		row("files", "%d in %s", o.Files, plural(o.Runs, "run"))
-		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored},
-			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run"}))
+		row("handled by", "%s", breakdown(o.ByHandling, []string{selector.OrphanReference, selector.OrphanAgent, selector.OrphanNoImpact, selector.OrphanPolicy, selector.OrphanIgnored, selector.OrphanSkipped, selector.OrphanUntested},
+			map[string]string{selector.OrphanReference: "reference scan", selector.OrphanNoImpact: "agent: no impact", selector.OrphanPolicy: "full suite run", selector.OrphanSkipped: "skipped by caller", selector.OrphanUntested: "untested code"}))
 	}
 	if a := rep.Agent; a.Calls > 0 {
 		row("agent", "%s (%d cached), %d turns, %s in / %s out tokens", plural(a.Calls, "call"), a.Cached, a.Turns,

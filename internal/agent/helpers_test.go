@@ -2,7 +2,6 @@ package agent
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,32 +12,8 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/testutil"
 )
-
-// gitRun runs git in dir with a hermetic identity and configuration.
-func gitRun(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	full := append([]string{"-c", "user.name=smates", "-c", "user.email=smates@example.com", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)
-	cmd := exec.Command("git", full...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return string(out)
-}
-
-func writeFile(t *testing.T, root, rel, content string) {
-	t.Helper()
-	p := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // fixture is a temporary repository with a committed baseline and working-tree
 // changes:
@@ -58,8 +33,8 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	dir := t.TempDir()
-	gitRun(t, dir, "init", "-q")
+	g := testutil.NewGitRepo(t, nil)
+	dir := g.Dir
 	files := map[string]string{
 		".gitignore":                ".env\n",
 		"scripts/seed.sh":           "#!/bin/sh\npsql < fixtures/seed.sql\n",
@@ -83,18 +58,17 @@ func newFixture(t *testing.T) *fixture {
 		"fixtures/users/alice.json": "{\"name\":\"alice\"}\n",
 	}
 	for p, c := range files {
-		writeFile(t, dir, p, c)
+		testutil.Write(t, dir, p, c)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "assets", "blob.bin"), []byte{1, 2, 0, 3, 'x', '\n'}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	outside := filepath.Join(t.TempDir(), "secret.txt")
-	writeFile(t, filepath.Dir(outside), "secret.txt", "TOP SECRET\n")
+	testutil.Write(t, filepath.Dir(outside), "secret.txt", "TOP SECRET\n")
 	if err := os.Symlink(outside, filepath.Join(dir, "link-out")); err != nil {
 		t.Fatal(err)
 	}
-	gitRun(t, dir, "add", "-A")
-	gitRun(t, dir, "commit", "-q", "-m", "base")
+	g.Commit("base")
 
 	repo, err := gitx.Open(dir)
 	if err != nil {
@@ -104,13 +78,13 @@ func newFixture(t *testing.T) *fixture {
 	f.oldSeed, _ = gitx.HashFile(filepath.Join(repo.Root, "scripts", "seed.sh"))
 	f.oldGone, _ = gitx.HashFile(filepath.Join(repo.Root, "scripts", "gone.sh"))
 
-	writeFile(t, repo.Root, "scripts/seed.sh", "#!/bin/sh\nset -e\npsql < fixtures/seed.sql\npsql < fixtures/extra.sql\n")
+	testutil.Write(t, repo.Root, "scripts/seed.sh", "#!/bin/sh\nset -e\npsql < fixtures/seed.sql\npsql < fixtures/extra.sql\n")
 	f.newSeed, _ = gitx.HashFile(filepath.Join(repo.Root, "scripts", "seed.sh"))
 	if err := os.Remove(filepath.Join(repo.Root, "scripts", "gone.sh")); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, repo.Root, "notes/new.txt", "brand new\n")
-	writeFile(t, repo.Root, ".env", "ANTHROPIC_API_KEY=do-not-leak\n")
+	testutil.Write(t, repo.Root, "notes/new.txt", "brand new\n")
+	testutil.Write(t, repo.Root, ".env", "ANTHROPIC_API_KEY=do-not-leak\n")
 	return f
 }
 

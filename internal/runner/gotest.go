@@ -35,8 +35,12 @@ func (goTest) Defaults(repo *gitx.Repo, root string) Defaults {
 	}
 }
 
-// Units are package directories.
+// Units are package directories, or with granularity "func" top-level test functions
+// ("dir#TestName", see gofunc.go).
 func (goTest) Units(s *Suite, testFiles []string) []string {
+	if funcGranularity(s) {
+		return funcUnits(s, testFiles)
+	}
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range testFiles {
@@ -50,20 +54,29 @@ func (goTest) Units(s *Suite, testFiles []string) []string {
 }
 
 func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
+	if funcGranularity(rc.Suite) {
+		return runFuncs(ctx, rc)
+	}
+	return runPackages(ctx, rc, rc.Units, rc.All, "", nil)
+}
+
+// runPackages runs go test on package units (all: on ./..., letting go find them),
+// restricted to the tests matching run when it is set; out also receives the output.
+// When recording, observations are keyed by package unit.
+func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, run string, out io.Writer) (*RunResult, error) {
 	var pkgs []string
-	for _, u := range rc.Units {
-		r := relToSuite(rc.Suite, u)
-		if r == "." {
-			pkgs = append(pkgs, ".")
-		} else {
-			pkgs = append(pkgs, "./"+r)
-		}
+	for _, u := range units {
+		pkgs = append(pkgs, pkgArg(rc.Suite, u))
 	}
 	var testArgs []string
-	if rc.All {
+	if all {
 		testArgs = []string{"./..."}
 	} else {
 		testArgs = pkgs
+	}
+	var extra []string
+	if run != "" {
+		extra = []string{"-run", run}
 	}
 	var env []string
 	if rc.Record {
@@ -97,9 +110,12 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// Packages that fail to build never start a test binary; go test reports them as
 	// "FAIL <import path> [build failed]".
 	failed := &buildFailures{}
-	out := *rc
-	out.Stdout = io.MultiWriter(rc.Stdout, failed)
-	code, err := runAll(ctx, &out, testArgs, env)
+	sub := *rc
+	sub.Stdout = io.MultiWriter(rc.Stdout, failed)
+	if out != nil {
+		sub.Stdout = io.MultiWriter(rc.Stdout, failed, out)
+	}
+	code, err := runAll(ctx, &sub, extra, testArgs, env)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
 	if err != nil || !rc.Record {
 		return res, err
@@ -127,25 +143,7 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o = &Observation{Files: map[string]bool{}}
 			res.Observations[unit] = o
 		}
-		for _, f := range r.Files {
-			// CollectGo returns absolute paths: a directory (listed) ends in a separator,
-			// an existence check in "?".
-			kind := depkey.KindContent
-			switch {
-			case strings.HasSuffix(f, string(filepath.Separator)):
-				kind, f = depkey.KindListing, strings.TrimSuffix(f, string(filepath.Separator))
-			case strings.HasSuffix(f, "?"):
-				kind, f = depkey.KindExistence, strings.TrimSuffix(f, "?")
-			}
-			if rel, ok := pathutil.Rel(rc.Repo.Root, f); ok && !pathutil.IsVendored(rel) {
-				o.AddFile(depkey.Make(kind, rel))
-			} else if kind == depkey.KindListing && filepath.Clean(f) == rc.Repo.Root {
-				o.AddFile(depkey.Listing("."))
-			}
-		}
-		for _, name := range r.Env {
-			o.AddFile(depkey.Env(name))
-		}
+		addTestLog(o, rc.Repo.Root, r.Files, r.Env)
 		for f := range children[r.Dir] {
 			o.AddFile(f)
 		}
@@ -157,7 +155,7 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	}
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		modDir, mod := findModule(rc.Repo.Root, rc.Dir())
-		for _, u := range rc.Units {
+		for _, u := range units {
 			ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
 			if ip == "" {
 				continue
@@ -171,6 +169,37 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// pkgArg is the go test argument naming the package directory unit (repo-relative).
+func pkgArg(s *Suite, unit string) string {
+	if r := relToSuite(s, unit); r != "." {
+		return "./" + r
+	}
+	return "."
+}
+
+// addTestLog adds what a Go test log recorded (absolute paths from trace.ParseTestLog:
+// a directory that was listed ends in a separator, an existence check in "?"; and the
+// environment variables looked up) to an observation.
+func addTestLog(o *Observation, root string, files, env []string) {
+	for _, f := range files {
+		kind := depkey.KindContent
+		switch {
+		case strings.HasSuffix(f, string(filepath.Separator)):
+			kind, f = depkey.KindListing, strings.TrimSuffix(f, string(filepath.Separator))
+		case strings.HasSuffix(f, "?"):
+			kind, f = depkey.KindExistence, strings.TrimSuffix(f, "?")
+		}
+		if rel, ok := pathutil.Rel(root, f); ok && !pathutil.IsVendored(rel) {
+			o.AddFile(depkey.Make(kind, rel))
+		} else if kind == depkey.KindListing && filepath.Clean(f) == root {
+			o.AddFile(depkey.Listing("."))
+		}
+	}
+	for _, name := range env {
+		o.AddFile(depkey.Env(name))
+	}
 }
 
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
@@ -282,11 +311,11 @@ func modulePath(gomod string) string {
 }
 
 // runAll runs go test without the "./..." expansion trick: go accepts many package
-// arguments, chunked if needed.
-func runAll(ctx context.Context, rc *RunContext, args []string, env []string) (int, error) {
+// arguments, chunked if needed; extra flags go before them.
+func runAll(ctx context.Context, rc *RunContext, extra, args []string, env []string) (int, error) {
 	worst := 0
 	for _, b := range chunk(args) {
-		argv, err := rc.CommandLine(nil, b)
+		argv, err := rc.CommandLine(extra, b)
 		if err != nil {
 			return 1, err
 		}

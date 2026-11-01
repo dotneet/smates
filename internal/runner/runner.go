@@ -33,6 +33,20 @@ type Adapter interface {
 	Run(ctx context.Context, rc *RunContext) (*RunResult, error)
 }
 
+// StaticMapper is implemented by adapters whose units depend on less than the static
+// import closure of their test files (Go test functions): MapStatic returns the
+// dependency keys of unit given that closure.
+type StaticMapper interface {
+	MapStatic(s *Suite, unit string, closure []string) []string
+}
+
+// Commander is implemented by adapters that run something other than the suite
+// command with the units appended; Commands returns what Run would execute without
+// recording (for --dry-run).
+type Commander interface {
+	Commands(rc *RunContext) ([][]string, error)
+}
+
 // Defaults are adapter-provided defaults.
 type Defaults struct {
 	Tests   []string // globs relative to the suite root
@@ -56,6 +70,9 @@ type Suite struct {
 	TestsSource string
 	// DiscoveryWarning says why the runner configuration could not be read.
 	DiscoveryWarning string
+	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
+	// units are found in the test files' contents.
+	RepoRoot string
 }
 
 // RunContext carries everything an adapter needs to run a suite.
@@ -80,6 +97,9 @@ type RunContext struct {
 	IsTest func(string) bool
 	// UnitOf maps a test file to its unit ID ("" if not a test).
 	UnitOf func(string) string
+	// Known returns the dependency keys a unit is known to have before it runs (static
+	// closure, inputs, rules; nil when unknown).
+	Known func(unit string) []string
 }
 
 // RunResult is the outcome of running a suite.
@@ -158,6 +178,9 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 	}
 	d := a.Defaults(repo, c.Root)
 	s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
+	if repo != nil {
+		s.RepoRoot = repo.Root
+	}
 	if s.Command == "" {
 		s.Command = d.Command
 	}
@@ -168,7 +191,7 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 	if len(s.Tests) == 0 {
 		s.Tests = d.Tests
 		s.TestsSource = SourceDefaults
-		if dc, ok := a.(discoverer); ok {
+		if dc, ok := a.(discoverer); ok && repo != nil {
 			disc := dc.Discover(repo, s)
 			s.DiscoveryWarning = disc.Warning
 			if len(disc.Matchers) > 0 {

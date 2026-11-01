@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // These tests run the real shims in node and python3 against a temporary repository and
@@ -23,16 +25,10 @@ func shimRepo(t *testing.T, files map[string]string) string {
 		t.Fatal(err)
 	}
 	for rel, body := range files {
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
 		if body == "" {
 			body = rel
 		}
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		testutil.Write(t, root, rel, body)
 	}
 	return root
 }
