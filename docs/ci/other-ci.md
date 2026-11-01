@@ -12,7 +12,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 The script detects OS and architecture, downloads the release archive, verifies its
-SHA-256 against the release's `checksums.txt` and installs `smates`. Without `-b` it
+SHA-256 against the release's `checksums.txt` (with `SMATES_VERIFY=attestation`, also
+its build provenance attestation, using the `gh` CLI) and installs `smates`. Without `-b` it
 installs to `/usr/local/bin` when writable (typical in containers running as root),
 else `~/.local/bin`. Pin a version in CI; without one it resolves the latest release.
 `SMATES_VERSION` and `SMATES_INSTALL_DIR` work as alternatives to the arguments.

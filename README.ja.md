@@ -85,10 +85,21 @@ env_track: [LANG]
    ことはできないため、誤答や指示注入があっても「追加し損ねる」以上の害はありません。
 3. それ以外の場合は、そのファイルが影響しうるスイートを丸ごと実行します。
 
+多くのコミットで繰り返しオーファンになるファイル(`.env.example`、デプロイ設定、どのスイートにも
+属さないフロントエンドなど)は `ignore:` に入れるべきものです。**`smates orphans`** は直近の
+first-parent コミット(既定 100 件。`--history N`、`--since rev`)を現在の依存マップに同じ規則で
+当てはめ、オーファンになったはずのファイルを件数順に並べ、そのまま貼れる `ignore:` ブロック
+(配下にテストの依存がなければ `dir/**` にまとめる)と、適用後もオーファンが残るコミット数を
+表示します。テストの実行に影響しうるファイル(CI ワークフロー、Makefile、Dockerfile、compose、
+ツールチェーンの版指定)は無視せず `inputs:` か `rules:` に書くよう案内します。依存が記録されて
+いないと静的解析だけで判定するため結果は悲観的になります。先に `smates run --all` を実行して
+ください(`--format json` で機械可読な出力)。
+
 ## クイックスタート
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
+# (SMATES_VERIFY=attestation で gh CLI によるビルドプロベナンスの検証も行います)
 
 smates init --github # スイート検出、smates.yml(と GitHub ワークフロー)生成、.smates/ を gitignore
 smates run --all     # 一度すべて実行して各テストの依存を記録
@@ -132,7 +143,10 @@ smates が書いた部分だけを削除し、`smates hook status` はフック�
 
 デフォルトブランチへの push では全テストを実行して状態を更新し、プルリクエストでは
 影響のあるテストだけを実行します。状態はブランチごとに Actions cache に保存され、
-デフォルトブランチの状態にフォールバックします。詳細は
+デフォルトブランチの状態にフォールバックします。`uses: dotneet/smates@<コミット SHA> # v1.2.3`
+のようにコミット SHA で固定しても、そのコミットのリリースバイナリがインストールされます。
+リリースのアーカイブにはビルドプロベナンスの attestation が付いており、`verify: attestation`
+で必須にできます(既定の `auto` は検証できるときに検証)。詳細は
 [docs/ci/github-actions.md](docs/ci/github-actions.md)、他の CI は
 [docs/ci/other-ci.md](docs/ci/other-ci.md) を参照してください。
 
