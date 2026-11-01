@@ -200,6 +200,8 @@ smates hook install  # 任意: git push の前に影響するテストを実行
 コメントアウトされた `services:`/`env:` ブロックになります。既存のワークフローがすでにテストを
 実行している場合は 2 つ目のワークフローを書かず(`--force` で書く)、そのステップを smates
 アクションに置き換えるパッチを表示します(`--patch FILE` で `git apply` 用に書き出し)。
+`smates.yml` がすでにある場合、`smates init --github` はそれを変更せず、そのスイートから
+ワークフロー(またはパッチ)だけを生成します(`--force` で `smates.yml` も書き直し)。
 Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml` にコメントの
 `command:`/`env:` ヒントとして書かれます。`smates doctor` も同じ内容に加えて、
 `node_modules` の欠如、`engines.node` を満たさない Node、起動していないサービスを報告します。
@@ -258,6 +260,23 @@ smates が書いた部分だけを削除し、`smates hook status` はフック�
 notice を出してスキップし、ジョブは失敗させません。シャード実行では各シャードが担当分の
 コメントを個別に持ちます。他の CI では `smates run --markdown <file>` や
 `smates select --format markdown` で同じ Markdown を出力できます。
+
+## コマンド
+
+| コマンド | |
+|---|---|
+| `smates run [-- args]` | テストを選び、トレース付きで実行し、state を更新。`--all`、`--select`、`--shard I/N`、`--shadow`、`--fail-fast`、`--explain`、`--no-agent`、`--no-record`、`--report file.json`、`--markdown file.md`、`--summary file.md`、`--dry-run` |
+| `smates select` | 選択結果だけを表示: `--format text\|files\|json\|github\|markdown` |
+| `smates watch [-- args]` | 保存のたびに影響するテストを再実行 |
+| `smates init [--github]` | `smates.yml` を生成(`--github` でワークフローも)。`--format json` は検出したスイート、書いたファイル、判断が必要な項目 `needs_review`(サービス、コードが読む環境変数、Makefile のフラグ、`depends_on` のない E2E スイートなど)を、根拠と推奨するコマンドや設定変更つきで出力 |
+| `smates list` / `doctor` | スイートとテスト単位の一覧 / 環境チェック(失敗があれば終了コード 1)。`--format text\|json`: doctor の各チェックは安定した `id`、`status`(`ok\|warn\|fail`)、`message`、`fix`(`command`、`config` のキーと値、`doc`)を持つ |
+| `smates why <file>` / `deps <test>` | 依存マップを調べる(`smates why '$TZ'` は変数を読むテスト): `--format text\|json` |
+| `smates flaky` | flaky と判明したテストと根拠: `--format text\|json`、`--clear [test...]` |
+| `smates stats` | 記録された実行の効果と選択の信頼性: `--since 30d\|2026-01-02`、`--branch`、`--ci`、`--format text\|json` |
+| `smates orphans` | 直近のコミットを再生し、どのテストも説明しない変更に `ignore:` グロブ(と `inputs:`/`rules:`)を提案: `--history N`、`--since rev`、`--format text\|json`、`--suite`。`--apply` で提案した glob だけを `ignore:` に追記、`--apply --dry-run` で差分を表示 |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | YAML を手で編集せずに `smates.yml` を変更: トップレベルの `ignore:`/`inputs:` へ重複なく追記、またはスカラー値(`orphans`、`untested`、`state`、`agent.model`、`flaky.retry` など)を設定。コメントとレイアウトは保たれ、書き込む前に検証されます。`--dry-run` で差分表示、`--format json` |
+| `smates state show\|pull\|push\|merge\|clear` | state の確認と移動(`show --format json`。`--json` は非推奨の別名) |
+| `smates hook install\|uninstall\|status` | 影響するテストを実行する git フック |
 
 ## シャドーモード
 
