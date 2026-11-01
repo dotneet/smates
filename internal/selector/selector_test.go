@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
@@ -1097,7 +1098,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 
 func TestCoversDeclarations(t *testing.T) {
 	deps := map[string]bool{"p/a.go#decls": true}
-	if got := Covers(deps, "p/a.go", false); got != "declarations" {
+	if got := depkey.Covers(deps, "p/a.go", false); got != depkey.CoverDecls {
 		t.Errorf("Covers = %q", got)
 	}
 	// Without a recording, a changed file changes its declarations.
@@ -1158,7 +1159,7 @@ func TestSelectLegacyConfigHash(t *testing.T) {
 	st := f.record(nil, nil)
 	blob := f.snap()["smates.yml"]
 	for _, e := range st.Suites["web"].Tests {
-		delete(e.Deps, ConfigKey("smates.yml"))
+		delete(e.Deps, depkey.Config("smates.yml"))
 		e.Deps["smates.yml"] = blob
 	}
 	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
@@ -1206,15 +1207,6 @@ func TestSnapshotHash(t *testing.T) {
 		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
 			t.Errorf("%s: %q %v", f, h, ok)
 		}
-	}
-}
-
-func TestConfigKeyDisplay(t *testing.T) {
-	if got := Covers(map[string]bool{ConfigKey("smates.yml"): true}, "smates.yml", false); got != "content" {
-		t.Errorf("Covers via the settings key: %q", got)
-	}
-	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
-		t.Error("DisplayKey")
 	}
 }
 

@@ -333,11 +333,11 @@ func Select(in *Input) (*Result, error) {
 
 	globalInputs := expandInputs(in.Config.Inputs, files)
 	if in.Config.Path != "" {
-		// Every test depends on its suite's settings (ConfigKey), not on the whole
+		// Every test depends on its suite's settings (depkey.Config), not on the whole
 		// file: a test that reads smates.yml itself records the file's content.
-		globalInputs = append(globalInputs, ConfigKey(in.Config.Path))
+		globalInputs = append(globalInputs, depkey.Config(in.Config.Path))
 		if changedSet[in.Config.Path] {
-			changedSet[ConfigKey(in.Config.Path)] = true
+			changedSet[depkey.Config(in.Config.Path)] = true
 		}
 	}
 
@@ -352,12 +352,12 @@ func Select(in *Input) (*Result, error) {
 			baseChanged[f] = true
 		}
 		if in.Config.Path != "" && baseChanged[in.Config.Path] {
-			baseChanged[ConfigKey(in.Config.Path)] = true
+			baseChanged[depkey.Config(in.Config.Path)] = true
 		}
 	}
 	covered := map[string]bool{} // union of all D(T)
 	if in.Config.Path != "" {
-		covered[in.Config.Path] = true // explained by ConfigKey
+		covered[in.Config.Path] = true // explained by depkey.Config
 	}
 	res.Covered = covered
 	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
@@ -474,7 +474,7 @@ func Select(in *Input) (*Result, error) {
 			}
 			if in.Config.Path != "" {
 				// The suite's settings key is reported as the file.
-				if i := slices.Index(t.Changed, ConfigKey(in.Config.Path)); i >= 0 {
+				if i := slices.Index(t.Changed, depkey.Config(in.Config.Path)); i >= 0 {
 					t.Changed = slices.Delete(t.Changed, i, i+1)
 					if !slices.Contains(t.Changed, in.Config.Path) {
 						t.Changed = append(t.Changed, in.Config.Path)
@@ -513,11 +513,12 @@ func Select(in *Input) (*Result, error) {
 	return res, nil
 }
 
-// Explains reports whether some test's D(T) explains a change to f (see Covers): f is
+// Explains reports whether some test's D(T) explains a change to f (see
+// depkey.Covers): f is
 // covered, or belongs to a depends_on/serves declaration some test depends on (also
 // when f no longer exists, which Covered cannot tell).
 func (r *Result) Explains(f string, existenceChanged bool) bool {
-	return Covers(r.Covered, f, existenceChanged) != "" || slices.ContainsFunc(r.declared, func(d *ServiceDeps) bool { return d.match(f) })
+	return depkey.Covers(r.Covered, f, existenceChanged) != depkey.CoverNone || slices.ContainsFunc(r.declared, func(d *ServiceDeps) bool { return d.match(f) })
 }
 
 // changedSets returns, for each declaration with changed files in changed, those
@@ -605,40 +606,6 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 // IgnoreGlobs are the changes that never need tests unless a test reads them.
 func IgnoreGlobs(c *config.Config) []string {
 	return append(append([]string{}, c.Ignore...), config.DefaultIgnore...)
-}
-
-// Covers reports how a dependency set explains a change to f ("" when it does not):
-// "content" (f itself), "declarations" (the declarations of Go file f: edits inside
-// function bodies the test did not execute do not select it), "listing" or "existence" (a directory listing or an existence
-// check, which explain f appearing or disappearing but not edits: an edited file only
-// listed or probed may still be read by something tracing cannot see), or "tree" (a
-// command smates cannot see into ran below a directory containing f). A tree at the
-// repository root explains nothing: it would hide every change from the orphan check.
-func Covers(deps map[string]bool, f string, existenceChanged bool) string {
-	switch {
-	case deps[f], deps[f+configKeySuffix]:
-		return "content"
-	case deps[depkey.Decls(f)]:
-		return "declarations"
-	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
-		return "listing"
-	case existenceChanged && deps[depkey.Existence(f)]:
-		return "existence"
-	}
-	for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
-		if deps[depkey.Tree(d)] {
-			return "tree"
-		}
-	}
-	// A submodule (recorded as one entry for its commit) is explained by tests that
-	// read files inside it.
-	prefix := f + "/"
-	for d := range deps {
-		if strings.HasPrefix(d, prefix) {
-			return "content"
-		}
-	}
-	return ""
 }
 
 // existedBefore reports whether f existed when the state was recorded (or at the base

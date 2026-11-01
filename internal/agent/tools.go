@@ -708,7 +708,7 @@ func (tb *toolbox) testDeps(suite, test string) (string, error) {
 			fmt.Fprintf(&b, "[%d more not shown]\n", len(deps)-maxTestDeps)
 			break
 		}
-		b.WriteString(selector.DisplayKey(d))
+		b.WriteString(depkey.Display(d))
 		b.WriteByte('\n')
 	}
 	return b.String(), nil
