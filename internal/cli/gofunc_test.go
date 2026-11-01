@@ -16,10 +16,14 @@ import (
 )
 
 // TestMain lets this test binary act as smates' `go test -exec` wrapper, as the smates
-// binary does (package-granularity recording runs the test binaries through it).
+// binary does (package-granularity recording runs the test binaries through it), and
+// as smates itself with SMATES_TEST_MAIN=1 (for tests that signal a smates process).
 func TestMain(m *testing.M) {
 	if trace.IsGoExec() {
 		os.Exit(trace.GoExec(os.Args[1:]))
+	}
+	if os.Getenv("SMATES_TEST_MAIN") == "1" {
+		os.Exit(Main(os.Args[1:], os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
 }
