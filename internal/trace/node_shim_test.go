@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -223,6 +224,68 @@ const fs = require('fs');
 			"tree/**", "tree2/**", "tree3/**", "tree4/**", "flat/"},
 		// The module loader resolves modules with realpathSync: that is no probe.
 		[]string{"lib.cjs?", "test.cjs?", "flat/**", "a.txt"})
+}
+
+// A busy child_process.fork() child is still killed by SIGTERM: only the pool workers
+// of known runners get the listener that flushes coverage first (and then dies of the
+// signal as well).
+func TestNodeShimForkedChildSignals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no SIGTERM")
+	}
+	root := shimRepo(t, nil)
+	busy := "process.send('ready');\nconst end = Date.now() + 5000;\nwhile (Date.now() < end) {}\n"
+	idle := "process.send('ready');\nsetInterval(() => {}, 1000);\n"
+	// A pool worker listens for messages (which keeps it alive): busy, it handles the
+	// signal once it is done, and dies of it.
+	worker := "process.on('message', () => {});\nprocess.send('ready');\nconst end = Date.now() + 500;\nwhile (Date.now() < end) {}\n"
+	procs := traceNode(t, root, map[string]string{
+		"busy.cjs": busy,
+		"node_modules/jest-worker/build/processChild.js": idle,
+		"node_modules/vitest/dist/workers/forks.js":      worker,
+	}, `
+const cp = require('child_process');
+const kill = (file) => new Promise((resolve) => {
+  const t0 = Date.now();
+  const c = cp.fork(file);
+  c.on('message', () => c.kill());
+  c.on('exit', (code, signal) => resolve({ file, code, signal, ms: Date.now() - t0 }));
+});
+(async () => {
+  for (const file of ['busy.cjs', 'node_modules/jest-worker/build/processChild.js', 'node_modules/vitest/dist/workers/forks.js']) {
+    const r = await kill(file);
+    console.log(JSON.stringify(r));
+    const quick = r.file === 'busy.cjs' ? r.ms < 3000 : true;
+    if (r.signal !== 'SIGTERM' || !quick) {
+      console.error('unexpected exit', r);
+      process.exit(1);
+    }
+  }
+})();
+`)
+	nodeVersion(t)
+	for _, p := range procs {
+		if len(p.Argv) < 2 || p.Lang != "node" {
+			continue
+		}
+		// The listener records the exit; a process the signal kills right away does not.
+		if worker := !strings.HasSuffix(p.Argv[1], "busy.cjs"); worker != (p.End > 0) {
+			t.Errorf("%s: end %d", p.Argv[1], p.End)
+		}
+	}
+}
+
+// A command line too long to keep is cut short in the trace: the command may read
+// anything below its working directory.
+func TestNodeShimHugeExec(t *testing.T) {
+	root := shimRepo(t, nil)
+	procs := traceNode(t, root, nil, `
+const cp = require('child_process');
+const r = cp.spawnSync('cat', ['x'.repeat(17000000)]);
+if (!r.error) { console.error('no error'); process.exit(1); }
+`)
+	nodeVersion(t)
+	checkDeps(t, readsOf(procs, "node"), []string{"./**"}, nil)
 }
 
 // Reads through workspace packages linked into node_modules are reads of the packages.

@@ -61,8 +61,29 @@ func (r *Repo) Head() string {
 }
 
 // Snapshot maps every non-ignored file in the working tree (tracked and untracked)
-// to its git blob SHA-1 as it exists on disk right now. Deleted tracked files are omitted.
+// to its hash (see HashFile) as it exists on disk right now. Deleted tracked files are
+// omitted.
 type Snapshot map[string]string
+
+// ExecSuffix follows the blob SHA-1 in the hash of an executable regular file (git mode
+// 100755), so that adding or removing the executable bit is a change: a test that runs
+// a script fails differently once it cannot execute it.
+const ExecSuffix = "+x"
+
+// Blob returns the git blob SHA-1 a file hash (Snapshot, HashFile) holds, without the
+// executable marker.
+func Blob(hash string) string { return strings.TrimSuffix(hash, ExecSuffix) }
+
+// SameHash reports whether a recorded hash still matches the current one: they are
+// equal, or recorded has no executable marker and equals cur without its markers.
+// smates before the marker recorded executable files by their blob alone, and an
+// older smates may still be writing the state (on CI); counting those as changed would
+// make every executable file a change after each such recording. The price: a file
+// that only gains the executable bit is no change. Losing a recorded one is.
+func SameHash(recorded, cur string) bool {
+	return recorded == cur ||
+		strings.Contains(cur, ExecSuffix) && !strings.Contains(recorded, ExecSuffix) && recorded == strings.ReplaceAll(cur, ExecSuffix, "")
+}
 
 // Snapshot computes the current content hashes. Unmodified tracked files take their
 // hash from the index, so the cost is one `git ls-files` plus hashing of dirty files.
@@ -72,6 +93,7 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		return nil, err
 	}
 	snap := Snapshot{}
+	indexExec := map[string]bool{} // regular files in the index: executable or not
 	for _, rec := range strings.Split(out, "\x00") {
 		// "<mode> <sha> <stage>\t<path>"
 		tab := strings.IndexByte(rec, '\t')
@@ -82,15 +104,24 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		if len(meta) != 3 {
 			continue
 		}
-		if meta[0] == "160000" {
+		p := rec[tab+1:]
+		switch meta[0] {
+		case "160000":
 			// A submodule: its pinned commit stands for its contents, so bumping it is a
 			// change (tests reading files inside it are tracked through those files).
-			snap[rec[tab+1:]] = "commit:" + meta[1]
-			continue
+			snap[p] = "commit:" + meta[1]
+		case "100755":
+			snap[p] = meta[1] + ExecSuffix
+			indexExec[p] = true
+		case "100644":
+			snap[p] = meta[1]
+			indexExec[p] = false
+		default:
+			snap[p] = meta[1]
 		}
-		snap[rec[tab+1:]] = meta[1]
 	}
-	// Files whose working-tree content differs from the index, plus untracked ones.
+	// Files whose working-tree content or executable bit differs from the index, plus
+	// untracked ones.
 	st, err := r.Git("-c", "core.quotepath=off", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules")
 	if err != nil {
 		return nil, err
@@ -106,7 +137,17 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 			dirty = append(dirty, p)
 		}
 	}
-	hashes := HashFiles(r.Root, dirty)
+	if len(dirty) == 0 {
+		return snap, nil
+	}
+	// With core.fileMode false (Windows, file systems without an executable bit) git
+	// ignores the bit on disk: a tracked file keeps the index's mode, a new one is added
+	// as not executable. So does smates.
+	var modes map[string]bool
+	if v, err := r.Git("config", "--bool", "core.fileMode"); err == nil && strings.TrimSpace(v) == "false" {
+		modes = indexExec
+	}
+	hashes := hashFiles(r.Root, dirty, modes)
 	for i, p := range dirty {
 		if hashes[i] == "" {
 			delete(snap, p) // deleted in the working tree
@@ -117,8 +158,13 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 	return snap, nil
 }
 
-// HashFiles hashes repo-relative paths in parallel. Missing files hash to "".
-func HashFiles(root string, paths []string) []string {
+// HashFiles hashes repo-relative paths in parallel (see HashFile). Missing files hash
+// to "".
+func HashFiles(root string, paths []string) []string { return hashFiles(root, paths, nil) }
+
+// hashFiles is HashFiles taking the executable bit of regular files from exec instead
+// of the file system when exec is not nil (a file it does not list is not executable).
+func hashFiles(root string, paths []string, exec map[string]bool) []string {
 	res := make([]string, len(paths))
 	var wg sync.WaitGroup
 	ch := make(chan int)
@@ -127,7 +173,18 @@ func HashFiles(root string, paths []string) []string {
 		go func() {
 			defer wg.Done()
 			for i := range ch {
-				res[i], _ = HashFile(filepath.Join(root, filepath.FromSlash(paths[i])))
+				blob, mode, err := hashFile(filepath.Join(root, filepath.FromSlash(paths[i])))
+				if err != nil {
+					continue
+				}
+				x := isExec(mode)
+				if exec != nil {
+					x = exec[paths[i]]
+				}
+				if mode.IsRegular() && x {
+					blob += ExecSuffix
+				}
+				res[i] = blob
 			}
 		}()
 	}
@@ -139,34 +196,51 @@ func HashFiles(root string, paths []string) []string {
 	return res
 }
 
-// HashFile returns the git blob SHA-1 of a file ("" and an error if unreadable).
-// Symlinks are hashed by their target path, as git does.
+// HashFile returns the hash smates records for a file ("" and an error if unreadable):
+// its git blob SHA-1, followed by ExecSuffix for an executable regular file (one git
+// records with mode 100755: the owner's executable bit is set). Symlinks are hashed by
+// their target path, as git does.
 func HashFile(path string) (string, error) {
-	fi, err := os.Lstat(path)
+	blob, mode, err := hashFile(path)
 	if err != nil {
 		return "", err
+	}
+	if mode.IsRegular() && isExec(mode) {
+		blob += ExecSuffix
+	}
+	return blob, nil
+}
+
+// isExec reports whether git records a regular file of this mode as executable.
+func isExec(mode os.FileMode) bool { return mode.Perm()&0o100 != 0 }
+
+// hashFile returns the git blob SHA-1 of a file and its mode.
+func hashFile(path string) (string, os.FileMode, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", 0, err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(path)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
-		return HashBytes([]byte(target)), nil
+		return HashBytes([]byte(target)), fi.Mode(), nil
 	}
 	if !fi.Mode().IsRegular() {
-		return "", errors.New("not a regular file")
+		return "", 0, errors.New("not a regular file")
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer f.Close()
 	h := sha1.New()
 	io.WriteString(h, "blob "+strconv.FormatInt(fi.Size(), 10)+"\x00")
 	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), fi.Mode(), nil
 }
 
 // HashBytes returns the git blob SHA-1 of data.

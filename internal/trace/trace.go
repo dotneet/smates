@@ -13,6 +13,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -92,6 +93,9 @@ func NodeEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 		"NODE_V8_COVERAGE=" + V8Dir(traceDir),
 		"NODE_OPTIONS=" + opts,
 		"BUN_OPTIONS=" + bunOpts,
+		// A run of its own: smates may be started from a test an outer smates traces.
+		"SMATES_TRACE_PARENT=",
+		"SMATES_TRACE_CTX=",
 	}
 }
 
@@ -127,6 +131,10 @@ func PythonEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 		"SMATES_REPO_ROOT=" + repoRoot,
 		"PYTHONPATH=" + pp,
 		"PYTEST_PLUGINS=" + plugins,
+		// A run of its own: smates may be started from a test an outer smates traces
+		// (whose context would make the plugin take the session for a nested one).
+		"SMATES_TRACE_PARENT=",
+		"SMATES_TRACE_CTX=",
 	}
 }
 
@@ -293,6 +301,7 @@ type event struct {
 	Ms     int64    `json:"ms"`
 	Msg    string   `json:"msg"`
 	Pctx   string   `json:"pctx"`
+	Trunc  bool     `json:"trunc"`
 }
 
 var (
@@ -312,7 +321,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		return p
 	}
-	rel := relCache(repoRoot)
+	rel, links := relCache(repoRoot), linksCache(repoRoot)
 
 	entries, err := os.ReadDir(traceDir)
 	if err != nil {
@@ -325,7 +334,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		pid, _ := strconv.Atoi(m[1])
 		tid, _ := strconv.Atoi(m[2])
-		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, repoRoot); err != nil {
+		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, links, repoRoot); err != nil {
 			return nil, err
 		}
 	}
@@ -396,14 +405,27 @@ func relCache(root string) func(string) (string, bool) {
 	}
 }
 
-func readStream(file string, p *Proc, rel func(string) (string, bool), root string) error {
+// linksCache returns a memoized pathutil.Links for root.
+func linksCache(root string) func(string) []string {
+	cache := map[string][]string{}
+	return func(p string) []string {
+		l, ok := cache[p]
+		if !ok {
+			l = pathutil.Links(root, p)
+			cache[p] = l
+		}
+		return l
+	}
+}
+
+// readStream reads one process's event stream into p. rel and links are shared by the
+// streams of one trace (relCache, linksCache).
+func readStream(file string, p *Proc, rel func(string) (string, bool), links func(string) []string, root string) error {
 	f, err := os.Open(file)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	ctx, spawn := "", ""
 	add := func(kind, r string) string {
 		key := p.add(ctx, kind, r)
@@ -418,10 +440,10 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		}
 		return key
 	}
-	for sc.Scan() {
+	return eachLine(f, maxLine, func(line []byte) {
 		var ev event
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
-			continue // partial line from a killed process
+		if json.Unmarshal(line, &ev) != nil {
+			return // partial line from a killed process
 		}
 		switch ev.K {
 		case "start":
@@ -435,23 +457,30 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				spawn = relCtx(c, rel)
 			}
 		case "read", "code", "dir", "probe", "tree":
-			key := ""
+			var keys []string
 			if r, ok := rel(ev.P); ok {
-				key = add(ev.K, r)
+				keys = append(keys, add(ev.K, r))
+				// The symlinks the path went through are read too: retargeting one
+				// changes what the test sees.
+				for _, l := range links(ev.P) {
+					keys = append(keys, add("read", l))
+				}
 			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
-				key = add(ev.K, ".")
+				keys = append(keys, add(ev.K, "."))
 			}
-			if by, ok := rel(ev.By); ok && key != "" && ev.By != "" {
+			if by, ok := rel(ev.By); ok && len(keys) > 0 && ev.By != "" {
 				m := p.ReadsBy[by]
 				if m == nil {
 					m = map[string]bool{}
 					p.ReadsBy[by] = m
 				}
-				m[key] = true
+				for _, key := range keys {
+					m[key] = true
+				}
 			}
 		case "env":
 			if ev.P == "" {
-				continue
+				return
 			}
 			key := add("env", ev.P)
 			if by, ok := rel(ev.By); ok && ev.By != "" {
@@ -466,6 +495,14 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			cwd := ev.Cwd
 			if cwd == "" {
 				cwd = p.Cwd
+			}
+			if ev.Trunc {
+				// The shim cut a huge command line short: nothing can be told from what
+				// is left, so the command may read anything below its working directory.
+				if k := opaqueKey(cwd, root, rel); k != "" {
+					add("key", k)
+				}
+				break
 			}
 			for _, k := range execDeps(ev.Args, ev.Shell, cwd, root, rel) {
 				add("key", k)
@@ -492,8 +529,62 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				p.End = ev.T
 			}
 		}
+	})
+}
+
+// maxLine bounds a line of a trace stream or results file. The shims keep theirs far
+// shorter (they cut the command lines of exec events); a longer line is skipped rather
+// than failing the whole collection.
+const maxLine = 16 << 20
+
+// eachLine calls fn with every line of r (without its line ending) of at most limit
+// bytes; longer lines are skipped. fn must not keep the slice.
+func eachLine(r io.Reader, limit int, fn func([]byte)) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var buf []byte
+	skip := false
+	for {
+		chunk, err := br.ReadSlice('\n')
+		n := len(buf) + len(chunk)
+		if err == nil {
+			n-- // the newline
+		}
+		switch {
+		case skip:
+		case n > limit:
+			skip, buf = true, buf[:0]
+		case err == nil && len(buf) == 0:
+			fn(bytes.TrimRight(chunk, "\r\n")) // a whole line in the buffer: no copy
+			continue
+		default:
+			buf = append(buf, chunk...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if !skip && len(buf) > 0 {
+			fn(bytes.TrimRight(buf, "\r\n"))
+		}
+		buf, skip = buf[:0], false
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return sc.Err()
+}
+
+// opaqueKey is the key of everything below dir, a command's working directory ("" when
+// dir is outside the repository).
+func opaqueKey(dir, root string, rel func(string) (string, bool)) string {
+	if r, ok := rel(dir); ok {
+		return depkey.Tree(r)
+	}
+	if isRoot(dir, root) {
+		return depkey.Tree(".")
+	}
+	return ""
 }
 
 // relCtx converts "kind:/abs/path" contexts to "kind:repo/rel"; other forms are kept.

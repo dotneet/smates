@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -70,6 +71,65 @@ func resolve(p string) string {
 		rest = filepath.Join(filepath.Base(dir), rest)
 	}
 	return p
+}
+
+// maxLinks bounds the symlinks Links follows (a loop ends there).
+const maxLinks = 255
+
+// Links lists the repo-relative paths of the symlinks below root that resolving the
+// absolute path p goes through, in the order they are met: p itself, a directory on the
+// way, a link a link points to. Rel only gives the resolved path, but a link is a file
+// of its own (git records its target), and retargeting it changes what p reads.
+// Symlinks outside root (a root reached through one) and vendored ones are left out.
+func Links(root, p string) []string {
+	if !filepath.IsAbs(p) {
+		return nil
+	}
+	vol := filepath.VolumeName(p)
+	sep := string(filepath.Separator)
+	split := func(s string) []string { return strings.Split(s, sep) }
+	rest := split(filepath.Clean(p)[len(vol):])
+	cur := vol + sep // resolved so far: no symlinks
+	var out []string
+	for hops := 0; len(rest) > 0; {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, c)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			break // the rest does not exist
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		if hops++; hops > maxLinks {
+			break
+		}
+		if rel, err := filepath.Rel(root, next); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+sep) {
+			if r := filepath.ToSlash(rel); !IsVendored(r) && !slices.Contains(out, r) {
+				out = append(out, r)
+			}
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			break
+		}
+		target = filepath.FromSlash(target)
+		if filepath.IsAbs(target) {
+			v := filepath.VolumeName(target)
+			cur, target = v+sep, target[len(v):]
+		}
+		rest = append(split(target), rest...)
+	}
+	return out
 }
 
 func fileExists(p string) bool {

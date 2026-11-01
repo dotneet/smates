@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -101,6 +102,13 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.AddFile(f)
 		}
 		o.AddFile(u)
+		// Read by bun natively, not through node:fs; without one, bun would read one
+		// created later.
+		if snap := bunSnapshotFile(u); exists(filepath.Join(rc.Repo.Root, filepath.FromSlash(snap))) {
+			o.AddFile(snap)
+		} else {
+			o.AddFile(depkey.Existence(snap))
+		}
 		setUnitExit(o, codes[u])
 	}
 	res.Observations, res.Warnings = obs, warns
@@ -124,6 +132,15 @@ func bunImportsSource(rc *RunContext, unit string) bool {
 		}
 	}
 	return false
+}
+
+// bunSnapshotFile is the snapshot file of test file unit (repo-relative): bun keeps
+// toMatchSnapshot's snapshots in __snapshots__/<file>.snap next to the test file. A
+// file that exists after the run (also one the test just wrote) is recorded as read,
+// a missing one as probed (creating it selects the test): bun reads it natively, which
+// the preload shim cannot see.
+func bunSnapshotFile(unit string) string {
+	return path.Join(path.Dir(unit), "__snapshots__", path.Base(unit)+".snap")
 }
 
 // bunConfigWithShim writes a copy of the suite's bunfig.toml whose [test].preload starts

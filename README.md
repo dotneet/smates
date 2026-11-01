@@ -61,15 +61,21 @@ now. Otherwise it is **selected**, with a reason (`smates run --explain`):
 
 Hashes are compared by content, not with `git diff`, so selection needs no history
 (`fetch-depth: 1` is fine), works on dirty working trees, and is never confused by
-rebases or merge commits.
+rebases or merge commits. The executable bit is part of a file's hash (`chmod -x` on a
+script a test runs selects the test), and a file read through a symlink in the
+repository depends on the link too (retargeting it selects the tests that read it).
+A state written by an older smates (which hashed content only) stays valid, also while
+CI keeps writing it with that version; the price is that a file only gaining the
+executable bit is no change (see [Limitations](#limitations)).
 
 **Environment variables.** A variable a test reads (`process.env.X` in Node and Bun,
 also through jest's and vitest's per-file copies and `import.meta.env`; `os.environ` /
 `os.getenv` in Python; `os.Getenv` / `os.LookupEnv` in Go) is a dependency like a file:
 `$X` in `smates deps`, compared by a hash of its value (never the value itself; unset and
 empty differ). Only reads made with repository code on the stack count, not the runner's
-own lookups; copying the whole environment (`{...process.env}`, `dict(os.environ)`,
-starting a child process) is not a read of every variable, and a value the test set
+own lookups; copying or enumerating the whole environment (`{...process.env}`,
+`dict(os.environ)`, `Object.entries(process.env)`, starting a child process) is not a
+read of every variable (see [Limitations](#limitations)), and a value the test set
 itself is not an outer dependency. The value compared is the one the suite's tests see:
 `env:` in `smates.yml` overrides the shell. Variables that differ between machines and
 between CI and a laptop are ignored by default, so a state recorded on CI and pulled
@@ -781,6 +787,16 @@ instead.
   invisible. In Go, `t.Setenv` looks the old value up to restore it, so a test that sets
   a variable still depends on its outer value (it may run more often than needed). Values are stored as SHA-256 hashes: a guessable value (a weak password) can
   be confirmed by whoever reads the state file; list such variables in `env_ignore`.
+- Enumerating the environment is not tracked, even when the code then keeps only some
+  variables: `Object.entries(process.env).filter(([k]) => k.startsWith("MYAPP_"))`,
+  `{k: v for k, v in os.environ.items() if k.startswith("MYAPP_")}`, pydantic-settings
+  and similar settings loaders. Changing `MYAPP_URL` (or setting a new `MYAPP_*`) then
+  selects nothing. `env_track` does not help (it only un-ignores a variable that is read
+  by name), and `inputs:`/`rules:` take files, not variables. Read the variables by name
+  (`process.env.MYAPP_URL`, `os.environ["MYAPP_URL"]`), set them in the suite's `env:` in
+  `smates.yml` (changing a value there reruns the suite), load them from a file the tests
+  read (a dotenv file is a file dependency), or run `smates run --all` after changing the
+  environment.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.
 - Granularity is the file (the package for Go, or the test function with
@@ -810,6 +826,14 @@ instead.
   graph covers it then; set it in the environment or the suite `env` instead), and c8 writes no
   `coverage/tmp` while smates records (`c8 report` afterwards has nothing to read; let c8
   report in the same command).
+- Gaining the executable bit alone (`chmod +x` without a content change) selects
+  nothing: a state written by an older smates recorded every file without the bit, and
+  the two cannot be told apart. Losing it (`chmod -x`) is a change once a state written
+  by this version recorded the bit (against an older smates' state it goes unnoticed
+  until the next recording).
+- A module Node or Bun loads through a symlink is traced by its target only (the
+  runtime resolves the link first): retargeting such a link may be an orphan. Files read
+  through a link (`fs`, `open`, Go's `os.Open`) depend on the link as well.
 - On case-insensitive file systems, an import whose case differs from the file on disk
   is recorded under the imported spelling and may not match the file's changes.
 - Type-only changes are handled like any change (type checking is not a test run;

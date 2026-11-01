@@ -404,6 +404,9 @@ func addTestLog(o *Observation, root string, files, env []string) {
 		}
 		if rel, ok := pathutil.Rel(root, f); ok && !pathutil.IsVendored(rel) {
 			o.AddFile(depkey.Make(kind, rel))
+			for _, l := range pathutil.Links(root, f) {
+				o.AddFile(l) // a symlink on the way: retargeting it changes what was read
+			}
 		} else if kind == depkey.KindListing && filepath.Clean(f) == root {
 			o.AddFile(depkey.Listing("."))
 		}

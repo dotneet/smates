@@ -9,6 +9,7 @@
 //   {"k":"dir","p":"/abs/dir"}     a directory under the repository was listed
 //   {"k":"probe","p":"/abs/path"}  existence of a path was checked (exists/stat/realpath...)
 //   {"k":"exec","args":[...],"shell":true,"cwd":"/abs"}  a child process was started
+//                                  ("trunc":true: args cut short, see MAX_ARGV)
 //   {"k":"tree","p":"/abs/dir"}    everything below a directory may have been read
 //   {"k":"code","p":"/abs/file"}   a module was loaded (Bun, which has no V8 coverage)
 //   {"k":"env","p":"NAME"}         an environment variable was read (never its value)
@@ -50,6 +51,21 @@
       if (fd < 0) fd = openSync0(out, 'a');
       writeSync0(fd, JSON.stringify(obj) + '\n');
     } catch (_) {}
+  };
+  // Command lines are cut to this many characters in all (a test may pass megabytes of
+  // arguments, to provoke E2BIG say); exec events mark it ("trunc") and smates then
+  // takes the command for one that may read anything below its working directory.
+  const MAX_ARGV = 256 * 1024;
+  const cutArgv = (argv) => {
+    let n = 0;
+    for (let i = 0; i < argv.length; i++) {
+      n += String(argv[i]).length;
+      if (n > MAX_ARGV) {
+        const a = String(argv[i]);
+        return [argv.slice(0, i).concat(a.slice(0, a.length - (n - MAX_ARGV))), true];
+      }
+    }
+    return [argv, false];
   };
   const rootPrefix = repoRoot.endsWith(path.sep) ? repoRoot : repoRoot + path.sep;
   const rootDir = rootPrefix.slice(0, -1);
@@ -227,7 +243,10 @@
   };
   const execEv = (args, shell, opts) => {
     try {
-      write({ k: 'exec', args: args.map(String), shell: Boolean(shell), cwd: cwdOf(opts) });
+      const [cut, trunc] = cutArgv(args.map(String));
+      const ev = { k: 'exec', args: cut, shell: Boolean(shell), cwd: cwdOf(opts) };
+      if (trunc) ev.trunc = true;
+      write(ev);
     } catch (_) {}
   };
   // A child given an environment of its own ({env: {PATH}}) would start untraced, and
@@ -525,7 +544,7 @@
     ppid: process.ppid,
     anc,
     tid: threadId,
-    argv: process.argv,
+    argv: cutArgv(process.argv)[0],
     cwd: process.cwd(),
     t: Date.now(),
     lang: typeof Bun !== 'undefined' ? 'bun' : 'node',
@@ -734,8 +753,11 @@
 
   // Pool workers are often stopped with a signal; V8 coverage is only written on a
   // normal exit, so flush it first, then let the default action (or other handlers) run.
-  // Only pool workers (forked with an IPC channel, stopped with SIGTERM) need this; a
-  // listener on other processes would change how they react to signals.
+  // Only the process pool workers of known runners (forked with an IPC channel, stopped
+  // with SIGTERM) get the listener: it defers the signal until the event loop is free,
+  // so any other forked child that is busy would no longer be killed by it.
+  const poolWorker =
+    /[\\/](?:tinypool[\\/]dist[\\/](?:esm[\\/])?entry[\\/]process|vitest[\\/]dist[\\/]workers[\\/](?:vmF|f)orks|jest-worker[\\/]build[\\/](?:workers[\\/])?processChild)\.[cm]?js$/;
   if (isMainThread && process.channel) {
     // A vitest fork worker reports "stopped" and then exits by itself while the pool
     // SIGTERMs it and SIGKILLs it 500ms later: on a busy machine Node's exit-time
@@ -752,7 +774,7 @@
         return send.apply(this, arguments);
       };
     }
-    for (const sig of ['SIGTERM']) {
+    for (const sig of poolWorker.test(process.argv[1] || '') ? ['SIGTERM'] : []) {
       const handler = () => {
         try {
           require('v8').takeCoverage();

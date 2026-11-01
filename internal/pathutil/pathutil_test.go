@@ -98,6 +98,51 @@ func TestRelThroughSymlink(t *testing.T) {
 	}
 }
 
+func TestLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	testutil.Write(t, root, "data/v2.json", "x")
+	testutil.Write(t, root, "fixtures/real/a.txt", "x")
+	link := func(target, rel string) {
+		t.Helper()
+		if err := os.Symlink(target, filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link("v2.json", "data/current.json")
+	link("current.json", "data/latest.json")                     // a link to a link
+	link("real", "fixtures/cur")                                 // a directory on the way
+	link(filepath.Join(root, "fixtures", "cur"), "fixtures/abs") // absolute target
+	link("loop", "loop")
+	testutil.Write(t, root, "node_modules/.keep", "")
+	link("../data", "node_modules/data")
+	// The repository reached through a symlink outside of it.
+	outer := filepath.Join(t.TempDir(), "outer")
+	if err := os.Symlink(root, outer); err != nil {
+		t.Fatal(err)
+	}
+	for in, want := range map[string][]string{
+		filepath.Join(root, "data", "v2.json"):                 nil,
+		filepath.Join(root, "data", "current.json"):            {"data/current.json"},
+		filepath.Join(root, "data", "latest.json"):             {"data/latest.json", "data/current.json"},
+		filepath.Join(root, "fixtures", "cur", "a.txt"):        {"fixtures/cur"},
+		filepath.Join(root, "fixtures", "abs", "a.txt"):        {"fixtures/abs", "fixtures/cur"},
+		filepath.Join(root, "fixtures", "cur", "missing.txt"):  {"fixtures/cur"}, // a probe
+		filepath.Join(root, "fixtures", "cur", "..", "x"):      nil,              // cleaned lexically first
+		filepath.Join(outer, "data", "current.json"):           {"data/current.json"},
+		filepath.Join(root, "node_modules", "data", "v2.json"): nil, // vendored
+		filepath.Join(root, "loop", "x"):                       {"loop"},
+		"data/current.json":                                    nil, // not absolute
+	} {
+		got := Links(root, in)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("Links(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestUnderRelToJoin(t *testing.T) {
 	under := []struct {
 		p, dir string
