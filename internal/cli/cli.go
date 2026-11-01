@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/dotneet/smates/docs"
 	"github.com/dotneet/smates/internal/agent"
@@ -74,7 +75,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM and SIGHUP (timeout(1), a cancelled CI job, a closed terminal) stop smates
+	// as Ctrl-C does: by cancelling, so that what runs in a process group of its own (an
+	// agent command, the tests of a watch run) is stopped with it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	cmd, rest := args[0], args[1:]
 	var err error

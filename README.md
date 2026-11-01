@@ -706,6 +706,12 @@ ok  	example.com/shop/internal/store	0.170s
   nowhere. A shard uses a decision cached in the state it restored (from an unsharded
   `smates select` or `smates run` on the same change); otherwise it falls back to the
   orphan policy.
+- An external agent (`agent.command`) gets the prompt on stdin and prints its answer on
+  stdout. Without a controlling terminal (CI) it runs in a process group of its own,
+  killed as a whole on the timeout or when smates is stopped (Ctrl-C, SIGTERM, SIGHUP).
+  From a terminal it stays in smates' process group so that it can prompt there (ssh
+  passphrase, pinentry): Ctrl-C stops it with smates, but on the timeout only the
+  command's own process is killed.
 - Fork pull requests get no secrets: smates simply falls back.
 
 ### Letting the calling agent decide

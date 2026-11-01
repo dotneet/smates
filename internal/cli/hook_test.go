@@ -323,3 +323,49 @@ func TestRefreshHookState(t *testing.T) {
 		t.Error("temporary pull file left behind")
 	}
 }
+
+// A state this smates cannot read (a newer version's, on the branch's ref) is skipped
+// for the next ref; with no readable state on any ref, pulling fails.
+func TestPullStateSkipsUnreadableRef(t *testing.T) {
+	g := newGitRepo(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	g.git("init", "-q", "--bare", remote)
+	g.git("remote", "add", "origin", remote)
+	good := state.New()
+	good.Suite("s").Tests["main_test.go"] = &state.Entry{Status: "pass", At: time.Now().UTC()}
+	src := filepath.Join(t.TempDir(), "good.json.gz")
+	if err := good.Save(src); err != nil {
+		t.Fatal(err)
+	}
+	newer := filepath.Join(t.TempDir(), "newer.json")
+	if err := os.WriteFile(newer, []byte(`{"version": 999}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := pushState(g.repo, src, "origin", stateRefPrefix+"main", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := pushState(g.repo, newer, "origin", stateRefPrefix+"feature", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(t.TempDir(), "state.json.gz")
+	var log bytes.Buffer
+	if err := pullState(g.repo, path, "origin", []string{stateRefPrefix + "feature", stateRefPrefix + "main"}, &log); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	if st, err := state.Load(path); err != nil || st.Suites["s"] == nil || st.Suites["s"].Tests["main_test.go"] == nil {
+		t.Errorf("main's state not pulled: %v %+v", err, st)
+	}
+	if !strings.Contains(log.String(), "skipping the state on origin "+stateRefPrefix+"feature") || !strings.Contains(log.String(), "pulled state from origin "+stateRefPrefix+"main") {
+		t.Errorf("log:\n%s", log.String())
+	}
+
+	other := filepath.Join(t.TempDir(), "state.json.gz")
+	err := pullState(g.repo, other, "origin", []string{stateRefPrefix + "feature", stateRefPrefix + "missing"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unsupported state version 999") {
+		t.Errorf("no readable state: %v", err)
+	}
+	if _, err := os.Stat(other); !os.IsNotExist(err) {
+		t.Error("a state was saved")
+	}
+}

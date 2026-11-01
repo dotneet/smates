@@ -27,6 +27,14 @@ func TestBunConfigWithShim(t *testing.T) {
 		// [test] keys set at the top level move into the [test] table (defined once).
 		{"dotted keys", "smol = true\ntest.preload = [\n  \"./setup.ts\", # setup\n]\ntest.coverageThreshold = 0.9\n[install]\nexact = true\n"},
 		{"inline table", "test = { preload = [\"./setup.ts\"], coverageThreshold = { lines = 0.9 }, root = \"./src\" }\n"},
+		// A byte order mark does not hide the [test] header or the dotted keys.
+		{"bom header", "\ufeff[test]\npreload = [\"./setup.ts\"]\n"},
+		{"bom dotted keys", "\ufefftest.preload = [\"./setup.ts\"]\nsmol = true\n"},
+		// Thresholds as dotted keys or as a table are dropped as well.
+		{"dotted threshold", "[test]\npreload = [\"./setup.ts\"]\ncoverageThreshold.lines = 0.9\n\"coverageThreshold\".functions = 0.9\n"},
+		{"threshold table", "[test]\npreload = [\"./setup.ts\"]\n[test.coverageThreshold]\nlines = 0.9 # x\nfunctions = 0.9\n[install]\nexact = true\n"},
+		{"threshold table first", "smol = true\n[test.coverageThreshold]\nlines = 0.9\n[test]\npreload = [\"./setup.ts\"]\n"},
+		{"top-level dotted threshold", "test.preload = [\"./setup.ts\"]\ntest.coverageThreshold.lines = 0.9\n[install]\nexact = true\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -72,12 +80,20 @@ func TestBunConfigTopLevelTestKeys(t *testing.T) {
 	}
 	const multiline = "x = \"\"\"\ntest.y = 1\n[test]\n\"\"\"\n"
 	for name, cfg := range map[string]string{
-		"dotted":            "test.preload = [\"./setup.ts\"]\n",
-		"inline":            "test = { preload = [\"./setup.ts\"] }\n",
-		"quoted dotted":     "\"test\".preload = [\"./setup.ts\"]\n",
-		"multi-line string": multiline + "test.preload = [\"./setup.ts\"]\n",
-		"header comment":    "[test] # setup\npreload = [\"./setup.ts\"]\n",
-		"comments in array": "[test]\npreload = [\n  # \"./nope.ts\"\n  \"./setup.ts\", # x ]\n]\n",
+		"dotted":                        "test.preload = [\"./setup.ts\"]\n",
+		"inline":                        "test = { preload = [\"./setup.ts\"] }\n",
+		"quoted dotted":                 "\"test\".preload = [\"./setup.ts\"]\n",
+		"multi-line string":             multiline + "test.preload = [\"./setup.ts\"]\n",
+		"header comment":                "[test] # setup\npreload = [\"./setup.ts\"]\n",
+		"comments in array":             "[test]\npreload = [\n  # \"./nope.ts\"\n  \"./setup.ts\", # x ]\n]\n",
+		"bom header":                    "\ufeff[test]\npreload = [\"./setup.ts\"]\n",
+		"bom dotted":                    "\ufefftest.preload = [\"./setup.ts\"]\n",
+		"dotted threshold":              "[test]\npreload = [\"./setup.ts\"]\ncoverageThreshold.lines = 0.9\ncoverageThreshold.functions = 0.9\n",
+		"threshold table":               "[test]\npreload = [\"./setup.ts\"]\n[test.coverageThreshold]\nlines = 0.9\n[install]\nexact = true\n",
+		"threshold before":              "[test.coverageThreshold]\nlines = 0.9\n[test]\npreload = [\"./setup.ts\"]\n",
+		"dotted threshold at top level": "test.preload = [\"./setup.ts\"]\ntest.coverageThreshold.lines = 0.9\n",
+		// An escaped quote does not end a multi-line basic string: [test] is in it.
+		"escaped quotes in multi-line string": "x = \"\"\"a \\\"\"\"\n[test]\n\"\"\"\ntest.preload = [\"./setup.ts\"]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -158,5 +174,25 @@ func TestBunRecordWithoutCoverage(t *testing.T) {
 	}
 	if o := res.Observations["uses.test.ts"]; o != nil && !o.Files["lib.ts"] {
 		t.Errorf("uses: %v", o.Files)
+	}
+}
+
+// Multi-line strings end at their closing delimiter: not at an escaped quote of a basic
+// one, and with the one or two quotes that may precede the delimiter.
+func TestTomlStringEnd(t *testing.T) {
+	for in, want := range map[string]string{
+		`"a\"b" x`:             `"a\"b"`,
+		`'a\' x`:               `'a\'`,
+		`"""a \""" b""" x`:     `"""a \""" b"""`,
+		`"""a \\""" x`:         `"""a \\"""`,
+		`""""a""""" x`:         `""""a"""""`,
+		`'''a \''' x`:          `'''a \'''`,
+		`''''a''''' x`:         `''''a'''''`,
+		"\"\"\"a\nb\"\"\" x":   "\"\"\"a\nb\"\"\"",
+		`"""unterminated \"""`: `"""unterminated \"""`,
+	} {
+		if got := in[:tomlStringEnd(in, 0)]; got != want {
+			t.Errorf("tomlStringEnd(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
