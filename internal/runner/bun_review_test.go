@@ -123,6 +123,9 @@ func TestBunRecordWithoutCoverage(t *testing.T) {
 	write("bad.test.ts", "import { test } from \"bun:test\";\nimport { x } from \"./missing.ts\";\ntest(\"bad\", () => { x(); });\n")
 	write("lib.ts", "export function one() {\n  return 1;\n}\n")
 	write("uses.test.ts", "import { test, expect } from \"bun:test\";\nimport { one } from \"./lib.ts\";\ntest(\"uses\", () => { expect(one()).toBe(1); });\n")
+	// bun reads snapshots natively: the file next to the test is recorded as a dependency.
+	write("src/snap.test.ts", "import { test, expect } from \"bun:test\";\ntest(\"snap\", () => { expect(1).toBe(1); });\n")
+	write("src/__snapshots__/snap.test.ts.snap", "// Bun Snapshot v1, https://bun.sh/docs/test/snapshots\n")
 	shimDir := t.TempDir()
 	if _, err := trace.ExtractShims(shimDir); err != nil {
 		t.Fatal(err)
@@ -131,7 +134,7 @@ func TestBunRecordWithoutCoverage(t *testing.T) {
 	s.Tests = []string{"**/*.test.ts"}
 	var out bytes.Buffer
 	rc := &RunContext{
-		Repo: repo, Suite: s, Units: []string{"bad.test.ts", "ok.test.ts", "uses.test.ts"}, Record: true,
+		Repo: repo, Suite: s, Units: []string{"bad.test.ts", "ok.test.ts", "src/snap.test.ts", "uses.test.ts"}, Record: true,
 		TraceDir: t.TempDir(), ShimDir: shimDir, Stdout: &out, Stderr: &out,
 		IsTest: s.IsTestFile,
 		UnitOf: func(f string) string {
@@ -151,12 +154,18 @@ func TestBunRecordWithoutCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	for u, want := range map[string]string{"ok.test.ts": state.Pass, "bad.test.ts": state.Fail, "uses.test.ts": state.Pass} {
+	for u, want := range map[string]string{"ok.test.ts": state.Pass, "bad.test.ts": state.Fail, "uses.test.ts": state.Pass, "src/snap.test.ts": state.Pass} {
 		if o := res.Observations[u]; o == nil || o.Status != want || o.Inferred || !o.Files[u] {
 			t.Errorf("%s: %+v, want %s\n%s", u, o, want, out.String())
 		}
 	}
 	if o := res.Observations["uses.test.ts"]; o != nil && !o.Files["lib.ts"] {
 		t.Errorf("uses: %v", o.Files)
+	}
+	if o := res.Observations["src/snap.test.ts"]; o != nil && !o.Files["src/__snapshots__/snap.test.ts.snap"] {
+		t.Errorf("snap: %v", o.Files)
+	}
+	if o := res.Observations["ok.test.ts"]; o != nil && o.Files["__snapshots__/ok.test.ts.snap"] {
+		t.Errorf("ok: a snapshot file that does not exist is no dependency: %v", o.Files)
 	}
 }

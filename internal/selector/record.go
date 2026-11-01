@@ -437,7 +437,7 @@ func (h *Hasher) decls(p string) string {
 		return v.(string)
 	}
 	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
-	if err != nil || gitx.HashBytes(src) != blob {
+	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
 		return blob
 	}
 	v, ok := golang.DeclsHash(src, strings.HasSuffix(p, "_test.go"))

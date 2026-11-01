@@ -247,6 +247,37 @@ func TestCollectSymlinkedRoot(t *testing.T) {
 	}
 }
 
+// A read through a symlink inside the repository depends on the link too (its blob is
+// its target), so retargeting it selects the test.
+func TestCollectSymlinksInRepo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root := repoDir(t)
+	touch(t, root, "data/v2.json", "fixtures/real/a.txt", "src/load.ts")
+	os.Symlink("v2.json", filepath.Join(root, "data", "current.json"))
+	os.Symlink("real", filepath.Join(root, "fixtures", "cur"))
+	td := t.TempDir()
+	stream(t, td, 1, 0,
+		ev{"k": "start", "pid": 1},
+		ev{"k": "read", "p": filepath.Join(root, "data", "current.json"), "by": filepath.Join(root, "src", "load.ts")},
+		ev{"k": "dir", "p": filepath.Join(root, "fixtures", "cur")},
+		ev{"k": "probe", "p": filepath.Join(root, "fixtures", "cur", "b.txt")},
+	)
+	procs, err := Collect(td, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := procs[0]
+	want := []string{"data/current.json", "data/v2.json", "fixtures/cur", "fixtures/real/", "fixtures/real/b.txt?"}
+	if got := keys(p.Reads); !reflect.DeepEqual(got, want) {
+		t.Errorf("reads %v, want %v", got, want)
+	}
+	if got := keys(p.ReadsBy["src/load.ts"]); !reflect.DeepEqual(got, []string{"data/current.json", "data/v2.json"}) {
+		t.Errorf("reads by src/load.ts %v", got)
+	}
+}
+
 func TestCollectPythonContexts(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "tests/test_a.py", "tests/test_b.py", "src/m.py", "data/a.json", "data/db.sql", "tests/conftest.py")

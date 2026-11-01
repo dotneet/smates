@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -177,6 +178,91 @@ func TestHashFile(t *testing.T) {
 	}
 	if len(HashFiles(dir, nil)) != 0 {
 		t.Error("HashFiles(nil)")
+	}
+}
+
+// The executable bit is part of a file's hash: a test running a script that lost it
+// fails differently (EACCES).
+func TestSnapshotExecutableBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no executable bit")
+	}
+	r := newTestRepo(t)
+	testutil.WriteMode(t, r.dir, "run.sh", "#!/bin/sh\necho hi\n", 0o755)
+	r.write("data.txt", "d\n")
+	base := r.commit("init")
+	blob := r.git("hash-object", "--no-filters", "--", "run.sh")
+	snapshot := func() Snapshot {
+		t.Helper()
+		snap, err := r.repo.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snap
+	}
+	hashFile := func(rel string) string {
+		t.Helper()
+		h, err := HashFile(filepath.Join(r.dir, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	snap := snapshot()
+	if snap["run.sh"] != blob+ExecSuffix || hashFile("run.sh") != snap["run.sh"] {
+		t.Errorf("executable file: snapshot %q, HashFile %q, want %q", snap["run.sh"], hashFile("run.sh"), blob+ExecSuffix)
+	}
+	if Blob(snap["run.sh"]) != blob || Blob(snap["data.txt"]) != snap["data.txt"] {
+		t.Error("Blob must strip the executable marker only")
+	}
+
+	// chmod -x in the working tree: a change git status reports, and so does smates.
+	os.Chmod(filepath.Join(r.dir, "run.sh"), 0o644)
+	if snap := snapshot(); snap["run.sh"] != blob || hashFile("run.sh") != blob {
+		t.Errorf("after chmod -x: snapshot %q, HashFile %q, want %q", snap["run.sh"], hashFile("run.sh"), blob)
+	}
+	got, err := r.repo.ChangedSince(base)
+	if err != nil || !slices.Equal(got, []string{"run.sh"}) {
+		t.Errorf("ChangedSince after chmod -x = %v %v", got, err)
+	}
+	// Committed: the index has mode 100644 now.
+	r.git("commit", "-q", "-am", "chmod")
+	if snap := snapshot(); snap["run.sh"] != blob {
+		t.Errorf("committed chmod -x: %q, want %q", snap["run.sh"], blob)
+	}
+	if got, err := r.repo.ChangedSince(base); err != nil || !slices.Equal(got, []string{"run.sh"}) {
+		t.Errorf("ChangedSince over a mode-only commit = %v %v", got, err)
+	}
+	head := r.repo.Head()
+	if ch, err := r.repo.ChangedInCommit(Commit{SHA: head, Parent: base}); err != nil || len(ch) != 1 || ch[0].Path != "run.sh" {
+		t.Errorf("ChangedInCommit of a mode-only commit = %v %v", ch, err)
+	}
+
+	// An untracked executable file.
+	testutil.WriteMode(t, r.dir, "new.sh", "#!/bin/sh\n", 0o755)
+	if snap := snapshot(); snap["new.sh"] != HashBytes([]byte("#!/bin/sh\n"))+ExecSuffix {
+		t.Errorf("untracked executable: %q", snap["new.sh"])
+	}
+
+	// core.fileMode false: git ignores the bit on disk, and so does the snapshot (an
+	// edited file keeps the index's mode, an untracked one would be added as 100644).
+	r.git("config", "core.fileMode", "false")
+	os.Chmod(filepath.Join(r.dir, "run.sh"), 0o755)
+	r.write("data.txt", "d2\n")
+	os.Chmod(filepath.Join(r.dir, "data.txt"), 0o755)
+	snap = snapshot()
+	if snap["run.sh"] != blob {
+		t.Errorf("core.fileMode false, chmod +x: %q, want %q", snap["run.sh"], blob)
+	}
+	if want := HashBytes([]byte("d2\n")); snap["data.txt"] != want {
+		t.Errorf("core.fileMode false, edited: %q, want %q", snap["data.txt"], want)
+	}
+	if snap["new.sh"] != HashBytes([]byte("#!/bin/sh\n")) {
+		t.Errorf("core.fileMode false, untracked executable: %q", snap["new.sh"])
+	}
+	r.git("add", "new.sh")
+	if got := r.git("ls-files", "-s", "new.sh"); !strings.HasPrefix(got, "100644 ") {
+		t.Errorf("git adds it as %q", got)
 	}
 }
 

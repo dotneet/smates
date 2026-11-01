@@ -418,6 +418,15 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		}
 		return key
 	}
+	linkCache := map[string][]string{}
+	links := func(path string) []string {
+		l, ok := linkCache[path]
+		if !ok {
+			l = pathutil.Links(root, path)
+			linkCache[path] = l
+		}
+		return l
+	}
 	for sc.Scan() {
 		var ev event
 		if json.Unmarshal(sc.Bytes(), &ev) != nil {
@@ -435,19 +444,26 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				spawn = relCtx(c, rel)
 			}
 		case "read", "code", "dir", "probe", "tree":
-			key := ""
+			var keys []string
 			if r, ok := rel(ev.P); ok {
-				key = add(ev.K, r)
+				keys = append(keys, add(ev.K, r))
+				// The symlinks the path went through are read too: retargeting one
+				// changes what the test sees.
+				for _, l := range links(ev.P) {
+					keys = append(keys, add("read", l))
+				}
 			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
-				key = add(ev.K, ".")
+				keys = append(keys, add(ev.K, "."))
 			}
-			if by, ok := rel(ev.By); ok && key != "" && ev.By != "" {
+			if by, ok := rel(ev.By); ok && len(keys) > 0 && ev.By != "" {
 				m := p.ReadsBy[by]
 				if m == nil {
 					m = map[string]bool{}
 					p.ReadsBy[by] = m
 				}
-				m[key] = true
+				for _, key := range keys {
+					m[key] = true
+				}
 			}
 		case "env":
 			if ev.P == "" {

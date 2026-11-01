@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -166,5 +167,23 @@ func TestGoWorkModules(t *testing.T) {
 	}
 	if got := goWorkModules(root, root, "off"); got != nil {
 		t.Errorf("GOWORK=off: %v", got)
+	}
+}
+
+// A file a Go test opened through a symlink inside the repository depends on the link
+// too.
+func TestAddTestLogSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	testutil.Write(t, root, "p/testdata/v2.json", "x")
+	if err := os.Symlink("v2.json", filepath.Join(root, "p", "testdata", "current.json")); err != nil {
+		t.Fatal(err)
+	}
+	o := &Observation{}
+	addTestLog(o, root, []string{filepath.Join(root, "p", "testdata", "current.json")}, nil)
+	if got := slices.Sorted(maps.Keys(o.Files)); !slices.Equal(got, []string{"p/testdata/current.json", "p/testdata/v2.json"}) {
+		t.Errorf("files %v", got)
 	}
 }
