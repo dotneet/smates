@@ -235,7 +235,7 @@ func explainBrief(ctx context.Context, req *ExplainRequest) string {
 				fmt.Fprintf(&b, " (last recorded status: %s)", h.LastStatus)
 			}
 		}
-		b.WriteString(", most direct first:\n")
+		b.WriteString(", most direct first (\"$NAME\" is an environment variable; only the fact that its value changed is known):\n")
 		for _, c := range h.Candidates {
 			fmt.Fprintf(&b, "- %s (%s, %s, %s)\n", c.Path, c.Kind, c.Link, c.Change)
 		}
@@ -274,7 +274,7 @@ func candidateDiffs(ctx context.Context, req *ExplainRequest) string {
 	tb := &toolbox{root: req.Repo.Root, orphans: map[string]Orphan{}, base: req.Base}
 	var picked []hints.Candidate
 	for _, c := range req.Hint.Candidates {
-		if c.Kind == hints.KindListing || len(picked) == maxExplainDiffs {
+		if c.Kind == hints.KindListing || c.Kind == hints.KindEnv || len(picked) == maxExplainDiffs {
 			continue
 		}
 		picked = append(picked, c)

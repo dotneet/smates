@@ -211,6 +211,9 @@ func (p *Proc) add(ctx, kind, rel string) string {
 	case "tree":
 		rel = depkey.Tree(rel)
 		p.Reads[rel] = true
+	case "env": // rel is the variable's name
+		rel = depkey.Env(rel)
+		p.Reads[rel] = true
 	default:
 		p.Reads[rel] = true
 	}
@@ -371,6 +374,19 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 				key = p.add(ctx, ev.K, ".")
 			}
 			if by, ok := rel(ev.By); ok && key != "" && ev.By != "" {
+				m := p.ReadsBy[by]
+				if m == nil {
+					m = map[string]bool{}
+					p.ReadsBy[by] = m
+				}
+				m[key] = true
+			}
+		case "env":
+			if ev.P == "" {
+				continue
+			}
+			key := p.add(ctx, "env", ev.P)
+			if by, ok := rel(ev.By); ok && ev.By != "" {
 				m := p.ReadsBy[by]
 				if m == nil {
 					m = map[string]bool{}

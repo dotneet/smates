@@ -2,6 +2,7 @@ package selector
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
@@ -19,23 +21,30 @@ import (
 
 // Hasher returns content hashes of dependency keys. A key is a repo-relative file path;
 // a directory path with a trailing "/" meaning "the list of entries of this directory"
-// (recorded when a test lists a directory, so added or removed files are noticed); or a
+// (recorded when a test lists a directory, so added or removed files are noticed); a
 // path with a trailing "?" meaning "whether this path exists" (recorded for existence
-// checks, including of paths that do not exist yet).
+// checks, including of paths that do not exist yet); or "$NAME", the value of an
+// environment variable as the tests of a suite see it (see ForSuite).
 type Hasher struct {
 	snap   gitx.Snapshot
 	ignore []string
-	root   string            // repository root for files outside the snapshot ("" = none)
-	disk   map[string]string // memoized hashes of files outside the snapshot
-	dirs   map[string][]string
-	trees  map[string]string
+	root   string // repository root for files outside the snapshot ("" = none)
+	env    func(string) (string, bool)
+	*hashCache
+}
+
+// hashCache is shared by the hashers derived from one with ForSuite.
+type hashCache struct {
+	disk  map[string]string // memoized hashes of files outside the snapshot
+	dirs  map[string][]string
+	trees map[string]string
 }
 
 // NewHasher indexes a snapshot. Files matching ignore globs (docs, editor settings) are
 // left out of "dir/**" tree hashes, so editing a README does not re-run every test that
 // shells out to an opaque command.
 func NewHasher(snap gitx.Snapshot, ignore ...string) *Hasher {
-	return &Hasher{snap: snap, ignore: ignore}
+	return &Hasher{snap: snap, ignore: ignore, hashCache: &hashCache{}}
 }
 
 // WithRoot makes the hasher read files git does not list (ignored files such as .env
@@ -44,6 +53,26 @@ func NewHasher(snap gitx.Snapshot, ignore ...string) *Hasher {
 func (h *Hasher) WithRoot(root string) *Hasher {
 	h.root = root
 	return h
+}
+
+// ForSuite returns a hasher (sharing h's caches) that hashes environment variables as
+// the tests of su see them: the suite's env overrides smates' own environment. Without
+// it, variables are looked up in smates' environment.
+func (h *Hasher) ForSuite(su *runner.Suite) *Hasher {
+	c := *h
+	c.env = su.LookupEnv
+	return &c
+}
+
+// EnvHash is the hash recorded for an environment variable: "" when it is not set, so
+// an unset variable and an empty one differ. Only the hash of a value is stored, never
+// the value.
+func EnvHash(value string, set bool) string {
+	if !set {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("smates-env\x00" + value))
+	return "env:" + hex.EncodeToString(sum[:16])
 }
 
 func (h *Hasher) file(p string) string {
@@ -68,6 +97,12 @@ func (h *Hasher) file(p string) string {
 func (h *Hasher) Hash(key string) string {
 	kind, p := depkey.Parse(key)
 	switch kind {
+	case depkey.KindEnv:
+		lookup := h.env
+		if lookup == nil {
+			lookup = (*runner.Suite)(nil).LookupEnv
+		}
+		return EnvHash(lookup(p))
 	case depkey.KindTree:
 		return h.tree(p)
 	case depkey.KindExistence:
@@ -146,6 +181,37 @@ func uniq(s []string) []string {
 		}
 	}
 	return out
+}
+
+// EnvIgnored reports whether key is an environment variable c ignores for su.
+func EnvIgnored(c *config.Config, su *runner.Suite, key string) bool {
+	kind, name := depkey.Parse(key)
+	if kind != depkey.KindEnv {
+		return false
+	}
+	var cs *config.Suite
+	if su != nil {
+		cs = &su.Suite
+	}
+	return c.EnvIgnored(cs, name)
+}
+
+// DropIgnoredEnv removes the environment variables c ignores for su from what a run
+// observed, so they are neither recorded nor offered as failure causes.
+func DropIgnoredEnv(c *config.Config, su *runner.Suite, r *runner.RunResult) {
+	drop := func(m map[string]bool) {
+		for k := range m {
+			if EnvIgnored(c, su, k) {
+				delete(m, k)
+			}
+		}
+	}
+	for _, o := range r.Observations {
+		drop(o.Files)
+	}
+	for _, m := range r.ReadsBy {
+		drop(m)
+	}
 }
 
 // RecordOptions control how observations are written to the state.
@@ -321,7 +387,13 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 	}
 	for k, v := range deps {
-		if _, ok := prev.Deps[k]; ok || depkey.IsPseudo(k) {
+		if _, ok := prev.Deps[k]; ok {
+			continue
+		}
+		if depkey.IsEnv(k) {
+			return false // no recorded environment to compare a newly read variable with
+		}
+		if depkey.IsPseudo(k) {
 			continue
 		}
 		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && was != v) {

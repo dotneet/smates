@@ -154,6 +154,34 @@ func TestCollectStreams(t *testing.T) {
 	}
 }
 
+func TestCollectEnv(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "src/config.py", "tests/test_a.py")
+	td := t.TempDir()
+	abs := func(r string) string { return filepath.Join(root, filepath.FromSlash(r)) }
+	stream(t, td, 100, 0,
+		ev{"k": "start", "pid": 100, "t": 1000, "lang": "python"},
+		ev{"k": "env", "p": "APP_MODE", "by": abs("src/config.py")},
+		ev{"k": "env", "p": ""}, // malformed: no name
+		ev{"k": "ctx", "id": "test:" + abs("tests/test_a.py"), "t": 1001},
+		ev{"k": "env", "p": "TZ"},
+	)
+	procs, err := Collect(td, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := procs[0]
+	if got := keys(p.Reads); !reflect.DeepEqual(got, []string{"$APP_MODE", "$TZ"}) {
+		t.Errorf("reads %v", got)
+	}
+	if got := keys(p.Ctx["test:tests/test_a.py"]); !reflect.DeepEqual(got, []string{"$TZ"}) {
+		t.Errorf("test context %v", got)
+	}
+	if got := keys(p.ReadsBy["src/config.py"]); !reflect.DeepEqual(got, []string{"$APP_MODE"}) {
+		t.Errorf("reads by %v", got)
+	}
+}
+
 func TestCollectV8(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "src/a.ts", "src/b.js", "src/my file.ts", "src/é.ts", "lib/w.js", "node_modules/dep/index.js", "src/q.ts")
@@ -458,6 +486,8 @@ func TestParseTestLog(t *testing.T) {
 	os.WriteFile(log, []byte(strings.Join([]string{
 		"# test log",
 		"getenv HOME",
+		"getenv APP_MODE",
+		"getenv HOME", // duplicate
 		"open data.txt",
 		"open data.txt", // duplicate
 		"stat ../top.txt",
@@ -472,7 +502,10 @@ func TestParseTestLog(t *testing.T) {
 		"malformed",
 		"",
 	}, "\n")), 0o644)
-	got := parseTestLog(log, pkg)
+	got, env := parseTestLog(log, pkg)
+	if !reflect.DeepEqual(env, []string{"HOME", "APP_MODE"}) {
+		t.Errorf("env %q", env)
+	}
 	sep := string(filepath.Separator)
 	want := []string{
 		filepath.Join(pkg, "data.txt"),
@@ -486,7 +519,7 @@ func TestParseTestLog(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got\n %q\nwant\n %q", got, want)
 	}
-	if parseTestLog(filepath.Join(root, "nope.log"), pkg) != nil {
+	if files, env := parseTestLog(filepath.Join(root, "nope.log"), pkg); files != nil || env != nil {
 		t.Error("missing log")
 	}
 }

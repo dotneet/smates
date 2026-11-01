@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -34,6 +35,12 @@ type Config struct {
 	FullRunBranches []string `yaml:"full_run_branches"`
 	// Flaky configures what happens to tests known to be flaky.
 	Flaky FlakyConfig `yaml:"flaky"`
+	// EnvIgnore: environment variables (names or globs such as "MY_*") whose values
+	// tests may read without being selected again when they change; "*" turns off
+	// environment tracking. Added to DefaultEnvIgnore.
+	EnvIgnore []string `yaml:"env_ignore"`
+	// EnvTrack: variables to track although DefaultEnvIgnore lists them (e.g. "LANG").
+	EnvTrack []string `yaml:"env_track"`
 
 	// Path is the file the config was loaded from ("" when auto-detected).
 	Path string `yaml:"-"`
@@ -71,6 +78,9 @@ type Suite struct {
 	Junit string `yaml:"junit"`
 	// PythonRoots: extra import roots for Python static analysis (relative to Root).
 	PythonRoots []string `yaml:"python_roots"`
+	// EnvIgnore and EnvTrack add to the top-level lists for this suite only.
+	EnvIgnore []string `yaml:"env_ignore"`
+	EnvTrack  []string `yaml:"env_track"`
 }
 
 // Rule declares dependencies tracing cannot see.
@@ -121,6 +131,72 @@ var DefaultIgnore = []string{
 	".vscode/**", ".idea/**", ".editorconfig", "**/.gitignore", "**/.gitattributes", ".devcontainer/**",
 	"**/.prettierrc*", "**/.prettierignore", "**/.eslintrc*", "**/eslint.config.*", "**/.markdownlint*",
 	"**/biome.json", "**/biome.jsonc", "**/.golangci.y*ml", "**/ruff.toml", "**/.pre-commit-config.yaml",
+}
+
+// DefaultEnvIgnore are environment variables whose reads are not tracked: their values
+// differ between machines, between CI and a developer's shell, or between runs, while
+// tests rarely depend on them. A state recorded on CI and pulled to a laptop would
+// otherwise select every test that reads one of them. Names are matched with path.Match
+// globs, case-sensitively.
+var DefaultEnvIgnore = []string{
+	// The user, the machine and the shell session.
+	"PATH", "HOME", "USER", "USERNAME", "LOGNAME", "SHELL", "PWD", "OLDPWD", "SHLVL", "_", "HOSTNAME", "HOST",
+	"MAIL", "TMPDIR", "TMP", "TEMP", "XDG_*", "SSH_*", "GPG_*", "DISPLAY", "WAYLAND_DISPLAY", "DBUS_*",
+	"EDITOR", "VISUAL", "PAGER", "LESS*", "MANPATH", "INFOPATH", "__CF*", "COMMAND_MODE", "SECURITYSESSIONID",
+	"USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "COMPUTERNAME", "PATHEXT", "COMSPEC",
+	"SYSTEMROOT", "SystemRoot", "WINDIR", "windir", "PROGRAMDATA", "ProgramData", "PROGRAMFILES*", "ProgramFiles*",
+	"PROCESSOR_*", "NUMBER_OF_PROCESSORS", "OS",
+	// Locale.
+	"LANG", "LANGUAGE", "LC_*",
+	// Terminals and colors.
+	"TERM", "TERM_*", "COLORTERM", "COLUMNS", "LINES", "NO_COLOR", "FORCE_COLOR", "CLICOLOR*", "NODE_DISABLE_COLORS",
+	"PY_COLORS", "TMUX*", "STY", "ITERM_*", "VSCODE_*", "WT_SESSION", "INSIDE_EMACS",
+	// CI systems.
+	"CI", "CONTINUOUS_INTEGRATION", "GITHUB_*", "RUNNER_*", "ACTIONS_*", "ImageOS", "ImageVersion", "GITLAB_*", "CI_*",
+	"CIRCLE*", "TRAVIS*", "JENKINS_*", "BUILD_NUMBER", "BUILD_ID", "BUILD_URL", "BUILDKITE*", "TF_BUILD", "AGENT_*",
+	"TEAMCITY_*", "APPVEYOR*", "DRONE*", "BITBUCKET_*", "CODEBUILD_*",
+	// Proxies.
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+	// Toolchain and package manager locations, runner workers.
+	"npm_*", "NVM_*", "VOLTA_*", "FNM_*", "COREPACK_*", "JEST_WORKER_ID", "VITEST_POOL_ID", "VITEST_WORKER_ID",
+	"PYTEST_*", "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "CONDA_*", "PYENV*", "UV", "UV_*", "PIP_*", "GOPATH", "GOROOT",
+	"GOCACHE", "GOMODCACHE", "GOTMPDIR", "GOENV", "_PYTHON_*",
+	// Set by smates itself to trace tests.
+	"SMATES_*", "NODE_OPTIONS", "NODE_V8_COVERAGE", "BUN_OPTIONS", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "GOFLAGS",
+}
+
+// EnvIgnored reports whether reads of the environment variable name are left out of
+// the dependencies of the tests of suite s (nil: no suite): name matches env_ignore
+// (top level or the suite's), or DefaultEnvIgnore unless env_track lists it.
+func (c *Config) EnvIgnored(s *Suite, name string) bool {
+	var ignore, track []string
+	if c != nil {
+		ignore, track = c.EnvIgnore, c.EnvTrack
+	}
+	if s != nil {
+		ignore, track = append(append([]string{}, ignore...), s.EnvIgnore...), append(append([]string{}, track...), s.EnvTrack...)
+	}
+	return matchEnv(ignore, name) || matchEnv(DefaultEnvIgnore, name) && !matchEnv(track, name)
+}
+
+func matchEnv(patterns []string, name string) bool {
+	for _, p := range patterns {
+		if ok, _ := path.Match(p, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func checkEnvPatterns(where string, lists ...[]string) error {
+	for _, l := range lists {
+		for _, p := range l {
+			if _, err := path.Match(p, ""); err != nil || p == "" {
+				return fmt.Errorf("%s: bad environment variable pattern %q", where, p)
+			}
+		}
+	}
+	return nil
 }
 
 // Load reads the config at the repo root. It returns (nil, nil) when there is none.
@@ -226,6 +302,9 @@ func (c *Config) Normalize() error {
 	if c.Flaky.Retry < 0 || c.Flaky.Retry > 5 {
 		return fmt.Errorf("flaky.retry must be between 0 and 5 (got %d)", c.Flaky.Retry)
 	}
+	if err := checkEnvPatterns("env_ignore/env_track", c.EnvIgnore, c.EnvTrack); err != nil {
+		return err
+	}
 	names := map[string]bool{}
 	for i := range c.Suites {
 		s := &c.Suites[i]
@@ -251,6 +330,9 @@ func (c *Config) Normalize() error {
 		names[s.Name] = true
 		if s.Runner == "custom" && s.Command == "" {
 			return fmt.Errorf("suite %q: custom runner needs a command", s.Name)
+		}
+		if err := checkEnvPatterns(fmt.Sprintf("suite %q", s.Name), s.EnvIgnore, s.EnvTrack); err != nil {
+			return err
 		}
 	}
 	return nil

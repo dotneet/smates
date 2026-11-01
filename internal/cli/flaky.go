@@ -50,7 +50,7 @@ func logFlakes(p *project, w io.Writer, flakes []flakeReport) {
 	if len(flakes) == 0 {
 		return
 	}
-	p.logf("FLAKY: %d test unit(s) changed outcome although none of their tracked inputs changed (flaky, or they depend on something smates cannot see: time, network, environment, files outside the repository); see `smates flaky`:", len(flakes))
+	p.logf("FLAKY: %d test unit(s) changed outcome although none of their tracked inputs (files and environment variables) changed (flaky, or they depend on something smates cannot see: time, network, environment variables in env_ignore, files outside the repository); see `smates flaky`:", len(flakes))
 	for _, f := range flakes {
 		fmt.Fprintf(w, "  - %s\n", f)
 	}
@@ -73,7 +73,7 @@ func flakySection(flakes []flakeReport) (sec summary.Section, ok bool) {
 		return sec, false
 	}
 	var b strings.Builder
-	b.WriteString("Outcome changed although no tracked input changed:\n")
+	b.WriteString("Outcome changed although no tracked input (file or environment variable) changed:\n")
 	for _, f := range flakes {
 		fmt.Fprintf(&b, "- `%s` — %s", f.Suite+": "+f.Unit, f.Flip)
 		if f.Retried {
@@ -174,6 +174,9 @@ type flakyUnit struct {
 	Flip   string    `json:"flip,omitempty"`
 	Status string    `json:"status"`
 	Recent []string  `json:"recent"`
+	// Env are the environment variables the unit read (tracked, so they did not change
+	// across its flips; variables in env_ignore are not compared).
+	Env []string `json:"env"`
 }
 
 func cmdFlaky(args []string, stdout, stderr io.Writer) error {
@@ -236,7 +239,7 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 			if e.Flaky == nil {
 				continue
 			}
-			u := flakyUnit{Suite: name, Unit: id, Count: e.Flaky.Count, First: e.Flaky.First, Last: e.Flaky.Last, Commit: e.Flaky.Commit, Flip: e.Flaky.Flip, Status: e.Status, Recent: []string{}}
+			u := flakyUnit{Suite: name, Unit: id, Count: e.Flaky.Count, First: e.Flaky.First, Last: e.Flaky.Last, Commit: e.Flaky.Commit, Flip: e.Flaky.Flip, Status: e.Status, Recent: []string{}, Env: envDeps(e)}
 			for _, o := range e.History {
 				s := o.Status
 				if o.Inferred {
@@ -258,9 +261,13 @@ func cmdFlaky(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, "smates: no flaky test units recorded")
 		return nil
 	}
-	fmt.Fprintln(stdout, "SUITE\tUNIT\tFLIPS\tLAST FLIP\tLAST SEEN\tCOMMIT\tRECENT (oldest first)")
+	fmt.Fprintln(stdout, "SUITE\tUNIT\tFLIPS\tLAST FLIP\tLAST SEEN\tCOMMIT\tRECENT (oldest first)\tENV READ")
 	for _, u := range list {
-		fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", u.Suite, u.Unit, u.Count, u.Flip, u.Last.Format(time.RFC3339), shortCommit(u.Commit), strings.Join(u.Recent, " "))
+		env := strings.Join(u.Env, ",")
+		if env == "" {
+			env = "-"
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", u.Suite, u.Unit, u.Count, u.Flip, u.Last.Format(time.RFC3339), shortCommit(u.Commit), strings.Join(u.Recent, " "), env)
 	}
 	return nil
 }

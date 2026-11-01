@@ -143,6 +143,9 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 				o.AddFile(depkey.Listing("."))
 			}
 		}
+		for _, name := range r.Env {
+			o.AddFile(depkey.Env(name))
+		}
 		for f := range children[r.Dir] {
 			o.AddFile(f)
 		}

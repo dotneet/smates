@@ -134,7 +134,7 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 		in := hints.Input{
 			Suite: sr.Name, Unit: u, Inferred: o.Inferred, TestFiles: files,
 			Deps: sr.Deps[u], Observed: o.Files, Static: static, Inputs: sr.Inputs,
-			Entry: entry, Changed: changed, Orphans: orphans, Hash: fh.hasher.Hash, Root: fh.p.repo.Root,
+			Entry: entry, Changed: changed, Orphans: orphans, Hash: fh.hasher.ForSuite(sr.Suite).Hash, Root: fh.p.repo.Root,
 		}
 		if fh.p.graph != nil {
 			in.Direct = fh.p.graph.Direct
@@ -328,6 +328,13 @@ func hintSummary(h *hints.Hint) string {
 }
 
 func candidateNote(c hints.Candidate) string {
+	if c.Kind == hints.KindEnv {
+		change := map[string]string{"added": "set", "deleted": "unset"}[c.Change]
+		if change == "" {
+			change = "changed"
+		}
+		return "environment variable, read in its last run, " + change
+	}
 	if c.Link == hints.LinkUnattributed {
 		return c.Kind + ", not attributed to any test, " + c.Change
 	}

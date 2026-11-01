@@ -283,6 +283,14 @@ func (v *view) why(b *strings.Builder) {
 		return
 	}
 	files := slices.Sorted(maps.Keys(byFile))
+	// Environment variables after the files.
+	sort.SliceStable(files, func(i, j int) bool { return !depkey.IsEnv(files[i]) && depkey.IsEnv(files[j]) })
+	nenv := 0
+	for _, f := range files {
+		if depkey.IsEnv(f) {
+			nenv++
+		}
+	}
 	reasons := slices.Sorted(maps.Keys(byReason))
 	sort.SliceStable(reasons, func(i, j int) bool { return reasonRank(reasons[i]) < reasonRank(reasons[j]) })
 
@@ -295,8 +303,11 @@ func (v *view) why(b *strings.Builder) {
 		perFile = max(3, min(maxTests, maxLines/min(len(files), maxFiles)))
 	}
 	var parts []string
-	if len(files) > 0 {
-		parts = append(parts, plural(len(files), "changed file"))
+	if len(files) > nenv {
+		parts = append(parts, plural(len(files)-nenv, "changed file"))
+	}
+	if nenv > 0 {
+		parts = append(parts, plural(nenv, "changed environment variable"))
 	}
 	if len(reasons) > 0 {
 		parts = append(parts, plural(len(reasons), "other reason"))
@@ -318,8 +329,11 @@ func (v *view) why(b *strings.Builder) {
 			break
 		}
 		title := code(f)
-		if depkey.KindOf(f) == depkey.KindListing {
+		switch kind, name := depkey.Parse(f); kind {
+		case depkey.KindListing:
 			title += " (files added or removed)"
+		case depkey.KindEnv:
+			title = "environment variable " + code(name)
 		}
 		v.group(b, title, byFile[f], perFile)
 	}
@@ -432,6 +446,8 @@ const orphanVia = "orphan policy: suite runs in full"
 
 func viaLabel(via, key string) string {
 	switch kind, p := depkey.Parse(key); kind {
+	case depkey.KindEnv:
+		return "read it in its last run (traced)"
 	case depkey.KindTree:
 		return "an untraced command ran under " + code(p+"/")
 	case depkey.KindListing:

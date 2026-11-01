@@ -275,6 +275,7 @@ func (c *cycle) runSuite(ctx context.Context, i int, sr *selector.Suite) error {
 		p.logf("%s: %s", sr.Name, w)
 	}
 	settleOutcomes(r, units, c.record, len(c.f.extra) > 0)
+	selector.DropIgnoredEnv(p.cfg, sr.Suite, r)
 	statuses := map[string]string{}
 	for u, o := range r.Observations {
 		statuses[u] = o.Status
@@ -288,7 +289,7 @@ func (c *cycle) runSuite(ctx context.Context, i int, sr *selector.Suite) error {
 		if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
 		}
-		events := selector.Record(p.state, sr, r.Observations, c.hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(c.f.extra) > 0})
+		events := selector.Record(p.state, sr, r.Observations, c.hasher.ForSuite(sr.Suite), selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(c.f.extra) > 0})
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
 	}
 	return nil
@@ -614,13 +615,7 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 			if !tt.Selected {
 				continue
 			}
-			why := tt.Reason
-			if len(tt.Changed) > 0 {
-				why += ": " + strings.Join(limit(tt.Changed, 3), ", ")
-			} else if tt.Detail != "" {
-				why += ": " + tt.Detail
-			}
-			fmt.Fprintf(w, "    + %s  [%s]\n", tt.ID, why)
+			fmt.Fprintf(w, "    + %s  [%s]\n", tt.ID, selectionReason(tt))
 		}
 	}
 }

@@ -108,6 +108,8 @@ func TestParseErrors(t *testing.T) {
 		{"too many flaky retries", "flaky:\n  retry: 9\n", "flaky.retry"},
 		{"unknown flaky field", "flaky:\n  retries: 1\n", "field retries not found"},
 		{"wrong type", "suites: 3\n", ""},
+		{"bad env pattern", "env_ignore: [\"A[\"]\n", "bad environment variable pattern"},
+		{"empty suite env pattern", "suites:\n  - runner: go\n    env_track: [\"\"]\n", "bad environment variable pattern"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -119,6 +121,47 @@ func TestParseErrors(t *testing.T) {
 				t.Fatalf("err %q, want %q", err, c.want)
 			}
 		})
+	}
+}
+
+func TestEnvIgnored(t *testing.T) {
+	c, err := Parse([]byte("env_ignore: [\"BUILD_*\", DEPLOY_ID]\nenv_track: [LANG]\nsuites:\n  - name: web\n    runner: vitest\n    env_ignore: [VITE_DEBUG]\n    env_track: [\"LC_*\", CI]\n  - name: api\n    runner: go\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, api := &c.Suites[0], &c.Suites[1]
+	for _, tc := range []struct {
+		s    *Suite
+		name string
+		want bool
+	}{
+		{nil, "TZ", false},
+		{nil, "PATH", true},
+		{nil, "GITHUB_SHA", true},
+		{nil, "SMATES_TRACE_DIR", true},
+		{nil, "LANG", false}, // env_track
+		{api, "LC_ALL", true},
+		{web, "LC_ALL", false}, // the suite's env_track
+		{web, "CI", false},
+		{api, "CI", true},
+		{api, "BUILD_TARGET", true}, // env_ignore
+		{api, "DEPLOY_ID", true},
+		{web, "VITE_DEBUG", true},
+		{api, "VITE_DEBUG", false},
+		{nil, "DATABASE_URL", false},
+	} {
+		if got := c.EnvIgnored(tc.s, tc.name); got != tc.want {
+			t.Errorf("EnvIgnored(%v, %s) = %v, want %v", tc.s != nil, tc.name, got, tc.want)
+		}
+	}
+	// env_track does not override an explicit env_ignore.
+	c2, _ := Parse([]byte("env_ignore: [\"*\"]\nenv_track: [LANG]\n"))
+	if !c2.EnvIgnored(nil, "LANG") || !c2.EnvIgnored(nil, "TZ") {
+		t.Error("env_ignore: [*] must turn tracking off")
+	}
+	var none *Config
+	if none.EnvIgnored(nil, "TZ") || !none.EnvIgnored(nil, "HOME") {
+		t.Error("nil config uses the defaults")
 	}
 }
 

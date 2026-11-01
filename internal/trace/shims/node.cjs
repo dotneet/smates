@@ -10,6 +10,7 @@
 //   {"k":"exec","args":[...],"shell":true,"cwd":"/abs"}  a child process was started
 //   {"k":"tree","p":"/abs/dir"}    everything below a directory may have been read
 //   {"k":"code","p":"/abs/file"}   a module was loaded (Bun, which has no V8 coverage)
+//   {"k":"env","p":"NAME"}         an environment variable was read (never its value)
 //   {"k":"ctx","id":"test:/abs/file","t":ms}  attribution context switch (runner hooks)
 //   {"k":"exit","code":0,"t":ms}
 // Executed code is not recorded here: it comes from V8 coverage (NODE_V8_COVERAGE),
@@ -230,6 +231,146 @@
     t: Date.now(),
     lang: typeof Bun !== 'undefined' ? 'bun' : 'node',
   });
+
+  // Environment variables: process.env becomes a proxy that records the names of the
+  // variables read. Only reads with repository code on the stack count (not the
+  // runner's own bookkeeping), and only of values this process did not set itself (a
+  // test that sets TZ and reads it back does not depend on the outer TZ). Copying the
+  // whole environment ({...process.env}, Object.keys, for...in, spawning a child) is
+  // not a read of every variable: traced children record their own reads.
+  try {
+    const hasOwn = Object.prototype.hasOwnProperty;
+    // Names that are looked up on any object (JSON.stringify, await, matchers...).
+    const protocol = new Set(['toJSON', 'then', 'asymmetricMatch', '$$typeof', 'nodeType', 'inspect', 'length']);
+    const frameRe = /(file:\/\/[^\s)]+?|\/[^\s()]+?|[A-Za-z]:\\[^\s()]+?):\d+:\d+/g;
+    const self = __filename;
+    const fromRepo = () => {
+      const limit = Error.stackTraceLimit;
+      let stack = '';
+      try {
+        Error.stackTraceLimit = 64;
+        stack = String(new Error().stack || '');
+      } finally {
+        Error.stackTraceLimit = limit;
+      }
+      for (const m of stack.matchAll(frameRe)) {
+        const f = m[1].startsWith('file:') ? safeFileURL(m[1]) : m[1];
+        if (f && f !== self && f.startsWith(rootPrefix) && !f.includes(nm)) return true;
+      }
+      return false;
+    };
+    const recorded = new Set(); // context + name
+    const tries = new Map(); // context + name -> reads without repository code on the stack
+    let envCtx = '';
+    // envProxy traces an environment object (initial: its values now).
+    const envProxy = (target) => {
+      const initial = Object.assign(Object.create(null), target);
+      const note = (env, name) => {
+        try {
+          if (typeof name !== 'string') return;
+          const own = hasOwn.call(env, name);
+          if (!own && (name in Object.prototype || protocol.has(name))) return;
+          const key = envCtx + '\0' + name;
+          if (recorded.has(key)) return;
+          if ((own ? env[name] : undefined) !== initial[name]) return; // set by this process
+          const n = tries.get(key) || 0;
+          if (n >= 32) return; // read over and over by code outside the repository
+          tries.set(key, n + 1);
+          if (!fromRepo()) return;
+          recorded.add(key);
+          write({ k: 'env', p: name });
+        } catch (_) {}
+      };
+      // An enumeration (ownKeys) is followed by lookups of the keys in order, within
+      // the same tick: those lookups are the copy, not reads of single variables.
+      let keys = null;
+      let descAt = 0;
+      let getAt = 0;
+      const enumerated = (name, get) => {
+        if (!keys) return false;
+        if (get ? keys[getAt] !== name : keys[descAt] !== name) return false;
+        if (get) getAt++;
+        else descAt++;
+        return true;
+      };
+      return new Proxy(target, {
+        get(env, name) {
+          if (!enumerated(name, true)) note(env, name);
+          return env[name];
+        },
+        has(env, name) {
+          note(env, name);
+          return name in env;
+        },
+        getOwnPropertyDescriptor(env, name) {
+          if (!enumerated(name, false)) note(env, name);
+          return Reflect.getOwnPropertyDescriptor(env, name);
+        },
+        ownKeys(env) {
+          const list = Reflect.ownKeys(env);
+          keys = list;
+          descAt = getAt = 0;
+          queueMicrotask(() => {
+            if (keys === list) keys = null;
+          });
+          return list;
+        },
+        set(env, name, value) {
+          env[name] = value;
+          return true;
+        },
+        deleteProperty(env, name) {
+          delete env[name];
+          return true;
+        },
+      });
+    };
+    let proxy = envProxy(process.env);
+    Object.defineProperty(process, 'env', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return proxy;
+      },
+      set(v) {
+        // A test replaced the environment: keep tracing the new one.
+        proxy = v && typeof v === 'object' ? envProxy(v) : v;
+      },
+    });
+    const context = globalThis.__smatesTrace.context;
+    globalThis.__smatesTrace.context = function (id) {
+      envCtx = String(id);
+      return context.apply(this, arguments);
+    };
+    // Jest gives every test file a copy of process.env (jest-util's
+    // installCommonGlobals): trace the copy too.
+    const Module = require('module');
+    const load = Module._load;
+    const jestUtil = new WeakMap();
+    Module._load = function (request) {
+      const exp = load.apply(this, arguments);
+      if (request !== 'jest-util' || !exp || typeof exp.installCommonGlobals !== 'function') return exp;
+      let w = jestUtil.get(exp);
+      if (!w) {
+        const install = exp.installCommonGlobals;
+        // Its exports are getters that cannot be redefined: shadow the one we need.
+        w = Object.create(exp, {
+          installCommonGlobals: {
+            enumerable: true,
+            value: function (g) {
+              const r = install.apply(this, arguments);
+              try {
+                if (g && g.process && g.process.env) g.process.env = envProxy(g.process.env);
+              } catch (_) {}
+              return r;
+            },
+          },
+        });
+        jestUtil.set(exp, w);
+      }
+      return w;
+    };
+  } catch (_) {}
 
   process.on('exit', (code) => {
     // Bun has no V8 coverage: the module cache tells which modules were loaded.
