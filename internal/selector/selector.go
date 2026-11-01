@@ -406,12 +406,13 @@ func existedBefore(in *Input, f string) bool {
 	return true
 }
 
-// SnapshotHash returns the hash a snapshot holds for f and whether f existed then. An
-// Unrecorded entry holds the hash a --suite run of other suites last saw.
+// SnapshotHash returns the hash a snapshot holds for f and whether it holds one. An
+// Unrecorded entry counts as none: the hash after the marker is only what --suite runs
+// of other suites compare (Select), never content the file's own suites have seen.
 func SnapshotHash(files map[string]string, f string) (string, bool) {
 	v, ok := files[f]
-	if h, marked := strings.CutPrefix(v, Unrecorded); marked {
-		return h, h != ""
+	if strings.HasPrefix(v, Unrecorded) {
+		return "", false
 	}
 	return v, ok
 }

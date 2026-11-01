@@ -123,7 +123,8 @@ it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) ref
 the snapshot entries of the files its suites own; files only the suites left out own
 keep their entry, or, when they had none, get `?` followed by their current hash
 (`selector.Unrecorded`): a run of their own suites, or of every suite, still sees them
-as changed, while `--suite` runs of the other suites compare the hash after `?`.
+as changed (and as not recorded: the agent and failure hints get no old version), while
+`--suite` runs of the other suites compare the hash after `?`.
 
 Orphans go through, in order:
 

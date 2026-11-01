@@ -998,3 +998,15 @@ func TestExistenceProbe(t *testing.T) {
 		t.Errorf("probed file removed: %v", d)
 	}
 }
+
+func TestSnapshotHash(t *testing.T) {
+	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
+	for f, want := range map[string]struct {
+		h  string
+		ok bool
+	}{"a": {"h1", true}, "b": {"", false}, "c": {"", false}, "d": {"", false}} {
+		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
+			t.Errorf("%s: %q %v", f, h, ok)
+		}
+	}
+}
