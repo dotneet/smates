@@ -410,7 +410,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
 	// executable or not installed: when tests that report results reported none, they
 	// never ran. The batch is still handled as a failure below.
-	if c.envErr == nil && c.notStarted(sr, b, r) {
+	if c.envErr == nil && notStarted(sr.Suite.Runner, c.record, r) {
 		c.envErr = envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
@@ -639,28 +639,12 @@ func subsetOf(a, b []string) bool {
 }
 
 // notStarted reports a batch whose process exited 126 (not executable) or 127
-// (command not found) although none of its tests reported or left a result, while
-// they would have: the run is recorded, and the runner reports per-test results
-// (every runner but custom), or a test of the batch left a traced result before. A
-// custom runner whose tests are not traced (bats, ruby), or a run with --no-record,
-// reports nothing even when its tests ran: its exit code is a test failure.
-func (c *cycle) notStarted(sr *selector.Suite, b *batch, r *runner.RunResult) bool {
-	if r.ExitCode != 126 && r.ExitCode != 127 || len(r.Observations) > 0 || !c.record {
-		return false
-	}
-	if sr.Suite.Runner != "custom" {
-		return true
-	}
-	st := c.p.state.Suites[sr.Name]
-	if st == nil {
-		return false
-	}
-	for _, u := range b.units {
-		if e := st.Tests[u]; e != nil && len(e.Deps) > 0 {
-			return true
-		}
-	}
-	return false
+// (command not found) although none of its tests reported a result, while they would
+// have: the run is recorded and the runner (any but custom) reports per-test results.
+// A custom runner, or a run with --no-record, may report nothing even when its tests
+// ran: its exit code is a test failure.
+func notStarted(runnerName string, record bool, r *runner.RunResult) bool {
+	return (r.ExitCode == 126 || r.ExitCode == 127) && len(r.Observations) == 0 && record && runnerName != "custom"
 }
 
 // runError classifies an error of a runner that could not run a batch: a suite command

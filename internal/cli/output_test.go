@@ -325,37 +325,60 @@ func TestPrintFailedBatch(t *testing.T) {
 	}
 }
 
-// TestExit126And127: a recorded run whose runner exits 126/127 although its tests,
-// which report results, reported none is an environment problem; with results, or with
-// --no-record, it is a test failure.
+// TestExit126And127: a recorded run whose runner (any but custom) exits 126/127
+// although no test reported a result is an environment problem; a custom runner, or a
+// run with --no-record, may report nothing when its tests ran: a test failure.
 func TestExit126And127(t *testing.T) {
 	_, write, run := outputFixture(t) // records traced results for good/a_check.py
-	cfg := func(command string) string {
-		return "version: 1\norphans: ignore\nsuites:\n  - name: good\n    runner: custom\n    tests: [\"good/*_check.py\"]\n    command: " + command + "\n"
+	cfg := func(runner, tests, command string) string {
+		return "version: 1\norphans: ignore\nsuites:\n  - name: s\n    runner: " + runner + "\n    tests: [\"" + tests + "\"]\n    command: " + command + "\n"
 	}
 
-	// The tests run and report results, then the command exits 127.
-	write("smates.yml", cfg(`sh -c 'for f; do python3 "$f"; done; exit 127' sh`))
+	// Custom runner: the tests run and report results, then the command exits 127.
+	write("smates.yml", cfg("custom", "good/*_check.py", `sh -c 'for f; do python3 "$f"; done; exit 127' sh`))
 	if code, _, errs := run("run", "--all"); code != ExitFailed {
 		t.Errorf("results then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
 	}
 	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
 		t.Errorf("--no-record, tests ran then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
 	}
+	// Custom runner, tool missing: nothing tells it from a failing test.
+	write("smates.yml", cfg("custom", "good/*_check.py", "sh -c 'smates-no-such-tool-x5'"))
+	if code, _, errs := run("run", "--all"); code != ExitFailed {
+		t.Errorf("custom, missing tool: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
 
-	// The tool is missing: no test ran.
-	write("smates.yml", cfg("sh -c 'smates-no-such-tool-x5'"))
+	// pytest launched through a shell that cannot find it: no test ran.
+	write("pt/test_x.py", "def test_x():\n    pass\n")
+	write("smates.yml", cfg("pytest", "pt/test_*.py", "sh -c 'smates-no-such-pytest-x6' sh"))
 	code, out, errs := run("run", "--all", "--output", "failures")
-	if code != ExitEnv || !strings.Contains(out, "smates-no-such-tool-x5") ||
+	if code != ExitEnv || !strings.Contains(out, "smates-no-such-pytest-x6") ||
 		!strings.Contains(errs, "exited with code 127 before any test reported a result") || !strings.Contains(errs, "smates: FAILED") {
-		t.Errorf("missing tool: exit %d\n%s\n--- stderr\n%s", code, out, errs)
+		t.Errorf("pytest, missing tool: exit %d\n%s\n--- stderr\n%s", code, out, errs)
 	}
-	write("smates.yml", cfg("sh -c 'exit 126'"))
-	if code, _, errs := run("run", "--all"); code != ExitEnv || !strings.Contains(errs, "done in") {
-		t.Errorf("126: exit %d\n%s", code, errs)
-	}
-	// Without recording nothing tells the cases apart: a test failure.
 	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
-		t.Errorf("--no-record 126: exit %d\n%s", code, errs)
+		t.Errorf("pytest, missing tool, --no-record: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+}
+
+func TestNotStarted(t *testing.T) {
+	obs := map[string]*runner.Observation{"a": {Status: state.Fail}}
+	for _, tc := range []struct {
+		runner string
+		record bool
+		r      *runner.RunResult
+		want   bool
+	}{
+		{"pytest", true, &runner.RunResult{ExitCode: 127}, true},
+		{"vitest", true, &runner.RunResult{ExitCode: 126}, true},
+		{"pytest", true, &runner.RunResult{ExitCode: 127, Observations: obs}, false},
+		{"pytest", false, &runner.RunResult{ExitCode: 127}, false},
+		{"custom", true, &runner.RunResult{ExitCode: 127}, false},
+		{"pytest", true, &runner.RunResult{ExitCode: 1}, false},
+		{"pytest", true, &runner.RunResult{ExitCode: 0}, false},
+	} {
+		if got := notStarted(tc.runner, tc.record, tc.r); got != tc.want {
+			t.Errorf("notStarted(%s, record=%t, exit %d, %d obs) = %t", tc.runner, tc.record, tc.r.ExitCode, len(tc.r.Observations), got)
+		}
 	}
 }
