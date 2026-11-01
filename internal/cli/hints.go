@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -64,7 +65,7 @@ type explainJob struct {
 func newFailureHints(ctx context.Context, p *project, res *selector.Result, hasher *selector.Hasher, base string, noAgent bool) *failureHints {
 	fh := &failureHints{ctx: ctx, p: p, res: res, hasher: hasher, flagBase: base, hadSnapshot: len(p.state.Files) > 0}
 	a := p.cfg.Agent
-	if !noAgent && a.Enabled != "never" && config.Bool(a.ExplainFailures, true) && a.ExplainMax > 0 {
+	if !noAgent && a.Enabled != config.AgentNever && config.Bool(a.ExplainFailures, true) && a.ExplainMax > 0 {
 		if ok, why := agent.ExplainSupported(a); ok {
 			fh.explain, fh.budget = true, a.ExplainMax
 		} else {
@@ -78,7 +79,7 @@ func newFailureHints(ctx context.Context, p *project, res *selector.Result, hash
 func (fh *failureHints) baseRev() string {
 	fh.baseOnce.Do(func() {
 		fh.base = fh.flagBase
-		if fh.base == "" && fh.res.Mode != "all" {
+		if fh.base == "" && fh.res.Mode != selector.ModeAll {
 			fh.base = autoBase(fh.p.ci, fh.p.repo)
 		}
 	})
@@ -99,7 +100,7 @@ func (fh *failureHints) add(sr *selector.Suite, obs map[string]*runner.Observati
 	}
 	sort.Strings(failing)
 	var changed map[string]bool
-	if fh.res.Mode != "all" && (fh.hadSnapshot || fh.baseRev() != "") {
+	if fh.res.Mode != selector.ModeAll && (fh.hadSnapshot || fh.baseRev() != "") {
 		changed = map[string]bool{}
 		for _, f := range fh.res.Changed {
 			changed[f] = true
@@ -155,7 +156,7 @@ func (fh *failureHints) queue(sr *selector.Suite, h *hints.Hint, output string) 
 	req.Log = &job.log
 	if raw, ok := fh.p.state.AgentCache[job.key]; ok {
 		var ex hints.Explanation
-		if jsonUnmarshal(raw, &ex) == nil && ex.Reason != "" {
+		if json.Unmarshal(raw, &ex) == nil && ex.Reason != "" {
 			ex.Cached = true
 			h.Explanation = &ex
 			return
@@ -224,7 +225,7 @@ func (fh *failureHints) wait() {
 			continue
 		}
 		job.hint.Explanation = job.ex
-		if raw, err := jsonMarshal(job.ex); err == nil {
+		if raw, err := json.Marshal(job.ex); err == nil {
 			fh.p.state.AgentCache[job.key] = raw
 		}
 	}
@@ -327,7 +328,7 @@ func hintSummary(h *hints.Hint) string {
 }
 
 func candidateNote(c hints.Candidate) string {
-	if c.Link == "unattributed" {
+	if c.Link == hints.LinkUnattributed {
 		return c.Kind + ", not attributed to any test, " + c.Change
 	}
 	return c.Kind + ", " + c.Link + ", " + c.Change

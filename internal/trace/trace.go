@@ -22,6 +22,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 )
 
@@ -200,15 +201,15 @@ func (p *Proc) add(ctx, kind, rel string) string {
 	case "code":
 		p.Code[rel] = true
 	case "dir":
-		rel = strings.TrimSuffix(rel, "/") + "/"
+		rel = depkey.Listing(rel)
 		p.Reads[rel] = true
 	case "probe":
-		rel = strings.TrimSuffix(rel, "/") + "?"
+		rel = depkey.Existence(rel)
 		p.Reads[rel] = true
-	case "key": // already a dependency key ("x/**", "x/", "x?")
+	case "key": // already a dependency key
 		p.Reads[rel] = true
 	case "tree":
-		rel = strings.TrimSuffix(rel, "/") + "/**"
+		rel = depkey.Tree(rel)
 		p.Reads[rel] = true
 	default:
 		p.Reads[rel] = true
@@ -396,12 +397,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 			}
 		case "result":
 			if r, ok := rel(ev.ID); ok {
-				prev, seen := p.Results[r]
-				st := ev.Status
-				if seen && prev.Status == "fail" {
-					st = "fail"
-				}
-				p.Results[r] = Result{Status: st, Ms: prev.Ms + ev.Ms, Message: JoinMessage(prev.Message, ev.Msg)}
+				addResult(p.Results, r, ev.Status, ev.Ms, ev.Msg)
 			}
 		case "exit":
 			if ev.Code != nil {

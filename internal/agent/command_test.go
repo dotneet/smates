@@ -106,6 +106,23 @@ JSON
 	}
 }
 
+// The command that runs is the one of the request's configuration, which the cache
+// key is computed from, not the one the backend was created with.
+func TestCommandBackendUsesRequestCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh scripts")
+	}
+	f := newFixture(t)
+	backend := testConfig()
+	backend.Command = writeScript(t, "cat >/dev/null; exit 3")
+	cfg := testConfig()
+	cfg.Command = writeScript(t, `cat >/dev/null; echo '{"decision":"none","tests":[],"no_impact":[],"summary":"request"}'`)
+	d, err := New(backend).Decide(context.Background(), f.request(cfg))
+	if err != nil || d.Summary != "request" {
+		t.Fatalf("Decide = %+v, %v", d, err)
+	}
+}
+
 func TestLimitedBuffer(t *testing.T) {
 	head := &limitedBuffer{max: 4}
 	if n, err := head.Write([]byte("abc")); n != 3 || err != nil {

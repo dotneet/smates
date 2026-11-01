@@ -20,6 +20,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/selector"
 )
@@ -181,7 +182,7 @@ func (tb *toolbox) run(ctx context.Context, name string, input json.RawMessage) 
 	case toolSearchTests:
 		var in struct{ Query string }
 		if err = decodeInput(input, &in); err == nil {
-			out, err = tb.searchTests(in.Query)
+			out = tb.searchTests(in.Query)
 		}
 	default:
 		err = toolErrorf("unknown tool %q", name)
@@ -656,7 +657,7 @@ func (tb *toolbox) testsForFile(p string) (string, error) {
 			return true
 		case dir:
 			return strings.HasPrefix(dep, rel)
-		case strings.HasSuffix(dep, "/"): // a directory dependency covers its files
+		case depkey.KindOf(dep) == depkey.KindListing: // a directory dependency covers its files
 			return strings.HasPrefix(rel, dep)
 		}
 		return false
@@ -713,7 +714,7 @@ func (tb *toolbox) testDeps(suite, test string) (string, error) {
 	return b.String(), nil
 }
 
-func (tb *toolbox) searchTests(q string) (string, error) {
+func (tb *toolbox) searchTests(q string) string {
 	q = strings.ToLower(strings.TrimSpace(q))
 	var b strings.Builder
 	n := 0
@@ -730,9 +731,9 @@ func (tb *toolbox) searchTests(q string) (string, error) {
 	}
 	switch {
 	case n == 0:
-		return "no test ID contains " + q, nil
+		return "no test ID contains " + q
 	case n > maxSearchTests:
 		fmt.Fprintf(&b, "[%d more tests not shown; refine the query]\n", n-maxSearchTests)
 	}
-	return b.String(), nil
+	return b.String()
 }

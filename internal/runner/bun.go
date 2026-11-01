@@ -66,10 +66,7 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		argv, err := rc.CommandLine(extra, []string{"./" + relToSuite(rc.Suite, u)})
 		return argv, env, err
 	})
-	worst := 0
-	for _, c := range codes {
-		worst = max(worst, c)
-	}
+	worst := worstCode(codes)
 	res := &RunResult{ExitCode: worst, Duration: time.Since(start)}
 	if err != nil {
 		return res, err
@@ -93,7 +90,7 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.AddFile(f)
 		}
 		o.AddFile(u)
-		o.Status = overallStatus("", codes[u])
+		setUnitExit(o, codes[u])
 	}
 	res.Observations, res.Warnings = obs, warns
 	return res, nil

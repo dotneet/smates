@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/trace"
@@ -134,7 +135,7 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 	for id, u := range attr.Units {
 		o := &Observation{Files: map[string]bool{}, DurationMs: u.Ms}
 		for f := range u.Files {
-			if !(opt.dropDirs && strings.HasSuffix(f, "/")) {
+			if !(opt.dropDirs && depkey.KindOf(f) == depkey.KindListing) {
 				o.Files[f] = true
 			}
 		}
@@ -197,6 +198,16 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	if rc.Suite.RecordJobs > 0 {
 		jobs = rc.Suite.RecordJobs
 	}
+	// Build every command line first: a failure then starts nothing.
+	type job struct{ argv, env []string }
+	cmds := make([]job, len(units))
+	for i, u := range units {
+		argv, env, err := argvFor(u, i)
+		if err != nil {
+			return nil, err
+		}
+		cmds[i] = job{argv, env}
+	}
 	codes := map[string]int{}
 	var mu sync.Mutex
 	var outMu sync.Mutex
@@ -204,10 +215,7 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	var wg sync.WaitGroup
 	var firstErr error
 	for i, u := range units {
-		argv, env, err := argvFor(u, i)
-		if err != nil {
-			return nil, err
-		}
+		argv, env := cmds[i].argv, cmds[i].env
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(u string, argv, env []string) {
@@ -230,6 +238,21 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	}
 	wg.Wait()
 	return codes, firstErr
+}
+
+// worstCode returns the highest exit code of an isolated run.
+func worstCode(codes map[string]int) int {
+	worst := 0
+	for _, c := range codes {
+		worst = max(worst, c)
+	}
+	return worst
+}
+
+// setUnitExit sets the status of a unit that ran in its own process (isolatedRun) from
+// that process's exit code: the outcome is the unit's own, not inferred from the run.
+func setUnitExit(o *Observation, code int) {
+	o.Status, o.Inferred = overallStatus("", code), false
 }
 
 // findBin looks for node_modules/.bin/<name> from dir up to the repository root and

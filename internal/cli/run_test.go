@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"sort"
 	"testing"
+
+	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // TestRunSelectEndToEnd drives `smates run` / `smates select` through Main on a small
@@ -172,4 +175,57 @@ func contains(s []string, x string) bool {
 		}
 	}
 	return false
+}
+
+func TestSettleOutcomes(t *testing.T) {
+	obs := func(st ...string) map[string]*runner.Observation {
+		m := map[string]*runner.Observation{}
+		for i, s := range st {
+			m[string(rune('a'+i))] = &runner.Observation{Status: s}
+		}
+		return m
+	}
+	statuses := func(r *runner.RunResult) map[string]string {
+		m := map[string]string{}
+		for u, o := range r.Observations {
+			m[u] = o.Status
+		}
+		return m
+	}
+	units := []string{"a", "b", "c"}
+
+	// A passing run is recorded as reported.
+	r := &runner.RunResult{Observations: obs(state.Pass, state.Fail)}
+	settleOutcomes(r, units, true, false)
+	if got := statuses(r); len(got) != 2 || got["a"] != state.Pass || got["b"] != state.Fail {
+		t.Errorf("passing run: %v", got)
+	}
+
+	// A failed run: untraced units are unknown; reported outcomes stay.
+	r = &runner.RunResult{ExitCode: 1, Observations: obs(state.Pass, state.Fail)}
+	settleOutcomes(r, units, true, false)
+	if got := statuses(r); got["a"] != state.Pass || got["b"] != state.Fail || got["c"] != state.Unknown || !r.Observations["c"].Inferred {
+		t.Errorf("failed run: %v", got)
+	}
+
+	// A failed run in which no unit failed records no pass.
+	r = &runner.RunResult{ExitCode: 1, Observations: obs(state.Pass)}
+	settleOutcomes(r, units[:1], false, false)
+	if o := r.Observations["a"]; o.Status != state.Unknown || !o.Inferred {
+		t.Errorf("crash after the tests: %+v", o)
+	}
+
+	// Arguments passed to the runner may filter tests: no pass is recorded.
+	r = &runner.RunResult{Observations: obs(state.Pass, state.Fail)}
+	settleOutcomes(r, units, true, true)
+	if got := statuses(r); got["a"] != state.Unknown || got["b"] != state.Fail {
+		t.Errorf("runner arguments: %v", got)
+	}
+
+	// No observations at all.
+	r = &runner.RunResult{}
+	settleOutcomes(r, nil, true, false)
+	if r.Observations == nil {
+		t.Error("observations map not created")
+	}
 }

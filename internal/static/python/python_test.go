@@ -362,6 +362,16 @@ importlib.import_module(".x", "other")
 			},
 		},
 		{
+			name: "relative dynamic import in a stub package",
+			files: map[string]string{
+				"pkg/__init__.pyi":  "",
+				"pkg/plugins/p1.py": "",
+				"pkg/loader.py":     "import importlib\nimportlib.import_module(f\".plugins.{n}\", __package__)\n",
+			},
+			target: "pkg/loader.py",
+			want:   []string{"pkg/__init__.pyi", "pkg/plugins/p1.py"},
+		},
+		{
 			name: "pytest_plugins and patch targets",
 			files: map[string]string{
 				"fixtures/__init__.py": "",

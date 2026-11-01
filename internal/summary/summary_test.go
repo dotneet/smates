@@ -3,8 +3,10 @@ package summary
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +25,7 @@ func suite(name, run string, tests ...*selector.Test) *selector.Suite {
 
 func sel(id, reason string, changed map[string]string, ms int64) *selector.Test {
 	t := &selector.Test{ID: id, Selected: true, Reason: reason, Duration: ms}
-	for _, c := range sortedKeys(changed) {
+	for _, c := range slices.Sorted(maps.Keys(changed)) {
 		t.Changed = append(t.Changed, c)
 	}
 	if len(changed) > 0 {

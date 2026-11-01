@@ -4,12 +4,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // Unit is the attributed usage of one test unit.
 type Unit struct {
 	Files map[string]bool
-	// Status: "pass", "fail" or "" (unknown) from runner plugins or process exit codes.
+	// Status: state.Pass, state.Fail or "" (unknown) from runner plugins or process exit codes.
 	Status string
 	Ms     int64
 	// Message is the failure output a runner plugin reported for the unit.
@@ -170,7 +173,7 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	// in the runner's own process.
 	for _, p := range procs {
 		for f := range p.Ctx[GlobalContext] {
-			if unitOf(f) == "" && !strings.HasSuffix(f, "?") && !strings.HasSuffix(f, "/") {
+			if k := depkey.KindOf(f); unitOf(f) == "" && k != depkey.KindExistence && k != depkey.KindListing {
 				res.Global[f] = true
 			}
 		}
@@ -210,9 +213,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 				u.Ms += p.End - p.Start
 			}
 			if p.Exit != nil {
-				st := "pass"
+				st := state.Pass
 				if *p.Exit != 0 {
-					st = "fail"
+					st = state.Fail
 				}
 				u.Status = worse(u.Status, st)
 			}
@@ -280,7 +283,7 @@ func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *U
 		switch {
 		case ctx == "":
 			for f := range files {
-				if !strings.HasSuffix(f, "/") && !strings.HasSuffix(f, "?") && !p.Code[f] {
+				if k := depkey.KindOf(f); k != depkey.KindListing && k != depkey.KindExistence && !p.Code[f] {
 					shared[f] = true
 				}
 			}
@@ -301,9 +304,9 @@ func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *U
 func worse(a, b string) string {
 	rank := func(s string) int {
 		switch s {
-		case "fail":
+		case state.Fail:
 			return 2
-		case "pass":
+		case state.Pass:
 			return 0
 		}
 		return 1

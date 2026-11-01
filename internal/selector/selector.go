@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
@@ -19,7 +20,6 @@ import (
 // Reason codes.
 const (
 	ReasonAll        = "all"        // forced full run
-	ReasonNoState    = "no-state"   // nothing recorded and no base to diff against
 	ReasonNew        = "new"        // no recorded entry for this test
 	ReasonChanged    = "changed"    // an input changed since the test last passed
 	ReasonFailed     = "failed"     // the test did not pass last time
@@ -27,6 +27,7 @@ const (
 	ReasonReference  = "reference"  // a test references an orphan file by name
 	ReasonAgent      = "agent"      // the agent asked for it
 	ReasonDiff       = "diff"       // diff mode: static deps changed since base
+	ReasonRerun      = "rerun"      // smates watch reran the previous selection
 	ReasonUnaffected = "unaffected" // skipped
 )
 
@@ -99,9 +100,18 @@ type Suite struct {
 	Inputs map[string]bool `json:"-"`
 }
 
+// Mode is how a selection was computed.
+type Mode string
+
+const (
+	ModeState Mode = "state" // against the recorded state
+	ModeDiff  Mode = "diff"  // nothing recorded: static deps against the base revision
+	ModeAll   Mode = "all"   // every test runs
+)
+
 // Result is the full selection.
 type Result struct {
-	Mode    string   `json:"mode"` // "state", "diff", "all"
+	Mode    Mode     `json:"mode"`
 	Suites  []*Suite `json:"suites"`
 	Changed []string `json:"changed"`
 	Orphans []string `json:"orphans"`
@@ -159,15 +169,15 @@ func (r *Result) SuiteByName(name string) *Suite {
 // Select computes the selection. Orphans are reported but not acted upon; callers apply
 // the orphan policy with ApplyOrphans (after an optional agent call).
 func Select(in *Input) (*Result, error) {
-	res := &Result{Mode: "state"}
+	res := &Result{Mode: ModeState}
 	switch {
 	case in.All:
-		res.Mode = "all"
+		res.Mode = ModeAll
 	case in.State.Empty() && in.Base == "":
-		res.Mode = "all"
+		res.Mode = ModeAll
 		res.Notes = append(res.Notes, "no recorded state and no base revision: running everything (run `smates run` once on the default branch to record)")
 	case in.State.Empty():
-		res.Mode = "diff"
+		res.Mode = ModeDiff
 	}
 
 	files := make([]string, 0, len(in.Snap))
@@ -178,7 +188,7 @@ func Select(in *Input) (*Result, error) {
 
 	// Changed files: against the recorded snapshot, or the base revision.
 	var changedSet map[string]bool
-	if res.Mode != "all" {
+	if res.Mode != ModeAll {
 		var err error
 		changedSet, err = changedFiles(in)
 		if err != nil {
@@ -196,7 +206,7 @@ func Select(in *Input) (*Result, error) {
 	}
 
 	var baseChanged map[string]bool
-	if in.DiffUnrecorded && in.Base != "" && res.Mode == "state" {
+	if in.DiffUnrecorded && in.Base != "" && res.Mode == ModeState {
 		list, err := in.Repo.ChangedSince(in.Base)
 		if err != nil {
 			return nil, fmt.Errorf("diff against %s: %w", in.Base, err)
@@ -275,8 +285,8 @@ func Select(in *Input) (*Result, error) {
 			if entry != nil {
 				t.Duration = entry.DurationMs
 			}
-			if entry == nil && res.Mode == "state" && baseChanged != nil {
-				decide(t, "diff", nil, dl, hasher, baseChanged)
+			if entry == nil && res.Mode == ModeState && baseChanged != nil {
+				decide(t, ModeDiff, nil, dl, hasher, baseChanged)
 			} else {
 				decide(t, res.Mode, entry, dl, hasher, changedSet)
 			}
@@ -294,7 +304,7 @@ func Select(in *Input) (*Result, error) {
 		sr.All = allSelected(sr)
 	}
 
-	if res.Mode != "all" {
+	if res.Mode != ModeAll {
 		for _, f := range res.Changed {
 			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
 				continue
@@ -323,13 +333,13 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
 	case deps[f]:
 		return "content"
-	case existenceChanged && deps[path.Dir(f)+"/"]:
+	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"
-	case existenceChanged && deps[f+"?"]:
+	case existenceChanged && deps[depkey.Existence(f)]:
 		return "existence"
 	}
 	for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
-		if deps[d+"/**"] {
+		if deps[depkey.Tree(d)] {
 			return "tree"
 		}
 	}
@@ -354,12 +364,12 @@ func existedBefore(in *Input, f string) bool {
 	return true
 }
 
-func decide(t *Test, mode string, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
+func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
 	switch mode {
-	case "all":
+	case ModeAll:
 		t.Selected, t.Reason = true, ReasonAll
 		return
-	case "diff":
+	case ModeDiff:
 		for _, d := range deps {
 			if changed[d] {
 				t.Changed = append(t.Changed, d)
@@ -490,6 +500,18 @@ type Addition struct {
 	Files []string `json:",omitempty"`
 }
 
+// viaFor is how the files of an addition with reason reached the test (only additions
+// for orphans, by name reference or by the orphan policy, carry files).
+func viaFor(reason string) string {
+	switch reason {
+	case ReasonReference:
+		return ViaReference
+	case ReasonOrphan:
+		return ViaOrphan
+	}
+	return ""
+}
+
 // Apply marks additional tests as selected. Unknown tests are ignored and returned.
 func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 	for _, a := range adds {
@@ -509,7 +531,7 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 							t.Via = map[string]string{}
 						}
 						t.Changed = append(t.Changed, f)
-						t.Via[f] = map[string]string{ReasonReference: ViaReference, ReasonOrphan: ViaOrphan}[a.Reason]
+						t.Via[f] = viaFor(a.Reason)
 					}
 				}
 			}

@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -19,9 +18,6 @@ import (
 	"github.com/dotneet/smates/internal/summary"
 	"github.com/dotneet/smates/internal/trace"
 )
-
-func jsonMarshal(v any) ([]byte, error)   { return json.Marshal(v) }
-func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 
 type runFlags struct {
 	commonFlags
@@ -37,14 +33,22 @@ type runFlags struct {
 	summary  string
 	markdown string
 	report   string
+	// extra are the arguments passed through to the runner; shardI/shardN the parsed
+	// --shard (0/0 when not sharded).
+	extra          []string
+	shardI, shardN int
 }
 
 func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
-	return runCycle(ctx, args, stdout, stderr, nil)
+	f, err := parseRunFlags(args, stderr)
+	if err != nil {
+		return 2, err
+	}
+	return runCycle(ctx, f, stdout, stderr, nil)
 }
 
-// runCycle is `smates run`; hooks (nil for `smates run`) let `smates watch` drive it.
-func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hooks *runHooks) (int, error) {
+// parseRunFlags parses the arguments of `smates run`.
+func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f runFlags
@@ -55,29 +59,34 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 	fs.BoolVar(&f.noAgent, "no-agent", false, "do not call the agent for unattributed changes")
 	fs.BoolVar(&f.noRecord, "no-record", false, "run without tracing and without updating the state")
 	fs.BoolVar(&f.shadow, "shadow", false, "run every test but report which failures the selection would have missed")
-	fs.StringVar(&f.shard, "shard", "", "run shard `I/N` of the selected tests (balanced by recorded duration)")
+	fs.StringVar(&f.shard, "shard", "", "run shard `I/N` of the selected tests (tests are assigned to shards by a stable hash)")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "print the commands instead of running them")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
 	fs.StringVar(&f.summary, "summary", "", "append a markdown summary to `file` (default: $GITHUB_STEP_SUMMARY on GitHub Actions)")
 	fs.StringVar(&f.report, "report", "", "write a JSON report (selection, per-test results, shadow escapes) to `file`")
 	fs.StringVar(&f.markdown, "markdown", "", "write the summary as Markdown to `file`, e.g. for a pull request comment")
 	if err := fs.Parse(args); err != nil {
-		return 2, usageError{err}
+		return nil, usageError{err}
 	}
-	extra := fs.Args()
-	shardI, shardN, err := parseShard(f.shard)
-	if err != nil {
-		return 2, err
+	f.extra = fs.Args()
+	var err error
+	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
+		return nil, err
 	}
-	if f.shadow && shardN > 1 {
-		return 2, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
+	if f.shadow && f.shardN > 1 {
+		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
 	}
+	return &f, nil
+}
+
+// runCycle is `smates run`: select, run every suite, record the outcomes and report.
+// hooks (nil for `smates run`) let `smates watch` drive it.
+func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks *runHooks) (int, error) {
 	p, err := load(&f.commonFlags, stderr)
 	if err != nil {
 		return 1, err
 	}
-
-	if len(extra) > 0 && !f.noRecord {
+	if len(f.extra) > 0 && !f.noRecord {
 		p.logf("runner arguments may filter tests: passing tests are not recorded as passed in this run")
 	}
 
@@ -93,261 +102,362 @@ func runCycle(ctx context.Context, args []string, stdout, stderr io.Writer, hook
 		return 1, err
 	}
 	hooks.onSelected(p, sel)
-	res := sel.res
-	applyShard(res, shardI, shardN)
+	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
+	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, record: !f.noRecord, self: selfPath(), ran: map[string]map[string]string{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection).
-	runAllNow := (res.Mode == "all" || f.shadow) && shardN <= 1
-	record := !f.noRecord
-	traceRoot := ""
-	if record && !f.dryRun {
-		traceRoot, err = os.MkdirTemp("", "smates-trace-")
+	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
+	if f.dryRun {
+		c.printCommands()
+		return 0, nil
+	}
+	if c.record {
+		cleanup, err := c.prepareTrace()
 		if err != nil {
 			return 1, err
 		}
-		if os.Getenv("SMATES_KEEP_TRACE") != "" {
-			p.logf("keeping trace files in %s", traceRoot)
-		} else {
-			defer os.RemoveAll(traceRoot)
-		}
+		defer cleanup()
 	}
-	shimDir := ""
-	if traceRoot != "" {
-		shimDir = filepath.Join(traceRoot, "shims")
-		if _, err := trace.ExtractShims(shimDir); err != nil {
+	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
+	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
+	c.now = time.Now().UTC()
+	start := time.Now()
+	for i, sr := range sel.res.Suites {
+		if err := c.runSuite(ctx, i, sr); err != nil {
 			return 1, err
 		}
 	}
+	c.failures.wait()
+	if c.record {
+		if err := c.saveState(); err != nil {
+			return 1, err
+		}
+	}
+	c.failures.print(stderr)
+	elapsed := time.Since(start).Round(time.Millisecond)
+	c.logOutcome(elapsed)
+	c.writeSummaries(elapsed)
+	if f.report != "" {
+		if err := c.writeReport(); err != nil {
+			return c.worst, fmt.Errorf("writing report: %w", err)
+		}
+	}
+	return c.worst, nil
+}
+
+// cycle is one `smates run` over the selected suites.
+type cycle struct {
+	p      *project
+	f      *runFlags
+	sel    *selection
+	stdout io.Writer
+	stderr io.Writer
+	record bool // trace the run and update the state
+	runAll bool // run every test of every suite, whatever was selected
+	self   string
+
+	traceRoot string
+	shimDir   string
+	hasher    *selector.Hasher
+	failures  *failureHints
+	now       time.Time
+
+	// Accumulated over the suites.
+	worst    int
+	ran      map[string]map[string]string // suite -> unit -> status
+	escapes  []string                     // shadow: failing tests the selection would have skipped
+	possible []string                     // shadow: skipped tests failed only by the run's exit code
+	flakes   []flakeReport
+}
+
+// selfPath is the smates executable with symlinks resolved ("" if unknown).
+func selfPath() string {
 	self, _ := os.Executable()
 	if self != "" {
 		if r, err := filepath.EvalSymlinks(self); err == nil {
 			self = r
 		}
 	}
+	return self
+}
 
-	hasher := selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
-	failures := newFailureHints(ctx, p, res, hasher, f.base, f.noAgent)
-	now := time.Now().UTC()
-	worst := 0
-	start := time.Now()
-	ran := map[string]map[string]string{} // suite -> unit -> status
-	var escapes, possible []string
-	var flakes []flakeReport
-	for i, sr := range res.Suites {
-		units := sr.Selected()
-		full := runAllNow || (sr.All && shardN <= 1)
-		if runAllNow {
-			units = nil
-			for _, t := range sr.Tests {
-				units = append(units, t.ID)
-			}
+// prepareTrace creates the trace directory and extracts the shims into it. cleanup
+// removes it (unless SMATES_KEEP_TRACE is set).
+func (c *cycle) prepareTrace() (cleanup func(), err error) {
+	root, err := os.MkdirTemp("", "smates-trace-")
+	if err != nil {
+		return nil, err
+	}
+	cleanup = func() { os.RemoveAll(root) }
+	if os.Getenv("SMATES_KEEP_TRACE") != "" {
+		c.p.logf("keeping trace files in %s", root)
+		cleanup = func() {}
+	}
+	c.traceRoot, c.shimDir = root, filepath.Join(root, "shims")
+	if _, err := trace.ExtractShims(c.shimDir); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return cleanup, nil
+}
+
+// units returns the units of a suite this cycle runs, and whether they are the whole
+// suite.
+func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
+	if c.runAll {
+		ids := make([]string, 0, len(sr.Tests))
+		for _, t := range sr.Tests {
+			ids = append(ids, t.ID)
 		}
+		return ids, true
+	}
+	return sr.Selected(), sr.All && c.f.shardN <= 1
+}
+
+func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runner.RunContext {
+	rc := &runner.RunContext{
+		Repo: c.p.repo, Suite: sr.Suite, Units: units, All: full, Record: c.record, ExtraArgs: c.f.extra,
+		ShimDir: c.shimDir, Self: c.self, Stdout: c.stdout, Stderr: c.stderr,
+		IsTest: sr.Suite.IsTestFile,
+	}
+	unitOf := unitIndex(sr)
+	rc.UnitOf = func(f string) string { return unitOf[f] }
+	return rc
+}
+
+// printCommands prints the command each suite would run (--dry-run).
+func (c *cycle) printCommands() {
+	for _, sr := range c.sel.res.Suites {
+		units, full := c.units(sr)
 		if len(units) == 0 {
-			p.logf("%s: no tests selected, skipping", sr.Name)
+			c.p.logf("%s: no tests selected, skipping", sr.Name)
 			continue
 		}
-		rc := &runner.RunContext{
-			Repo: p.repo, Suite: sr.Suite, Units: units, All: full && shardN <= 1, Record: record, ExtraArgs: extra,
-			ShimDir: shimDir, Self: self, Stdout: stdout, Stderr: stderr,
-			IsTest: sr.Suite.IsTestFile,
+		rc := c.runContext(sr, units, full)
+		argv, _ := rc.CommandLine(nil, rc.RelArgs(""))
+		if rc.All {
+			argv, _ = rc.CommandLine(nil, nil)
 		}
-		unitOf := unitIndex(sr)
-		rc.UnitOf = func(f string) string { return unitOf[f] }
-		if f.dryRun {
-			argv, _ := rc.CommandLine(nil, rc.RelArgs(""))
-			if rc.All {
-				argv, _ = rc.CommandLine(nil, nil)
+		fmt.Fprintf(c.stdout, "(cd %s && %s)\n", sr.Suite.Root, strings.Join(argv, " "))
+	}
+}
+
+// runSuite runs the units of the i-th suite and records their outcomes.
+func (c *cycle) runSuite(ctx context.Context, i int, sr *selector.Suite) error {
+	p := c.p
+	units, full := c.units(sr)
+	if len(units) == 0 {
+		p.logf("%s: no tests selected, skipping", sr.Name)
+		return nil
+	}
+	rc := c.runContext(sr, units, full)
+	if c.record {
+		rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("suite-%d", i))
+		if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
+			return err
+		}
+	}
+	p.logf("%s: running %d test unit(s) with %s", sr.Name, len(units), sr.Suite.Runner)
+	r, err := sr.Suite.Adapter.Run(ctx, rc)
+	if err != nil {
+		return fmt.Errorf("%s: %w", sr.Name, err)
+	}
+	var retried map[string]*runner.Observation
+	if c.record && len(c.f.extra) == 0 {
+		if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
+			return err
+		}
+	}
+	c.worst = max(c.worst, r.ExitCode)
+	for _, w := range r.Warnings {
+		p.logf("%s: %s", sr.Name, w)
+	}
+	settleOutcomes(r, units, c.record, len(c.f.extra) > 0)
+	statuses := map[string]string{}
+	for u, o := range r.Observations {
+		statuses[u] = o.Status
+	}
+	c.ran[sr.Name] = statuses
+	if c.f.shadow {
+		c.checkShadow(sr, r.Observations)
+	}
+	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
+	if c.record {
+		if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
+			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
+		}
+		events := selector.Record(p.state, sr, r.Observations, c.hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(c.f.extra) > 0})
+		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
+	}
+	return nil
+}
+
+// settleOutcomes corrects the outcomes a run reported for its units before they are
+// recorded: record says the run was traced, extraArgs that arguments were passed
+// through to the runner.
+func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool) {
+	if r.Observations == nil {
+		r.Observations = map[string]*runner.Observation{}
+	}
+	// Units that ran but left no trace when the run failed (build or collection
+	// failure, an aborted session) have an unknown outcome: they are retried next time.
+	if r.ExitCode != 0 && record {
+		for _, u := range units {
+			if r.Observations[u] == nil {
+				r.Observations[u] = &runner.Observation{Status: state.Unknown, Inferred: true}
 			}
-			fmt.Fprintf(stdout, "(cd %s && %s)\n", sr.Suite.Root, strings.Join(argv, " "))
-			continue
 		}
-		if record {
-			rc.TraceDir = filepath.Join(traceRoot, fmt.Sprintf("suite-%d", i))
-			if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
-				return 1, err
-			}
+	}
+	// A failing run in which no unit failed (a crash after the tests, a coverage
+	// threshold, a teardown error) must not record passes.
+	if r.ExitCode != 0 {
+		anyFail := false
+		for _, o := range r.Observations {
+			anyFail = anyFail || o.Status == state.Fail
 		}
-		p.logf("%s: running %d test unit(s) with %s", sr.Name, len(units), sr.Suite.Runner)
-		r, err := sr.Suite.Adapter.Run(ctx, rc)
-		if err != nil {
-			return 1, fmt.Errorf("%s: %w", sr.Name, err)
-		}
-		var retried map[string]*runner.Observation
-		if record && len(extra) == 0 {
-			if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
-				return 1, err
-			}
-		}
-		worst = max(worst, r.ExitCode)
-		for _, w := range r.Warnings {
-			p.logf("%s: %s", sr.Name, w)
-		}
-		if r.Observations == nil {
-			r.Observations = map[string]*runner.Observation{}
-		}
-		// Units that ran but left no trace when the run failed (build or collection
-		// failure, an aborted session) have an unknown outcome: they are retried next time.
-		if r.ExitCode != 0 && record {
-			for _, u := range units {
-				if r.Observations[u] == nil {
-					r.Observations[u] = &runner.Observation{Status: state.Unknown, Inferred: true}
-				}
-			}
-		}
-		// A failing run in which no unit failed (a crash after the tests, a coverage
-		// threshold, a teardown error) must not record passes.
-		if r.ExitCode != 0 {
-			anyFail := false
-			for _, o := range r.Observations {
-				anyFail = anyFail || o.Status == state.Fail
-			}
-			if !anyFail {
-				for _, o := range r.Observations {
-					if o.Status == state.Pass {
-						o.Status, o.Inferred = state.Unknown, true
-					}
-				}
-			}
-		}
-		// Arguments passed through to the runner may filter tests (-t, -k, -run,
-		// --test-name-pattern, --bail): a file that passed may not have run fully.
-		if len(extra) > 0 {
+		if !anyFail {
 			for _, o := range r.Observations {
 				if o.Status == state.Pass {
-					o.Status = state.Unknown
-				}
-			}
-		}
-		statuses := map[string]string{}
-		inferred := map[string]bool{}
-		for u, o := range r.Observations {
-			statuses[u] = o.Status
-			inferred[u] = o.Inferred
-		}
-		ran[sr.Name] = statuses
-		failures.add(sr, r.Observations) // before recording: compares with the previous entries
-		if record {
-			if missing := len(units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
-				p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
-			}
-			events := selector.Record(p.state, sr, r.Observations, hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: now, Full: full && shardN <= 1, ReadsBy: r.ReadsBy, Retried: retried, Unreliable: len(extra) > 0})
-			flakes = append(flakes, flakeReports(sr.Name, events)...)
-		}
-		if f.shadow {
-			for _, t := range sr.Tests {
-				// Only failures reported for the unit itself count: a failure inferred
-				// from a shared exit code may belong to a selected test.
-				if !t.Selected && statuses[t.ID] == state.Fail {
-					if inferred[t.ID] {
-						possible = append(possible, sr.Name+": "+t.ID)
-					} else {
-						escapes = append(escapes, sr.Name+": "+t.ID)
-					}
+					o.Status, o.Inferred = state.Unknown, true
 				}
 			}
 		}
 	}
-	if f.dryRun {
-		return 0, nil
-	}
-	failures.wait()
-	if record {
-		if p.filtered {
-			// Only some suites ran: the repository-wide snapshot stays as it was.
-		} else if res.Mode == "all" || f.shadow {
-			p.state.Files = map[string]string(p.snap)
-			p.state.Commit = p.repo.Head()
-			p.state.Created = now
-		} else if len(p.state.Files) > 0 {
-			// Orphans were handled by this run (by name, by the agent or by running the
-			// affected suites): remember their current content so the next run on this
-			// branch does not ask again. Other files stay as recorded; per-test entries
-			// track them.
-			for _, o := range res.Orphans {
-				if h, ok := p.snap[o]; ok {
-					p.state.Files[o] = h
-				} else {
-					delete(p.state.Files, o)
-				}
+	// Arguments passed through to the runner may filter tests (-t, -k, -run,
+	// --test-name-pattern, --bail): a file that passed may not have run fully.
+	if extraArgs {
+		for _, o := range r.Observations {
+			if o.Status == state.Pass {
+				o.Status = state.Unknown
 			}
 		}
-		p.state.Tool = "smates/" + Version
-		if err := p.state.Save(p.statePath); err != nil {
-			return 1, fmt.Errorf("saving state: %w", err)
+	}
+}
+
+// checkShadow notes the failing tests of a suite the selection would have skipped
+// (--shadow). Only failures reported for the unit itself count: a failure inferred
+// from a shared exit code may belong to a selected test.
+func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation) {
+	for _, t := range sr.Tests {
+		o := obs[t.ID]
+		if t.Selected || o == nil || o.Status != state.Fail {
+			continue
+		}
+		if o.Inferred {
+			c.possible = append(c.possible, sr.Name+": "+t.ID)
+		} else {
+			c.escapes = append(c.escapes, sr.Name+": "+t.ID)
 		}
 	}
-	failures.print(stderr)
-	sel2, total := res.Counts()
-	elapsed := time.Since(start).Round(time.Millisecond)
-	if f.shadow {
-		if len(escapes) > 0 {
-			p.logf("SHADOW: %d failing test(s) would NOT have been selected:", len(escapes))
-			for _, e := range escapes {
-				fmt.Fprintf(stderr, "  - %s\n", e)
+}
+
+// saveState updates the state's repository snapshot and saves the state.
+func (c *cycle) saveState() error {
+	p, res := c.p, c.sel.res
+	switch {
+	case p.filtered:
+		// Only some suites ran: the repository-wide snapshot stays as it was.
+	case res.Mode == selector.ModeAll || c.f.shadow:
+		p.state.Files = map[string]string(p.snap)
+		p.state.Commit = p.repo.Head()
+		p.state.Created = c.now
+	case len(p.state.Files) > 0:
+		// Orphans were handled by this run (by name, by the agent or by running the
+		// affected suites): remember their current content so the next run on this
+		// branch does not ask again. Other files stay as recorded; per-test entries
+		// track them.
+		for _, o := range res.Orphans {
+			if h, ok := p.snap[o]; ok {
+				p.state.Files[o] = h
+			} else {
+				delete(p.state.Files, o)
+			}
+		}
+	}
+	p.state.Tool = "smates/" + Version
+	if err := p.state.Save(p.statePath); err != nil {
+		return fmt.Errorf("saving state: %w", err)
+	}
+	return nil
+}
+
+// logOutcome logs how the run went.
+func (c *cycle) logOutcome(elapsed time.Duration) {
+	p := c.p
+	selected, total := c.sel.res.Counts()
+	if c.f.shadow {
+		if len(c.escapes) > 0 {
+			p.logf("SHADOW: %d failing test(s) would NOT have been selected:", len(c.escapes))
+			for _, e := range c.escapes {
+				fmt.Fprintf(c.stderr, "  - %s\n", e)
 			}
 		} else {
-			p.logf("shadow: every failing test was selected (%d/%d would have run)", sel2, total)
+			p.logf("shadow: every failing test was selected (%d/%d would have run)", selected, total)
 		}
-		if len(possible) > 0 {
-			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(possible), strings.Join(limit(possible, 10), ", "))
+		if len(c.possible) > 0 {
+			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
 	} else {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, sel2, total, worst)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.worst)
 	}
-	sum := summaryInput(sel, shardI, shardN)
-	sum.Run = &summary.Run{ExitCode: worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: escapes, Possible: possible}
-	for _, sr := range res.Suites {
+	logFlakes(p, c.stderr, c.flakes)
+}
+
+// writeSummaries writes the Markdown summaries and the GitHub outputs.
+func (c *cycle) writeSummaries(elapsed time.Duration) {
+	p, f := c.p, c.f
+	sum := summaryInput(c.sel, f.shardI, f.shardN)
+	sum.Run = &summary.Run{ExitCode: c.worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible}
+	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
-			if ran[sr.Name][t.ID] == state.Fail {
+			if c.ran[sr.Name][t.ID] == state.Fail {
 				sum.Run.Failed = append(sum.Run.Failed, sr.Name+": "+t.ID)
 			}
 		}
 	}
-	logFlakes(p, stderr, flakes)
-	if sec, ok := flakySection(flakes); ok {
+	if sec, ok := flakySection(c.flakes); ok {
 		sum.Sections = append(sum.Sections, sec)
 	}
-	if sec, ok := failures.section(); ok {
+	if sec, ok := c.failures.section(); ok {
 		sum.Sections = append(sum.Sections, sec)
 	}
 	writeRunSummary(p, f.summary, sum)
 	writeMarkdown(p, f.markdown, sum)
 	if os.Getenv("GITHUB_OUTPUT") != "" {
-		if err := writeGitHubOutputs(sel, append([]string{fmt.Sprintf("exit-code=%d", worst)}, flakyOutputs(flakes)...)...); err != nil {
+		if err := writeGitHubOutputs(c.stdout, c.sel, append([]string{fmt.Sprintf("exit-code=%d", c.worst)}, flakyOutputs(c.flakes)...)...); err != nil {
 			p.logf("could not write GitHub outputs: %v", err)
 		}
 	}
-	if f.report != "" {
-		rep := struct {
-			jsonOut
-			Results  map[string]map[string]string `json:"results"`
-			Escapes  []string                     `json:"escapes"`
-			Possible []string                     `json:"possible_escapes"`
-			ExitCode int                          `json:"exit_code"`
-			Shadow   bool                         `json:"shadow"`
-			Flaky    []flakeReport                `json:"flaky"`
-			Failures []*hints.Hint                `json:"failure_hints"`
-		}{jsonSelection(sel), ran, escapes, possible, worst, f.shadow, flakes, failures.all()}
-		if rep.Flaky == nil {
-			rep.Flaky = []flakeReport{}
-		}
-		if rep.Escapes == nil {
-			rep.Escapes = []string{}
-		}
-		if rep.Possible == nil {
-			rep.Possible = []string{}
-		}
-		data, err := json.MarshalIndent(rep, "", "  ")
-		if err == nil {
-			err = os.WriteFile(f.report, data, 0o644)
-		}
-		if err != nil {
-			return worst, fmt.Errorf("writing report: %w", err)
-		}
+}
+
+// writeReport writes the JSON report (--report).
+func (c *cycle) writeReport() error {
+	rep := struct {
+		jsonOut
+		Results  map[string]map[string]string `json:"results"`
+		Escapes  []string                     `json:"escapes"`
+		Possible []string                     `json:"possible_escapes"`
+		ExitCode int                          `json:"exit_code"`
+		Shadow   bool                         `json:"shadow"`
+		Flaky    []flakeReport                `json:"flaky"`
+		Failures []*hints.Hint                `json:"failure_hints"`
+	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.worst, c.f.shadow, c.flakes, c.failures.all()}
+	if rep.Flaky == nil {
+		rep.Flaky = []flakeReport{}
 	}
-	return worst, nil
+	if rep.Escapes == nil {
+		rep.Escapes = []string{}
+	}
+	if rep.Possible == nil {
+		rep.Possible = []string{}
+	}
+	data, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.f.report, data, 0o644)
 }
 
 // unitIndex maps every test file of a suite to its unit.
@@ -428,14 +538,10 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		printSelection(p, sel, stderr, f.explain)
 		_, err := io.WriteString(stdout, summary.Markdown(sum))
 		return 0, err
-	case "text":
-		printSelection(p, sel, stderr, f.explain)
-		for _, s := range sel.res.Suites {
-			for _, id := range s.Selected() {
-				fmt.Fprintln(stdout, id)
-			}
+	case "text", "files":
+		if f.format == "text" {
+			printSelection(p, sel, stderr, f.explain)
 		}
-	case "files":
 		for _, s := range sel.res.Suites {
 			for _, id := range s.Selected() {
 				fmt.Fprintln(stdout, id)
@@ -447,7 +553,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 0, enc.Encode(jsonSelection(sel))
 	case "github":
 		printSelection(p, sel, stderr, f.explain)
-		if err := writeGitHubOutputs(sel); err != nil {
+		if err := writeGitHubOutputs(stdout, sel); err != nil {
 			return 0, err
 		}
 		writeRunSummary(p, "", sum)
@@ -484,8 +590,7 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	for _, n := range res.Notes {
 		p.logf("%s", n)
 	}
-	switch res.Mode {
-	case "diff":
+	if res.Mode == selector.ModeDiff {
 		p.logf("no recorded state: selected by static analysis against the base revision")
 	}
 	if len(res.Orphans) > 0 {
@@ -521,7 +626,7 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 }
 
 // writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
-func writeGitHubOutputs(sel *selection, extra ...string) error {
+func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
 	s, t := sel.res.Counts()
 	runAll := true
 	tests := map[string][]string{}
@@ -548,7 +653,7 @@ func writeGitHubOutputs(sel *selection, extra ...string) error {
 		}
 	} else {
 		for _, l := range lines {
-			fmt.Println(l)
+			fmt.Fprintln(stdout, l)
 		}
 	}
 	return nil
@@ -584,14 +689,4 @@ func writeMarkdown(p *project, path string, in *summary.Input) {
 	if err := os.WriteFile(path, []byte(summary.Markdown(in)), 0o644); err != nil {
 		p.logf("could not write %s: %v", path, err)
 	}
-}
-
-// sortedKeys returns the sorted keys of a map.
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

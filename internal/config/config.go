@@ -158,6 +158,20 @@ func Parse(data []byte) (*Config, error) {
 	return &c, nil
 }
 
+// Orphan policies (Config.Orphans).
+const (
+	OrphansAgent  = "agent"  // ask the agent, fall back to all
+	OrphansAll    = "all"    // run the suites the orphans may affect
+	OrphansIgnore = "ignore" // do nothing
+)
+
+// Agent modes (AgentConfig.Enabled).
+const (
+	AgentAuto   = "auto"
+	AgentAlways = "always"
+	AgentNever  = "never"
+)
+
 // Normalize fills defaults and validates.
 func (c *Config) Normalize() error {
 	if c.Version == 0 {
@@ -167,10 +181,10 @@ func (c *Config) Normalize() error {
 		return fmt.Errorf("unsupported config version %d", c.Version)
 	}
 	if c.Orphans == "" {
-		c.Orphans = "agent"
+		c.Orphans = OrphansAgent
 	}
 	switch c.Orphans {
-	case "agent", "all", "ignore":
+	case OrphansAgent, OrphansAll, OrphansIgnore:
 	default:
 		return fmt.Errorf("orphans must be agent, all or ignore (got %q)", c.Orphans)
 	}
@@ -179,10 +193,10 @@ func (c *Config) Normalize() error {
 	}
 	a := &c.Agent
 	if a.Enabled == "" {
-		a.Enabled = "auto"
+		a.Enabled = AgentAuto
 	}
 	switch a.Enabled {
-	case "auto", "always", "never":
+	case AgentAuto, AgentAlways, AgentNever:
 	default:
 		return fmt.Errorf("agent.enabled must be auto, always or never (got %q)", a.Enabled)
 	}
