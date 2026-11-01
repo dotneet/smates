@@ -61,7 +61,32 @@ smates run --all     # 一度すべて実行して各テストの依存を記録
 smates run           # 以後は変更の影響を受けるテストだけ実行
 smates why src/pricing.ts     # このファイルに依存するテストは?
 smates deps src/cart.test.ts  # このテストは何に依存している?
+smates hook install  # 任意: git push の前に影響するテストを実行
 ```
+
+### git フック
+
+`smates hook install` は `pre-push` フック(`--hook pre-commit` で pre-commit)を書き込み、
+`smates run --no-agent` を実行して、選ばれたテストが失敗したら push を止めます。
+エージェントを使わないので API 呼び出しは発生しません(どのテストも依存していない変更は、
+影響しうるスイートを丸ごと実行します)。`--agent` でエージェントを有効にでき、`--` の後に
+`smates run` のフラグを渡せます(`smates hook install -- --explain`)。
+
+- `core.hooksPath` を尊重し、リポジトリのすべての worktree で共有されます。
+- smates が書いていない既存のフックは上書きしません。追加すべき行を表示して中断するか、
+  `--append` でシェルスクリプトの末尾に追記します。husky や lefthook を使っている場合は、
+  `.husky/pre-push` や `lefthook.yml` に追加する設定例を表示します。
+- ローカルに state がなければ共有 state を取得し(`smates state pull`)、ローカルの state が
+  1 週間より古いか、現在の履歴にないコミットで記録されたものなら、リモートの state を
+  マージします(fetch は 1 時間に 1 回まで)。
+- `git push --no-verify` または `SMATES_SKIP_HOOK=1` でスキップできます。`smates` が `PATH`
+  にない環境では警告を出して push を通します。
+
+smates は push されるコミットではなく作業ツリーの内容で判定するため、未コミットの変更
+(pre-commit ではステージされていない変更)や未追跡ファイルもテスト対象に含まれます。
+その場合や、push するブランチがチェックアウト中のものと異なる場合は警告を出します。
+正確に判定したいときは、先にコミットするか stash してください。`smates hook uninstall` は
+smates が書いた部分だけを削除し、`smates hook status` はフックの場所を表示します。
 
 ### GitHub Actions
 

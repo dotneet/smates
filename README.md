@@ -103,10 +103,35 @@ smates run --all     # run everything once and record what each test uses
 smates run           # run only what your changes can affect
 smates why src/pricing.ts     # which tests depend on this file?
 smates deps src/cart.test.ts  # what does this test depend on?
+smates hook install  # optional: run the affected tests before every git push
 ```
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
+
+### Git hook
+
+`smates hook install` writes a `pre-push` hook (`--hook pre-commit` for a pre-commit
+one) that runs `smates run --no-agent` and stops the push when a selected test fails.
+Without the agent the hook makes no API calls (changes no test is known to depend on run
+the affected suites in full); `--agent` keeps it, and `smates run` flags can follow `--`
+(`smates hook install -- --explain`). The hook:
+
+- honours `core.hooksPath` and is shared by all worktrees of the repository;
+- never overwrites a hook it did not write: it stops and prints the line to add, or
+  appends itself to a shell hook with `--append`. With husky or lefthook it prints the
+  snippet for `.husky/pre-push` or `lefthook.yml` instead;
+- pulls the shared state (`smates state pull`) when there is none locally, and merges in
+  the remote one when the local state is older than a week or was recorded on a commit
+  outside the current history (fetching at most once an hour);
+- is skipped with `git push --no-verify` or `SMATES_SKIP_HOOK=1`, and lets the push
+  through with a warning when `smates` is not on `PATH`.
+
+smates hashes the working tree, not the commits being pushed: uncommitted (pre-commit:
+unstaged) changes and untracked files are part of what is tested. The hook warns when
+there are any, and when the pushed branch is not the one checked out; commit or stash
+them first for an exact result. `smates hook uninstall` removes only what smates wrote;
+`smates hook status` shows where the hook lives.
 
 ### GitHub Actions
 
@@ -200,6 +225,7 @@ agent:
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
+| `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
