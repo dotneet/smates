@@ -43,6 +43,7 @@ D(T) = traced(T)        files executed or read while T ran (incl. its child proc
                         and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
      ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
+     ∪ depends_on       code of a server the tests talk to in another process (declared)
 ```
 
 `T` is **skipped** only if it passed last time and every file in `D(T)` hashes the same
@@ -92,6 +93,16 @@ left to the job that runs that suite). smates then
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
 3. otherwise runs the suites the orphan can affect in full.
 
+Orphans that show up on most commits (`.env.example`, deploy configs, a frontend no suite
+covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
+100 first-parent commits (`--history N`, `--since rev`) against the current dependency
+map with the same rule, ranks the files that would have been orphans, and prints a
+ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency),
+plus how many commits would still have orphans. Files that can change how tests run (CI
+workflows, Makefiles, Dockerfiles, compose files, toolchain pins) are listed for
+`inputs:` or `rules:` instead. Run it after `smates run --all`: without recorded
+dependencies it only knows the static graph and overstates the orphans.
+
 ## Supported runners
 
 | runner | unit | how dependencies are traced | per-file status |
@@ -119,6 +130,7 @@ directly), uv / virtualenvs for Python. Monorepos with several suites, workspace
 ```bash
 # install (Linux/macOS; or download a release, or `go install github.com/dotneet/smates/cmd/smates@latest`)
 curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
+# (SMATES_VERIFY=attestation also checks the build provenance with the gh CLI)
 
 smates init --github # detect suites, write smates.yml (+ a GitHub workflow), gitignore .smates/
 smates run --all     # run everything once and record what each test uses
@@ -131,6 +143,18 @@ smates hook install  # optional: run the affected tests before every git push
 
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
+
+`init --github` sets up toolchains from `mise.toml`/`.tool-versions` (via
+`jdx/mise-action`), `.nvmrc`/`.node-version` or `package.json` `engines.node`/`volta`, and
+`.python-version`. Databases from `docker-compose.yml`/`compose.yaml` or `localhost` URLs
+in the code, and variables from `.env.example` the code reads, become commented-out
+`services:`/`env:` blocks to check and enable. If an existing workflow already runs the
+tests, it writes no second one (unless `--force`) and prints a patch replacing those
+steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+variables of a Makefile `test` target become commented `command:`/`env:` hints in
+`smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
+version outside `engines.node`, and services that are not running. smates never lets
+`npx`/`bunx` download a runner: one missing from `node_modules/.bin` is an error.
 
 ### Git hook
 
@@ -184,7 +208,8 @@ let you skip downstream jobs, and a summary is written to the job page. With
 pull request comment, updated on every push: how many tests in which suites the change
 affects, which changed file selected which test and how it depends on it, how changes
 no test depends on were handled, and the recorded test time skipped. See
-[docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices) and
+[docs/ci/github-actions.md](docs/ci/github-actions.md) (sharding, matrices, pinning by
+commit SHA, `verify: attestation` for the release's build provenance) and
 [docs/ci/other-ci.md](docs/ci/other-ci.md) (GitLab, CircleCI, Buildkite, Jenkins).
 
 ### Other CI systems
@@ -207,15 +232,24 @@ suites:
     exclude: ["src/legacy/**"]
     command: "pnpm exec vitest run"   # selected files are appended (or put in {tests})
     inputs: ["/proto/**"]            # extra files all tests of the suite depend on ("/" = repo root)
-    rules:                           # dependencies tracing cannot see
-      - tests: ["e2e/**"]
-        deps: ["server/**", "docker-compose.yml"]
+    rules:                           # other dependencies tracing cannot see
+      - tests: ["src/db/**"]
+        deps: ["migrations/**"]
     env: { TZ: UTC }
     isolate: true                    # jest/bun: one process per file while recording
     junit: reports/junit.xml          # per-file status from a JUnit report you produce
   - name: api
     runner: go
     root: services/api
+  - name: e2e                        # Playwright against the api server (docker compose)
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on:                      # code of the server(s) the tests talk to
+      - api                          # = {suite: api}: what suite api covers (its root minus its tests)
+      - paths: ["docker-compose.yml"]  # repo-relative globs
+        tests: ["admin/**"]          # optional: only these tests (relative to root)
+    serves: ["services/worker/**"]   # shorthand for depends_on: [{paths: [...]}]
   - name: tools
     runner: pytest
     root: tools
@@ -233,11 +267,45 @@ agent:
   # model: gpt-6-luna   # default depends on the provider (see "The agent")
   max_turns: 12
   timeout: 120s
-  instructions: "e2e/ tests talk to the server built from server/."
+  instructions: "Files under deploy/ configure production only."
   explain_failures: true   # one-line probable cause for failing tests (built-in backend only)
   explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
+
+### Tests that exercise a server
+
+End-to-end tests (Playwright, vitest e2e, pytest against an HTTP API) often talk to a
+server running in another process or container, e.g. a Go backend started by docker
+compose. Tracing sees the test process, not the server, so a change to the server's code
+would select none of these tests. Declare the dependency on the e2e suite:
+
+```yaml
+  - name: e2e
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on: [api]              # the code of suite api
+    # or: depends_on: [{paths: ["backend/**", "docker-compose.yml"], tests: ["admin/**"]}]
+    # or: serves: ["backend/**"]
+```
+
+`{suite: api}` (or just `api`) stands for the files under that suite's root, minus test
+files (of any suite), ignored and vendored files and files of suites rooted below it.
+`paths` are repo-relative globs; `tests` (relative to the suite root) narrows which tests
+get the dependency. Each declaration joins `D(T)` as one key whose hash covers all its
+files (computed at HEAD, recorded when the test runs, so the state does not grow with the
+size of the server), so a change to them selects the tests and is no longer an orphan,
+also with `--suite`. `--explain`, `smates why` and the pull request summary name the
+changed files and the declaration:
+
+```
++ e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]
+```
+
+`smates doctor` points at suites that look like end-to-end tests (name or root mentions
+e2e, the command runs Playwright or Cypress, or a test calls `http://localhost`) and
+declare none of `depends_on`, `serves` or `rules`.
 
 ## Commands
 
@@ -250,6 +318,7 @@ agent:
 | `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
+| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
@@ -399,8 +468,12 @@ ok  	example.com/shop/internal/store	0.170s
 
 ## Limitations
 
-- Dependencies outside the repository (services, databases, network) are not traced;
-  declare them with `rules`/`inputs`, or let orphans reach the agent.
+- Tracing follows the test process and its children, not a server the tests reach over
+  the network (docker compose, a separately started backend): declare its code with
+  `depends_on`/`serves` (see [Tests that exercise a server](#tests-that-exercise-a-server)).
+  What it reads from outside the repository (databases, external services) is not
+  tracked; declare files it depends on with `rules`/`inputs`, or let orphans reach the
+  agent.
 - Environment variables are seen only when code reads them through `process.env` (not
   Bun's `Bun.env` / `import.meta.env`), `os.environ` or Go's `os.Getenv`/`os.LookupEnv`.
   What the runtime itself consults (`TZ` for dates, the locale, `GODEBUG`), native code,

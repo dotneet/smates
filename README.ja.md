@@ -35,6 +35,7 @@ D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込み
                    T のコードが読んだ環境変数
      ∪ static(T)   現時点で計算した import グラフの閉包(新しい import も即座に反映)
      ∪ inputs      lockfile、マニフェスト、ランナー設定、smates.yml、指定した glob
+     ∪ depends_on  テストが別プロセスで叩くサーバーのコード(宣言したもの)
 ```
 
 前回成功していて、`D(T)` の全ファイルのハッシュが今も同じときだけ `T` を **スキップ**し、
@@ -86,10 +87,55 @@ env_track: [LANG]
    ことはできないため、誤答や指示注入があっても「追加し損ねる」以上の害はありません。
 3. それ以外の場合は、そのファイルが影響しうるスイートを丸ごと実行します。
 
+多くのコミットで繰り返しオーファンになるファイル(`.env.example`、デプロイ設定、どのスイートにも
+属さないフロントエンドなど)は `ignore:` に入れるべきものです。**`smates orphans`** は直近の
+first-parent コミット(既定 100 件。`--history N`、`--since rev`)を現在の依存マップに同じ規則で
+当てはめ、オーファンになったはずのファイルを件数順に並べ、そのまま貼れる `ignore:` ブロック
+(配下にテストの依存がなければ `dir/**` にまとめる)と、適用後もオーファンが残るコミット数を
+表示します。テストの実行に影響しうるファイル(CI ワークフロー、Makefile、Dockerfile、compose、
+ツールチェーンの版指定)は無視せず `inputs:` か `rules:` に書くよう案内します。依存が記録されて
+いないと静的解析だけで判定するため結果は悲観的になります。先に `smates run --all` を実行して
+ください(`--format json` で機械可読な出力)。
+
+### サーバーを叩くテスト
+
+E2E テスト(Playwright、vitest の e2e、HTTP API に対する pytest など)は、別プロセスや
+コンテナで動くサーバー(docker compose で起動した Go のバックエンドなど)にアクセスする
+ことがよくあります。トレースが見るのはテストのプロセスでサーバーではないため、サーバーの
+コードを変えてもこれらのテストは選ばれません。E2E スイートに依存を宣言してください。
+
+```yaml
+  - name: e2e
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on: [api]              # スイート api のコード
+    # または: depends_on: [{paths: ["backend/**", "docker-compose.yml"], tests: ["admin/**"]}]
+    # または: serves: ["backend/**"]
+```
+
+`{suite: api}`(または単に `api`)は、そのスイートの root 以下のファイルから、(どの
+スイートのものであれ)テストファイル、無視・vendor 扱いのファイル、さらに下に root を持つ
+別スイートのファイルを除いたものです。`paths` はリポジトリ相対の glob、`tests`(スイートの
+root からの相対)で依存を付けるテストを絞れます。宣言ごとに、全ファイルをまとめたハッシュを
+持つ 1 つのキーとして `D(T)` に加わる(HEAD で計算し、テスト実行時に記録。サーバーの規模に
+比例して状態が大きくなることはありません)ので、変更するとテストが選ばれ、`--suite` で
+絞ってもオーファンになりません。`--explain`、`smates why`、プルリクエストのサマリには
+変更されたファイルと宣言名が出ます。
+
+```
++ e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]
+```
+
+`smates doctor` は、E2E らしいのに `depends_on`・`serves`・`rules` のどれもないスイート
+(名前や root に e2e を含む、コマンドが Playwright や Cypress を実行する、テストが
+`http://localhost` を呼ぶ)を指摘します。
+
 ## クイックスタート
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dotneet/smates/main/install.sh | sh
+# (SMATES_VERIFY=attestation で gh CLI によるビルドプロベナンスの検証も行います)
 
 smates init --github # スイート検出、smates.yml(と GitHub ワークフロー)生成、.smates/ を gitignore
 smates run --all     # 一度すべて実行して各テストの依存を記録
@@ -98,6 +144,19 @@ smates why src/pricing.ts     # このファイルに依存するテストは?
 smates deps src/cart.test.ts  # このテストは何に依存している?
 smates hook install  # 任意: git push の前に影響するテストを実行
 ```
+
+`init --github` は `mise.toml`/`.tool-versions`(`jdx/mise-action` を使用)、
+`.nvmrc`/`.node-version` または `package.json` の `engines.node`/`volta`、`.python-version`
+からツールチェーンを設定します。`docker-compose.yml`/`compose.yaml` のデータベースやコード中の
+`localhost` URL、`.env.example` にありコードが読む環境変数は、確認して有効にするための
+コメントアウトされた `services:`/`env:` ブロックになります。既存のワークフローがすでにテストを
+実行している場合は 2 つ目のワークフローを書かず(`--force` で書く)、そのステップを smates
+アクションに置き換えるパッチを表示します(`--patch FILE` で `git apply` 用に書き出し)。
+Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml` にコメントの
+`command:`/`env:` ヒントとして書かれます。`smates doctor` も同じ内容に加えて、
+`node_modules` の欠如、`engines.node` を満たさない Node、起動していないサービスを報告します。
+smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを許さず、`node_modules/.bin` に
+ないときはエラーにします。
 
 ### git フック
 
@@ -133,7 +192,10 @@ smates が書いた部分だけを削除し、`smates hook status` はフック�
 
 デフォルトブランチへの push では全テストを実行して状態を更新し、プルリクエストでは
 影響のあるテストだけを実行します。状態はブランチごとに Actions cache に保存され、
-デフォルトブランチの状態にフォールバックします。詳細は
+デフォルトブランチの状態にフォールバックします。`uses: dotneet/smates@<コミット SHA> # v1.2.3`
+のようにコミット SHA で固定しても、そのコミットのリリースバイナリがインストールされます。
+リリースのアーカイブにはビルドプロベナンスの attestation が付いており、`verify: attestation`
+で必須にできます(既定の `auto` は検証できるときに検証)。詳細は
 [docs/ci/github-actions.md](docs/ci/github-actions.md)、他の CI は
 [docs/ci/other-ci.md](docs/ci/other-ci.md) を参照してください。
 

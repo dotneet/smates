@@ -59,3 +59,5 @@ changelog:
 
 release:
   prerelease: auto
+  # Published by release.yml after the archives are attested.
+  draft: true

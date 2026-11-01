@@ -38,7 +38,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         # A shallow clone is enough once state exists. With no state at all (first
         # run), `fetch-depth: 0` lets smates diff against the base branch instead of
         # running everything.
@@ -77,7 +77,7 @@ jobs:
   #     matrix:
   #       shard: [1, 2, 3, 4]
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v5
   #     - uses: dotneet/smates@vX.Y.Z
   #       with:
   #         args: --shard ${{ matrix.shard }}/4
