@@ -400,7 +400,10 @@ are replaced wholesale (the full-run rule) only when every call of it ran. A run
 stopped early does not touch the repository-wide snapshot, neither the full-run refresh
 nor the orphans it handled: tests that would have covered them may not have run. Results,
 failure hints, flake evidence, the summary and `--report` only contain what ran;
-`--report` lists the rest under `not_run` and the summary and log count them.
+`--report` lists the rest under `not_run` and the summary and log count them. An
+interrupted run (Ctrl-C) stops the same way: the batch it cuts short is not recorded
+either (a killed runner fails its tests or reports nothing), what finished is recorded
+and reported (`interrupted` in `--report`), and smates exits 1.
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
 ### Flaky tests
@@ -607,9 +610,11 @@ output: it stops starting runs (until it changes while idle).
 
 **Orphans.** Every cycle after the first applies the orphan policy only to orphans among
 the files that changed since the previous cycle (the rest were handled at start, or are
-branch changes that a state without a full-run snapshot reports on every run). The agent
-is called only with `--agent`, so a burst of saves never turns into a burst of LLM calls;
-without it `orphans: agent` behaves like `smates run --no-agent`.
+branch changes that a state without a full-run snapshot reports on every run); only
+those are written into the snapshot as handled, so a `smates run` still applies the
+policy to the rest. The agent is called only with `--agent`, so a burst of saves never
+turns into a burst of LLM calls; without it `orphans: agent` behaves like
+`smates run --no-agent`.
 
 **Fail fast.** `smates watch --fail-fast` passes `--fail-fast` to every cycle; the footer
 counts what ran and how many selected units were not started. Rerun (`Enter`) still

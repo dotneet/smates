@@ -246,3 +246,17 @@ func TestLexerLinear(t *testing.T) {
 		t.Errorf("got %q", refs)
 	}
 }
+
+// TestArrowRegexBacktick checks that a regex after => may contain a backtick (it must
+// not open a template literal) and that `x.return / 2` is a division.
+func TestArrowRegexBacktick(t *testing.T) {
+	for _, src := range []string{
+		"export const isFence = (l) => /^```/.test(l)\nexport async function load() { return import('./lazy') }\n",
+		"const g = (x: number): boolean => /`/.test(String(x))\nrequire('./a')",
+		"const z = x.return / 2; require('./a') / 3",
+	} {
+		if got := refStrings(scanSource([]byte(src))); len(got) != 1 {
+			t.Errorf("%q: got %q", src, got)
+		}
+	}
+}

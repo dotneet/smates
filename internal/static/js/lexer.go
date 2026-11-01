@@ -164,7 +164,8 @@ func (l *lexer) emit(t token) {
 	case tPunct:
 		l.slash = l.punctSlash(t, prev, hasPrev && prev.e == t.s)
 	case tIdent:
-		if regexKeywords[string(l.src[t.s:t.e])] {
+		// After '.' a keyword is a property name: x.return / 2.
+		if regexKeywords[string(l.src[t.s:t.e])] && !(hasPrev && prev.kind == tPunct && prev.c == '.') {
 			l.slash = slashRegex
 		} else {
 			l.slash = slashDiv
@@ -194,9 +195,13 @@ func (l *lexer) punctSlash(t, prev token, adjacent bool) slashMode {
 	case ']':
 		return slashDiv
 	case '}', '>':
+		// After an arrow (=>) a slash starts an expression body, so a regex.
+		if t.c == '>' && adjacent && prev.kind == tPunct && prev.c == '=' {
+			return slashRegex
+		}
 		// After '}' a slash may start a regex (after a block) or divide (after an object
 		// literal, or in JSX: {a} / {b}, {x} />). After '>' it may start a regex
-		// (a > /re/, () => /re/) or be JSX text or a closing tag.
+		// (a > /re/) or be JSX text or a closing tag.
 		return slashMaybe
 	case '<':
 		// </tag> in JSX. a < /re/ is valid but practically never written.
