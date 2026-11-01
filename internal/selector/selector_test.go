@@ -106,7 +106,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 	f.t.Helper()
 	st := state.New()
 	res := f.sel(st, func(in *Input) { in.All = true })
-	h := NewHasher(f.snap())
+	h := NewHasher(f.snap()).WithConfig(f.cfg)
 	for _, sr := range res.Suites {
 		obs := map[string]*runner.Observation{}
 		for _, tt := range sr.Tests {
@@ -119,7 +119,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 			}
 			obs[tt.ID] = o
 		}
-		Record(st, sr, obs, h, RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
+		Record(st, sr, obs, h.ForSuite(sr.Suite), RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
 	}
 	st.Files = map[string]string(f.snap())
 	return st
@@ -209,7 +209,19 @@ func TestSelectStateMode(t *testing.T) {
 		{name: "suite input changed", edit: func(f *fixture) { f.write("web/vitest.config.ts", "export default {x:1}") }, want: all(ReasonChanged)},
 		{name: "repo-relative suite input changed", edit: func(f *fixture) { f.write("package-lock.json", `{"x":1}`) }, want: all(ReasonChanged)},
 		{name: "global input added", edit: func(f *fixture) { f.write(".tool-versions", "node 22") }, want: all(ReasonChanged)},
-		{name: "config file changed", edit: func(f *fixture) { f.write("smates.yml", "version: 1\n#") }, want: all(ReasonChanged)},
+		// smates.yml hashes as the suite's settings: other edits select nothing.
+		{name: "config file edited, suite unchanged", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n#")
+			f.cfg.Orphans, f.cfg.Agent.Model, f.cfg.Flaky.Retry = config.OrphansAll, "m", 1
+		}, want: base},
+		{name: "suite settings changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# env")
+			f.suites[0].Env = map[string]string{"TZ": "UTC"}
+		}, want: all(ReasonChanged)},
+		{name: "env_track changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# track")
+			f.cfg.EnvTrack = []string{"LANG"}
+		}, want: all(ReasonChanged)},
 		{name: "rule dep changed", edit: func(f *fixture) { f.write("migrations/001.sql", "create table u()") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "rule dep added", edit: func(f *fixture) { f.write("migrations/002.sql", "x") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "new test file", edit: func(f *fixture) { f.write("web/src/d.test.ts", "test('d')") }, want: with(map[string]string{"web/src/d.test.ts": ReasonNew})},
@@ -515,6 +527,63 @@ func TestSelectOthersOnlyCover(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.Orphans, []string{"Dockerfile"}) {
 		t.Errorf("only a change no suite depends on is an orphan: %v", res.Orphans)
+	}
+}
+
+func TestSelectOrphansOfSuitesLeftOut(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"api/test_api.py": "",
+		"api/server.py":   "",
+		"web/a.test.ts":   "",
+		"web/unused.ts":   "",
+		"go_test.go":      "",
+	})
+	f.suites = []*runner.Suite{
+		suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}, Static: new(bool)}),
+		suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.ts"}, Static: new(bool)}),
+		suite(t, config.Suite{Name: "root", Runner: "go", Tests: []string{"*_test.go"}, Static: new(bool)}),
+	}
+	st := f.record(nil, nil)
+	f.write("web/unused.ts", "export const x = 1")
+	f.write("api/server.py", "x = 1")
+	f.write("Dockerfile", "FROM x")
+	// --suite web: api/server.py is only py's (and the root suite's) to run.
+	res := f.sel(st, func(in *Input) { in.Suites, in.Others = f.suites[1:2], []*runner.Suite{f.suites[0], f.suites[2]} })
+	if want := []string{"Dockerfile", "web/unused.ts"}; !reflect.DeepEqual(res.Orphans, want) {
+		t.Errorf("orphans %v, want %v", res.Orphans, want)
+	}
+	if len(res.Notes) == 0 || !strings.Contains(res.Notes[len(res.Notes)-1], "left out by --suite") {
+		t.Errorf("notes %v", res.Notes)
+	}
+	// --suite root: a suite rooted at the repository root may be affected by any
+	// change, as the orphan policy over every suite would run it too.
+	res = f.sel(st, func(in *Input) { in.Suites, in.Others = f.suites[2:], f.suites[:2] })
+	if want := []string{"Dockerfile", "api/server.py", "web/unused.ts"}; !reflect.DeepEqual(res.Orphans, want) {
+		t.Errorf("root suite orphans %v, want %v", res.Orphans, want)
+	}
+}
+
+func TestOwned(t *testing.T) {
+	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
+	all := []*runner.Suite{mk("web"), mk("api"), mk(".")}
+	cases := []struct {
+		f    string
+		n    int
+		want bool
+	}{
+		{"web/a.ts", 1, true},   // web is selected
+		{"api/a.py", 1, false},  // only api and the root suite (left out)
+		{"Dockerfile", 1, true}, // no suite root contains it: every suite
+		{"api/a.py", 3, true},   // every suite selected
+	}
+	for _, c := range cases {
+		if got := Owned(c.f, all, c.n); got != c.want {
+			t.Errorf("Owned(%q, n=%d) = %v, want %v", c.f, c.n, got, c.want)
+		}
+	}
+	// The root suite selected alone owns every file.
+	if !Owned("api/a.py", []*runner.Suite{mk("."), mk("api")}, 1) {
+		t.Error("root suite owns api/a.py")
 	}
 }
 
@@ -1018,5 +1087,154 @@ func TestCoversDeclarations(t *testing.T) {
 	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, map[string]bool{"p/a.go": true})
 	if !tt.Selected || !reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) {
 		t.Errorf("diff mode: %+v", tt)
+	}
+}
+
+func TestUntested(t *testing.T) {
+	mk := func(runner_, root string, static bool) *Suite {
+		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
+	}
+	r := &Result{Mode: ModeState, Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	r.Suites[0].Suite.Exclude = []string{"e2e/**"}
+	got := r.Untested([]string{
+		"cmd/tool/main.go",   // Go code under the go suite
+		"web/src/Button.tsx", // TS under the vitest suite
+		"web/vite.config.ts", // tool configuration
+		"web/src/types.d.ts", // declarations
+		"web/.eslintrc.js",   // rc file
+		"scripts/build.ts",   // not under a JS suite root
+		"py/app.py",          // static analysis off for that suite
+		"web/setup-tests.ts", // setup file
+		"Dockerfile",         // not code
+		"web/src/data.json",  // not code
+		"pkg/testdata/in.go", // read as data by tests
+		"web/__mocks__/a.ts", // mocks
+		"e2e/fixture/x/x.go", // excluded from the go suite
+		"e2e/new/x.go",       // excluded from the go suite
+	})
+	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Untested = %v, want %v", got, want)
+	}
+	// A suite with a test that has no recorded entry knows only its import closure.
+	// (The go suite is rooted at the repository root: unrecorded, it blocks all.)
+	r.Suites[1].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go", "web/src/Button.tsx"}); !reflect.DeepEqual(got, []string{"cmd/tool/main.go"}) {
+		t.Errorf("unrecorded vitest suite: %v", got)
+	}
+	r.Suites[0].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("unrecorded root suite: %v", got)
+	}
+	r.Suites[0].Unrecorded, r.Suites[1].Unrecorded = false, false
+	// Without a recorded state only the static closure is known.
+	r.Mode = ModeDiff
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("diff mode: %v", got)
+	}
+}
+
+// An entry recorded before smates.yml was hashed as the suite's settings holds the
+// file's content hash: it still matches while the file is unchanged.
+func TestSelectLegacyConfigHash(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	blob := f.snap()["smates.yml"]
+	for _, e := range st.Suites["web"].Tests {
+		delete(e.Deps, ConfigKey("smates.yml"))
+		e.Deps["smates.yml"] = blob
+	}
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
+		t.Errorf("legacy hash, file unchanged: %v", d)
+	}
+	f.write("smates.yml", "version: 1\n#")
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != ReasonChanged {
+		t.Errorf("legacy hash, file changed: %v", d)
+	}
+}
+
+// A test that reads smates.yml itself depends on the file's content.
+func TestSelectConfigReadByTest(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"smates.yml"}}, nil)
+	f.write("smates.yml", "version: 1\n# comment")
+	want := map[string]string{"web/src/a.test.ts": "-unaffected", "web/src/b.test.ts": "-unaffected", "web/src/c.test.ts": ReasonChanged, "web/db/q.test.ts": "-unaffected"}
+	res := f.sel(st, nil)
+	if d := decisions(res); !reflect.DeepEqual(d, want) {
+		t.Errorf("got %v want %v", d, want)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("smates.yml is not an orphan: %v", res.Orphans)
+	}
+	// The suite's settings changing reports the file, not the internal key.
+	f.suites[0].Env = map[string]string{"TZ": "UTC"}
+	for _, s := range f.sel(st, nil).Suites {
+		for _, tt := range s.Tests {
+			if tt.ID == "web/src/c.test.ts" {
+				continue // also read the edited file: traced
+			}
+			if !reflect.DeepEqual(tt.Changed, []string{"smates.yml"}) || tt.Via["smates.yml"] != ViaInput {
+				t.Errorf("%s: changed %v via %v", tt.ID, tt.Changed, tt.Via)
+			}
+		}
+	}
+}
+
+func TestSnapshotHash(t *testing.T) {
+	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
+	for f, want := range map[string]struct {
+		h  string
+		ok bool
+	}{"a": {"h1", true}, "b": {"", false}, "c": {"", false}, "d": {"", false}} {
+		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
+			t.Errorf("%s: %q %v", f, h, ok)
+		}
+	}
+}
+
+func TestConfigKeyDisplay(t *testing.T) {
+	if got := Covers(map[string]bool{ConfigKey("smates.yml"): true}, "smates.yml", false); got != "content" {
+		t.Errorf("Covers via the settings key: %q", got)
+	}
+	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
+		t.Error("DisplayKey")
+	}
+}
+
+func TestSelectMarksUnrecordedSuites(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	if res := f.sel(st, nil); res.Suites[0].Unrecorded {
+		t.Error("every test recorded")
+	}
+	delete(st.Suites["web"].Tests, "web/src/a.test.ts")
+	if res := f.sel(st, nil); !res.Suites[0].Unrecorded {
+		t.Error("a test without an entry")
+	}
+}
+
+func TestMarkers(t *testing.T) {
+	m := Marker("h1", []string{"b", "a", "a"})
+	if m != "?h1@a,b" {
+		t.Fatalf("Marker: %q", m)
+	}
+	if h, seen, ok := ParseMarker(m); !ok || h != "h1" || !reflect.DeepEqual(seen, []string{"a", "b"}) {
+		t.Errorf("ParseMarker: %q %v %v", h, seen, ok)
+	}
+	if _, _, ok := ParseMarker("h1"); ok {
+		t.Error("a content hash is no marker")
+	}
+	if got := MarkSeen(m, "h1", []string{"c"}); got != "?h1@a,b,c" {
+		t.Errorf("same hash: %q", got)
+	}
+	if got := MarkSeen(m, "h2", []string{"c"}); got != "?h2@c" {
+		t.Errorf("new hash: %q", got)
+	}
+	if got := MarkSeen("h0", "", []string{"a"}); got != "?@a" {
+		t.Errorf("absent: %q", got)
+	}
+	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
+	all := []*runner.Suite{mk("a"), mk("b")}
+	if !OwnedOnly("a/x", all, 1) || OwnedOnly("Dockerfile", all, 1) || OwnedOnly("b/x", all, 1) || !OwnedOnly("Dockerfile", all, 2) {
+		t.Error("OwnedOnly")
 	}
 }

@@ -17,6 +17,10 @@ func TestParseAndMake(t *testing.T) {
 		{"$TZ", KindEnv, "TZ"},
 		{"$WEIRD/NAME?", KindEnv, "WEIRD/NAME?"},
 		{"pkg/a.go#decls", KindDecls, "pkg/a.go"},
+		// The suite settings key of smates.yml is content-like (the selector's hasher
+		// intercepts it); only the exact "#decls" suffix makes a declarations key.
+		{"smates.yml#suite", KindContent, "smates.yml#suite"},
+		{"pkg/a.go#declsx", KindContent, "pkg/a.go#declsx"},
 	} {
 		k, p := Parse(c.key)
 		if k != c.kind || p != c.path {

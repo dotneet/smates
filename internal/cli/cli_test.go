@@ -16,6 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 func TestParseShard(t *testing.T) {
@@ -345,7 +346,7 @@ suites:
     command: "true"
     rules: [{tests: ["*"], deps: ["src/b/**"]}]
 `)
-	write("a/x_check.sh", "")
+	write("a/x_check.sh", "cat ../b/fixtures/users.json\n")
 	write("b/x_check.sh", "")
 	write("src/a/lib", "1")
 	write("src/b/lib", "1")
@@ -383,7 +384,108 @@ suites:
 		t.Errorf("a change no suite depends on: %s, orphans %v", reason, orphans)
 	}
 
+	// A change under suite b's root that no test depends on is b's orphan, not a's.
+	write("b/notes.cfg", "x")
+	if reason, orphans := selectA(); reason != "orphan" || !reflect.DeepEqual(orphans, []string{"Dockerfile"}) {
+		t.Errorf("a change under another suite's root: %s, orphans %v", reason, orphans)
+	}
+
+	// A change under b's root that a test of a names is still selected in a's job.
+	write("b/fixtures/users.json", "[]")
+	if reason, orphans := selectA(); reason != "reference" || !reflect.DeepEqual(orphans, []string{"Dockerfile"}) {
+		t.Errorf("a file under b's root named by a's test: %s, orphans %v", reason, orphans)
+	}
+	os.Remove(filepath.Join(g.dir, "b", "fixtures", "users.json"))
+
+	// --suite a --all records the snapshot of the files a owns: afterwards only new
+	// changes count for a, while b's pending change is still seen by a run over b.
 	var out, errb bytes.Buffer
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "a", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite a --all: %d %s", code, errb.String())
+	}
+	st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz"))
+	if err != nil || len(st.Files) == 0 || st.Files["Dockerfile"] == "" {
+		t.Fatalf("snapshot after --suite --all: %v, %d files", err, len(st.Files))
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select: %d %s", code, errb.String())
+	}
+	if strings.Contains(out.String(), "Dockerfile") {
+		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
+	}
+	if h := st.Files["b/notes.cfg"]; !strings.HasPrefix(h, selector.Unrecorded) || len(h) == 1 {
+		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run: %q", h)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "b", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select --suite b: %d %s", code, errb.String())
+	}
+	var jb struct {
+		Orphans []string `json:"orphans"`
+	}
+	// Dockerfile is b's too (no suite root contains it): a's run does not hide it.
+	if err := json.Unmarshal(out.Bytes(), &jb); err != nil || !reflect.DeepEqual(jb.Orphans, []string{"Dockerfile", "b/notes.cfg"}) {
+		t.Errorf("b's pending changes are lost: %v %s", err, out.String())
+	}
+
+	// Once b has seen Dockerfile too, it is a plain entry again: no orphan anywhere.
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "b", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite b --all: %d %s", code, errb.String())
+	}
+	if st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil || st.Files["Dockerfile"] == "" || strings.HasPrefix(st.Files["Dockerfile"], selector.Unrecorded) {
+		t.Errorf("Dockerfile after both suites ran: %v %q", err, st.Files["Dockerfile"])
+	}
+
+	// With a recorded snapshot, a file added under b's root that a's test names still
+	// selects that test in a's job.
+	write("b/fixtures/users.json", "[]")
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select --suite a: %d %s", code, errb.String())
+	}
+	var ja struct {
+		Suites []struct {
+			Tests []struct {
+				Reason string `json:"reason"`
+			} `json:"tests"`
+		} `json:"suites"`
+		Orphans []string `json:"orphans"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &ja); err != nil || ja.Suites[0].Tests[0].Reason != "reference" || len(ja.Orphans) != 0 {
+		t.Errorf("new file under b's root named by a's test: %v %s", err, out.String())
+	}
+
+	// Once a --suite a --all run has seen it, the file is compared by its hash in a's
+	// runs: unchanged selects nothing, an edit selects a's test by reference again.
+	selectA2 := func() string {
+		out.Reset()
+		errb.Reset()
+		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+			t.Fatalf("select --suite a: %d %s", code, errb.String())
+		}
+		ja.Suites = nil
+		if err := json.Unmarshal(out.Bytes(), &ja); err != nil {
+			t.Fatal(err)
+		}
+		return ja.Suites[0].Tests[0].Reason
+	}
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "a", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite a --all: %d %s", code, errb.String())
+	}
+	if r := selectA2(); r != "unaffected" {
+		t.Errorf("unchanged marked file: %s", r)
+	}
+	write("b/fixtures/users.json", "[1]")
+	if r := selectA2(); r != "reference" {
+		t.Errorf("edited marked file named by a's test: %s", r)
+	}
+
+	out.Reset()
+	errb.Reset()
 	if code := Main([]string{"select", "-C", g.dir, "--suite", "nope"}, &out, &errb); code == 0 || !strings.Contains(errb.String(), "unknown suite") {
 		t.Errorf("unknown suite: %d %s", code, errb.String())
 	}
@@ -422,5 +524,92 @@ func TestRenderConfig(t *testing.T) {
 		if _, err := runner.Resolve(&gitx.Repo{Root: t.TempDir()}, c.Suites); err != nil {
 			t.Errorf("resolve: %v", err)
 		}
+	}
+}
+
+// TestUntestedCode checks that a change to source code no test reaches selects nothing
+// by default (untested: skip) and is an orphan with untested: orphan.
+func TestUntestedCode(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	write := func(rel, content string) {
+		p := filepath.Join(g.dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := "version: 1\norphans: all\nsuites:\n  - name: go\n    runner: go\n    command: \"true\"\n" // runs nothing: only the selection matters
+	write("smates.yml", cfg)
+	write("go.mod", "module example.com/m\n\ngo 1.22\n")
+	write("lib/lib.go", "package lib\n\nfunc F() int { return 1 }\n")
+	write("lib/lib_test.go", "package lib\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) {}\n")
+	write("cmd/tool/main.go", "package main\n\nfunc main() {}\n")
+	g.git("add", "-A")
+	base := g.commit("fixture")
+	sel := func() (orphans []string, handling map[string]string, reason string) {
+		var out, errb bytes.Buffer
+		args := []string{"select", "-C", g.dir, "--no-agent", "--format", "json"}
+		if _, err := os.Stat(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil {
+			args = append(args, "--base", base)
+		}
+		if code := Main(args, &out, &errb); code != 0 {
+			t.Fatalf("select: %d %s", code, errb.String())
+		}
+		var js struct {
+			Suites []struct {
+				Tests []struct {
+					Reason string `json:"reason"`
+				} `json:"tests"`
+			} `json:"suites"`
+			Orphans        []string          `json:"orphans"`
+			OrphanHandling map[string]string `json:"orphan_handling"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &js); err != nil {
+			t.Fatalf("%v\n%s", err, out.String())
+		}
+		return js.Orphans, js.OrphanHandling, js.Suites[0].Tests[0].Reason
+	}
+	write("cmd/tool/main.go", "package main\n\nfunc main() { println() }\n")
+	// Without a recorded state (diff mode) only the static closure is known: the
+	// orphan policy still applies.
+	if _, how, _ := sel(); how["cmd/tool/main.go"] != "policy" {
+		t.Errorf("diff mode: handling %v", how)
+	}
+	// Record the snapshot (the command runs nothing), then give the package a passing
+	// entry, as a real recording would: the selection is now made against the state.
+	var out, errb bytes.Buffer
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --all: %d %s", code, errb.String())
+	}
+	statePath := filepath.Join(g.dir, ".smates", "state.json.gz")
+	st, err := state.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Suites["go"] = &state.Suite{Tests: map[string]*state.Entry{"lib": {Deps: map[string]string{"lib/lib.go": st.Files["lib/lib.go"], "smates.yml": st.Files["smates.yml"]}, Status: state.Pass}}}
+	if err := st.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	write("cmd/tool/main.go", "package main\n\nfunc main() { println(1) }\n")
+	if orphans, how, reason := sel(); !reflect.DeepEqual(orphans, []string{"cmd/tool/main.go"}) || how["cmd/tool/main.go"] != "untested" || reason == "orphan" {
+		t.Errorf("untested: skip: orphans %v, handling %v, reason %s", orphans, how, reason)
+	}
+	write("smates.yml", cfg+"untested: orphan\n")
+	if _, how, _ := sel(); how["cmd/tool/main.go"] != "policy" {
+		t.Errorf("untested: orphan: handling %v", how)
+	}
+
+	// The suite's settings key is shown as the file: why and deps.
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"why", "-C", g.dir, "smates.yml"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "lib\t(static/inputs") {
+		t.Errorf("why smates.yml: %d %s %s", code, out.String(), errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"deps", "-C", g.dir, "lib"}, &out, &errb); code != 0 || strings.Count(out.String(), "smates.yml\t") != 1 || !strings.Contains(out.String(), "smates.yml\tstatic,recorded") || strings.Contains(out.String(), "#suite") {
+		t.Errorf("deps lib: %d %s %s", code, out.String(), errb.String())
 	}
 }
