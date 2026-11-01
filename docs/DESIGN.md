@@ -172,7 +172,7 @@ variables differ for reasons that have nothing to do with the tests: the user an
 machine (`PATH`, `HOME`, `USER`, `TMPDIR`, `SHELL`), the locale, the terminal (`TERM`,
 `COLUMNS`, color switches), CI metadata (`CI`, `GITHUB_*`, `RUNNER_*`, ...), proxies,
 toolchain locations (`GOPATH`, `VIRTUAL_ENV`, `npm_*`) and the variables smates injects
-(`NODE_OPTIONS`, `PYTHONPATH`, `GOFLAGS`, `SMATES_*`). Tracking them would select every
+(`NODE_OPTIONS`, `BUN_OPTIONS`, `PYTHONPATH`, `GOFLAGS`, `SMATES_*`). Tracking them would select every
 test that touches one of them on the first local run, which defeats pulling the state.
 They are therefore ignored by default (`config.DefaultEnvIgnore`); `env_ignore` adds to
 the list, `env_track` takes names out of it (top level or per suite), and the ignore list
@@ -275,7 +275,7 @@ can alter test results.
 | vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
 | node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
-| bun | test file | `bun test --coverage` lcov + `require.cache` per process (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
+| bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
@@ -338,7 +338,10 @@ and `getOwnPropertyDescriptor` record a name after checking the stack (`Error().
 at most 32 checks per name and context); an `ownKeys` call followed, within the same
 tick, by lookups of the returned keys in order is a copy. jest-util's
 `installCommonGlobals` is shadowed on load so the copy jest gives each test file is
-proxied too; vitest's `import.meta.env` reads through `process.env`. Bun's `Bun.env` is
+proxied too; vitest's `import.meta.env` reads through `process.env`. A proxy cannot be
+cloned: `structuredClone`, `MessagePort`/`BroadcastChannel` `postMessage`, a Worker's
+`workerData` and `v8.serialize` get the environment object itself instead (as the value
+or one level down, `{env: process.env}`), a copy rather than a read. Bun's `Bun.env` is
 not configurable and is not traced. Python: `os._Environ.__getitem__` (behind `get`, `in`
 and `os.getenv`) records the name with the nearest repository frame as `by`;
 `__iter__` remembers the frame and instruction that enumerates, and lookups from that
@@ -399,10 +402,12 @@ transitively). Granularity is the module: a test that imports a module depends o
 that module reads.
 
 Static analysis (fast Go scanners, no toolchain): JS/TS imports, requires, dynamic imports
-with literal or template prefixes, `new URL(…, import.meta.url)`, mocks; tsconfig paths and
-workspace packages (falling back to the whole package when unresolvable). Python imports
-including relative, dynamic with literal prefixes, conftest chains. Go imports, embeds, and
-package directories named in test string literals (`go run ../../cmd/tool`).
+with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, import.meta.url)`,
+mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
+back to the whole package when unresolvable). Python imports including relative, dynamic
+with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
+on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
+package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
 
 ## 3. Status and shadow mode
 

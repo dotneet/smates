@@ -73,19 +73,35 @@ type Shims struct {
 // V8Dir is where NODE_V8_COVERAGE output goes inside a trace directory.
 func V8Dir(traceDir string) string { return filepath.Join(traceDir, "v8") }
 
-// NodeEnv returns environment variables that trace Node processes.
+// NodeEnv returns environment variables that trace Node and Bun processes. Bun ignores
+// NODE_OPTIONS --require: it preloads the shim through BUN_OPTIONS (a process that also
+// preloads it with bun test --preload loads it once).
 func NodeEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 	opts := getenv(base, "NODE_OPTIONS")
 	req := "--require=" + quoteNodeOption(sh.Node)
 	if !strings.Contains(opts, sh.Node) {
 		opts = strings.TrimSpace(req + " " + opts)
 	}
+	bunOpts := getenv(base, "BUN_OPTIONS")
+	if !strings.Contains(bunOpts, sh.Node) {
+		bunOpts = strings.TrimSpace(bunOpts + " " + bunPreloadOption(sh.Node))
+	}
 	return []string{
 		"SMATES_TRACE_DIR=" + traceDir,
 		"SMATES_REPO_ROOT=" + repoRoot,
 		"NODE_V8_COVERAGE=" + V8Dir(traceDir),
 		"NODE_OPTIONS=" + opts,
+		"BUN_OPTIONS=" + bunOpts,
 	}
+}
+
+// bunPreloadOption is the BUN_OPTIONS argument preloading p. Bun splits BUN_OPTIONS at
+// whitespace without escapes, but takes a whole argument in quotes.
+func bunPreloadOption(p string) string {
+	if strings.ContainsAny(p, " \t") {
+		return `"--preload=` + p + `"`
+	}
+	return "--preload=" + p
 }
 
 func quoteNodeOption(p string) string {

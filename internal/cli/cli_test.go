@@ -507,6 +507,13 @@ func TestRenderConfig(t *testing.T) {
 			{Name: "vitest:packages/a b", Runner: "vitest", Root: "packages/a b", Exclude: []string{"*: weird/**", "#x"}},
 			{Name: "yes", Runner: "pytest", Root: "on"},
 		},
+		// Detected tests, command and env (Create React App, node --import tsx).
+		{
+			{Name: "jest", Runner: "jest", Root: "web", Tests: []string{"src/**/*.{spec,test}.{js,jsx,ts,tsx}"},
+				Command: "npx --no-install react-scripts test --transformIgnorePatterns 'x/(?!y)' --watchAll=false",
+				Env:     map[string]string{"CI": "true", "TZ": "a: b"}},
+			{Name: "node", Runner: "node", Root: ".", Command: "node --import tsx --test", Env: map[string]string{"NODE_ENV": "test"}},
+		},
 	}
 	for _, suites := range cases {
 		out := renderConfig(suites, map[string][]string{"go:root": {"# command: \"go test -race\"", "# env:", "#   TZ: UTC"}})
@@ -519,7 +526,8 @@ func TestRenderConfig(t *testing.T) {
 		}
 		for i, s := range suites {
 			g := c.Suites[i]
-			if g.Name != s.Name || g.Runner != s.Runner || g.Root != s.Root || !reflect.DeepEqual(g.Exclude, s.Exclude) {
+			if g.Name != s.Name || g.Runner != s.Runner || g.Root != s.Root || !reflect.DeepEqual(g.Exclude, s.Exclude) ||
+				!reflect.DeepEqual(g.Tests, s.Tests) || g.Command != s.Command || !reflect.DeepEqual(g.Env, s.Env) {
 				t.Errorf("suite %d: %+v, want %+v", i, g, s)
 			}
 		}

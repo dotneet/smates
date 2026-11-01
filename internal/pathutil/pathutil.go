@@ -15,6 +15,13 @@ import (
 
 // Rel converts an absolute (or file:// URL) path to a clean repo-relative slash path.
 // It resolves symlinks when possible. ok is false for paths outside root.
+//
+// A query or fragment on a plain path (/repo/src/a.ts?v=3, as dev servers and V8
+// coverage report modules) is dropped only when the path itself does not exist, the
+// part before it is an existing file and the name holding the '?' or '#' is not an
+// existing directory, so names that merely contain them (/repo/notes#1/new.txt, a probe
+// of a file not created yet) are kept. A file:// URL's query and fragment are already
+// separated by url.Parse.
 func Rel(root, p string) (string, bool) {
 	if strings.HasPrefix(p, "file://") {
 		u, err := url.Parse(p)
@@ -22,8 +29,7 @@ func Rel(root, p string) (string, bool) {
 			return "", false
 		}
 		p = fileURLPath(u.Path, runtime.GOOS == "windows")
-	}
-	if i := strings.IndexAny(p, "?#"); i >= 0 && !fileExists(p) {
+	} else if i := strings.IndexAny(p, "?#"); i >= 0 && !fileExists(p) && isFile(p[:i]) && !nameExists(p, i) {
 		p = p[:i]
 	}
 	if !filepath.IsAbs(p) {
@@ -69,6 +75,20 @@ func resolve(p string) string {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// nameExists reports whether the path element of p holding offset i exists as a
+// directory (notes#1 in /repo/notes#1/new.txt): the '?' or '#' at i is then part of a
+// name rather than the start of a query.
+func nameExists(p string, i int) bool {
+	k := strings.IndexAny(p[i:], `/\`)
+	return k >= 0 && fileExists(p[:i+k])
+}
+
+// isFile reports whether p exists and is not a directory.
+func isFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }
 
 // Join joins repo-relative slash paths and cleans the result ("." stays ".").

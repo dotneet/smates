@@ -12,8 +12,9 @@
 //  3. directories declared in config: pytest pythonpath (pyproject.toml, pytest.ini,
 //     tox.ini, setup.cfg), setuptools/poetry/hatch package locations;
 //  4. Options.Roots;
-//  5. the parent of the importing file's top-level package (pytest's rootdir-based
-//     "prepend" import mode);
+//  5. the parent of the importing file's top-level package and, for test files, the
+//     basedir of every conftest.py pytest loads for it (pytest's "prepend" import
+//     mode);
 //  6. the importing file's own directory.
 //
 // The analyzer is a safety net under runtime traces, so wherever the import system
@@ -62,6 +63,10 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 	a.once.Do(func() { a.idx = buildIndex(a.h, a.opts.Roots) })
 	r := &resolver{h: a.h, idx: a.idx, self: p, dir: parentDir(p), out: map[string]bool{}}
 	r.ownPackage()
+	if a.idx.isTestLike(p) {
+		// Before resolving: loading conftests adds import roots.
+		r.conftests()
+	}
 
 	sc := scan(src)
 	for _, ref := range sc.refs {
@@ -74,9 +79,6 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 				r.leaf(join(r.dir, name))
 			}
 		}
-	}
-	if a.idx.isTestLike(p) {
-		r.conftests()
 	}
 	return r.result()
 }
@@ -130,13 +132,31 @@ func (r *resolver) ownPackage() {
 }
 
 // conftests adds conftest.py from the file's directory up to the repository root.
+// In pytest's default "prepend" import mode, loading a conftest.py inserts its
+// basedir (the first directory up from it that is not a package) into sys.path, so
+// each such basedir is also a local import root of the test file: with
+// tests/conftest.py, tests/api/test_x.py can "from utils import foo" (tests/utils.py).
 func (r *resolver) conftests() {
 	for d := r.dir; ; d = parentDir(d) {
-		r.add(join(d, "conftest.py"))
+		if c := join(d, "conftest.py"); r.h.Has(c) {
+			r.add(c)
+			if root := r.basedir(d); !contains(r.local, root) {
+				r.local = append(r.local, root)
+			}
+		}
 		if d == "" {
 			return
 		}
 	}
+}
+
+// basedir returns the first directory from d upwards without an __init__.py: the
+// directory pytest's prepend import mode puts on sys.path for a module in d.
+func (r *resolver) basedir(d string) string {
+	for d != "" && r.h.Has(join(d, "__init__.py")) {
+		d = parentDir(d)
+	}
+	return d
 }
 
 // resolve adds the files a module reference may load.

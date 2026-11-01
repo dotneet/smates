@@ -282,7 +282,8 @@ func TestGoFuncDeps(t *testing.T) {
 		code := Main([]string{"deps", "-C", r.g.dir, arg}, &out, &errb)
 		return code, out.String(), errb.String()
 	}
-	for _, arg := range []string{"calc#TestAdd", "./calc#TestAdd", filepath.Join(r.g.dir, "calc") + "#TestAdd"} {
+	// A subtest names its function's unit.
+	for _, arg := range []string{"calc#TestAdd", "./calc#TestAdd", filepath.Join(r.g.dir, "calc") + "#TestAdd", "calc#TestAdd/sub_case"} {
 		code, out, errs := deps(arg)
 		if code != 0 || !strings.Contains(out, "calc/add_test.go") || !strings.Contains(out, "calc/add.go") {
 			t.Errorf("deps %s: exit %d\n%s%s", arg, code, out, errs)
