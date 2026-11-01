@@ -298,6 +298,9 @@ class _Tracer:
             f = caller(sys._getframe(2))
             if f is None or getattr(local, "enum", None) == (id(f), f.f_code, f.f_lasti):
                 return
+            module = f.f_globals.get("__name__") or ""
+            if module.split(".")[0] in ("_pytest", "pytest", "pluggy"):
+                return  # pytest itself, e.g. monkeypatch saving the value it restores later
             # The repository file nearest on the stack: a module reading the variable at
             # import (once per process) passes it on to every test depending on it.
             by = None

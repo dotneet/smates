@@ -244,6 +244,7 @@
     const protocol = new Set(['toJSON', 'then', 'asymmetricMatch', '$$typeof', 'nodeType', 'inspect', 'length']);
     const frameRe = /(file:\/\/[^\s)]+?|\/[^\s()]+?|[A-Za-z]:\\[^\s()]+?):\d+:\d+/g;
     const self = __filename;
+    const runnerRe = /[\\/]node_modules[\\/](?:vitest|@vitest[\\/][^\\/]+|jest-[^\\/]+|@jest[\\/][^\\/]+|expect)[\\/]/;
     const fromRepo = () => {
       const limit = Error.stackTraceLimit;
       let stack = '';
@@ -253,9 +254,14 @@
       } finally {
         Error.stackTraceLimit = limit;
       }
+      let first = true;
       for (const m of stack.matchAll(frameRe)) {
         const f = m[1].startsWith('file:') ? safeFileURL(m[1]) : m[1];
-        if (f && f !== self && f.startsWith(rootPrefix) && !f.includes(nm)) return true;
+        if (!f || f === self) continue;
+        // The test framework itself, e.g. vi.stubEnv saving the value it restores later.
+        if (first && runnerRe.test(f)) return false;
+        first = false;
+        if (f.startsWith(rootPrefix) && !f.includes(nm)) return true;
       }
       return false;
     };

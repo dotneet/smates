@@ -20,6 +20,7 @@ import (
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/detect"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/selector"
@@ -288,13 +289,16 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 		return usageError{err}
 	}
 	if fs.NArg() != 1 {
-		return usageError{errors.New("usage: smates why <file>")}
+		return usageError{errors.New("usage: smates why <file or $ENV_VAR>")}
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
 	}
-	target := p.relArg(fs.Arg(0))
+	target := fs.Arg(0)
+	if !depkey.IsEnv(target) {
+		target = p.relArg(target)
+	}
 	res, err := selector.Select(&selector.Input{Repo: p.repo, Config: p.cfg, Suites: p.suites, State: p.state, Snap: p.snap, Graph: p.graph, All: true})
 	if err != nil {
 		return err

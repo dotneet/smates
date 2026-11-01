@@ -39,7 +39,8 @@ For every test unit `T` (a test file; a package for Go) smates stores the inputs
 used and their git blob hashes at the time it last ran:
 
 ```
-D(T) = traced(T)        files executed or read while T ran (incl. its child processes)
+D(T) = traced(T)        files executed or read while T ran (incl. its child processes),
+                        and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
      ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
 ```
@@ -50,6 +51,7 @@ now. Otherwise it is **selected**, with a reason (`smates run --explain`):
 ```
 + src/cart.test.ts      [changed: src/pricing.ts]
 + tests/test_report.py  [changed: tests/data/catalog.json]
++ src/dates.test.ts     [env changed: TZ]
 + pkg/api               [failed: last run: fail]
 + src/new.test.ts       [new: no recorded run]
 ```
@@ -57,6 +59,25 @@ now. Otherwise it is **selected**, with a reason (`smates run --explain`):
 Hashes are compared by content, not with `git diff`, so selection needs no history
 (`fetch-depth: 1` is fine), works on dirty working trees, and is never confused by
 rebases or merge commits.
+
+**Environment variables.** A variable a test reads (`process.env.X` in Node and Bun,
+also through jest's and vitest's per-file copies and `import.meta.env`; `os.environ` /
+`os.getenv` in Python; `os.Getenv` / `os.LookupEnv` in Go) is a dependency like a file:
+`$X` in `smates deps`, compared by a hash of its value (never the value itself; unset and
+empty differ). Only reads made with repository code on the stack count, not the runner's
+own lookups; copying the whole environment (`{...process.env}`, `dict(os.environ)`,
+starting a child process) is not a read of every variable, and a value the test set
+itself is not an outer dependency. The value compared is the one the suite's tests see:
+`env:` in `smates.yml` overrides the shell. Variables that differ between machines and
+between CI and a laptop are ignored by default, so a state recorded on CI and pulled
+locally does not select every test: `PATH`, `HOME`, `USER`, `TMPDIR`, `SHELL`, locale
+(`LANG`, `LC_*`), terminal (`TERM`, `COLUMNS`, color switches), CI metadata (`CI`,
+`GITHUB_*`, `RUNNER_*`, `GITLAB_*`, …), proxies, toolchain locations (`GOPATH`,
+`VIRTUAL_ENV`, `npm_*`, …) and what smates sets itself (`SMATES_*`, `NODE_OPTIONS`,
+`PYTHONPATH`, `GOFLAGS`, …); see `DefaultEnvIgnore` in
+[internal/config/config.go](internal/config/config.go). Add your own with `env_ignore`,
+track a default one with `env_track` (top level or per suite), or turn tracking off with
+`env_ignore: ["*"]`.
 
 **Orphans.** A changed file that is in no test's `D(T)` and not ignored (docs, editor
 config, …) is an *orphan*: deterministic analysis cannot explain it. smates then
@@ -174,6 +195,8 @@ suites:
 
 orphans: agent        # agent | all | ignore
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
+env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select nothing ("*": tracking off)
+env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
 flaky:
@@ -197,7 +220,7 @@ agent:
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
-| `smates why <file>` / `deps <test>` | inspect the dependency map |
+| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
 
@@ -209,7 +232,9 @@ selection in a new repository, or permanently on a nightly job.
 every input of every test, so when a test's outcome flips between pass and fail while none
 of those inputs changed (a failing test that passes when re-run, a full run on the default
 branch that fails a test nothing touched), the test is flaky — or it depends on something
-smates cannot see (time, network, environment variables, files outside the repository).
+smates cannot see (time, network, environment variables it ignores or cannot see being
+read, files outside the repository). `smates flaky` also lists the variables each flaky
+test reads (they were the same across its flips).
 `smates run` reports such tests in its log, in `--report` (`flaky`), in the job summary and
 in the `flaky` / `flaky-tests` outputs, and remembers the evidence (number of flips, last
 commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure still
@@ -228,13 +253,15 @@ smates: failure hints for 1 failing test unit(s):
   web: src/cart.test.ts — 2 of its 37 known inputs changed since its last recorded run (3f2a1c9, passed)
       src/price.ts  (source, direct import, modified)
       fixtures/prices.json  (data, traced, modified)
+      $TZ  (environment variable, read in its last run, changed)
     → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
 ```
 
 - "Changed" is measured against the content recorded when that test last ran (or, for a
   test with no record, against the files this run's selection found changed). Candidates
-  are ranked: code the test imports directly, other code it uses, the test file itself,
-  data, configuration, directory listings; then by modification time.
+  are ranked: code the test imports directly, other code it uses, the test file itself
+  and environment variables it read, data, configuration, directory listings; then by
+  modification time.
 - **None of its inputs changed** points at a flaky test or the environment (time, network,
   ordering, something tracing cannot see); if it did not pass last time either, the cause
   predates that run. Changed files no test is known to depend on are listed instead when
@@ -317,6 +344,12 @@ ok  	example.com/shop/internal/store	0.170s
 
 - Dependencies outside the repository (services, databases, network) are not traced;
   declare them with `rules`/`inputs`, or let orphans reach the agent.
+- Environment variables are seen only when code reads them through `process.env` (not
+  Bun's `Bun.env` / `import.meta.env`), `os.environ` or Go's `os.Getenv`/`os.LookupEnv`.
+  What the runtime itself consults (`TZ` for dates, the locale, `GODEBUG`), native code,
+  `syscall.Getenv`, and commands smates cannot trace (shell scripts, binaries) are
+  invisible. Values are stored as SHA-256 hashes: a guessable value (a weak password) can
+  be confirmed by whoever reads the state file; list such variables in `env_ignore`.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.
 - Granularity is the file (the package for Go): a change anywhere in a module re-runs
