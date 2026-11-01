@@ -179,13 +179,39 @@ comes from the overall exit code unless you give a [JUnit report](configuration.
 
 Tests that start other processes are followed everywhere:
 
-- Node and Python children trace themselves, also when started through a shell
+- Node, Bun and Python children trace themselves, in any suite (a pytest test running
+  `node`, a Node test running `python3` or `bun`), also when started through a shell
   (`sh -c "node x | tr"`), and are attributed to the test that started them.
 - Shell scripts, `grep`, `cat` and other read-only commands are analyzed from their
-  command line and script contents: the test depends on the files they name.
+  command line and script contents: the test depends on the files they name. A script
+  called with arguments follows its positional parameters (`$1`, `"$@"`).
 - A command smates cannot see into (`make`, a compiled binary) makes the test depend on
-  everything below the directory it runs in (`dir/**`), and on the program itself when it
-  is named by path.
+  everything below the directory it runs in (`dir/**`), on the program itself when it
+  is named by path, and on files named in its option values (`--config=cfg/app.ini`,
+  `-Dk=v`) and response files (`@args.txt`).
+- A Python child run with `-I`, `-E` or `-S`, or a Node, Bun or Python child whose
+  environment drops smates' variables, cannot trace itself and is handled like a
+  command smates cannot see into.
+- Children of Go tests: see [Child processes of Go tests](#child-processes-of-go-tests).
+
+### Child processes of Go tests { #child-processes-of-go-tests }
+
+Go has no hook in the processes a test starts, so smates follows them through Go's test
+log:
+
+- A re-execution of the test binary run as a test binary (the helper-process pattern,
+  `exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")`) writes a test log of its
+  own, which is merged into the test's dependencies. If it ends in `os.Exit`, panics or
+  is killed, its log is lost and the test depends on every file of its Go module:
+  return from the helper instead of exiting to keep it precise.
+- Any other program (`sh`, `git`, a compiled tool, the binary run with its own
+  arguments by a `TestMain` that dispatches to a CLI) makes the test depend on the tree
+  of the directory it runs in, its `cmd.Dir`, and the program file when it is in the
+  repository.
+- Node, Bun and Python children trace themselves, as everywhere.
+
+Paths such a program names outside those directories (`sh -c "cat ../../testdata/x"`)
+are not seen; see [Limitations](../reference/limitations.md).
 
 A server the tests reach over the network is not a child process. Declare its code with
 `depends_on` (see [Tests that talk to a server](servers.md)).

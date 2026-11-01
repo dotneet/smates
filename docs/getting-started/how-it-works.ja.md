@@ -158,7 +158,7 @@ smates はいつものテストコマンドを実行し、その実行の間だ�
 | Bun | ファイルごとの `bun test --coverage`、モジュールキャッシュ、`node:fs`・`Bun.file`・`Bun.Glob` の preload フック |
 | Python（pytest、unittest） | `sys.monitoring`（3.12 以降）または `sys.setprofile` と audit フック。テスト・fixture・モジュールごと |
 | Go | 静的な import の閉包（Go では正確）と、`go test -exec` 経由でテストログが記録するファイルと環境変数 |
-| 子プロセス | Node と Python の子プロセスは自分自身をトレースします。シェルスクリプト、`grep`、`cat` などはコマンドラインから解析します |
+| 子プロセス | Node、Bun、Python の子プロセスは自分自身をトレースします。シェルスクリプト、`grep`、`cat` などはコマンドラインから解析し、Go のテストの子プロセスは Go のテストログから追跡します（[詳細](../guides/runners.md#child-processes)） |
 
 カバレッジツールやパッケージマネージャーを含むランナーごとの詳細は
 [言語とランナー](../guides/runners.md) にあります。

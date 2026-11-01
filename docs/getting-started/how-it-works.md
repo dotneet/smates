@@ -153,7 +153,7 @@ installed into your project.
 | Bun | `bun test --coverage` per file, the module cache, and preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` |
 | Python (pytest, unittest) | `sys.monitoring` (3.12+) or `sys.setprofile`, plus audit hooks; per test, fixture and module |
 | Go | The static import closure (exact for Go), plus the files and variables the test log records through `go test -exec` |
-| Child processes | Node and Python children trace themselves; shell scripts, `grep`, `cat` and similar are analyzed from their command line |
+| Child processes | Node, Bun and Python children trace themselves; shell scripts, `grep`, `cat` and similar are analyzed from their command line; children of Go tests through Go's test log ([details](../guides/runners.md#child-processes)) |
 
 Per-runner details, including coverage tools and package managers, are in
 [Languages and runners](../guides/runners.md).

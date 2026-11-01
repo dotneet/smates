@@ -92,9 +92,12 @@ re-execution the function's coverage directory, so the child's coverage joins th
 parent's.
 
 A child that writes no coverage (it panics or is killed, so no exit hook runs) makes
-the function depend on every Go file it could reach. A child started with an
-environment of its own (`cmd.Env` without `os.Environ()`) or from a copy of the binary
-is not seen.
+the function depend on every Go file it could reach. The files the child reads are
+recorded through its own test log; a child that ends in `os.Exit` loses that log, and
+the function then depends on every file of its Go module (return from the helper to
+keep it precise). A child started with an environment of its own (`cmd.Env` without
+`os.Environ()`) or from a copy of the binary is not seen. Other children of Go tests
+are described in [Child processes of Go tests](runners.md#child-processes-of-go-tests).
 
 ## Compile checks
 

@@ -22,7 +22,13 @@ Playwright) is covered by the static import graph only.
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands
 are analyzed from their command line. A command smates cannot see into (`make`, a
 compiled binary) makes the test depend on everything below the directory it runs in,
-so the test runs more often than needed.
+so the test runs more often than needed. Paths such a command names outside that
+directory are seen only when they appear in its arguments or option values; for a child
+of a Go test, whose command line is not recorded, they are not seen at all
+(`sh -c "cat ../../testdata/x"` from a package directory). A program a Go test deletes
+before it ends (built into `t.TempDir()`) is not detected, and an executable file a Go
+test only reads counts as a program start (extra dependencies, never fewer). See
+[Child processes](../guides/runners.md#child-processes).
 
 **Type-only changes** are handled like any change. Type checking is not a test run:
 keep `tsc` (or your type checker) in CI.
