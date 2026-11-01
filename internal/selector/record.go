@@ -109,17 +109,26 @@ func (h *Hasher) PinBefore(st *state.State, suites []string, start time.Time) {
 	h.since = start
 }
 
+// runStartSlack is how much earlier than the start of the run a modification time may
+// be and still count as during the run. File systems take timestamps from a coarser
+// clock than time.Now: Linux uses the kernel's tick-granular clock (1-10ms), so a path
+// created just after the start can carry an mtime slightly before it. Kept far below
+// the time a build step before `smates run` takes to hand over (`make gen && smates
+// run` must not rerun the tests probing what it generated).
+const runStartSlack = 100 * time.Millisecond
+
 // modifiedDuringRun reports whether a path outside the snapshot, checked for the first
-// time, was modified since the tests started (PinBefore). A modification time in whole
-// seconds comes from a file system with coarse timestamps (HFS+, ext3), on which a path
-// created in the second the run started may look older than the start.
+// time, was modified since the tests started (PinBefore), give or take runStartSlack.
+// A modification time in whole seconds comes from a file system with coarse
+// timestamps (HFS+, ext3), on which a path created in the second the run started may
+// look older than the start: it is compared with the start's second.
 func (h *Hasher) modifiedDuringRun(fi os.FileInfo) bool {
 	if h.since.IsZero() {
 		return false
 	}
-	since, mt := h.since, fi.ModTime()
-	if mt.Nanosecond() == 0 {
-		since = since.Truncate(time.Second)
+	since, mt := h.since.Add(-runStartSlack), fi.ModTime()
+	if sec := h.since.Truncate(time.Second); mt.Nanosecond() == 0 && sec.Before(since) {
+		since = sec
 	}
 	return !mt.Before(since)
 }
