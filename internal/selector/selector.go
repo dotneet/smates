@@ -111,6 +111,9 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Files maps each test to its test files (the file defining it, for a Go test
+	// function).
+	Files map[string][]string `json:"-"`
 	// Unrecorded is set when some test of the suite has no recorded entry: its
 	// dependencies are known from the static closure only.
 	Unrecorded bool `json:"-"`
@@ -141,16 +144,38 @@ type ServiceDeps struct {
 // exists).
 func (d *ServiceDeps) Match(f string) bool { return d.match(f) }
 
-// applies reports whether the declaration covers a unit of suite su.
-func (d *ServiceDeps) applies(su *runner.Suite, unit string) bool {
-	return len(d.Tests) == 0 || pathutil.Match(d.Tests, pathutil.RelTo(unit, su.Root))
+// applies reports whether the declaration covers a unit of suite su whose test files
+// are files.
+func (d *ServiceDeps) applies(su *runner.Suite, unit string, files []string) bool {
+	return len(d.Tests) == 0 || UnitMatches(su, unit, files, d.Tests)
+}
+
+// UnitMatches reports whether the tests globs of a rule or a depends_on declaration
+// (relative to the suite root) select unit, whose test files are files. A Go test
+// function ("dir#TestName") is matched by its package directory, like the package unit
+// it belongs to, and by the test file defining it.
+func UnitMatches(su *runner.Suite, unit string, files, globs []string) bool {
+	if pathutil.Match(globs, pathutil.RelTo(unit, su.Root)) {
+		return true
+	}
+	if dir, _, ok := runner.SplitFuncUnit(unit); ok {
+		if pathutil.Match(globs, pathutil.RelTo(dir, su.Root)) {
+			return true
+		}
+		for _, f := range files {
+			if pathutil.Match(globs, pathutil.RelTo(f, su.Root)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ServiceVia returns the label of the first depends_on/serves declaration through
 // which unit depends on file f ("" when none does).
 func (s *Suite) ServiceVia(unit, f string) string {
 	for _, d := range s.Services {
-		if d.match(f) && d.applies(s.Suite, unit) {
+		if d.match(f) && d.applies(s.Suite, unit, s.Files[unit]) {
 			return d.Label
 		}
 	}
@@ -358,6 +383,8 @@ func Select(in *Input) (*Result, error) {
 			sr.Inputs[f] = true
 		}
 		st := in.State.Suites[su.Name]
+		mapper, _ := su.Adapter.(runner.StaticMapper)
+		sr.Files = unitFiles
 
 		var staticStarts []string
 		for _, u := range units {
@@ -371,7 +398,7 @@ func Select(in *Input) (*Result, error) {
 			deps := map[string]bool{}
 			via := map[string]string{} // known deps by strongest explanation
 			for _, d := range sr.Services {
-				if d.applies(su, u) {
+				if d.applies(su, u, unitFiles[u]) {
 					deps[d.Key], via[d.Key] = true, ViaService
 					if !slices.Contains(res.declared, d) {
 						res.declared = append(res.declared, d)
@@ -382,14 +409,18 @@ func Select(in *Input) (*Result, error) {
 				}
 			}
 			if config.Bool(su.Static, true) && in.Graph != nil {
-				for _, f := range in.Graph.Closure(unitFiles[u]...) {
+				closure := in.Graph.Closure(unitFiles[u]...)
+				if mapper != nil {
+					closure = mapper.MapStatic(su, u, closure)
+				}
+				for _, f := range closure {
 					deps[f], via[f] = true, ViaImport
 				}
 			}
 			for _, f := range suiteInputs {
 				deps[f], via[f] = true, ViaInput
 			}
-			for _, f := range ruleDeps(su, u, files) {
+			for _, f := range ruleDeps(su, u, unitFiles[u], files) {
 				deps[f], via[f] = true, ViaInput
 			}
 			for _, f := range unitFiles[u] {
@@ -574,7 +605,8 @@ func IgnoreGlobs(c *config.Config) []string {
 }
 
 // Covers reports how a dependency set explains a change to f ("" when it does not):
-// "content" (f itself), "listing" or "existence" (a directory listing or an existence
+// "content" (f itself), "declarations" (the declarations of Go file f: edits inside
+// function bodies the test did not execute do not select it), "listing" or "existence" (a directory listing or an existence
 // check, which explain f appearing or disappearing but not edits: an edited file only
 // listed or probed may still be read by something tracing cannot see), or "tree" (a
 // command smates cannot see into ran below a directory containing f). A tree at the
@@ -583,6 +615,8 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
 	case deps[f], deps[f+configKeySuffix]:
 		return "content"
+	case deps[depkey.Decls(f)]:
+		return "declarations"
 	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"
 	case existenceChanged && deps[depkey.Existence(f)]:
@@ -641,7 +675,9 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		return
 	case ModeDiff:
 		for _, d := range deps {
-			if changed[d] {
+			// Without a recording, a Go file's declarations change when the file does.
+			f, isFile := depkey.File(d)
+			if changed[d] || (isFile && changed[f]) {
 				t.Changed = append(t.Changed, d)
 			}
 		}
@@ -836,11 +872,12 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 	return out
 }
 
-func ruleDeps(su *runner.Suite, unit string, files []string) []string {
+// ruleDeps are the files the suite's rules declare for unit (with test files
+// unitFiles), among files.
+func ruleDeps(su *runner.Suite, unit string, unitFiles, files []string) []string {
 	var out []string
-	rel := pathutil.RelTo(unit, su.Root)
 	for _, r := range su.Rules {
-		if !pathutil.Match(r.Tests, rel) {
+		if !UnitMatches(su, unit, unitFiles, r.Tests) {
 			continue
 		}
 		out = append(out, expandInputs(r.Deps, files)...)
@@ -1080,10 +1117,20 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
 				var why, named []string
+				searched := map[string]bool{}
 				for _, d := range s.Deps[t.ID] {
 					if s.Inputs[d] != (tier == 1) {
 						continue
 					}
+					// The declarations of a Go file are searched as the file itself (one
+					// read for both keys).
+					if f, ok := depkey.File(d); ok {
+						d = f
+					}
+					if searched[d] {
+						continue
+					}
+					searched[d] = true
 					h, ok := hits[d]
 					if !ok {
 						h = map[string]bool{}
