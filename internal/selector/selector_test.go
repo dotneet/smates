@@ -1010,3 +1010,30 @@ func TestSnapshotHash(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkers(t *testing.T) {
+	m := Marker("h1", []string{"b", "a", "a"})
+	if m != "?h1@a,b" {
+		t.Fatalf("Marker: %q", m)
+	}
+	if h, seen, ok := ParseMarker(m); !ok || h != "h1" || !reflect.DeepEqual(seen, []string{"a", "b"}) {
+		t.Errorf("ParseMarker: %q %v %v", h, seen, ok)
+	}
+	if _, _, ok := ParseMarker("h1"); ok {
+		t.Error("a content hash is no marker")
+	}
+	if got := MarkSeen(m, "h1", []string{"c"}); got != "?h1@a,b,c" {
+		t.Errorf("same hash: %q", got)
+	}
+	if got := MarkSeen(m, "h2", []string{"c"}); got != "?h2@c" {
+		t.Errorf("new hash: %q", got)
+	}
+	if got := MarkSeen("h0", "", []string{"a"}); got != "?@a" {
+		t.Errorf("absent: %q", got)
+	}
+	mk := func(root string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Root: root}} }
+	all := []*runner.Suite{mk("a"), mk("b")}
+	if !OwnedOnly("a/x", all, 1) || OwnedOnly("Dockerfile", all, 1) || OwnedOnly("b/x", all, 1) || !OwnedOnly("Dockerfile", all, 2) {
+		t.Error("OwnedOnly")
+	}
+}

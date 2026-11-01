@@ -426,8 +426,9 @@ suites:
 	var jb struct {
 		Orphans []string `json:"orphans"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &jb); err != nil || !reflect.DeepEqual(jb.Orphans, []string{"b/notes.cfg"}) {
-		t.Errorf("b's pending change is lost: %v %s", err, out.String())
+	// Dockerfile is b's too (no suite root contains it): a's run does not hide it.
+	if err := json.Unmarshal(out.Bytes(), &jb); err != nil || !reflect.DeepEqual(jb.Orphans, []string{"Dockerfile", "b/notes.cfg"}) {
+		t.Errorf("b's pending changes are lost: %v %s", err, out.String())
 	}
 
 	// With a recorded snapshot, a file added under b's root that a's test names still

@@ -120,11 +120,15 @@ suites left out would run for under the orphan policy (it is under their root, n
 the root of a picked suite, and no suite rooted at the repository root is picked) is not
 an orphan of the run either (`selector.Owned`): the job that runs those suites handles
 it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
-the snapshot entries of the files its suites own; files only the suites left out own
-keep their entry, or, when they had none, get `?` followed by their current hash
-(`selector.Unrecorded`): a run of their own suites, or of every suite, still sees them
-as changed (and as not recorded: the agent and failure hints get no old version), while
-`--suite` runs of the other suites compare the hash after `?`.
+the snapshot for them: a file only its suites own gets its hash; a file the suites left
+out also own (or own alone) gets a marker `?<hash>@<suites>` (`selector.Marker`), the
+content these suites saw, unless its entry already equals the current hash (or holds a
+content hash and only suites left out own it). A later `--suite` run finds a marked
+file unchanged only when every suite it runs saw that content; a run of other suites,
+or of every suite, finds it changed (and, to the agent and failure hints, unrecorded),
+so a shared state (local runs, `state merge`, CI without a `cache-key` per job) never
+hides a change from the suites that have not compared it. Orphans a `--suite` run
+handles are recorded the same way.
 
 Orphans go through, in order:
 

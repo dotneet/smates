@@ -206,14 +206,14 @@ func Select(in *Input) (*Result, error) {
 			return nil, err
 		}
 		if len(in.Others) > 0 && len(in.State.Files) > 0 {
-			// A --suite --all run records the files only the suites left out own,
-			// when the snapshot holds no comparable entry for them, as Unrecorded
-			// followed by their current hash (cli saveState). A --suite run of other
-			// suites compares that hash; a run of their own suites, or of every
-			// suite, sees the file as changed until it records it.
-			all := append(slices.Clip(in.Suites), in.Others...)
+			// Entries --suite runs wrote as markers (cli saveState): unchanged
+			// for this run when every suite it runs saw the current content.
+			var names []string
+			for _, s := range in.Suites {
+				names = append(names, s.Name)
+			}
 			for f := range changedSet {
-				if v := in.State.Files[f]; strings.HasPrefix(v, Unrecorded) && !Owned(f, all, len(in.Suites)) && v[len(Unrecorded):] == in.Snap[f] {
+				if h, seen, ok := ParseMarker(in.State.Files[f]); ok && h == in.Snap[f] && subset(names, seen) {
 					delete(changedSet, f)
 				}
 			}
@@ -402,6 +402,15 @@ func existedBefore(in *Input, f string) bool {
 	if len(in.State.Files) > 0 {
 		_, ok := SnapshotHash(in.State.Files, f)
 		return ok
+	}
+	return true
+}
+
+func subset(a, b []string) bool {
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
 	}
 	return true
 }
@@ -620,12 +629,56 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	return adds
 }
 
-// Unrecorded prefixes the snapshot entry of a file only the suites left out by a
-// --suite --all run own, when the snapshot had no comparable entry for it: the rest is
-// the file's hash in that run ("" = absent). Such an entry never equals a content hash,
-// so a run of the owning suites, or of every suite, finds the file changed; --suite
-// runs of other suites compare the hash after the prefix.
+// Unrecorded prefixes a snapshot entry that only some suites have compared: a
+// --suite run records a file the suites left out also own (or own alone) as
+// "?<hash>@<suites>", the hash it saw and the suites it ran (Marker). A --suite run
+// whose suites all saw that hash finds the file unchanged; any other run, a run over
+// every suite included, finds it changed until it records the file itself.
 const Unrecorded = "?"
+
+// Marker is the snapshot entry saying that suites saw a file with hash ("" = absent).
+func Marker(hash string, suites []string) string {
+	s := slices.Clone(suites)
+	sort.Strings(s)
+	return Unrecorded + hash + "@" + strings.Join(slices.Compact(s), ",")
+}
+
+// ParseMarker splits a Marker entry; ok is false for a content hash.
+func ParseMarker(v string) (hash string, suites []string, ok bool) {
+	rest, ok := strings.CutPrefix(v, Unrecorded)
+	if !ok {
+		return "", nil, false
+	}
+	hash, names, _ := strings.Cut(rest, "@")
+	if names != "" {
+		suites = strings.Split(names, ",")
+	}
+	return hash, suites, true
+}
+
+// MarkSeen returns the entry after suites saw a file with hash: the suites that
+// already saw that same hash keep it, the others do not.
+func MarkSeen(v, hash string, suites []string) string {
+	if h, seen, ok := ParseMarker(v); ok && h == hash {
+		return Marker(hash, append(seen, suites...))
+	}
+	return Marker(hash, suites)
+}
+
+// OwnedOnly reports whether every suite the orphan policy would run for f (see Owned)
+// is one of the first n suites of all.
+func OwnedOnly(f string, all []*runner.Suite, n int) bool {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	for _, i := range orphanOwners(f, roots) {
+		if i >= n {
+			return false
+		}
+	}
+	return true
+}
 
 // orphanOwners returns the indexes of the suites (by root) an orphan may affect: the
 // suites whose root contains it, where a suite rooted at the repository root contains
