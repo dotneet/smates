@@ -398,12 +398,55 @@ func coverPkgs(rc *RunContext) []string {
 	return pats
 }
 
+// Build flags that change which files go test compiles, forwarded to go list. Others
+// (test flags, -exec, -coverpkg, -count) are not go list's and are left out.
+var (
+	goListValueFlags = map[string]bool{"tags": true, "mod": true, "modfile": true, "overlay": true}
+	goListBoolFlags  = map[string]bool{"race": true, "msan": true, "asan": true}
+)
+
+// goListFlags returns the build flags of GOFLAGS, the suite command and the arguments
+// passed through (in that order: later ones win, as with go test) that go list needs to
+// see the files go test builds.
+func goListFlags(rc *RunContext) []string {
+	words := strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))
+	cmd, _ := SplitWords(rc.Suite.Command)
+	words = append(append(words, cmd...), rc.ExtraArgs...)
+	var out []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "--" || w == "-args" || w == "--args" {
+			break // what follows goes to the test binary
+		}
+		if !strings.HasPrefix(w, "-") {
+			continue
+		}
+		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
+		switch {
+		case goListValueFlags[flag] && hasValue:
+			out = append(out, "-"+flag+"="+value)
+		case goListValueFlags[flag] && i+1 < len(words):
+			out = append(out, "-"+flag+"="+words[i+1])
+			i++
+		case goListBoolFlags[flag]:
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // goPackageFiles lists the Go source files (repository-relative) of the packages
-// matching patterns, resolved in the suite directory.
+// matching patterns, resolved in the suite directory. Files excluded by build
+// constraints count too (minus tests): go test may build them under tags or a platform
+// this listing cannot see, and listing too many only selects more tests.
 func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]string, error) {
-	args := append([]string{"list", "-e", "-find", "-f", "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}", "--"}, patterns...)
+	const format = "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}{{range .IgnoredGoFiles}}|{{.}}{{end}}"
+	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", format, "--")
+	args = append(args, patterns...)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = rc.Dir()
+	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
+	// flags) must not reach go list.
 	cmd.Env = MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="})
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -415,6 +458,9 @@ func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]s
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		parts := strings.Split(line, "|")
 		for _, name := range parts[1:] {
+			if strings.HasSuffix(name, "_test.go") || !strings.HasSuffix(name, ".go") {
+				continue // IgnoredGoFiles lists tests too; -coverpkg builds no test files
+			}
 			if rel, ok := pathutil.Rel(rc.Repo.Root, filepath.Join(parts[0], name)); ok && !pathutil.IsVendored(rel) {
 				files = append(files, rel)
 			}

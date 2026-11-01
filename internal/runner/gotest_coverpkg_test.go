@@ -75,3 +75,70 @@ func TestGoPackageFiles(t *testing.T) {
 		t.Errorf("files %v, want %v", got, want)
 	}
 }
+
+func TestGoListFlags(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	s := &Suite{Suite: config.Suite{
+		Command: "go test -tags=integration -race -coverpkg=./... -count=1 ./x -- -tags=notmine",
+		Env:     map[string]string{"GOFLAGS": "-mod=mod -exec=/bin/false -tags=ignored -coverpkg=./..."},
+	}}
+	got := goListFlags(&RunContext{Suite: s, ExtraArgs: []string{"-tags", "late"}})
+	want := []string{"-mod=mod", "-tags=ignored", "-tags=integration", "-race"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("goListFlags = %v, want %v", got, want)
+	}
+}
+
+// Files behind build tags in -coverpkg packages are dependencies: go test builds them
+// into every test binary under the tags it is given.
+func TestGoPackageFilesBuildTags(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not on PATH")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{
+		"go.mod":                   "module example.com/m\n\ngo 1.22\n",
+		"a/a.go":                   "package a\n",
+		"a/db_integration.go":      "//go:build integration\n\npackage a\n",
+		"a/db_integration_test.go": "//go:build integration\n\npackage a\n",
+		"integ/only.go":            "//go:build integration\n\npackage integ\n",
+	} {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tagged := []string{"a/a.go", "a/db_integration.go", "integ/only.go"}
+	cases := []struct {
+		name    string
+		cmd     string
+		goflags string
+		want    []string
+	}{
+		{"tags in the command", "go test -tags=integration -coverpkg=./...", "", tagged},
+		{"tags in GOFLAGS with flags go list rejects", "go test", "-tags=integration -exec=/bin/false -coverpkg=./... -count=1", tagged},
+		// Without the tag, a file excluded by it still counts (over-selection at worst);
+		// a package with no file but tagged ones is not built by go test either.
+		{"no tags", "go test -coverpkg=./...", "", []string{"a/a.go", "a/db_integration.go"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("GOFLAGS", c.goflags)
+			rc := &RunContext{Repo: &gitx.Repo{Root: root}, Suite: &Suite{Suite: config.Suite{Root: ".", Command: c.cmd}}}
+			got, err := goPackageFiles(context.Background(), rc, []string{"./..."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Strings(got)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("files %v, want %v", got, c.want)
+			}
+		})
+	}
+}
