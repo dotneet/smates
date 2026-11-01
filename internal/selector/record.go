@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
@@ -17,6 +18,7 @@ import (
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static/golang"
 )
 
 // Hasher returns content hashes of dependency keys. A key is a repo-relative file path;
@@ -117,6 +119,8 @@ func (h *Hasher) Hash(key string) string {
 		return "absent"
 	case depkey.KindContent:
 		return h.file(key)
+	case depkey.KindDecls:
+		return h.decls(p)
 	}
 	if h.dirs == nil {
 		h.dirs = map[string][]string{}
@@ -146,6 +150,33 @@ func (h *Hasher) Hash(key string) string {
 	}
 	sum := sha1.Sum([]byte(strings.Join(list, "\n")))
 	return "dir:" + hex.EncodeToString(sum[:])
+}
+
+// declsCache maps a Go file's blob hash to the hash of its declarations.
+var declsCache sync.Map
+
+// decls hashes the declarations of a Go file (see golang.DeclsHash): "" when the file
+// is absent, its content hash when the declarations cannot be told apart from the
+// rest (it does not parse, or is not on disk as the snapshot has it), so that any
+// change counts.
+func (h *Hasher) decls(p string) string {
+	blob := h.file(p)
+	if blob == "" || h.root == "" {
+		return blob
+	}
+	if v, ok := declsCache.Load(blob); ok {
+		return v.(string)
+	}
+	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
+	if err != nil || gitx.HashBytes(src) != blob {
+		return blob
+	}
+	v, ok := golang.DeclsHash(src, strings.HasSuffix(p, "_test.go"))
+	if !ok {
+		v = blob
+	}
+	declsCache.Store(blob, v)
+	return v
 }
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
@@ -392,6 +423,13 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 		if depkey.IsEnv(k) {
 			return false // no recorded environment to compare a newly read variable with
+		}
+		if f, ok := depkey.File(k); ok && f != k {
+			// The declarations of a Go file: unchanged if the file is.
+			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && was != h.Hash(f)) {
+				return false
+			}
+			continue
 		}
 		if depkey.IsPseudo(k) {
 			continue

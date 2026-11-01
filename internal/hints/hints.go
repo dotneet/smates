@@ -179,6 +179,18 @@ func Compute(in Input) *Hint {
 		if !ok {
 			continue
 		}
+		if f, ok := depkey.File(k); ok && f != k {
+			// The declarations of a Go file stand for the file.
+			if keys[f] {
+				if _, ok := changed(in, f); ok {
+					continue
+				}
+			}
+			c.Path, c.New, c.Old = f, in.Hash(f), ""
+			if in.Entry != nil {
+				c.Old = in.Entry.Deps[f]
+			}
+		}
 		classify(&c, in, own, direct)
 		cands = append(cands, c)
 	}

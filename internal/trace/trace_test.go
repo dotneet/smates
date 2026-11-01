@@ -502,7 +502,7 @@ func TestParseTestLog(t *testing.T) {
 		"malformed",
 		"",
 	}, "\n")), 0o644)
-	got, env := parseTestLog(log, pkg)
+	got, env := ParseTestLog(log, pkg)
 	if !reflect.DeepEqual(env, []string{"HOME", "APP_MODE"}) {
 		t.Errorf("env %q", env)
 	}
@@ -519,7 +519,7 @@ func TestParseTestLog(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got\n %q\nwant\n %q", got, want)
 	}
-	if files, env := parseTestLog(filepath.Join(root, "nope.log"), pkg); files != nil || env != nil {
+	if files, env := ParseTestLog(filepath.Join(root, "nope.log"), pkg); files != nil || env != nil {
 		t.Error("missing log")
 	}
 }

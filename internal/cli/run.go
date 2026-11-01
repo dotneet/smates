@@ -250,6 +250,7 @@ func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runne
 	}
 	unitOf := unitIndex(sr)
 	rc.UnitOf = func(f string) string { return unitOf[f] }
+	rc.Known = func(u string) []string { return sr.Known[u] }
 	return rc
 }
 
@@ -257,6 +258,14 @@ func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runne
 func (c *cycle) printCommands(batches []*batch) {
 	for _, b := range batches {
 		rc := c.runContext(b.sr, b.units, b.full)
+		if cmd, ok := b.sr.Suite.Adapter.(runner.Commander); ok {
+			if argvs, err := cmd.Commands(rc); err == nil && argvs != nil {
+				for _, argv := range argvs {
+					fmt.Fprintf(c.stdout, "(cd %s && %s)\n", b.sr.Suite.Root, strings.Join(argv, " "))
+				}
+				continue
+			}
+		}
 		argv, _ := rc.CommandLine(nil, rc.RelArgs(""))
 		if rc.All {
 			argv, _ = rc.CommandLine(nil, nil)
@@ -552,9 +561,12 @@ func unitIndex(sr *selector.Suite) map[string]string {
 	return idx
 }
 
-// unitFiles lists the test files of a unit (a unit is a test file, or for Go a
-// package directory whose test files are known from its deps).
+// unitFiles lists the test files of a unit (a unit is a test file, for Go a package
+// directory whose test files are known from its deps, or a test function).
 func unitFiles(sr *selector.Suite, unit string) []string {
+	if files, ok := sr.Files[unit]; ok {
+		return files
+	}
 	if sr.Suite.IsTestFile(unit) {
 		return []string{unit}
 	}

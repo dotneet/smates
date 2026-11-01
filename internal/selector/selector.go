@@ -105,6 +105,9 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Files maps each test to its test files (the file defining it, for a Go test
+	// function).
+	Files map[string][]string `json:"-"`
 }
 
 // Mode is how a selection was computed.
@@ -243,6 +246,8 @@ func Select(in *Input) (*Result, error) {
 			sr.Inputs[f] = true
 		}
 		st := in.State.Suites[su.Name]
+		mapper, _ := su.Adapter.(runner.StaticMapper)
+		sr.Files = unitFiles
 
 		var staticStarts []string
 		for _, u := range units {
@@ -256,7 +261,11 @@ func Select(in *Input) (*Result, error) {
 			deps := map[string]bool{}
 			via := map[string]string{} // known deps by strongest explanation
 			if config.Bool(su.Static, true) && in.Graph != nil {
-				for _, f := range in.Graph.Closure(unitFiles[u]...) {
+				closure := in.Graph.Closure(unitFiles[u]...)
+				if mapper != nil {
+					closure = mapper.MapStatic(su, u, closure)
+				}
+				for _, f := range closure {
 					deps[f], via[f] = true, ViaImport
 				}
 			}
@@ -341,7 +350,8 @@ func IgnoreGlobs(c *config.Config) []string {
 }
 
 // Covers reports how a dependency set explains a change to f ("" when it does not):
-// "content" (f itself), "listing" or "existence" (a directory listing or an existence
+// "content" (f itself), "declarations" (the declarations of Go file f: edits inside
+// function bodies the test did not execute do not select it), "listing" or "existence" (a directory listing or an existence
 // check, which explain f appearing or disappearing but not edits: an edited file only
 // listed or probed may still be read by something tracing cannot see), or "tree" (a
 // command smates cannot see into ran below a directory containing f). A tree at the
@@ -350,6 +360,8 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
 	case deps[f]:
 		return "content"
+	case deps[depkey.Decls(f)]:
+		return "declarations"
 	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"
 	case existenceChanged && deps[depkey.Existence(f)]:
@@ -388,7 +400,8 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		return
 	case ModeDiff:
 		for _, d := range deps {
-			if changed[d] {
+			// Without a recording, a Go file's declarations change when the file does.
+			if f, ok := depkey.File(d); ok && changed[f] {
 				t.Changed = append(t.Changed, d)
 			}
 		}

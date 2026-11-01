@@ -16,6 +16,7 @@ func TestParseAndMake(t *testing.T) {
 		{"./**", KindTree, "."},
 		{"$TZ", KindEnv, "TZ"},
 		{"$WEIRD/NAME?", KindEnv, "WEIRD/NAME?"},
+		{"pkg/a.go#decls", KindDecls, "pkg/a.go"},
 	} {
 		k, p := Parse(c.key)
 		if k != c.kind || p != c.path {
@@ -30,6 +31,15 @@ func TestParseAndMake(t *testing.T) {
 		if IsEnv(c.key) != (c.kind == KindEnv) {
 			t.Errorf("IsEnv(%q)", c.key)
 		}
+	}
+	if f, ok := File("pkg/a.go#decls"); !ok || f != "pkg/a.go" {
+		t.Errorf("File(decls) = %q %v", f, ok)
+	}
+	if f, ok := File("pkg/a.go"); !ok || f != "pkg/a.go" {
+		t.Errorf("File(content) = %q %v", f, ok)
+	}
+	if _, ok := File("pkg/"); ok {
+		t.Error("File(listing)")
 	}
 	// A trailing slash on the path is not doubled.
 	if Listing("dir/") != "dir/" || Existence("dir/") != "dir?" || Tree("dir/") != "dir/**" {

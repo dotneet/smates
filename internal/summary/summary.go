@@ -441,7 +441,7 @@ func commonVia(hs []hit) string {
 func (v *view) expand(key string) []string {
 	kind, p := depkey.Parse(key)
 	switch kind {
-	case depkey.KindExistence:
+	case depkey.KindExistence, depkey.KindDecls:
 		return []string{p}
 	case depkey.KindContent, depkey.KindListing, depkey.KindEnv:
 		return []string{key}
@@ -471,6 +471,8 @@ func viaLabel(via, key string) string {
 		return "lists the directory"
 	case depkey.KindExistence:
 		return "checks whether it exists"
+	case depkey.KindDecls:
+		return "its declarations changed (static dependency)"
 	}
 	switch via {
 	case selector.ViaTest:

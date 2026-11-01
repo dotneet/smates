@@ -23,6 +23,7 @@ import (
 	"github.com/dotneet/smates/internal/detect"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 	"gopkg.in/yaml.v3"
@@ -331,6 +332,13 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 						how = append(how, "recorded")
 					}
 				}
+			case "declarations":
+				how = append(how, "static: its declarations (edits inside function bodies count only where the test executed them)")
+				if st != nil && st.Tests[t.ID] != nil {
+					if _, ok := st.Tests[t.ID].Deps[target]; ok {
+						how = append(how, "executed")
+					}
+				}
 			case "listing":
 				how = append(how, "lists its directory (only additions/removals count)")
 			case "existence":
@@ -400,6 +408,18 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
 		}
 		return nil
+	}
+	// A Go package directory whose units are its test functions.
+	var funcs []string
+	for _, s := range res.Suites {
+		for _, t := range s.Tests {
+			if d, _, ok := runner.SplitFuncUnit(t.ID); ok && d == target {
+				funcs = append(funcs, t.ID)
+			}
+		}
+	}
+	if len(funcs) > 0 {
+		return fmt.Errorf("%s is tested per function; pass one of: %s", target, strings.Join(limit(funcs, 20), ", "))
 	}
 	return fmt.Errorf("%s is not a test unit of any suite (see `smates list`)", target)
 }

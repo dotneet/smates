@@ -941,3 +941,82 @@ func TestExistenceProbe(t *testing.T) {
 		t.Errorf("probed file removed: %v", d)
 	}
 }
+
+// Go test functions (granularity func) depend on the bodies they executed and on the
+// declarations of the rest of their package's closure.
+func TestSelectGoFuncUnits(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.22\n",
+		"p/a.go":      "package p\n\nconst K = 1\n\nfunc A() int { return K }\n",
+		"p/b.go":      "package p\n\nfunc B() int { return 2 }\n",
+		"p/a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+		"p/b_test.go": "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n",
+	})
+	s := suite(t, config.Suite{Runner: "go", Tests: []string{"**/*_test.go"}, Inputs: []string{"go.mod"}, Granularity: config.GranularityFunc})
+	s.RepoRoot = f.dir
+	f.suites = []*runner.Suite{s}
+	repo := &gitx.Repo{Root: f.dir}
+	sel := func(st *state.State, all bool) *Result {
+		return f.sel(st, func(in *Input) { in.Repo, in.All = repo, all })
+	}
+	st := state.New()
+	res := sel(st, true)
+	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB"}) {
+		t.Fatalf("units %v", got)
+	}
+	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
+		t.Errorf("known %v", known)
+	}
+	if files := res.Suites[0].Files["p#TestA"]; !reflect.DeepEqual(files, []string{"p/a_test.go"}) {
+		t.Errorf("files %v", files)
+	}
+	executed := map[string]string{"p#TestA": "p/a.go", "p#TestB": "p/b.go"}
+	obs := map[string]*runner.Observation{}
+	for u, f := range executed {
+		obs[u] = &runner.Observation{Files: map[string]bool{f: true}, Status: state.Pass}
+	}
+	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
+	st.Files = map[string]string(f.snap())
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+		t.Fatalf("unchanged: %v", got)
+	}
+
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}) {
+		t.Errorf("body: %v", got)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged}) {
+		t.Errorf("declarations: %v", got)
+	}
+	for _, tt := range res.Suites[0].Tests {
+		if tt.ID == "p#TestB" && (!reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) || tt.Via["p/a.go#decls"] != ViaImport) {
+			t.Errorf("TestB changed %v via %v", tt.Changed, tt.Via)
+		}
+	}
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n")
+
+	// A new test file in the package selects every function (and its own as new).
+	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew}) {
+		t.Errorf("new file: %v", got)
+	}
+}
+
+func TestCoversDeclarations(t *testing.T) {
+	deps := map[string]bool{"p/a.go#decls": true}
+	if got := Covers(deps, "p/a.go", false); got != "declarations" {
+		t.Errorf("Covers = %q", got)
+	}
+	// Without a recording, a changed file changes its declarations.
+	tt := &Test{}
+	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, map[string]bool{"p/a.go": true})
+	if !tt.Selected || !reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) {
+		t.Errorf("diff mode: %+v", tt)
+	}
+}
