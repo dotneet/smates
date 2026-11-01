@@ -1,0 +1,260 @@
+package cli
+
+// `smates config`: safe edits of smates.yml (no hand-editing YAML), and the --format
+// flag shared by the read commands.
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
+)
+
+// formatFlag registers --format text|json.
+func formatFlag(fs *flag.FlagSet) *string {
+	return fs.String("format", "text", "output: text, json")
+}
+
+func checkFormat(f string) error {
+	if f != "text" && f != "json" {
+		return usageError{fmt.Errorf("unknown format %q (want text or json)", f)}
+	}
+	return nil
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// parseInterspersed parses flags that may come after positional arguments
+// (`smates config add-ignore 'docs/**' --dry-run`); "--" ends the flags.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return pos, nil
+		}
+		if i := len(args) - len(rest) - 1; i >= 0 && args[i] == "--" {
+			return append(pos, rest...), nil // everything after "--" is positional
+		}
+		pos = append(pos, rest[0])
+		args = rest[1:]
+	}
+}
+
+// configEdit is the result of an edit of smates.yml (the JSON schema of `smates config
+// ... --format json`, and of "applied" in `smates orphans --apply --format json`).
+type configEdit struct {
+	File string `json:"file"`
+	Key  string `json:"key"`
+	// Added and Present: add-ignore/add-input (and orphans --apply).
+	Added   []string `json:"added,omitempty"`
+	Present []string `json:"present,omitempty"`
+	// Value and Previous: set.
+	Value    *string `json:"value,omitempty"`
+	Previous *string `json:"previous,omitempty"`
+	Changed  bool    `json:"changed"`
+	Written  bool    `json:"written"`
+	DryRun   bool    `json:"dry_run"`
+	Diff     string  `json:"diff,omitempty"`
+}
+
+// configFile returns the config file to edit: explicit, or the one at the repository
+// root of dir.
+func configFile(dir, explicit string) (abs, display string, err error) {
+	if explicit != "" {
+		return absPath(explicit), explicit, nil
+	}
+	if dir == "" {
+		dir = "."
+	}
+	repo, err := gitx.Open(dir)
+	if err != nil {
+		return "", "", err
+	}
+	for _, n := range config.FileNames {
+		p := filepath.Join(repo.Root, n)
+		if _, err := os.Stat(p); err == nil {
+			return p, n, nil
+		}
+	}
+	return "", "", errors.New("no smates.yml at the repository root: run `smates init` first")
+}
+
+// editConfig applies edit to the config file at path and writes the result unless
+// dryRun (always computing the diff).
+func editConfig(path, display string, dryRun bool, res *configEdit, edit func([]byte) ([]byte, error)) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	out, err := edit(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", display, err)
+	}
+	res.File, res.DryRun = display, dryRun
+	res.Changed = string(out) != string(data)
+	if !res.Changed {
+		return nil
+	}
+	res.Diff = unifiedDiff(filepath.ToSlash(display), string(data), string(out))
+	if dryRun {
+		return nil
+	}
+	if err := writeFileAtomic(path, out); err != nil {
+		return err
+	}
+	res.Written = true
+	return nil
+}
+
+// writeFileAtomic replaces path with data, keeping its mode.
+func writeFileAtomic(path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".smates-config-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// addGlobs adds globs to a top-level list of the config file.
+func addGlobs(path, display, key string, globs []string, dryRun bool) (*configEdit, error) {
+	res := &configEdit{Key: key, Added: []string{}, Present: []string{}}
+	err := editConfig(path, display, dryRun, res, func(data []byte) ([]byte, error) {
+		out, added, present, err := config.AddToList(data, key, globs)
+		if err != nil {
+			return nil, err
+		}
+		res.Added, res.Present = append(res.Added, added...), append(res.Present, present...)
+		return out, nil
+	})
+	return res, err
+}
+
+const configUsage = `usage: smates config add-ignore <glob>...   add changes that never require tests (top-level ignore:)
+       smates config add-input <glob>...    add files every test depends on (top-level inputs:)
+       smates config set <key> <value>      set a scalar key (orphans, state, agent.model, flaky.retry, ...)
+flags: --dry-run (print the diff, write nothing), --format text|json, -C dir, --config file`
+
+func cmdConfig(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return usageError{errors.New(configUsage)}
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("config "+sub, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("C", "", "run as if started in `dir`")
+	file := fs.String("config", "", "config file (default: smates.yml at the repository root)")
+	dryRun := fs.Bool("dry-run", false, "print the diff instead of writing")
+	format := formatFlag(fs)
+	pos, err := parseInterspersed(fs, rest)
+	if err != nil {
+		return usageError{err}
+	}
+	if err := checkFormat(*format); err != nil {
+		return err
+	}
+	var res *configEdit
+	switch sub {
+	case "add-ignore", "add-input":
+		if len(pos) == 0 {
+			return usageError{fmt.Errorf("usage: smates config %s <glob>...", sub)}
+		}
+		key := "ignore"
+		if sub == "add-input" {
+			key = "inputs"
+		}
+		path, display, err := configFile(*dir, *file)
+		if err != nil {
+			return err
+		}
+		if res, err = addGlobs(path, display, key, pos, *dryRun); err != nil {
+			return err
+		}
+	case "set":
+		if len(pos) != 2 {
+			return usageError{fmt.Errorf("usage: smates config set <key> <value> (keys: %s)", strings.Join(config.ScalarKeys(), ", "))}
+		}
+		path, display, err := configFile(*dir, *file)
+		if err != nil {
+			return err
+		}
+		res = &configEdit{Key: pos[0], Value: &pos[1]}
+		err = editConfig(path, display, *dryRun, res, func(data []byte) ([]byte, error) {
+			out, prev, err := config.SetScalar(data, pos[0], pos[1])
+			if err == nil && prev != "" {
+				res.Previous = &prev
+			}
+			return out, err
+		})
+		if err != nil {
+			return err
+		}
+	default:
+		return usageError{fmt.Errorf("unknown config command %q\n%s", sub, configUsage)}
+	}
+	if *format == "json" {
+		return writeJSON(stdout, res)
+	}
+	printConfigEdit(stdout, res)
+	return nil
+}
+
+func printConfigEdit(w io.Writer, res *configEdit) {
+	for _, g := range res.Present {
+		fmt.Fprintf(w, "already in %s: %s\n", res.Key, g)
+	}
+	verb := "added to"
+	if res.DryRun {
+		verb = "would add to"
+	}
+	for _, g := range res.Added {
+		fmt.Fprintf(w, "%s %s: %s\n", verb, res.Key, g)
+	}
+	if res.Value != nil && res.Changed {
+		was := ""
+		if res.Previous != nil {
+			was = fmt.Sprintf(" (was %s)", *res.Previous)
+		}
+		verb := "set"
+		if res.DryRun {
+			verb = "would set"
+		}
+		fmt.Fprintf(w, "%s %s: %s%s\n", verb, res.Key, *res.Value, was)
+	}
+	switch {
+	case !res.Changed:
+		fmt.Fprintf(w, "%s: nothing to change\n", res.File)
+	case res.DryRun:
+		fmt.Fprintf(w, "\n%s(dry run: %s not changed)\n", res.Diff, res.File)
+	}
+}

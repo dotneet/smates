@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/detect"
@@ -38,9 +36,14 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	print := fs.Bool("stdout", false, "print the config instead of writing it")
 	github := fs.Bool("github", false, "also write .github/workflows/smates.yml")
 	patch := fs.String("patch", "", "with --github: write the patch that switches existing workflows' test steps to smates to `file` (default: print it)")
+	format := formatFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
+	if err := checkFormat(*format); err != nil {
+		return err
+	}
+	asJSON := *format == "json"
 	d := *dir
 	if d == "" {
 		d = "."
@@ -64,9 +67,18 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
 	}
 	doc := renderConfig(suites, configHints(mk))
+	rep := &initReport{Config: "smates.yml", FilesWritten: []string{}, Suites: []initSuite{}, NeedsReview: []reviewItem{}, NextSteps: initNextSteps}
+	for _, s := range suites {
+		rep.Suites = append(rep.Suites, initSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Exclude: nonNil(s.Exclude)})
+	}
 	if *print {
-		_, err := io.WriteString(stdout, doc)
-		return err
+		if !asJSON {
+			_, err := io.WriteString(stdout, doc)
+			return err
+		}
+		rep.ConfigYAML = doc
+		rep.NeedsReview = initReview(repo, suites, files, mk, *github)
+		return writeJSON(stdout, rep)
 	}
 	path := filepath.Join(repo.Root, "smates.yml")
 	if _, err := os.Stat(path); err == nil && !*force {
@@ -75,20 +87,40 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
 		return err
 	}
-	if err := ensureGitignore(repo.Root); err != nil {
+	rep.Written = true
+	rep.FilesWritten = append(rep.FilesWritten, "smates.yml")
+	if changed, err := ensureGitignore(repo.Root); err != nil {
 		fmt.Fprintf(stderr, "smates: could not update .gitignore: %v\n", err)
+	} else if changed {
+		rep.FilesWritten = append(rep.FilesWritten, ".gitignore")
 	}
-	fmt.Fprintf(stdout, "wrote smates.yml with %d suite(s):\n", len(suites))
+	out := stdout
+	if asJSON {
+		out = io.Discard
+	}
+	fmt.Fprintf(out, "wrote smates.yml with %d suite(s):\n", len(suites))
 	for _, s := range suites {
-		fmt.Fprintf(stdout, "  - %s (%s) in %s\n", s.Name, s.Runner, s.Root)
+		fmt.Fprintf(out, "  - %s (%s) in %s\n", s.Name, s.Runner, s.Root)
 	}
 	if len(suites) == 0 {
-		fmt.Fprintln(stdout, "  (no test suites detected: add them to smates.yml by hand)")
+		fmt.Fprintln(out, "  (no test suites detected: add them to smates.yml by hand)")
 	}
 	if *github {
-		if err := initGitHub(repo, suites, files, *force, *patch, stdout, stderr); err != nil {
+		wf, err := initGitHub(repo, suites, files, *force, *patch, out, stderr)
+		if err != nil {
 			return err
 		}
+		rep.Workflow = wf
+		if wf.Written {
+			rep.FilesWritten = append(rep.FilesWritten, wf.File)
+		}
+		if wf.PatchFile != "" {
+			rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
+		}
+	}
+	if asJSON {
+		rep.NeedsReview = initReview(repo, suites, files, mk, *github)
+		return writeJSON(stdout, rep)
 	}
 	fmt.Fprint(stdout, `
 Next steps:
@@ -157,12 +189,14 @@ func yamlStr(s string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func ensureGitignore(root string) error {
+// ensureGitignore adds .smates/ to the root .gitignore unless it is there, and
+// reports whether it did.
+func ensureGitignore(root string) (bool, error) {
 	p := filepath.Join(root, ".gitignore")
 	data, _ := os.ReadFile(p)
 	for _, l := range strings.Split(string(data), "\n") {
 		if t := strings.TrimSpace(l); t == ".smates/" || t == ".smates" || t == "/.smates/" || t == "/.smates" {
-			return nil
+			return false, nil
 		}
 	}
 	prefix := ""
@@ -171,22 +205,44 @@ func ensureGitignore(root string) error {
 	}
 	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 	_, err = io.WriteString(f, prefix+".smates/\n")
-	return err
+	return err == nil, err
 }
 
 // ---- why / deps / list ----
+
+// whyReport is the JSON schema of `smates why --format json`.
+type whyReport struct {
+	// Target is the repo-relative file (or $VAR) asked about.
+	Target string    `json:"target"`
+	Tests  []whyTest `json:"tests"`
+}
+
+// whyTest is a test unit depending on the target.
+type whyTest struct {
+	Suite string `json:"suite"`
+	Test  string `json:"test"`
+	// Kind of dependency: content | listing | existence | tree.
+	Kind string `json:"kind"`
+	// How: the explanations the text output shows ("static/inputs", "recorded", a
+	// depends_on/serves declaration, ...).
+	How []string `json:"how"`
+}
 
 func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("why", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	cf.register(fs)
+	format := formatFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
+	}
+	if err := checkFormat(*format); err != nil {
+		return err
 	}
 	if fs.NArg() != 1 {
 		return usageError{errors.New("usage: smates why <file or $ENV_VAR>")}
@@ -203,7 +259,7 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	n := 0
+	rep := whyReport{Target: target, Tests: []whyTest{}}
 	for _, s := range res.Suites {
 		st := p.state.Suites[s.Name]
 		for _, t := range s.Tests {
@@ -242,11 +298,16 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			case "tree":
 				how = append(how, "runs a command below its directory that smates cannot see into")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\t(%s)\n", s.Name, t.ID, strings.Join(how, ", "))
-			n++
+			rep.Tests = append(rep.Tests, whyTest{Suite: s.Name, Test: t.ID, Kind: kind, How: nonNil(how)})
 		}
 	}
-	if n == 0 {
+	if *format == "json" {
+		return writeJSON(stdout, rep)
+	}
+	for _, t := range rep.Tests {
+		fmt.Fprintf(stdout, "%s\t%s\t(%s)\n", t.Suite, t.Test, strings.Join(t.How, ", "))
+	}
+	if len(rep.Tests) == 0 {
 		fmt.Fprintf(stderr, "smates: no test is known to depend on %s\n", target)
 	}
 	return nil
@@ -260,13 +321,33 @@ func (p *project) relArg(a string) string {
 	return filepath.ToSlash(filepath.Clean(a))
 }
 
+// depsReport is the JSON schema of `smates deps --format json`.
+type depsReport struct {
+	Suite string     `json:"suite"`
+	Test  string     `json:"test"`
+	Deps  []depEntry `json:"deps"`
+}
+
+// depEntry is one dependency of a test: a repo-relative file, or a dependency key such
+// as "$VAR" (an environment variable).
+type depEntry struct {
+	Dep string `json:"dep"`
+	// Sources: "static" (static analysis, inputs, rules, depends_on) and/or "recorded"
+	// (seen while the test ran); empty for dependencies of neither kind.
+	Sources []string `json:"sources"`
+}
+
 func cmdDeps(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("deps", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	cf.register(fs)
+	format := formatFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
+	}
+	if err := checkFormat(*format); err != nil {
+		return err
 	}
 	if fs.NArg() != 1 {
 		return usageError{errors.New("usage: smates deps <test file or Go package dir>")}
@@ -293,19 +374,43 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		for _, d := range s.Known[target] {
 			known[d] = true
 		}
+		rep := depsReport{Suite: s.Name, Test: target, Deps: []depEntry{}}
 		for _, d := range deps {
-			var src []string
+			src := []string{}
 			if known[d] {
 				src = append(src, "static")
 			}
 			if _, ok := traced[d]; ok {
 				src = append(src, "recorded")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
+			rep.Deps = append(rep.Deps, depEntry{Dep: d, Sources: src})
+		}
+		if *format == "json" {
+			return writeJSON(stdout, rep)
+		}
+		for _, d := range rep.Deps {
+			fmt.Fprintf(stdout, "%s\t%s\n", d.Dep, strings.Join(d.Sources, ","))
 		}
 		return nil
 	}
 	return fmt.Errorf("%s is not a test unit of any suite (see `smates list`)", target)
+}
+
+// listReport is the JSON schema of `smates list --format json`.
+type listReport struct {
+	// Config is the config file the suites come from ("" when auto-detected).
+	Config string      `json:"config"`
+	Suites []listSuite `json:"suites"`
+}
+
+type listSuite struct {
+	Name    string `json:"name"`
+	Runner  string `json:"runner"`
+	Root    string `json:"root"`
+	Command string `json:"command"`
+	// UnitCount and Units: the suite's test units (test files, or Go packages).
+	UnitCount int      `json:"unit_count"`
+	Units     []string `json:"units"`
 }
 
 func cmdList(args []string, stdout, stderr io.Writer) error {
@@ -313,12 +418,24 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	var cf commonFlags
 	cf.register(fs)
+	format := formatFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
+	}
+	if err := checkFormat(*format); err != nil {
+		return err
 	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
+	}
+	if *format == "json" {
+		rep := listReport{Config: p.cfg.Path, Suites: []listSuite{}}
+		for _, s := range p.suites {
+			units := s.Adapter.Units(s, s.TestFiles(p.files))
+			rep.Suites = append(rep.Suites, listSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Command: s.Command, UnitCount: len(units), Units: nonNil(units)})
+		}
+		return writeJSON(stdout, rep)
 	}
 	for _, s := range p.suites {
 		units := s.Adapter.Units(s, s.TestFiles(p.files))
@@ -347,10 +464,17 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	statePath := fs.String("state", "", "state file")
 	remote := fs.String("remote", "origin", "git remote for pull/push")
 	ref := fs.String("ref", "", "git ref for pull/push (default refs/smates/state/<branch>)")
-	asJSON := fs.Bool("json", false, "show: print JSON")
+	format := formatFlag(fs)
+	asJSON := fs.Bool("json", false, "show: print JSON (deprecated: use --format json)")
 	out := fs.String("o", "", "merge: output file (default: the state file)")
 	if err := fs.Parse(rest); err != nil {
 		return usageError{err}
+	}
+	if err := checkFormat(*format); err != nil {
+		return err
+	}
+	if *asJSON {
+		*format = "json"
 	}
 	d := *dir
 	if d == "" {
@@ -384,7 +508,7 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return showState(st, path, *asJSON, stdout)
+		return showState(st, path, *format == "json", stdout)
 	case "merge":
 		st, err := state.Load(path)
 		if err != nil {
@@ -472,9 +596,7 @@ func showState(st *state.State, path string, asJSON bool, w io.Writer) error {
 		info.Suites[name] = si
 	}
 	if asJSON {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(info)
+		return writeJSON(w, info)
 	}
 	if st.Empty() {
 		fmt.Fprintf(w, "%s: no recorded state\n", path)
@@ -546,119 +668,6 @@ func gitStdin(repo *gitx.Repo, stdin string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
-}
-
-// ---- doctor ----
-
-func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	var cf commonFlags
-	cf.register(fs)
-	if err := fs.Parse(args); err != nil {
-		return 2, usageError{err}
-	}
-	problems := 0
-	ok := func(f string, a ...any) { fmt.Fprintf(stdout, "  ok    "+f+"\n", a...) }
-	warn := func(f string, a ...any) { fmt.Fprintf(stdout, "  warn  "+f+"\n", a...) }
-	bad := func(f string, a ...any) { problems++; fmt.Fprintf(stdout, "  FAIL  "+f+"\n", a...) }
-
-	fmt.Fprintf(stdout, "smates %s\n", Version)
-	if _, err := exec.LookPath("git"); err != nil {
-		bad("git not found on PATH")
-		return 1, nil
-	}
-	p, err := load(&cf, io.Discard)
-	if err != nil {
-		bad("%v", err)
-		return 1, nil
-	}
-	ok("repository %s", p.repo.Root)
-	if p.cfg.Path != "" {
-		ok("config %s", p.cfg.Path)
-	} else {
-		warn("no smates.yml: using auto-detected suites (run `smates init` to pin them)")
-	}
-	if len(p.suites) == 0 {
-		bad("no test suites detected")
-	}
-	runners := map[string]bool{}
-	for _, s := range p.suites {
-		units := s.Adapter.Units(s, s.TestFiles(p.files))
-		if len(units) == 0 {
-			warn("suite %s (%s): no test files match %v", s.Name, s.Runner, s.Tests)
-		} else {
-			ok("suite %s (%s, root %s): %d test units; command: %s", s.Name, s.Runner, s.Root, len(units), s.Command)
-		}
-		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
-			warn("suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why)
-		}
-		runners[s.Runner] = true
-	}
-	tool := func(name string, args ...string) string {
-		out, err := exec.Command(name, args...).Output()
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	}
-	if runners["vitest"] || runners["jest"] || runners["node"] {
-		if v := tool("node", "--version"); v == "" {
-			bad("node not found on PATH")
-		} else if strings.HasPrefix(v, "v1") && v < "v18" {
-			bad("node %s is too old (tracing needs Node 18+)", v)
-		} else {
-			ok("node %s", v)
-		}
-	}
-	if runners["bun"] {
-		if v := tool("bun", "--version"); v == "" {
-			bad("bun not found on PATH")
-		} else {
-			ok("bun %s", v)
-		}
-	}
-	if runners["go"] {
-		if v := tool("go", "version"); v == "" {
-			bad("go not found on PATH")
-		} else {
-			ok("%s", v)
-		}
-	}
-	if runners["pytest"] {
-		py := tool("python3", "-c", "import sys;print('%d.%d'%sys.version_info[:2])")
-		if py == "" {
-			warn("python3 not found on PATH (fine if the suite command provides Python, e.g. uv)")
-		} else if py < "3.12" && len(py) == 4 {
-			warn("python %s: tracing uses sys.setprofile (slower); Python 3.12+ uses sys.monitoring", py)
-		} else {
-			ok("python %s", py)
-		}
-	}
-	doctorProject(p, func() string { return tool("node", "--version") }, ok, warn, bad)
-	if p.state.Empty() {
-		warn("no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath)
-	} else {
-		age := time.Since(p.state.Created).Round(time.Minute)
-		n := 0
-		for _, s := range p.state.Suites {
-			n += len(s.Tests)
-		}
-		ok("state %s: %d tests recorded, snapshot from commit %.12s (%s ago)", p.statePath, n, p.state.Commit, age)
-	}
-	if okA, why := agent.Available(p.cfg.Agent); okA {
-		ok("agent: %s available for unattributed changes (orphans: %s)", agent.Describe(p.cfg.Agent), p.cfg.Orphans)
-	} else if p.cfg.Orphans == config.OrphansAgent {
-		warn("agent unavailable (%s): unattributed changes run the affected suites in full", why)
-	}
-	if ci := detectCI(); ci.Name != "" {
-		full, b := fullRunBranch(ci, p.repo, p.cfg.FullRunBranches)
-		ok("CI %s, branch %q, pull request %t, full run by default: %t", ci.Name, b, ci.PullRequest, full)
-	}
-	if problems > 0 {
-		return 1, nil
-	}
-	return 0, nil
 }
 
 // serverSuiteHint says why suite s looks like end-to-end tests of a server running in

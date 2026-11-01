@@ -211,6 +211,23 @@ notice を出してスキップし、ジョブは失敗させません。シャ�
 コメントを個別に持ちます。他の CI では `smates run --markdown <file>` や
 `smates select --format markdown` で同じ Markdown を出力できます。
 
+## コマンド
+
+| コマンド | |
+|---|---|
+| `smates run [-- args]` | テストを選び、トレース付きで実行し、state を更新。`--all`、`--select`、`--shard I/N`、`--shadow`、`--fail-fast`、`--explain`、`--no-agent`、`--no-record`、`--report file.json`、`--markdown file.md`、`--summary file.md`、`--dry-run` |
+| `smates select` | 選択結果だけを表示: `--format text\|files\|json\|github\|markdown` |
+| `smates watch [-- args]` | 保存のたびに影響するテストを再実行 |
+| `smates init [--github]` | `smates.yml` を生成(`--github` でワークフローも)。`--format json` は検出したスイート、書いたファイル、判断が必要な項目 `needs_review`(サービス、コードが読む環境変数、Makefile のフラグ、`depends_on` のない E2E スイートなど)を、根拠と推奨するコマンドや設定変更つきで出力 |
+| `smates list` / `doctor` | スイートとテスト単位の一覧 / 環境チェック(失敗があれば終了コード 1)。`--format text\|json`: doctor の各チェックは安定した `id`、`status`(`ok\|warn\|fail`)、`message`、`fix`(`command`、`config` のキーと値、`doc`)を持つ |
+| `smates why <file>` / `deps <test>` | 依存マップを調べる(`smates why '$TZ'` は変数を読むテスト): `--format text\|json` |
+| `smates flaky` | flaky と判明したテストと根拠: `--format text\|json`、`--clear [test...]` |
+| `smates stats` | 記録された実行の効果と選択の信頼性: `--since 30d\|2026-01-02`、`--branch`、`--ci`、`--format text\|json` |
+| `smates orphans` | 直近のコミットを再生し、どのテストも説明しない変更に `ignore:` グロブ(と `inputs:`/`rules:`)を提案: `--history N`、`--since rev`、`--format text\|json`、`--suite`。`--apply` で提案した glob だけを `ignore:` に追記、`--apply --dry-run` で差分を表示 |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | YAML を手で編集せずに `smates.yml` を変更: トップレベルの `ignore:`/`inputs:` へ重複なく追記、またはスカラー値(`orphans`、`state`、`agent.model`、`flaky.retry` など)を設定。コメントとレイアウトは保たれ、書き込む前に検証されます。`--dry-run` で差分表示、`--format json` |
+| `smates state show\|pull\|push\|merge\|clear` | state の確認と移動(`show --format json`。`--json` は非推奨の別名) |
+| `smates hook install\|uninstall\|status` | 影響するテストを実行する git フック |
+
 ## シャドーモード
 
 `smates run --shadow` は全テストを実行しつつ選択結果を評価し、「選択していれば

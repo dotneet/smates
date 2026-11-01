@@ -97,7 +97,8 @@ Orphans that show up on most commits (`.env.example`, deploy configs, a frontend
 covers) belong in `ignore:`. **`smates orphans`** finds them for you: it replays the last
 100 first-parent commits (`--history N`, `--since rev`) against the current dependency
 map with the same rule, ranks the files that would have been orphans, and prints a
-ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency),
+ready-to-paste `ignore:` block (a whole `dir/**` when nothing below it is a dependency;
+`--apply` writes those globs into `smates.yml` for you, keeping its comments),
 plus how many commits would still have orphans. Files that can change how tests run (CI
 workflows, Makefiles, Dockerfiles, compose files, toolchain pins) are listed for
 `inputs:` or `rules:` instead. Run it after `smates run --all`: without recorded
@@ -314,12 +315,14 @@ declare none of `depends_on`, `serves` or `rules`.
 | `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
 | `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
-| `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
-| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable) |
+| `smates init [--github]` | write `smates.yml` (`--github`: also a workflow with the right toolchain setup). `--format json` reports the suites, the files written and `needs_review` items (services, variables the code reads, Makefile flags, end-to-end suites without `depends_on`, ...) each with its evidence and a recommended command or config change |
+| `smates list` / `doctor` | suites and test units; setup checks (exit 1 when one fails). `--format text\|json`: each doctor check has a stable `id`, `status` (`ok\|warn\|fail`), `message` and a `fix` (`command`, `config` key/value, `doc`) |
+| `smates why <file>` / `deps <test>` | inspect the dependency map (`smates why '$TZ'`: the tests that read a variable): `--format text\|json` |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
 | `smates stats` | what the recorded runs saved and how far to trust the selection: `--since 30d\|2026-01-02`, `--branch`, `--ci`, `--format text\|json` |
-| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite` |
-| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state |
+| `smates orphans` | replay recent commits and suggest `ignore:` globs (and `inputs:`/`rules:`) for the changes no test explains: `--history N`, `--since rev`, `--format text\|json`, `--suite`; `--apply` adds the suggested globs to `ignore:` (nothing else), `--apply --dry-run` prints the diff |
+| `smates config add-ignore\|add-input <glob>...` / `config set <key> <value>` | edit `smates.yml` without hand-editing YAML: append to the top-level `ignore:`/`inputs:` (deduplicated), or set a scalar (`orphans`, `state`, `agent.model`, `flaky.retry`, ...). Comments and layout are kept, the result is validated before it is written; `--dry-run` prints the diff, `--format json` |
+| `smates state show\|pull\|push\|merge\|clear` | inspect and move the state (`show --format json`; `--json` is a deprecated alias) |
 | `smates hook install\|uninstall\|status` | git hook that runs the affected tests: `--hook pre-push\|pre-commit`, `--append`, `--agent`, `-- run flags` |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
