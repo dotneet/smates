@@ -3,7 +3,6 @@ package detect
 import (
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -253,6 +252,53 @@ func TestDetectPythonWithoutProjectFile(t *testing.T) {
 			files: map[string]string{"tox.ini": "[testenv]\ncommands = make\n", "docs/requirements.txt": "sphinx\n", "src/app.py": ""},
 			want:  nil,
 		},
+		{
+			name: "requirements next to a Go module with Python fixtures in testdata",
+			files: map[string]string{
+				"go.mod": "module m", "main.go": "", "main_test.go": "",
+				"requirements.txt": "mkdocs\n", "internal/py/testdata/proj/test_fixture.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "pytest in requirements does not make fixtures a project",
+			files: map[string]string{
+				"go.mod": "module m", "main_test.go": "",
+				"requirements-dev.txt": "pytest\n", "internal/fixtures/test_fixture.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "conftest.py in testdata",
+			files: map[string]string{
+				"go.mod": "module m", "main_test.go": "",
+				"internal/py/testdata/tests/conftest.py": "", "internal/py/testdata/tests/test_a.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "project file without tests below a weakly marked project",
+			files: map[string]string{
+				"requirements.txt": "pytest\n", "conftest.py": "", "tests/test_x.py": test,
+				"third_party/lib/setup.py": "",
+			},
+			want: []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "requirements/ directory",
+			files: map[string]string{"requirements/dev.txt": "pytest\n", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "Pipfile",
+			files: map[string]string{"api/Pipfile": "[dev-packages]\npytest = \"*\"\n", "api/tests/test_x.py": test},
+			want:  []got{{"pytest", "api", "pytest"}},
+		},
+		{
+			name:  "Django manage.py",
+			files: map[string]string{"manage.py": "", "app/__init__.py": "", "app/tests.py": "from django.test import TestCase\n"},
+			want:  []got{{"unittest", ".", "unittest"}},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -271,8 +317,28 @@ func TestDetectCreateReactApp(t *testing.T) {
 	if want := []got{{"jest", ".", "jest"}}; !reflect.DeepEqual(g, want) {
 		t.Fatalf("got %v, want %v", g, want)
 	}
-	if !strings.Contains(suites[0].Command, "react-scripts test") {
-		t.Errorf("command %q does not run react-scripts", suites[0].Command)
+	if want := "npx --no-install react-scripts test --watchAll=false"; suites[0].Command != want {
+		t.Errorf("command %q, want %q", suites[0].Command, want)
+	}
+}
+
+func TestCRACommand(t *testing.T) {
+	dir := t.TempDir()
+	testutil.Write(t, dir, "pnpm-lock.yaml", "")
+	testutil.Write(t, dir, "web/node_modules/.bin/react-scripts", "")
+	for script, want := range map[string]string{
+		"react-scripts test": "pnpm exec react-scripts test --watchAll=false",
+		"CI=true react-scripts test --transformIgnorePatterns 'x/(?!y)' && echo": "pnpm exec react-scripts test --transformIgnorePatterns 'x/(?!y)' --watchAll=false",
+		"react-scripts test --env=jsdom --watchAll=false":                        "pnpm exec react-scripts test --env=jsdom --watchAll=false",
+		"react-scripts test --watch --watchAll true --coverage":                  "pnpm exec react-scripts test --coverage --watchAll=false",
+	} {
+		if got := craCommand(dir, ".", script); got != want {
+			t.Errorf("craCommand(%q) = %q, want %q", script, got, want)
+		}
+	}
+	// A locally installed react-scripts is run directly.
+	if got, want := craCommand(dir, "web", "react-scripts test"), "./node_modules/.bin/react-scripts test --watchAll=false"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 

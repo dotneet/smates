@@ -95,7 +95,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		case strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
 			// which a bare jest would not see.
-			r, command = "jest", "npx --no-install react-scripts test --watchAll=false"
+			r, command = "jest", craCommand(repo.Root, d, test)
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
 		case strings.Contains(test, "bun test"):
@@ -176,16 +176,50 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	return kept
 }
 
+// craCommand turns a Create React App test script into a suite command: the
+// `react-scripts test` invocation with the script's own arguments (up to the next
+// shell operator), never in watch mode, run through the project's package manager.
+func craCommand(repoRoot, dir, script string) string {
+	args := script[strings.Index(script, "react-scripts test")+len("react-scripts test"):]
+	if k := strings.IndexAny(args, "&|;"); k >= 0 {
+		args = args[:k]
+	}
+	out := []string{"test"}
+	fields := strings.Fields(args)
+	for i := 0; i < len(fields); i++ {
+		switch a := fields[i]; {
+		case a == "--watch" || a == "--watchAll":
+			if i+1 < len(fields) && (fields[i+1] == "true" || fields[i+1] == "false") {
+				i++
+			}
+		case strings.HasPrefix(a, "--watch=") || strings.HasPrefix(a, "--watchAll="):
+		default:
+			out = append(out, a)
+		}
+	}
+	out = append(out, "--watchAll=false")
+	return runner.JSBinCommand(repoRoot, dir, "react-scripts", strings.Join(out, " "))
+}
+
 // pythonProjects returns the Python project directories, sorted (parents before
 // children). A project file (pyproject.toml, setup.cfg, setup.py) or a pytest config
-// (pytest.ini, a tox.ini with a [pytest] section) marks its directory. Without any of
-// them in or below it, a directory is also a project when it holds a pip requirements
-// file or a conftest.py; a conftest.py inside a test/ or tests/ directory marks the
-// directory above, the one pytest runs from. Whether a project has tests is checked by
-// the caller.
+// (pytest.ini, a tox.ini with a [pytest] section) marks its directory; whether that
+// project has tests is checked by the caller.
+//
+// Weaker signs mark a directory too: a pip requirements file (*requirements*.txt, or
+// any .txt/.in in a requirements/ directory, which marks the directory above), a
+// Pipfile, a Django manage.py, or a conftest.py (inside a test/ or tests/ directory it
+// marks the directory above, the one pytest runs from). As such files also appear in
+// repositories that are not Python projects (mkdocs' requirements.txt next to a Go
+// module), a weakly marked directory is a project only when it is outside testdata,
+// vendor and fixture directories, is not inside a marked project, and holds Python
+// test files of its own outside such directories and outside the marked projects
+// below it.
 func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string) []string {
 	strong, weak := map[string]bool{}, map[string]bool{}
+	var tests []string // Python test files outside fixture directories
 	for _, d := range dirs {
+		fixture := inFixtureDir(d)
 		for _, n := range dirFiles[d] {
 			switch {
 			case n == "pyproject.toml", n == "setup.cfg", n == "setup.py", n == "pytest.ini":
@@ -195,10 +229,16 @@ func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string
 				if err == nil && toxPytestSection.Match(data) {
 					strong[d] = true
 				}
-			case requirementsTxt.MatchString(n):
+			case fixture:
+			case requirementsTxt.MatchString(n), n == "Pipfile", n == "manage.py":
 				weak[d] = true
 			case n == "conftest.py":
 				weak[conftestProject(d)] = true
+			case path.Base(d) == "requirements" && requirementsFile.MatchString(n):
+				weak[path.Dir(d)] = true
+			}
+			if !fixture && pyTestFile.MatchString(n) {
+				tests = append(tests, path.Join(d, n))
 			}
 		}
 	}
@@ -207,19 +247,54 @@ func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string
 		out = append(out, d)
 	}
 	for d := range weak {
-		covered := false
-		for s := range strong {
-			if pathutil.Under(s, d) || pathutil.Under(d, s) {
-				covered = true
-				break
-			}
+		if inFixtureDir(d) || weakProjectIsCovered(d, strong, tests) {
+			continue
 		}
-		if !covered {
-			out = append(out, d)
-		}
+		out = append(out, d)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// weakProjectIsCovered reports whether the weakly marked directory d is no project of
+// its own: it is inside a marked project, or every Python test file under it belongs
+// to a marked project below it (or there is none).
+func weakProjectIsCovered(d string, strong map[string]bool, tests []string) bool {
+	for s := range strong {
+		if pathutil.Under(d, s) {
+			return true
+		}
+	}
+	for _, t := range tests {
+		if !pathutil.Under(t, d) {
+			continue
+		}
+		owned := false
+		for s := range strong {
+			if pathutil.Under(t, s) {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return false
+		}
+	}
+	return true
+}
+
+// inFixtureDir reports whether d is inside a testdata, vendor or fixtures directory,
+// whose files are data of other tests rather than a project.
+func inFixtureDir(d string) bool {
+	if underTestdata(d) {
+		return true
+	}
+	for _, seg := range strings.Split(d, "/") {
+		if seg == "fixtures" || seg == "fixture" || seg == "__fixtures__" {
+			return true
+		}
+	}
+	return false
 }
 
 // conftestProject returns the directory a conftest.py in dir marks as a project: the
