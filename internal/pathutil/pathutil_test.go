@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,8 @@ func TestRel(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "src", "a.ts"), []byte("x"), 0o644)
 	os.WriteFile(filepath.Join(root, "src", "q?x.ts"), []byte("x"), 0o644)
 	os.WriteFile(filepath.Join(root, "my file.ts"), []byte("x"), 0o644)
+	// file:///C:/... on Windows, file:///tmp/... elsewhere.
+	fileURL := func(p string) string { return "file://" + "/" + strings.TrimPrefix(filepath.ToSlash(p), "/") }
 	cases := []struct {
 		in   string
 		want string
@@ -23,8 +26,8 @@ func TestRel(t *testing.T) {
 	}{
 		{filepath.Join(root, "src", "a.ts"), "src/a.ts", true},
 		{filepath.Join(root, "src", "..", "src", "a.ts"), "src/a.ts", true},
-		{"file://" + filepath.ToSlash(filepath.Join(root, "src", "a.ts")), "src/a.ts", true},
-		{"file://" + filepath.ToSlash(filepath.Join(root, "my%20file.ts")), "my file.ts", true},
+		{fileURL(filepath.Join(root, "src", "a.ts")), "src/a.ts", true},
+		{fileURL(filepath.Join(root, "my%20file.ts")), "my file.ts", true},
 		{filepath.Join(root, "src", "a.ts") + "?v=3", "src/a.ts", true},
 		{filepath.Join(root, "src", "a.ts") + "#frag", "src/a.ts", true},
 		{filepath.Join(root, "src", "q?x.ts"), "src/q?x.ts", true}, // an existing name with "?"
@@ -40,6 +43,26 @@ func TestRel(t *testing.T) {
 		got, ok := Rel(root, c.in)
 		if got != c.want || ok != c.ok {
 			t.Errorf("Rel(%q) = %q %v, want %q %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestFileURLPath(t *testing.T) {
+	cases := []struct {
+		in      string
+		windows bool
+		want    string
+	}{
+		{"/repo/a.ts", false, "/repo/a.ts"},
+		{"/C:/x", false, "/C:/x"},
+		{"/C:/repo/a.ts", true, filepath.FromSlash("C:/repo/a.ts")},
+		{"/d:/r", true, filepath.FromSlash("d:/r")},
+		{"//server/share/a.ts", true, filepath.FromSlash("//server/share/a.ts")},
+		{"/1:/x", true, filepath.FromSlash("/1:/x")},
+	}
+	for _, c := range cases {
+		if got := fileURLPath(c.in, c.windows); got != c.want {
+			t.Errorf("fileURLPath(%q, %v) = %q, want %q", c.in, c.windows, got, c.want)
 		}
 	}
 }

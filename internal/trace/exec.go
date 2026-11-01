@@ -50,9 +50,6 @@ var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true
 // plain paths (content), "dir/" (listing), "dir/**" (whole tree) and "path?" (existence).
 func execDeps(args []string, shell bool, cwd, root string, rel func(string) (string, bool)) []string {
 	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}}
-	if len(args) >= 3 && shells[filepath.Base(args[0])] && args[1] == "-c" {
-		shell, args = true, []string{args[2]}
-	}
 	if shell {
 		a.shellText(strings.Join(args, " "), cwd, "", 0)
 	} else {
@@ -91,6 +88,9 @@ func (a *execAnalysis) opaque(dir string) {
 // the script ("" for -c strings), used for $0 and $(dirname "$0").
 func (a *execAnalysis) shellText(text, cwd, script string, depth int) {
 	if script != "" {
+		// bash's ${BASH_SOURCE[0]} names the script like $0 (the dirname idioms below).
+		text = bashSourcePrefix.ReplaceAllLiteralString(text, "${0%")
+		text = bashSource.ReplaceAllLiteralString(text, "$0")
 		dir := filepath.Dir(script)
 		for _, pat := range []string{`"$(cd "$(dirname "$0")" && pwd)"`, `$(cd "$(dirname "$0")" && pwd)`, `"$(dirname "$0")"`, `$(dirname "$0")`, `$(dirname $0)`, `"${0%/*}"`, `${0%/*}`} {
 			text = strings.ReplaceAll(text, pat, dir)
@@ -134,7 +134,18 @@ var (
 	funcDef = regexp.MustCompile(`(?m)^[ \t]*(?:function[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*\([ \t]*\)`)
 	varRef  = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
 	assign  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+	bashSource       = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?\}|\$BASH_SOURCE\b`)
+	bashSourcePrefix = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?%`)
+	// cwdChange matches anything that may change the working directory of a script
+	// (directly or through sourced code), so $(pwd) cannot be taken as the start cwd.
+	cwdChange = regexp.MustCompile(`\b(?:cd|pushd|popd|source|eval)\b|(?:^|[;&|(\n])[ \t]*\.[ \t]`)
 )
+
+// unresolvedSubst replaces the output of a command substitution. Like an unknown
+// variable it contains "$", so a word using it is unresolved (an opaque command, an
+// opaque cd) and never becomes a path.
+const unresolvedSubst = "${__smates_subst__}"
 
 func isAssignments(seg []string) bool {
 	for _, w := range seg {
@@ -175,36 +186,61 @@ func expandVars(seg []string, vars map[string][]string) []string {
 	return out
 }
 
-// substitutions handles $(...) command substitutions: commands that only read (pwd,
-// basename, cat ...) are analyzed like any other command and replaced by a placeholder;
-// anything else makes the surrounding directory opaque.
+// substitutions handles $(...) and `...` command substitutions: commands that only read
+// (pwd, basename, cat ...) are analyzed like any other command, anything else makes the
+// surrounding directory opaque. The output is unknown (unresolvedSubst), except for
+// $(pwd) in a script that never changes directory.
 func (a *execAnalysis) substitutions(text, cwd string, depth int) string {
+	pwd := unresolvedSubst
+	if !cwdChange.MatchString(text) && !strings.ContainsAny(cwd, " \t\n\"'$\\`;&|<>()*?[") {
+		pwd = cwd
+	}
 	for n := 0; n < 100; n++ {
 		start := strings.LastIndex(text, "$(")
 		if start < 0 {
-			return text
+			break
 		}
 		end := strings.IndexByte(text[start:], ')')
 		if end < 0 {
 			a.opaque(cwd)
 			return text[:start]
 		}
-		inner := text[start+2 : start+end]
-		for _, seg := range splitShell(inner) {
-			if len(seg) == 0 {
-				continue
-			}
-			if readers[filepath.Base(seg[0])] || seg[0] == "cd" {
-				if seg[0] != "cd" {
-					a.command(seg, cwd, depth)
-				}
-				continue
-			}
-			a.opaque(cwd)
+		text = text[:start] + a.substitution(text[start+2:start+end], cwd, pwd, depth) + text[start+end+1:]
+	}
+	for n := 0; n < 100; n++ {
+		start := strings.IndexByte(text, '`')
+		if start < 0 {
+			break
 		}
-		text = text[:start] + "_" + text[start+end+1:]
+		end := strings.IndexByte(text[start+1:], '`')
+		if end < 0 {
+			a.opaque(cwd)
+			return text[:start]
+		}
+		text = text[:start] + a.substitution(text[start+1:start+1+end], cwd, pwd, depth) + text[start+end+2:]
 	}
 	return text
+}
+
+// substitution analyzes the commands of one command substitution and returns what
+// stands for its output.
+func (a *execAnalysis) substitution(inner, cwd, pwd string, depth int) string {
+	if strings.TrimSpace(inner) == "pwd" {
+		return pwd
+	}
+	for _, seg := range splitShell(inner) {
+		if len(seg) == 0 {
+			continue
+		}
+		if readers[filepath.Base(seg[0])] || seg[0] == "cd" {
+			if seg[0] != "cd" {
+				a.command(seg, cwd, depth)
+			}
+			continue
+		}
+		a.opaque(cwd)
+	}
+	return unresolvedSubst
 }
 
 var keywords = map[string]bool{
@@ -241,7 +277,11 @@ func (a *execAnalysis) builtin(seg []string, cwd string, depth int) (string, boo
 		}
 		return filepath.Clean(d), true
 	case "source", ".":
-		if len(seg) >= 2 {
+		switch {
+		case len(seg) < 2:
+		case strings.Contains(seg[1], "$"):
+			a.opaque(cwd) // unresolved path: cannot follow
+		default:
 			a.script(seg[1], cwd, depth)
 		}
 		return cwd, true
@@ -271,17 +311,10 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		a.opaque(cwd)
 		return
 	}
-	// A shell running a script file, or a script started directly: read the script.
+	// A shell (running a -c string, a script file or stdin), or a script started
+	// directly: analyze the shell code.
 	if shells[prog] {
-		for _, arg := range seg[1:] {
-			if arg == "-c" {
-				return // handled by the caller for -c strings at top level; be safe below
-			}
-			if !strings.HasPrefix(arg, "-") {
-				a.script(arg, cwd, depth)
-				return
-			}
-		}
+		a.shellInvocation(seg[1:], cwd, depth)
 		return
 	}
 	if isScriptFile(seg[0], cwd) {
@@ -294,7 +327,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		if w == "-r" || w == "-R" || w == "--recursive" || (prog == "grep" && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.ContainsAny(w, "rR")) {
 			recursive = true
 		}
-		if w == "<" && i+2 < len(seg) {
+		if w == "<" && i+2 < len(seg) && !strings.Contains(seg[i+2], "$") {
 			for _, m := range expand(seg[i+2], cwd) {
 				a.add(m)
 			}
@@ -335,6 +368,83 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int) {
 		// Reads only what it names.
 	default:
 		a.opaque(cwd)
+	}
+}
+
+// shellInvocation analyzes a shell started with args (the words after its name):
+// "-c text" (after any options, or combined as in -ec), a script file (its arguments
+// are positional parameters, not files), or commands read from stdin.
+func (a *execAnalysis) shellInvocation(args []string, cwd string, depth int) {
+	cmd, stdin, endOpts := false, false, false
+	operand, stdinFile := -1, ""
+	for i := 0; i < len(args); i++ {
+		w := args[i]
+		switch {
+		case w == "<":
+			if i+1 < len(args) {
+				stdinFile = strings.ReplaceAll(args[i+1], literalDollar, "$")
+				i++
+			}
+		case w == ">" || w == ">>":
+			i++
+		case operand >= 0:
+			// $0, $1, ...: positional parameters.
+		case endOpts || len(w) < 2 || (w[0] != '-' && w[0] != '+'):
+			operand = i
+		case w == "--":
+			endOpts = true
+		case strings.HasPrefix(w, "--"):
+			if w == "--rcfile" || w == "--init-file" {
+				i++
+			}
+		default: // a cluster of short options: -e, -ec, -o pipefail, +x
+			for _, c := range w[1:] {
+				switch {
+				case c == 'c' && w[0] == '-':
+					cmd = true
+				case c == 's' && w[0] == '-':
+					stdin = true
+				case c == 'o' || c == 'O':
+					i++ // takes an argument
+				}
+			}
+		}
+	}
+	var script string
+	if operand >= 0 {
+		script = strings.ReplaceAll(args[operand], literalDollar, "$")
+	}
+	switch {
+	case cmd && operand < 0:
+		a.opaque(cwd)
+	case cmd:
+		if depth >= 3 {
+			a.opaque(cwd)
+		} else {
+			a.shellText(script, cwd, "", depth+1)
+		}
+	case operand >= 0 && !stdin:
+		if strings.Contains(script, "$") {
+			a.opaque(cwd)
+		} else {
+			a.script(script, cwd, depth)
+		}
+	case stdinFile != "" && !strings.Contains(stdinFile, "$"):
+		a.script(stdinFile, cwd, depth) // sh < script.sh
+		return
+	default:
+		a.opaque(cwd) // commands from stdin (a pipe, a terminal) or an unresolved script
+		return
+	}
+	// Commands run by the shell may read its redirected stdin.
+	switch {
+	case stdinFile == "":
+	case strings.Contains(stdinFile, "$"):
+		a.opaque(cwd)
+	default:
+		for _, m := range expand(stdinFile, cwd) {
+			a.add(m)
+		}
 	}
 }
 

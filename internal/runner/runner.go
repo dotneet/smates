@@ -45,6 +45,9 @@ type Defaults struct {
 type Suite struct {
 	config.Suite
 	Adapter Adapter
+	// Narrowed is set when smates.yml configures tests or exclude: the runner's own
+	// discovery would then run a different set of files, so units are always passed.
+	Narrowed bool
 }
 
 // RunContext carries everything an adapter needs to run a suite.
@@ -134,7 +137,7 @@ func Resolve(repo *gitx.Repo, cs []config.Suite) ([]*Suite, error) {
 			return nil, fmt.Errorf("suite %q: unknown runner %q (known: %s)", c.Name, c.Runner, strings.Join(Names(), ", "))
 		}
 		d := a.Defaults(repo, c.Root)
-		s := &Suite{Suite: c, Adapter: a}
+		s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0}
 		if len(s.Tests) == 0 {
 			s.Tests = d.Tests
 		}

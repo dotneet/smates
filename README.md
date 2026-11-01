@@ -177,7 +177,7 @@ ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 inputs: [".github/workflows/test.yml"]
 full_run_branches: [main, release]
 flaky:
-  retry: 0            # re-run a failing, already known flaky test up to N times (default 0: never hide a failure)
+  retry: 0            # re-run a suite run whose failures are all known flaky tests, up to N times (default 0: never hide a failure)
 agent:
   provider: auto      # auto (from the API key that is set) | anthropic | openai | openrouter
   # model: gpt-6-luna   # default depends on the provider (see "The agent")
@@ -213,9 +213,10 @@ smates cannot see (time, network, environment variables, files outside the repos
 `smates run` reports such tests in its log, in `--report` (`flaky`), in the job summary and
 in the `flaky` / `flaky-tests` outputs, and remembers the evidence (number of flips, last
 commit, recent outcomes) in the state; `smates flaky` lists it. A flaky failure still
-fails the run and is still selected next time. With `flaky: {retry: 1}`, a failing test
-that is *already known* to be flaky is re-run once, and if it then passes the run does not
-fail (only when every failure of that suite run is such a test; the flip is reported).
+fails the run and is still selected next time. With `flaky: {retry: 1}`, when every
+failure of a suite run is a test *already known* to be flaky, the suite run is repeated
+once with the same tests, and if it then passes the run does not fail (the flip is
+reported).
 
 ## Failure hints
 
