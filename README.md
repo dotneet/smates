@@ -218,9 +218,9 @@ agent:
 
 | command | |
 |---|---|
-| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
+| `smates run [-- args]` | select, run with tracing, update state. `--all`, `--select`, `--shard I/N`, `--shadow`, `--fail-fast`, `--explain`, `--no-agent`, `--no-record`, `--report file.json`, `--markdown file.md` (summary for a PR comment), `--summary file.md` (append it; default `$GITHUB_STEP_SUMMARY`), `--dry-run` |
 | `smates select` | selection only: `--format text\|files\|json\|github\|markdown`, `--markdown file.md` |
-| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear` |
+| `smates watch [-- args]` | rerun the affected tests on every save: `--interval`, `--debounce`, `--agent`, `--clear`, `--fail-fast` |
 | `smates init [--github]` / `list` / `doctor` | setup helpers (`--github` writes a workflow with the right toolchain setup) |
 | `smates why <file>` / `deps <test>` | inspect the dependency map |
 | `smates flaky` | tests proven flaky, with evidence: `--format text\|json`, `--clear [test...]` |
@@ -231,6 +231,20 @@ agent:
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
 selection in a new repository, or permanently on a nightly job.
+
+**Likeliest failures first.** `smates run` starts the selected tests in this order: tests
+that did not pass last time; tests whose own file or a file they import directly changed;
+tests reached through an indirect dependency (a transitive import, traced data,
+configuration, a file-name reference, the agent); then new tests and the rest. Within a
+group, the shortest recorded duration goes first. Suites run in the order of their best
+test, and each runner gets its files in that order (pytest and `go test` start them in
+that order; vitest and jest use their own sequencers, which also put previously failed
+files first). With **`--fail-fast`**, each suite is split into one runner call per group
+and the calls run group by group across suites; after a call fails, no further call
+starts (the running one finishes). Tests that did not start are not recorded, so they
+stay selected; the log, the summary and `--report` (`not_run`) list them. Extra runner
+start-ups are the price, so the split only happens with `--fail-fast`. It cannot be
+combined with `--shadow`.
 
 **Flaky tests** are detected by proof, not by heuristics. smates knows the content hash of
 every input of every test, so when a test's outcome flips between pass and fail while none
@@ -322,6 +336,8 @@ ok  	example.com/shop/internal/store	0.170s
 - Keys (when stdin is a terminal): `a` runs every test, `f` reruns the tests that have not
   passed, `Enter` reruns the last selection, `q` quits. Ctrl-C stops the running tests
   (their whole process tree) and exits.
+- `smates watch --fail-fast` runs every cycle with `smates run --fail-fast`: the
+  likeliest failures run first and nothing more starts once one fails.
 - Unattributed changes follow the orphan policy, but only for files changed while
   watching, and the agent is not called unless you pass `--agent`: with `orphans: agent`,
   an unattributed change runs the suites it can affect in full instead, as with

@@ -123,6 +123,56 @@ not reported as definite misses. Units that ran but left no trace in a failing r
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+### Run order and `--fail-fast`
+
+`smates run` orders what it runs so the likeliest failures finish first. Priorities come
+from the selection reasons (what `--explain` prints) and the state, and are set on the
+selected tests (`priority` in `--report`):
+
+1. the unit did not pass last time (reason `failed`, or a recorded `fail` even when an
+   input changed since);
+2. a changed input is the unit's own test file, or a file one of its test files imports
+   directly (`Graph.Direct`);
+3. an indirect dependency changed (a transitive import, a traced read, listing or
+   command, a suite input or rule), or the unit was pulled in by a name reference, the
+   agent or the orphan policy;
+4. anything else: new units, full runs, watch reruns.
+
+Within a priority, units with a recorded duration go first, shortest first.
+
+What smates controls is limited by the runners. The order of **suites** is fully under its
+control. Within one runner call it only controls the order of the arguments: pytest
+collects in that order (unless a plugin such as pytest-randomly reorders), `go test`
+builds and runs packages in parallel but starts them in that order, `node --test` and the
+one-process-per-file recording runs (bun, `isolate: true`) start files in that order with
+bounded concurrency. Vitest and jest ignore it: their sequencers sort by their own cache
+(previous failures first, then the longest files, to balance workers). So by default
+smates passes units in priority order and runs suites by their best priority — free, and
+the outcome is the same.
+
+`--fail-fast` needs more: a failure deep in one big runner call is only known when the call
+ends. With `--fail-fast` each suite is split into one call per non-empty priority, the
+calls run by priority across suites (suite order breaking ties), and once a call exits
+non-zero (after retries of known flaky tests) no further call starts. A call that is
+running is left to finish rather than killed: its units are mostly done, killing would
+leave partial traces and unknown outcomes for all of them, and the runner's own bail flags
+(`--bail`, `-x`, `-failfast`) remain available after `--` for users who want the runner to
+stop too. Splitting costs one runner start-up per extra call (a vitest or jest start-up is
+around a second; `go test` reuses its build cache), which is why it is not the default: a
+plain run pays nothing for the ordering. A full suite run (`--all`, the default branch)
+under `--fail-fast` is split too when some of its units failed last time, passing explicit units instead of letting the runner
+discover its tests, so previously failed units can run first without running twice.
+
+Recording stays on the safe side. Outcomes of a suite's calls are merged and recorded once
+per suite; units that did not start get no observation, so their old entry (or the
+absence of one) stays and they are selected again for the same reason. A suite's entries
+are replaced wholesale (the full-run rule) only when every call of it ran. A run that
+stopped early does not touch the repository-wide snapshot, neither the full-run refresh
+nor the orphans it handled: tests that would have covered them may not have run. Results,
+failure hints, flake evidence, the summary and `--report` only contain what ran;
+`--report` lists the rest under `not_run` and the summary and log count them.
+`--fail-fast` is rejected with `--shadow`, whose point is to run everything.
+
 ### Flaky tests
 
 Because every entry stores the content hash of every input, a flaky test can be detected
@@ -273,6 +323,10 @@ the files that changed since the previous cycle (the rest were handled at start,
 branch changes that a state without a full-run snapshot reports on every run). The agent
 is called only with `--agent`, so a burst of saves never turns into a burst of LLM calls;
 without it `orphans: agent` behaves like `smates run --no-agent`.
+
+**Fail fast.** `smates watch --fail-fast` passes `--fail-fast` to every cycle; the footer
+counts what ran and how many selected units were not started. Rerun (`Enter`) still
+reruns the whole previous selection, not only what started.
 
 **Stopping.** Watch runs test commands in their own process group; cancelling a cycle
 (`q`, Ctrl-C, SIGTERM, SIGHUP) sends SIGINT to the whole group and SIGKILL after 5 s, and
