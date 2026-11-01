@@ -61,12 +61,16 @@ jobs:
           - name: polyglot others
             fixtures: polyglot
             args: -- -skip TestScenarios
-          - name: jest-npm, node-test
-            fixtures: jest-npm,node-test
+          - name: jest-npm scenarios
+            fixtures: jest-npm
+            args: -- -run TestScenarios
+          - name: jest-npm others
+            fixtures: jest-npm
+            args: -- -skip TestScenarios
           - name: vitest-npm, python-uv
             fixtures: vitest-npm,python-uv
           - name: others
-            fixtures: -polyglot,-jest-npm,-node-test,-vitest-npm,-python-uv
+            fixtures: -polyglot,-jest-npm,-vitest-npm,-python-uv
     runs-on: ubuntu-latest
     env:
       SMATES_E2E_FIXTURE: ${{ matrix.fixtures }}
