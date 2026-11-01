@@ -172,7 +172,7 @@ func (c *cycle) failedUnits() []failedUnit {
 			}
 		}
 		for _, fb := range c.failedBatches {
-			if fb.suite != sr.Name || fb.anyFail {
+			if fb.suite != sr.Name || fb.anyFail || fb.noResult {
 				continue
 			}
 			for _, u := range fb.units {
@@ -188,9 +188,10 @@ func (c *cycle) failedUnits() []failedUnit {
 
 // failedBatch is a batch that exited non-zero.
 type failedBatch struct {
-	suite   string
-	units   []string
-	anyFail bool // some unit of it was recorded as failed
+	suite    string
+	units    []string
+	anyFail  bool // some unit of it was recorded as failed
+	noResult bool // the runner exited 126/127 before any test reported a result (notStarted)
 }
 
 // printAgentSummary is the end of a run in failures mode: one line when it passed;
@@ -201,11 +202,12 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 	selected, total := c.sel.res.Counts()
 	started := countUnits(c.started)
 	failed := c.failedUnits()
-	if len(failed) == 0 && !c.interrupted && len(c.unstarted) > 0 {
+	noResult := c.noResultUnits()
+	if len(failed) == 0 && !c.interrupted && (len(c.unstarted) > 0 || noResult > 0) {
 		// Not a pass: smates exits 4 (the runner's error follows).
 		fmt.Fprintf(w, "smates: NOT STARTED: %s left %d selected test unit(s) not started (they stay selected); %d of %d selected unit(s) ran in %s (%d in total)\n",
-			c.notStartedBy(), countUnits(c.notRun), started, selected, elapsedText, total)
-		if c.worst != 0 {
+			c.notStartedBy(), c.notStartedUnits(), started-noResult, selected, elapsedText, total)
+		if c.testsFailed {
 			fmt.Fprintf(w, "smates: FAILED (exit code %d), but no test unit is known to have failed (see the output above)\n", c.worst)
 		}
 		return
@@ -265,7 +267,7 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 	}
 	if n := countUnits(c.notRun); n > 0 && c.interrupted {
 		fmt.Fprintf(w, "  (interrupted: %d selected test unit(s) not run)\n", n)
-	} else if n > 0 {
+	} else if n := c.notStartedUnits(); n > 0 {
 		fmt.Fprintf(w, "  (%s left %d selected test unit(s) not started)\n", c.notStartedBy(), n)
 	}
 	fmt.Fprintf(w, "smates: rerun them: %s\n", c.rerunCommand(failed))

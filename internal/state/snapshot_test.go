@@ -123,6 +123,9 @@ func TestSnapMarkSeen(t *testing.T) {
 		{UnrecordedSnap(), "", []string{"b", "a"}, "?@a,b"}, // "?" saw the absent file
 		{UnrecordedSnap(), "h1", []string{"a"}, "?h1@a"},
 		{ParseSnap("?h1@b,a"), "h1", []string{"c"}, "?h1@a,b,c"}, // unsorted on disk
+		// A marker an older smates wrote without the executable marker: the same hash.
+		{m, "h1+x", []string{"c"}, "?h1+x@a,b,c"},
+		{MarkerSnap("h1+x", []string{"a"}), "h1", []string{"c"}, "?h1@c"}, // lost the bit
 	}
 	for _, c := range cases {
 		if got := c.v.MarkSeen(c.hash, c.suites).String(); got != c.want {

@@ -52,8 +52,11 @@ type hashCache struct {
 	lists map[string]string   // memoized listing hashes (see listing)
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
-	// legacy memoizes tree and set hashes without the executable marker (Unchanged).
-	legacy map[string]string
+	// legacy and legacySets memoize tree and set hashes without the executable marker
+	// (Unchanged). Sets are keyed like setv: one set key stands for different files in
+	// the hashers of different suites.
+	legacy     map[string]string
+	legacySets map[*ServiceDeps]string
 	// since is when the tests started (see PinBefore); zero when not pinned.
 	since time.Time
 }
@@ -530,19 +533,27 @@ func (h *Hasher) Unchanged(key, recorded string) bool {
 	if kind != depkey.KindTree && kind != depkey.KindSet {
 		return false
 	}
-	v, ok := h.legacy[key]
-	if !ok {
-		if kind == depkey.KindTree {
+	var v string
+	if kind == depkey.KindTree {
+		var ok bool
+		if v, ok = h.legacy[key]; !ok {
 			if files, listed := h.treeFiles(p); listed {
 				v = h.treeSum(files, true)
 			}
-		} else if d := h.sets[key]; d != nil {
+			if h.legacy == nil {
+				h.legacy = map[string]string{}
+			}
+			h.legacy[key] = v
+		}
+	} else if d := h.sets[key]; d != nil {
+		var ok bool
+		if v, ok = h.legacySets[d]; !ok {
 			v = h.setSum(d, true)
+			if h.legacySets == nil {
+				h.legacySets = map[*ServiceDeps]string{}
+			}
+			h.legacySets[d] = v
 		}
-		if h.legacy == nil {
-			h.legacy = map[string]string{}
-		}
-		h.legacy[key] = v
 	}
 	return v != "" && recorded == v
 }

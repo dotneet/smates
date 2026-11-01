@@ -10,7 +10,9 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -336,5 +338,30 @@ suites:
 	}
 	if after, _ := os.ReadFile(statePath); !bytes.Equal(before, after) {
 		t.Error("--no-record changed the state")
+	}
+}
+
+// TestRecordSeenLegacyHash: a --suite run keeps a plain entry an older smates recorded
+// for an executable file without the executable marker (gitx.SameHash): it still
+// matches, and turning it into a marker would make the suites left out find the file
+// changed after every such run.
+func TestRecordSeenLegacyHash(t *testing.T) {
+	suite := func(name string) *runner.Suite { return &runner.Suite{Suite: config.Suite{Name: name}} }
+	own := selector.NewOwnership([]*runner.Suite{suite("a")}, []*runner.Suite{suite("b")})
+	p := &project{state: &state.State{Files: map[string]string{"run.sh": "abc", "x.sh": "abc+x", "y.sh": "old"}}}
+	p.recordSeen(own, "run.sh", "abc+x") // legacy plain entry: unchanged
+	p.recordSeen(own, "x.sh", "abc+x")
+	p.recordSeen(own, "y.sh", "new+x") // a real change: a marker
+	want := map[string]string{"run.sh": "abc", "x.sh": "abc+x", "y.sh": "?new+x@a"}
+	for f, w := range want {
+		if got := p.state.Files[f]; got != w {
+			t.Errorf("%s: %q, want %q", f, got, w)
+		}
+	}
+	// A legacy marker counts the suites that saw it.
+	p.state.Files["m.sh"] = "?abc@b"
+	p.recordSeen(selector.NewOwnership([]*runner.Suite{suite("a")}, []*runner.Suite{suite("b"), suite("c")}), "m.sh", "abc+x")
+	if got := p.state.Files["m.sh"]; got != "?abc+x@a,b" {
+		t.Errorf("legacy marker: %q, want %q", got, "?abc+x@a,b")
 	}
 }
