@@ -14,8 +14,8 @@ expected failures pass. A module that loaded but ran no test at all is "unknown"
 "pass": it runs again next time) when it looks written for pytest (module-level test
 functions or `import pytest`, which unittest cannot run), and "pass" with a warning
 otherwise (a helper module matching the test pattern). Both are explained on stderr.
-When the run stopped early (--failfast, or an interrupt with -c), a module that did not
-fail and either ran no test or was the one running when it stopped is "unknown": its
+When the run stopped early (--failfast, or an interrupt: with -c, or a KeyboardInterrupt
+from SIGINT, which smates watch sends to restart a run), a module that did not fail and either ran no test or was the one running when it stopped is "unknown": its
 tests did not all run.
 """
 
@@ -33,8 +33,9 @@ _tracer = smates_trace.install()
 # File -> {"ms": total test time, "failed": bool, "msg": failure output}.
 _results = {}
 _MAX_MSG = 4000
-# The result object of the run, and the file of the test started last.
-_run = {"result": None, "last": None}
+# The result object of the run, the file of the test started last, and whether a
+# KeyboardInterrupt ended the run.
+_run = {"result": None, "last": None, "interrupted": False}
 
 
 def _module_file(name):
@@ -217,6 +218,9 @@ class _Runner(unittest.TextTestRunner):
     def run(self, test):
         try:
             return super().run(test)
+        except KeyboardInterrupt:
+            _run["interrupted"] = True
+            raise
         finally:
             _finish()
 
@@ -225,7 +229,7 @@ def _finish():
     if _tracer is None:
         return
     _tracer.switch("")
-    stopped = getattr(_run["result"], "shouldStop", False)
+    stopped = _run["interrupted"] or getattr(_run["result"], "shouldStop", False)
     for f, r in sorted(_results.items()):
         status = "fail" if r["failed"] else "pass"
         if not r["failed"] and stopped and (r["ran"] == 0 or f == _run["last"]):

@@ -399,35 +399,44 @@ source = ["src"]
 func TestDiscoverPytestNoRecurseDirs(t *testing.T) {
 	pytest := config.Suite{Runner: "pytest"}
 	files := map[string]string{
-		"tests/test_ok.py":       "",
-		"legacy/test_old.py":     "",
-		"build/test_b.py":        "",
-		"src/dist/test_d.py":     "",
-		".hidden/test_h.py":      "",
-		"x.egg/test_e.py":        "",
-		"{arch}/test_arch.py":    "",
-		"arch/test_arch.py":      "",
-		"venv/lib/test_v.py":     "",
-		"build/tests/test_bt.py": "",
+		"tests/test_ok.py":             "",
+		"legacy/test_old.py":           "",
+		"build/test_b.py":              "",
+		"src/dist/test_d.py":           "",
+		".hidden/test_h.py":            "",
+		"x.egg/test_e.py":              "",
+		"{arch}/test_arch.py":          "",
+		"arch/test_arch.py":            "",
+		"venv/lib/test_v.py":           "",
+		"build/tests/test_bt.py":       "",
+		"build/tests/build/test_bb.py": "",
+		"tests/build/test_tb.py":       "",
+		"lib/a/b/c/test_abc.py":        "",
 	}
 	runDiscoverCases(t, []discoverCase{
 		{
 			name: "default", suite: pytest, files: files, source: SourceDefaults,
-			tests: []string{"arch/test_arch.py", "legacy/test_old.py", "tests/test_ok.py"},
+			tests: []string{"arch/test_arch.py", "legacy/test_old.py", "lib/a/b/c/test_abc.py", "tests/test_ok.py"},
 		},
 		{
 			name: "configured", suite: pytest, files: with(files, "pytest.ini", "[pytest]\nnorecursedirs = legacy .*\n"),
 			source: "pytest.ini [pytest] norecursedirs",
-			tests:  []string{"arch/test_arch.py", "build/test_b.py", "build/tests/test_bt.py", "src/dist/test_d.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
+			tests:  []string{"arch/test_arch.py", "build/test_b.py", "build/tests/build/test_bb.py", "build/tests/test_bt.py", "lib/a/b/c/test_abc.py", "src/dist/test_d.py", "tests/build/test_tb.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
 		},
 		{
 			name: "pyproject, nested pattern", suite: pytest, files: with(files, "pyproject.toml", "[tool.pytest.ini_options]\nnorecursedirs = [\"src/dist\", \"build\"]\n"),
 			source: "pyproject.toml [tool.pytest.ini_options] norecursedirs",
-			tests:  []string{".hidden/test_h.py", "arch/test_arch.py", "legacy/test_old.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
+			tests:  []string{".hidden/test_h.py", "arch/test_arch.py", "legacy/test_old.py", "lib/a/b/c/test_abc.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
+		},
+		{
+			// fnmatch's * matches "/" too.
+			name: "star across directories", suite: pytest, files: with(files, "pytest.ini", "[pytest]\nnorecursedirs = lib/*/c\n"),
+			source: "pytest.ini [pytest] norecursedirs",
+			tests:  []string{".hidden/test_h.py", "arch/test_arch.py", "build/test_b.py", "build/tests/build/test_bb.py", "build/tests/test_bt.py", "legacy/test_old.py", "src/dist/test_d.py", "tests/build/test_tb.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
 		},
 		{
 			// The default applies with other options; testpaths are collected even when
-			// a pattern matches them.
+			// a pattern matches them, but not what the pattern matches below them.
 			name: "testpaths below a default pattern", suite: pytest, files: with(files, "setup.cfg", "[tool:pytest]\ntestpaths = build/tests tests\n"),
 			source: "setup.cfg [tool:pytest] testpaths",
 			tests:  []string{"build/tests/test_bt.py", "tests/test_ok.py"},

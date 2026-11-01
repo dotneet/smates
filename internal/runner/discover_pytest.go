@@ -32,31 +32,58 @@ var pytestVenvExclude = []string{"**/.venv/**", "**/venv/**", "**/site-packages/
 // pytestExclude is the exclude globs (relative to the suite directory, where pytest
 // starts collecting) of a suite whose pytest skips virtualenvs and the directories
 // matching the norecursedirs patterns noRecurse: fnmatch patterns matched against a
-// directory's name, or the end of its path when they have a "/", at any depth. pytest
-// still collects the testpaths themselves: a pattern matching a directory of one of
-// them is left out.
+// directory's name, or the end of its path when they have a "/", at any depth. fnmatch's
+// "*" also matches "/": a "*" path segment of a pattern with a "/" becomes "**" (a "*"
+// within a segment stays in it). pytest still collects the testpaths themselves: when a
+// pattern matches a testpath or one of its parents, it only excludes what is below the
+// testpaths (only their files are tests then).
 func pytestExclude(noRecurse, testpaths []string) []string {
 	out := append([]string{}, pytestVenvExclude...)
-next:
-	for _, pat := range noRecurse {
-		// fnmatch has no escapes and no braces.
-		dir := "**/" + strings.NewReplacer(`\`, `\\`, "{", `\{`, "}", `\}`).Replace(strings.Trim(pat, "/"))
-		for _, p := range testpaths {
-			p = strings.Trim(strings.TrimPrefix(p, "./"), "/")
-			if strings.HasSuffix(p, ".py") {
-				p = path.Dir(p)
-			}
-			for q := p; q != "." && q != "" && q != "/"; q = path.Dir(q) {
-				if pathutil.Match([]string{dir}, q) {
-					continue next
-				}
-			}
-		}
-		if g := dir + "/**"; !slices.Contains(out, g) {
+	add := func(g string) {
+		if !slices.Contains(out, g) {
 			out = append(out, g)
 		}
 	}
+	var dirs []string // testpaths that are directories
+	for _, p := range testpaths {
+		if p = strings.Trim(strings.TrimPrefix(p, "./"), "/"); p != "" && p != "." && !strings.HasSuffix(p, ".py") {
+			dirs = append(dirs, p)
+		}
+	}
+	for _, pat := range noRecurse {
+		// fnmatch has no escapes and no braces.
+		pat = strings.NewReplacer(`\`, `\\`, "{", `\{`, "}", `\}`).Replace(strings.Trim(pat, "/"))
+		if strings.Contains(pat, "/") {
+			segs := strings.Split(pat, "/")
+			for i, s := range segs {
+				if s == "*" {
+					segs[i] = "**"
+				}
+			}
+			pat = strings.Join(segs, "/")
+		}
+		dir := "**/" + pat
+		covers := false // a testpath is below a directory the pattern matches
+		for _, p := range testpaths {
+			p = strings.Trim(strings.TrimPrefix(p, "./"), "/")
+			for q := p; q != "." && q != "" && q != "/"; q = path.Dir(q) {
+				covers = covers || pathutil.Match([]string{dir}, q)
+			}
+		}
+		if !covers {
+			add(dir + "/**")
+			continue
+		}
+		for _, p := range dirs {
+			add(globEscape(p) + "/**/" + pat + "/**")
+		}
+	}
 	return out
+}
+
+// globEscape quotes the glob metacharacters of a literal path.
+func globEscape(p string) string {
+	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`, "{", `\{`, "}", `\}`).Replace(p)
 }
 
 // Discover reads testpaths, python_files and norecursedirs from the pytest

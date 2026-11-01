@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
@@ -28,13 +29,19 @@ type goTest struct{}
 
 func (goTest) Name() string { return "go" }
 
-func (goTest) Defaults(repo *gitx.Repo, root string) Defaults {
+func (g goTest) Defaults(repo *gitx.Repo, root string) Defaults {
+	return g.DefaultsForSuite(repo, config.Suite{Root: root})
+}
+
+// DefaultsForSuite implements SuiteDefaulter: which nested modules belong to the suite
+// depends on GOWORK in its env:.
+func (goTest) DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults {
 	exclude := []string{"**/testdata/**", "**/vendor/**", "**/_*/**", "**/.*/**"}
 	if repo != nil {
 		// Packages of a nested module are not the suite's: go test of the outer module
 		// cannot build them (and ./... skips them), unless the go.work workspace has them.
-		dir := filepath.Join(repo.Root, filepath.FromSlash(root))
-		nested, _ := nestedGoModules(repo.Root, dir, os.Getenv("GOWORK"))
+		dir := filepath.Join(repo.Root, filepath.FromSlash(c.Root))
+		nested, _ := nestedGoModules(repo, dir, goWorkEnv(c.Env))
 		for _, m := range nested {
 			exclude = append(exclude, m+"/**")
 		}
@@ -47,35 +54,87 @@ func (goTest) Defaults(repo *gitx.Repo, root string) Defaults {
 	}
 }
 
+// goWorkEnv is the GOWORK go test sees with the suite's env: on top of smates' own.
+func goWorkEnv(env map[string]string) string {
+	if v, ok := env["GOWORK"]; ok {
+		return v
+	}
+	return os.Getenv("GOWORK")
+}
+
 // nestedGoModules finds the Go modules below the suite directory dir (absolute), as
 // directories relative to it: those outside the go.work workspace go uses there
 // (other: the suite cannot run their tests) and those in it (workspace: go test runs
-// them when named, but ./... does not reach them). Directories go ignores (testdata,
-// vendor, names starting with "." or "_") are not searched. gowork is $GOWORK.
-func nestedGoModules(root, dir, gowork string) (other, workspace []string) {
-	use := goWorkModules(root, dir, gowork)
-	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || p == dir {
-			return nil
-		}
-		if n := d.Name(); n == "testdata" || n == "vendor" || n == "node_modules" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_") {
-			return filepath.SkipDir
-		}
-		if _, err := os.Stat(filepath.Join(p, "go.mod")); err != nil {
-			return nil
-		}
+// them when named, but ./... does not reach them). gowork is $GOWORK.
+func nestedGoModules(repo *gitx.Repo, dir, gowork string) (other, workspace []string) {
+	use := goWorkModules(repo.Root, dir, gowork)
+	for _, p := range goModDirs(repo, dir) {
 		rel, err := filepath.Rel(dir, p)
 		if err != nil {
-			return filepath.SkipDir
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		if slices.ContainsFunc(other, func(o string) bool { return pathutil.Under(rel, o) }) {
+			continue // everything below belongs to that module
 		}
 		if use[filepath.Clean(p)] {
-			workspace = append(workspace, filepath.ToSlash(rel))
-			return nil
+			workspace = append(workspace, rel)
+		} else {
+			other = append(other, rel)
 		}
-		other = append(other, filepath.ToSlash(rel))
-		return filepath.SkipDir // everything below belongs to that module
-	})
+	}
 	return other, workspace
+}
+
+// goModDirs lists the directories (absolute, sorted) below dir that have a go.mod,
+// leaving out what go ignores (testdata, vendor, names starting with "." or "_") and
+// node_modules. git lists them (tracked or untracked, not ignored: a build tree stays
+// unread); outside a git repository the directory is walked.
+func goModDirs(repo *gitx.Repo, dir string) []string {
+	ignored := func(rel string) bool {
+		for _, seg := range strings.Split(rel, "/") {
+			if seg == "testdata" || seg == "vendor" || seg == "node_modules" || strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "_") {
+				return true
+			}
+		}
+		return false
+	}
+	var out []string
+	add := func(rel string) {
+		if rel != "." && !ignored(rel) {
+			out = append(out, filepath.Join(dir, filepath.FromSlash(rel)))
+		}
+	}
+	base, ok := repoDir(repo.Root, dir)
+	spec := ":(glob)**/go.mod"
+	if base != "." {
+		spec = ":(glob)" + base + "/**/go.mod"
+	}
+	listed, err := repo.Git("-c", "core.quotepath=off", "ls-files", "-co", "--exclude-standard", "-z", "--", spec)
+	if err != nil || !ok {
+		filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+			if err != nil || !d.IsDir() || p == dir {
+				return nil
+			}
+			rel, _ := filepath.Rel(dir, p)
+			if ignored(filepath.ToSlash(rel)) {
+				return filepath.SkipDir
+			}
+			if exists(filepath.Join(p, "go.mod")) {
+				add(filepath.ToSlash(rel))
+			}
+			return nil
+		})
+		return out
+	}
+	for _, f := range strings.Split(listed, "\x00") {
+		if path.Base(f) != "go.mod" || !exists(filepath.Join(repo.Root, filepath.FromSlash(f))) {
+			continue // a tracked go.mod deleted from the working tree
+		}
+		add(pathutil.RelTo(path.Dir(f), base))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // goWorkModules returns the module directories (absolute) of the go.work file go uses
@@ -134,12 +193,8 @@ func goWorkModules(root, dir, gowork string) map[string]bool {
 // allPkgArgs are the go test arguments running every package of the suite: ./... and
 // the nested modules of the go.work workspace, which ./... does not reach.
 func allPkgArgs(rc *RunContext) []string {
-	gowork := os.Getenv("GOWORK")
-	if v, ok := rc.Suite.Env["GOWORK"]; ok {
-		gowork = v
-	}
 	args := []string{"./..."}
-	_, ws := nestedGoModules(rc.Repo.Root, rc.Dir(), gowork)
+	_, ws := nestedGoModules(rc.Repo, rc.Dir(), goWorkEnv(rc.Suite.Env))
 	for _, m := range ws {
 		args = append(args, "./"+m+"/...")
 	}

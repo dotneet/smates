@@ -95,14 +95,14 @@ func TestGoNestedModule(t *testing.T) {
 		}
 		return res
 	}
-	units := func() []string {
-		suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go"}})
+	units := func(env map[string]string) []string {
+		suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go", Env: env}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return suites[0].Adapter.Units(suites[0], suites[0].TestFiles(files))
 	}
-	if got := units(); !slices.Equal(got, []string{"a"}) {
+	if got := units(nil); !slices.Equal(got, []string{"a"}) {
 		t.Errorf("units without a workspace: %v", got)
 	}
 	if res := run([]string{"a"}, false); res.Observations["a"] == nil {
@@ -110,7 +110,7 @@ func TestGoNestedModule(t *testing.T) {
 	}
 
 	write("go.work", "go 1.22\n\nuse (\n\t.\n\t./tools // the tools\n)\n")
-	if got := units(); !slices.Equal(got, []string{"a", "tools/x"}) {
+	if got := units(nil); !slices.Equal(got, []string{"a", "tools/x"}) {
 		t.Fatalf("units in a workspace: %v", got)
 	}
 	for _, all := range []bool{false, true} {
@@ -120,6 +120,39 @@ func TestGoNestedModule(t *testing.T) {
 				t.Errorf("all=%v %s: %+v", all, u, o)
 			}
 		}
+	}
+	// GOWORK=off in the suite's env: the workspace does not apply, as when it runs.
+	if got := units(map[string]string{"GOWORK": "off"}); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("units with GOWORK=off: %v", got)
+	}
+}
+
+// git lists the go.mod files (untracked ones too, not ignored or deleted ones); what
+// go ignores is left out.
+func TestGoModDirs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := tempRepo(t)
+	for _, f := range []string{"go.mod", "tools/go.mod", "tools/sub/go.mod", "build/go.mod", "gone/go.mod", "vendor/v/go.mod", "x/testdata/go.mod", "_old/go.mod", "node_modules/m/go.mod"} {
+		testutil.Write(t, repo.Root, f, "module m\n")
+	}
+	testutil.Write(t, repo.Root, ".gitignore", "/build/\n")
+	for _, args := range [][]string{{"init", "-q"}, {"add", "gone/go.mod"}} {
+		if _, err := repo.Git(args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Remove(filepath.Join(repo.Root, "gone", "go.mod"))
+	want := []string{filepath.Join(repo.Root, "tools"), filepath.Join(repo.Root, "tools", "sub")}
+	if got := goModDirs(repo, repo.Root); !slices.Equal(got, want) {
+		t.Errorf("goModDirs = %v, want %v", got, want)
+	}
+	if got := goModDirs(repo, filepath.Join(repo.Root, "tools")); !slices.Equal(got, want[1:]) {
+		t.Errorf("goModDirs(tools) = %v", got)
+	}
+	if other, _ := nestedGoModules(repo, repo.Root, "off"); !slices.Equal(other, []string{"tools"}) {
+		t.Errorf("nested %v", other)
 	}
 }
 
