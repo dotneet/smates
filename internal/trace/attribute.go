@@ -131,14 +131,15 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		switch {
 		case target != nil && target.HasContexts():
-			ctx := target.contextAt(p.Start)
-			m := target.Ctx[ctx]
-			if m == nil {
-				m = map[string]bool{}
-				target.Ctx[ctx] = m
-			}
-			for f := range files {
-				m[f] = true
+			for ctx, files := range p.contextsIn(target, files) {
+				m := target.Ctx[ctx]
+				if m == nil {
+					m = map[string]bool{}
+					target.Ctx[ctx] = m
+				}
+				for f := range files {
+					m[f] = true
+				}
 			}
 		case target != nil:
 			if extra[target] == nil {
@@ -361,6 +362,38 @@ func (p *Proc) allFiles() map[string]bool {
 	}
 	for f := range p.Reads {
 		out[f] = true
+	}
+	return out
+}
+
+// contextsIn splits files, what child p used, by the contexts of target they belong to:
+// the ones target exported to p (the context p was started in, those a forked child
+// followed), else the context active when p started. Files recorded outside the trace
+// stream (V8 coverage) belong to the context p was started in.
+func (p *Proc) contextsIn(target *Proc, files map[string]bool) map[string]map[string]bool {
+	if p.SpawnKey != target.Key() {
+		return map[string]map[string]bool{target.contextAt(p.Start): files}
+	}
+	out := map[string]map[string]bool{}
+	rest := map[string]bool{}
+	for f := range files {
+		rest[f] = true
+	}
+	for ctx, fs := range p.SpawnFiles {
+		out[ctx] = fs
+		for f := range fs {
+			delete(rest, f)
+		}
+	}
+	if len(rest) > 0 {
+		m := map[string]bool{}
+		for f := range out[p.SpawnCtx] {
+			m[f] = true
+		}
+		for f := range rest {
+			m[f] = true
+		}
+		out[p.SpawnCtx] = m
 	}
 	return out
 }

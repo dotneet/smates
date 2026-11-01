@@ -386,10 +386,9 @@ func shortSHA(s string) string {
 }
 
 // mdEscape keeps untrusted text (agent output) from opening markdown or HTML
-// constructs in the step summary.
+// constructs, mentions or links in the step summary and PR comment.
 func mdEscape(s string) string {
-	r := strings.NewReplacer("<", "&lt;", ">", "&gt;", "\n", " ", "`", "'")
-	return r.Replace(s)
+	return summary.Inline(strings.NewReplacer("\n", " ", "`", "'").Replace(s))
 }
 
 // displayCandidates shows the suite's settings key (depkey.Config) as the config

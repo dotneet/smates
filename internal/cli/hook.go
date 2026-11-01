@@ -90,11 +90,11 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	repo, err := gitx.Open(d)
 	if err != nil {
-		return 1, err
+		return 1, asEnvError(err)
 	}
 	h, err := locateHook(repo, *kind)
 	if err != nil {
-		return 1, err
+		return 1, asEnvError(err)
 	}
 	switch sub {
 	case "install":
@@ -394,7 +394,7 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	repo, err := gitx.Open(d)
 	if err != nil {
-		return 1, err
+		return 1, asEnvError(err)
 	}
 	if kind == "pre-push" {
 		updates := readPushUpdates(stdin)

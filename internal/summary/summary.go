@@ -49,7 +49,10 @@ type Run struct {
 	Failed   []string // "suite: test" of units that failed
 	Escapes  []string // shadow mode: failed but would not have been selected
 	Possible []string // shadow mode: unselected, failure only inferred
-	NotRun   []string // --fail-fast: selected but not started after a failure
+	NotRun   []string // --fail-fast: selected but not started after a failure (or interrupted)
+	// Interrupted: the run was cancelled (Ctrl-C), so NotRun were cut short, not left
+	// out by --fail-fast.
+	Interrupted bool
 }
 
 // Section is an extra block of the summary.
@@ -248,7 +251,10 @@ func (v *view) run(b *strings.Builder) {
 			b.WriteString(".\n")
 		}
 	}
-	if len(r.NotRun) > 0 {
+	if len(r.NotRun) > 0 && r.Interrupted {
+		fmt.Fprintf(b, "\n**Interrupted:** %s not run (still selected next time):\n", plural(len(r.NotRun), "selected test unit"))
+		list(b, r.NotRun, maxItems)
+	} else if len(r.NotRun) > 0 {
 		fmt.Fprintf(b, "\n**Fail fast:** %s not started after the first failure (still selected next time):\n", plural(len(r.NotRun), "selected test unit"))
 		list(b, r.NotRun, maxItems)
 	}
@@ -679,11 +685,18 @@ func code(s string) string {
 	return "`" + s + "`"
 }
 
-// text makes free text (agent answers, notes) safe to embed: one line, no HTML, no
-// @-mentions.
-func text(s string) string {
-	return strings.ReplaceAll(html(oneLine(s)), "@", "@​")
-}
+// text makes free text (agent answers, notes) safe to embed: one line, see Inline.
+func text(s string) string { return Inline(oneLine(s)) }
+
+// inline escapes what lets text written by others (an LLM, a test) reach outside its
+// line: HTML, @-mentions (a zero-width space after the @), links and images, table
+// cells.
+var inline = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "@", "@\u200b",
+	`\`, `\\`, "[", `\[`, "]", `\]`, "!", `\!`, "|", `\|`)
+
+// Inline makes untrusted text safe to embed in a Markdown line (a PR comment, the step
+// summary): no HTML, @-mentions, links, images or table cells. Newlines are kept.
+func Inline(s string) string { return inline.Replace(s) }
 
 func cell(s string) string { return strings.ReplaceAll(html(s), "|", `\|`) }
 

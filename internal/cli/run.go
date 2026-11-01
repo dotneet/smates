@@ -801,7 +801,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 func (c *cycle) writeSummaries(elapsed time.Duration) {
 	p, f := c.p, c.f
 	sum := summaryInput(c.sel, f.shardI, f.shardN)
-	sum.Run = &summary.Run{ExitCode: c.worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible}
+	sum.Run = &summary.Run{ExitCode: c.worst, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted}
 	sum.Savings = cumulativeSavings(p.state.Runs)
 	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
@@ -920,6 +920,10 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs.StringVar(&f.markdown, "markdown", "", "also write the summary as Markdown to `file`, e.g. for a pull request comment")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
+	}
+	// Before selecting: a selection can call the agent, write --markdown and save the state.
+	if !slices.Contains([]string{"text", "files", "json", "markdown", "github"}, f.format) {
+		return 2, usageError{fmt.Errorf("unknown format %q", f.format)}
 	}
 	if err := f.callerFlags.validate(); err != nil {
 		return 2, err

@@ -39,7 +39,7 @@ This change affects **8 test units in 2 of 3 suites**; 6 skipped, saving about *
 - `web/src/new.test.ts` (web) — no recorded run
 
 **Selected by the agent** → 1 test unit
-- `api/client` (api) — agent: @​octocat says &lt;b&gt;client&lt;/b&gt; reads the generated | table
+- `api/client` (api) — agent: @​octocat says &lt;b&gt;client&lt;/b&gt; reads the generated \| table
 
 </details>
 

@@ -390,7 +390,7 @@ func (p *project) runAgent(ctx context.Context, res *selector.Result, orphans []
 	key := agent.CacheKey(req)
 	if raw, ok := p.state.AgentCache[key]; ok {
 		var dec agent.Decision
-		if err := json.Unmarshal(raw, &dec); err == nil {
+		if err := json.Unmarshal(raw, &dec); err == nil && dec.Check() == nil {
 			p.logf("agent: reusing cached decision for %d orphan file(s)", len(orphans))
 			return &dec, true, nil
 		}
