@@ -276,6 +276,8 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite) (string
 		}
 		old := string(data)
 		lines := strings.Split(old, "\n")
+		// The lines written keep the file's line endings (lines still end in \r).
+		crlf := strings.Contains(old, "\r\n")
 		// block returns the raw lines of a key of the step, re-indented as a key that
 		// is not on the "- " line.
 		block := func(st testStep, key string) []string {
@@ -332,6 +334,13 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite) (string
 			}
 			rep = append(rep, ind+"    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional (or openai-api-key / openrouter-api-key)")
 			rep = append(rep, block(st, "env")...)
+			if crlf {
+				for i, l := range rep {
+					if !strings.HasSuffix(l, "\r") {
+						rep[i] = l + "\r"
+					}
+				}
+			}
 			if st.TestLine > 0 {
 				outLines = append(outLines, lines[next-1:st.TestLine-1]...)
 				outLines = append(outLines, lines[st.TestLine:st.End]...)
@@ -358,9 +367,19 @@ func shellQuote(s string) string {
 }
 
 // unifiedDiff renders a git-style unified diff of two versions of file with three
-// lines of context.
+// lines of context. A last line without a newline is marked as git does ("\ No
+// newline at end of file"), so that git apply accepts the patch.
 func unifiedDiff(file, a, b string) string {
 	al, bl := splitLines(a), splitLines(b)
+	// The last line of a text without a final newline differs from the same line with
+	// one: it carries noEOL until it is written.
+	const noEOL = "\x00"
+	if a != "" && !strings.HasSuffix(a, "\n") {
+		al[len(al)-1] += noEOL
+	}
+	if b != "" && !strings.HasSuffix(b, "\n") {
+		bl[len(bl)-1] += noEOL
+	}
 	// Common prefix and suffix, then an LCS of the middle (workflows are small).
 	pre := 0
 	for pre < len(al) && pre < len(bl) && al[pre] == bl[pre] {
@@ -457,7 +476,11 @@ func unifiedDiff(file, a, b string) string {
 			if o.kind != '-' {
 				bN++
 			}
-			body.WriteString(string(o.kind) + o.text + "\n")
+			if text, ok := strings.CutSuffix(o.text, noEOL); ok {
+				body.WriteString(string(o.kind) + text + "\n\\ No newline at end of file\n")
+			} else {
+				body.WriteString(string(o.kind) + o.text + "\n")
+			}
 		}
 		if aN == 0 {
 			aStart--

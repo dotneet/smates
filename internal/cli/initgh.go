@@ -227,10 +227,10 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 		root := s.Root
 		switch s.Runner {
 		case "go":
-			tool("go", "go:"+root, "      - uses: "+actSetupGo, "        with:", "          go-version-file: "+joinRel(root, "go.mod"))
+			tool("go", "go:"+root, "      - uses: "+actSetupGo, "        with:", "          go-version-file: "+yamlStr(joinRel(root, "go.mod")))
 		case "pytest", "unittest":
 			if f := pythonVersionFile(repo.Root, root); f != "" {
-				tool("python", "python:"+f, "      - uses: "+actSetupPython, "        with:", "          python-version-file: "+f)
+				tool("python", "python:"+f, "      - uses: "+actSetupPython, "        with:", "          python-version-file: "+yamlStr(f))
 			} else if mise["python"] {
 				usesMise = true
 			}
@@ -239,7 +239,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 			tool("bun", "bun", "      - uses: "+actSetupBun)
 			if !seen["install:"+root] {
 				seen["install:"+root] = true
-				install = append(install, "      - run: bun install --frozen-lockfile", "        working-directory: "+root)
+				install = append(install, "      - run: bun install --frozen-lockfile", "        working-directory: "+yamlStr(root))
 			}
 		default: // vitest, jest, node
 			cmd := "npm ci"
@@ -262,7 +262,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 				}
 				if !seen["install:"+d] {
 					seen["install:"+d] = true
-					install = append(install, "      - run: "+cmd, "        working-directory: "+d)
+					install = append(install, "      - run: "+cmd, "        working-directory: "+yamlStr(d))
 				}
 				break
 			}
@@ -274,7 +274,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 name: tests
 on:
   push:
-    branches: [` + repo.DefaultBranch() + `]
+    branches: [` + yamlFlowStr(repo.DefaultBranch()) + `]
   pull_request:
 
 jobs:
@@ -501,4 +501,13 @@ func renderServices(b *strings.Builder, in inspection) {
 			fmt.Fprintf(b, "    #   %s: %s\n", kv[0], v)
 		}
 	}
+}
+
+// yamlFlowStr is yamlStr for an item of a flow sequence ([a, b]), where a comma or a
+// bracket also ends a plain scalar.
+func yamlFlowStr(s string) string {
+	if strings.ContainsAny(s, ",[]{}") {
+		return strconv.Quote(s)
+	}
+	return yamlStr(s)
 }

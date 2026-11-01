@@ -247,3 +247,26 @@ func TestUntestedCodeSection(t *testing.T) {
 		t.Errorf("untested code:\n%s", out)
 	}
 }
+
+// An interrupted run (Ctrl-C) also leaves selected units not run, but not by --fail-fast.
+func TestRunInterrupted(t *testing.T) {
+	in := &Input{Result: prResult(), Run: &Run{ExitCode: 1, Elapsed: time.Second, NotRun: []string{"web: web/src/ui.test.ts"}, Interrupted: true}}
+	md := Markdown(in)
+	if strings.Contains(md, "Fail fast") || !strings.Contains(md, "**Interrupted:** 1 selected test unit not run (still selected next time):\n- `web: web/src/ui.test.ts`") {
+		t.Errorf("interrupted run:\n%s", md)
+	}
+	in.Run.Interrupted = false
+	if md := Markdown(in); !strings.Contains(md, "**Fail fast:** 1 selected test unit not started") {
+		t.Errorf("fail-fast run:\n%s", md)
+	}
+}
+
+// Inline keeps text from others from mentioning people, linking, embedding images or
+// breaking out of a table cell.
+func TestInline(t *testing.T) {
+	got := Inline(`@octocat [x](https://e.example) ![i](https://e.example/t.png) a|b \[y] <b>&`)
+	want := "@​octocat \\[x\\](https://e.example) \\!\\[i\\](https://e.example/t.png) a\\|b \\\\\\[y\\] &lt;b&gt;&amp;"
+	if got != want {
+		t.Errorf("Inline = %q\nwant     %q", got, want)
+	}
+}

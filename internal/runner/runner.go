@@ -74,7 +74,10 @@ type Defaults struct {
 // Suite is a configured suite with its adapter and defaults applied.
 type Suite struct {
 	config.Suite
-	Adapter Adapter
+	// Configured is the suite's entry as smates.yml has it, before the defaults (which
+	// depend on the machine: a virtualenv, GOWORK) were applied to Suite.
+	Configured config.Suite
+	Adapter    Adapter
 	// Narrowed is set when smates.yml configures tests or exclude: the runner's own
 	// discovery would then run a different set of files, so units are always passed.
 	Narrowed bool
@@ -204,7 +207,7 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 	} else {
 		d = a.Defaults(repo, c.Root)
 	}
-	s := &Suite{Suite: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
+	s := &Suite{Suite: c, Configured: c, Adapter: a, Narrowed: len(c.Tests) > 0 || len(c.Exclude) > 0, TestsSource: SourceConfig}
 	if repo != nil {
 		s.RepoRoot = repo.Root
 	}
