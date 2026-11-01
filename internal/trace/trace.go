@@ -93,6 +93,9 @@ func NodeEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 		"NODE_V8_COVERAGE=" + V8Dir(traceDir),
 		"NODE_OPTIONS=" + opts,
 		"BUN_OPTIONS=" + bunOpts,
+		// A run of its own: smates may be started from a test an outer smates traces.
+		"SMATES_TRACE_PARENT=",
+		"SMATES_TRACE_CTX=",
 	}
 }
 
@@ -128,6 +131,10 @@ func PythonEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 		"SMATES_REPO_ROOT=" + repoRoot,
 		"PYTHONPATH=" + pp,
 		"PYTEST_PLUGINS=" + plugins,
+		// A run of its own: smates may be started from a test an outer smates traces
+		// (whose context would make the plugin take the session for a nested one).
+		"SMATES_TRACE_PARENT=",
+		"SMATES_TRACE_CTX=",
 	}
 }
 

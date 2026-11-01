@@ -378,7 +378,9 @@ func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *U
 	}
 }
 
-// worse combines statuses: fail beats unknown beats pass.
+// Worse combines statuses: fail beats unknown beats pass.
+func Worse(a, b string) string { return worse(a, b) }
+
 func worse(a, b string) string {
 	rank := func(s string) int {
 		switch s {

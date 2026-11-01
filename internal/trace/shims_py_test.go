@@ -770,6 +770,34 @@ def test_meta():
 	}
 }
 
+// smates started from a test an outer smates traces (a project test running `smates
+// run`) records a run of its own: the outer context it inherits does not make its
+// pytest session a nested one.
+func TestPytestInsideOuterRecording(t *testing.T) {
+	py := pytestPython(t)
+	root := shimRepo(t, map[string]string{
+		"test_a.py": "import subprocess\nimport sys\n\n\ndef test_a():\n    subprocess.run([sys.executable, '-c', \"open('a.txt').read()\"], check=True)\n",
+		"test_b.py": "def test_b():\n    assert False\n",
+		"a.txt":     "",
+	})
+	sh, traceDir := extractShims(t)
+	outer := []string{"SMATES_TRACE_CTX=4242-0:test:/outer/tests/test_runs_smates.py", "SMATES_TRACE_PARENT=4242-0"}
+	env := append(outer, PythonEnv(traceDir, root, sh, append(os.Environ(), outer...))...)
+	out, code := runPy(t, root, env, py, "-m", "pytest", "-q", "-p", "no:cacheprovider")
+	if code != 1 {
+		t.Fatalf("pytest exited %d:\n%s", code, out)
+	}
+	procs, err := Collect(traceDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := Attribute(procs, unitOfPy, Options{})
+	checkUnit(t, a, "test_a.py", []string{"a.txt"}, nil)
+	if a.Units["test_a.py"].Status != "pass" || a.Units["test_b.py"] == nil || a.Units["test_b.py"].Status != "fail" {
+		t.Errorf("units %+v %+v", a.Units["test_a.py"], a.Units["test_b.py"])
+	}
+}
+
 // A file not all of whose tests ran (-x, --maxfail, pytest.exit()) did not pass.
 func TestPytestStoppedFile(t *testing.T) {
 	root := shimRepo(t, map[string]string{

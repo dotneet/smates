@@ -599,7 +599,8 @@ func TestEnv(t *testing.T) {
 	t.Setenv("PYTEST_PLUGINS", "")
 	env := NodeEnv("/tr", "/repo", sh, []string{"NODE_OPTIONS=--max-old-space-size=4096", "BUN_OPTIONS=--smol"})
 	want := []string{"SMATES_TRACE_DIR=/tr", "SMATES_REPO_ROOT=/repo", "NODE_V8_COVERAGE=" + V8Dir("/tr"),
-		"NODE_OPTIONS=--require=/s/node.cjs --max-old-space-size=4096", "BUN_OPTIONS=--smol --preload=/s/node.cjs"}
+		"NODE_OPTIONS=--require=/s/node.cjs --max-old-space-size=4096", "BUN_OPTIONS=--smol --preload=/s/node.cjs",
+		"SMATES_TRACE_PARENT=", "SMATES_TRACE_CTX="}
 	if !reflect.DeepEqual(env, want) {
 		t.Errorf("NodeEnv %v", env)
 	}
@@ -622,7 +623,8 @@ func TestEnv(t *testing.T) {
 	}
 
 	py := PythonEnv("/tr", "/repo", sh, []string{"PYTHONPATH=/a", "PYTEST_PLUGINS=xdist"})
-	wantPy := []string{"SMATES_TRACE_DIR=/tr", "SMATES_REPO_ROOT=/repo", "PYTHONPATH=/s/py" + string(os.PathListSeparator) + "/a", "PYTEST_PLUGINS=xdist,smates_pytest"}
+	wantPy := []string{"SMATES_TRACE_DIR=/tr", "SMATES_REPO_ROOT=/repo", "PYTHONPATH=/s/py" + string(os.PathListSeparator) + "/a", "PYTEST_PLUGINS=xdist,smates_pytest",
+		"SMATES_TRACE_PARENT=", "SMATES_TRACE_CTX="}
 	if !reflect.DeepEqual(py, wantPy) {
 		t.Errorf("PythonEnv %v", py)
 	}
