@@ -17,10 +17,11 @@ import (
 // MapStatic implements StaticMapper: a test function depends on the declarations of the
 // Go files of its static closure (their bodies only when it executed them, which
 // recording adds), on its own test file and the test files it needs, and on the
-// listing of its package directory.
+// listing of its package directory. A compile check (BuildCheck) depends on the
+// content of the whole closure, as a package does.
 func (goTest) MapStatic(s *Suite, unit string, closure []string) []string {
 	dir, name, ok := SplitFuncUnit(unit)
-	if !funcGranularity(s) || !ok {
+	if !funcGranularity(s) || !ok || name == BuildCheck {
 		return closure
 	}
 	content := testFileDeps(s.RepoRoot, dir, name, closure)

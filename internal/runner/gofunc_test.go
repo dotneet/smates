@@ -79,9 +79,9 @@ func TestSplitFuncUnit(t *testing.T) {
 	if _, _, ok := SplitFuncUnit("pkg/x"); ok {
 		t.Error("a package is not a function")
 	}
-	pkgs, dirs, funcs := splitUnits([]string{"a#T1", "b", "a#T2", "c#T"})
-	if !slices.Equal(pkgs, []string{"b"}) || !slices.Equal(dirs, []string{"a", "c"}) || !slices.Equal(funcs["a"], []string{"T1", "T2"}) {
-		t.Errorf("splitUnits %v %v %v", pkgs, dirs, funcs)
+	pkgs, dirs, funcs, checks := splitUnits([]string{"a#T1", "b", "a#T2", "c#T", "a#(build)"})
+	if !slices.Equal(pkgs, []string{"b"}) || !slices.Equal(dirs, []string{"a", "c"}) || !slices.Equal(funcs["a"], []string{"T1", "T2"}) || !slices.Equal(checks, []string{"a"}) {
+		t.Errorf("splitUnits %v %v %v %v", pkgs, dirs, funcs, checks)
 	}
 }
 
@@ -259,8 +259,13 @@ func TestFuncUnitsAndMapStatic(t *testing.T) {
 	s := &Suite{Suite: config.Suite{Runner: "go", Granularity: config.GranularityFunc}, RepoRoot: repo.Root}
 	a := goTest{}
 	units := a.Units(s, []string{"p/a_test.go", "p/b_test.go", "p/helper_test.go", "p/ext_test.go", "q/bad_test.go"})
-	if !slices.Equal(units, []string{"p#TestA", "p#TestA2", "p#TestB", "p#ExampleX", "q"}) {
+	// Then the compile check of each package.
+	if !slices.Equal(units, []string{"p#TestA", "p#TestA2", "p#TestB", "p#ExampleX", "q", "p#(build)", "q#(build)"}) {
 		t.Errorf("units %v", units)
+	}
+	// A test file without test functions still belongs to its package's compile check.
+	if got := a.Units(s, []string{"p/helper_test.go"}); !slices.Equal(got, []string{"p#(build)"}) {
+		t.Errorf("helper units %v", got)
 	}
 	closure := []string{"go.mod", "p/a.go", "p/a_test.go", "p/b_test.go", "p/deep_test.go", "p/ext_test.go", "p/helper_test.go", "p/main_test.go", "p/other_test.go", "p/static/x.txt", "r/r.go"}
 	got := a.MapStatic(s, "p#TestA", closure)
@@ -268,9 +273,12 @@ func TestFuncUnitsAndMapStatic(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("MapStatic\n got %v\nwant %v", got, want)
 	}
-	// Package granularity keeps the closure as it is.
+	// Package granularity keeps the closure as it is, and so does a compile check.
 	if got := a.MapStatic(&Suite{Suite: config.Suite{Runner: "go"}, RepoRoot: repo.Root}, "p", closure); !slices.Equal(got, closure) {
 		t.Errorf("package granularity: %v", got)
+	}
+	if got := a.MapStatic(s, "p#(build)", closure); !slices.Equal(got, closure) {
+		t.Errorf("compile check: %v", got)
 	}
 }
 

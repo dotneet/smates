@@ -15,7 +15,8 @@ import (
 // A test function declared only in a file the suite's configuration does not compile
 // (build constraints: a //go:build tag the suite does not pass, a GOOS file) is not a
 // unit: go test would run nothing for it, and a pass recorded here would hide it from a
-// configuration that compiles it. With the tag (GOFLAGS) it is one.
+// configuration that compiles it. With the tag (GOFLAGS, or `smates run -- -tags=...`)
+// it is one.
 func TestFuncUnitsBuildConstraints(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH")
@@ -36,15 +37,23 @@ func TestFuncUnitsBuildConstraints(t *testing.T) {
 		}
 		return goTest{}.Units(suites[0], files)
 	}
-	if got, want := units(""), []string{"p#TestA", "p#ExampleF"}; !slices.Equal(got, want) {
+	if got, want := units(""), []string{"p#TestA", "p#ExampleF", "p#(build)"}; !slices.Equal(got, want) {
 		t.Errorf("units %v, want %v", got, want)
 	}
-	if got, want := units("-tags=smates_never"), []string{"p#TestA", "p#ExampleF", "p#TestTagged"}; !slices.Equal(got, want) {
+	if got, want := units("-tags=smates_never"), []string{"p#TestA", "p#ExampleF", "p#TestTagged", "p#(build)"}; !slices.Equal(got, want) {
 		t.Errorf("with the tag: units %v, want %v", got, want)
 	}
 	// Cached by file stat: the same answer again.
-	if got, want := units(""), []string{"p#TestA", "p#ExampleF"}; !slices.Equal(got, want) {
+	if got, want := units(""), []string{"p#TestA", "p#ExampleF", "p#(build)"}; !slices.Equal(got, want) {
 		t.Errorf("again: units %v, want %v", got, want)
+	}
+	extra, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go", Granularity: config.GranularityFunc, Env: map[string]string{"GOFLAGS": ""}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra[0].ExtraArgs = []string{"-tags=smates_never"}
+	if got, want := (goTest{}).Units(extra[0], files), []string{"p#TestA", "p#ExampleF", "p#TestTagged", "p#(build)"}; !slices.Equal(got, want) {
+		t.Errorf("with the tag passed through: units %v, want %v", got, want)
 	}
 
 	// Recording: an example without output (compiled, never run anywhere) passes; a

@@ -277,6 +277,9 @@ func (r *Result) Mentions(g *static.Graph, orphans []string) ([]Mention, []strin
 	for tier := 0; tier < 2; tier++ {
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
+				if runner.IsBuildCheck(t.ID) {
+					continue // a Go compile check reads no data file
+				}
 				var ms []Mention
 				searched := map[string]bool{}
 				for _, d := range s.Deps[t.ID] {

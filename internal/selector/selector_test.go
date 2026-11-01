@@ -1049,7 +1049,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	}
 	st := state.New()
 	res := sel(st, true)
-	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB"}) {
+	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB", "p#(build)"}) {
 		t.Fatalf("units %v", got)
 	}
 	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
@@ -1063,15 +1063,21 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	for u, f := range executed {
 		obs[u] = &runner.Observation{Files: map[string]bool{f: true}, Status: state.Pass}
 	}
+	obs["p#(build)"] = &runner.Observation{Status: state.Pass}
 	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
 	st.Files = map[string]string(f.snap())
-	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected", "p#(build)": "-unaffected"}) {
 		t.Fatalf("unchanged: %v", got)
 	}
+	// The compile check depends on every file of the package's closure.
+	if known := res.Suites[0].Known["p#(build)"]; !contains(known, "p/a.go") || !contains(known, "p/b.go") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go") || contains(known, "p/a.go#decls") {
+		t.Errorf("compile check known %v", known)
+	}
 
+	// A body only TestA executed: TestA and the compile check.
 	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n")
 	res = sel(st, false)
-	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}) {
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected", "p#(build)": ReasonChanged}) {
 		t.Errorf("body: %v", got)
 	}
 	if len(res.Orphans) != 0 {
@@ -1079,7 +1085,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	}
 	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n")
 	res = sel(st, false)
-	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged}) {
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#(build)": ReasonChanged}) {
 		t.Errorf("declarations: %v", got)
 	}
 	for _, tt := range res.Suites[0].Tests {
@@ -1091,7 +1097,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 
 	// A new test file in the package selects every function (and its own as new).
 	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")
-	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew}) {
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew, "p#(build)": ReasonChanged}) {
 		t.Errorf("new file: %v", got)
 	}
 }

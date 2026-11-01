@@ -10,7 +10,8 @@ import (
 
 // An orphan named only in a Go file a test function depends on through its
 // declarations (a constant path in a file whose functions it does not run) is found by
-// the reference scan, which reads the file behind the declarations key.
+// the reference scan, which reads the file behind the declarations key. The package's
+// compile check reads no data and is not pulled in.
 func TestReferencesThroughDeclarations(t *testing.T) {
 	f := newFixture(t, map[string]string{
 		"go.mod":                     "module example.com/m\n\ngo 1.22\n",

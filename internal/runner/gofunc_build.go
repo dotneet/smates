@@ -32,15 +32,15 @@ type buildInfo struct {
 var buildInfos sync.Map // absolute path -> buildInfo
 
 // excludedTestFiles returns the test files (repo-relative) of suite s that go list
-// reports as excluded by build constraints in the suite's configuration (GOFLAGS and
-// command flags, its environment). Only files that may be constrained are looked up,
+// reports as excluded by build constraints in the suite's configuration (GOFLAGS,
+// command flags and the arguments passed through, its environment). Only files that may be constrained are looked up,
 // with one go list for all their packages; results are cached by file stat. When go
 // list fails nothing is excluded.
 func excludedTestFiles(s *Suite, testFiles []string) map[string]bool {
 	if s.RepoRoot == "" {
 		return nil
 	}
-	rc := &RunContext{Repo: &gitx.Repo{Root: s.RepoRoot}, Suite: s}
+	rc := &RunContext{Repo: &gitx.Repo{Root: s.RepoRoot}, Suite: s, ExtraArgs: s.ExtraArgs}
 	env := MergeEnv(baseEnv(), suiteEnv(s), []string{"GOFLAGS="})
 	flags := strings.Join(append(goListFlags(rc), Getenv(env, "GOOS"), Getenv(env, "GOARCH"), Getenv(env, "CGO_ENABLED")), "\x00")
 	infos := map[string]buildInfo{}

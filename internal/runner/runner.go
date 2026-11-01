@@ -92,6 +92,10 @@ type Suite struct {
 	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
 	// units are found in the test files' contents.
 	RepoRoot string
+	// ExtraArgs are the arguments `smates run -- ...` passes through to the runner, set
+	// before selection: they can change which test files the runner compiles (Go's
+	// -tags, see excludedTestFiles).
+	ExtraArgs []string
 }
 
 // RunContext carries everything an adapter needs to run a suite.

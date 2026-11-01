@@ -98,6 +98,7 @@ func recordFuncs(ctx context.Context, rc *RunContext, dirs []string, funcs map[s
 type goPackage struct {
 	dirs   map[string]string // import path -> absolute directory (main-module packages)
 	linked map[string]bool   // repo-relative directories of those packages
+	names  map[string]string // absolute directory -> package name
 }
 
 // listPackages lists the main-module packages linked into the test binary of pkg.
@@ -110,7 +111,7 @@ func (fr *funcRecorder) listPackages(ctx context.Context, pkg string) (*goPackag
 	if err != nil || code != 0 {
 		return nil, "go list failed: " + firstLine(errb.String())
 	}
-	gp := &goPackage{dirs: map[string]string{}, linked: map[string]bool{}}
+	gp := &goPackage{dirs: map[string]string{}, linked: map[string]bool{}, names: map[string]string{}}
 	sc := bufio.NewScanner(&out)
 	for sc.Scan() {
 		f := strings.Split(sc.Text(), "\t")
@@ -118,6 +119,7 @@ func (fr *funcRecorder) listPackages(ctx context.Context, pkg string) (*goPackag
 			continue
 		}
 		gp.dirs[f[0]] = f[1]
+		gp.names[f[1]] = f[2]
 		if rel, ok := repoDir(rc.Repo.Root, f[1]); ok {
 			gp.linked[rel] = true
 		}
@@ -162,7 +164,12 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	argv := append(append([]string{"go", "test"}, fr.flags.build...), "-c", "-cover", "-coverpkg="+strings.Join(ips, ","), "-o", bin, pkg)
+	pkgDir := filepath.Join(rc.Repo.Root, filepath.FromSlash(dir))
+	build, err := childCoverFlags(fr.flags.build, Getenv(suiteEnv(rc.Suite), "GOFLAGS"), rc.Dir(), pkgDir, gp.names[pkgDir], work)
+	if err != nil {
+		return "", err
+	}
+	argv := append(append([]string{"go", "test"}, build...), "-c", "-cover", "-coverpkg="+strings.Join(ips, ","), "-o", bin, pkg)
 	var out bytes.Buffer
 	code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &out)
 	if err != nil || code != 0 {
@@ -171,7 +178,6 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	if _, err := os.Stat(bin); err != nil {
 		return "go test -c wrote no test binary", nil
 	}
-	pkgDir := filepath.Join(rc.Repo.Root, filepath.FromSlash(dir))
 	covDir := filepath.Join(work, "covdata")
 	if err := os.MkdirAll(covDir, 0o755); err != nil {
 		return "", err
@@ -281,7 +287,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	argv := append(slices.Clone(fr.flags.exec), bin, "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.coverprofile="+profile,
 		"-test.testlogfile="+testLog, "-test.paniconexit0")
 	argv = append(append(argv, fr.flags.test...), fr.flags.tail...)
-	env := []string{"GOCOVERDIR=" + covDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
+	env := []string{"GOCOVERDIR=" + covDir, childCoverEnv + "=" + covDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
 	env = append(env, childTraceEnv(rc, work)...)
 	var buf bytes.Buffer
 	start := time.Now()
@@ -306,7 +312,8 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 			o.AddFile(f)
 		}
 	}
-	certain := addCoverage(o, rc.Repo.Root, gp, profile)
+	// A re-execution of the binary that wrote no counters ran code no profile shows.
+	certain := addCoverage(o, rc.Repo.Root, gp, profile) && childrenCovered(covDir)
 	var known []string
 	if rc.Known != nil {
 		known = rc.Known(unit)

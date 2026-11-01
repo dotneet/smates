@@ -160,6 +160,9 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if len(f.extra) > 0 && !f.noRecord {
 		p.logf("runner arguments may filter tests: passing tests are not recorded as passed in this run")
 	}
+	for _, s := range p.suites {
+		s.ExtraArgs = f.extra // they can change which test files compile (go -tags)
+	}
 
 	all := f.all
 	if !all && !f.selectOn && !f.shadow && len(f.onlySpecs) == 0 {
@@ -685,11 +688,22 @@ func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
 // checkShadow notes the failing tests of a suite the selection would have skipped
 // (--shadow). Only failures reported for the unit itself count: a failure inferred
 // from a shared exit code, or a unit a failed run said nothing about, may belong to a
-// selected test (they are possible escapes).
+// selected test (they are possible escapes). A Go test function of a package whose
+// compile check was selected and failed is no escape: it failed because its package
+// does not build, which the check reports.
 func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
+	brokenBuild := map[string]bool{} // package directories whose selected check failed
+	for _, t := range sr.Tests {
+		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && t.Selected && runner.IsBuildCheck(t.ID) && obs[t.ID] != nil && obs[t.ID].Status == state.Fail {
+			brokenBuild[dir] = true
+		}
+	}
 	for _, t := range sr.Tests {
 		o := obs[t.ID]
 		if t.Selected || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
+			continue
+		}
+		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && brokenBuild[dir] {
 			continue
 		}
 		if o.Inferred {
