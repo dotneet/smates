@@ -130,7 +130,12 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		switch {
 		case target != nil && target.HasContexts():
+			// The context the child was started in; its start time can be later, when the
+			// target has moved on (a server a session fixture starts without waiting).
 			ctx := target.contextAt(p.Start)
+			if p.SpawnKey == target.Key() {
+				ctx = p.SpawnCtx
+			}
 			m := target.Ctx[ctx]
 			if m == nil {
 				m = map[string]bool{}

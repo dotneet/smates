@@ -243,6 +243,32 @@ func TestAttributePythonContexts(t *testing.T) {
 	}
 }
 
+// A child records the context its parent exported when starting it (SMATES_TRACE_CTX);
+// that context wins over the one active at the child's own (later) start time, but only
+// when the exporting process is the one the child is attributed to.
+func TestAttributeChildSpawnContext(t *testing.T) {
+	py := mkProc(100, 1, 0).
+		ctx(10, "fixture:server@").
+		ctx(12, "test:test_a.py").
+		ctx(50, "test:test_b.py").
+		ctx(90, "")
+	py.p.Uses["test_a.py"] = []string{"fixture:server@"}
+	py.p.Uses["test_b.py"] = []string{"fixture:server@"}
+	server := mkProc(200, 100, 0).times(30, 0).code("server.py").read("served.txt") // up during test_a
+	server.p.SpawnKey, server.p.SpawnCtx = "100-0", "fixture:server@"
+	other := mkProc(201, 100, 0).times(60, 0).read("other.txt") // exported by another process
+	other.p.SpawnKey, other.p.SpawnCtx = "99-0", "test:test_a.py"
+	a := attr(Options{}, py, server, other)
+	for id, want := range map[string][]string{
+		"test_a.py": {"served.txt", "server.py"},
+		"test_b.py": {"other.txt", "served.txt", "server.py"},
+	} {
+		if got := unitFiles(a, id); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v, want %v", id, got, want)
+		}
+	}
+}
+
 func TestAttributeUnitsFromArgv(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "web/src/a.test.ts", "web/src/b.test.ts", "web/src/a.ts")

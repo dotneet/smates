@@ -159,6 +159,10 @@ type Proc struct {
 	Results map[string]Result
 	// Coverage reports whether code coverage was collected for this process.
 	Coverage bool
+	// SpawnKey is the process ("pid-tid") that exported SpawnCtx, its attribution context
+	// when it started this process (or a traced ancestor of it), through the environment
+	// (SMATES_TRACE_CTX="<key>:<context>").
+	SpawnKey, SpawnCtx string
 }
 
 // Span is a context switch.
@@ -269,6 +273,7 @@ type event struct {
 	Status string   `json:"status"`
 	Ms     int64    `json:"ms"`
 	Msg    string   `json:"msg"`
+	Pctx   string   `json:"pctx"`
 }
 
 var (
@@ -389,6 +394,9 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), root stri
 		switch ev.K {
 		case "start":
 			p.Ppid, p.Anc, p.Argv, p.Cwd, p.Lang, p.Start = ev.Ppid, ev.Anc, ev.Argv, ev.Cwd, ev.Lang, ev.T
+			if key, c, ok := strings.Cut(ev.Pctx, ":"); ok && key != "" {
+				p.SpawnKey, p.SpawnCtx = key, relCtx(c, rel)
+			}
 		case "read", "code", "dir", "probe", "tree":
 			key := ""
 			if r, ok := rel(ev.P); ok {

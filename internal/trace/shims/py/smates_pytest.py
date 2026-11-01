@@ -8,6 +8,9 @@ Loaded through PYTEST_PLUGINS while smates records, and without tracing (smates 
                               so their dependencies are added to every test using them)
     session:end      the end of a session that ran tests (reports such as pytest-cov's),
                      attributed to no test
+
+A session a test runs in-process (pytester's runpytest()) is part of that test: the
+plugin, loaded into it too, attributes nothing of its own there and reports no results.
 """
 
 import json
@@ -22,6 +25,16 @@ _tracer = smates_trace.install()
 _results = {}
 # Without tracing, results go to a file of their own in $SMATES_TRACE_DIR.
 _results_dir = os.environ.get("SMATES_TRACE_DIR") if _tracer is None else None
+# Sessions running in this process, the outermost first.
+_sessions = []
+# Contexts of the fixtures the running test requested beyond its declared ones.
+_requested = set()
+_running = []  # the test file running (outside nested sessions)
+_ended = False  # session:end is active
+
+
+def _nested():
+    return len(_sessions) > 1
 
 
 def _file_of(node):
@@ -29,6 +42,10 @@ def _file_of(node):
     if path is None:
         path = getattr(node, "fspath", None)
     return os.path.realpath(str(path)) if path is not None else None
+
+
+def _fixture_ctx(fixturedef):
+    return "fixture:%s@%s" % (fixturedef.argname, fixturedef.baseid)
 
 
 def _write_result(ev):
@@ -46,7 +63,7 @@ if _tracer is not None:
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_make_collect_report(collector):
-        f = _file_of(collector) if isinstance(collector, pytest.File) else None
+        f = _file_of(collector) if isinstance(collector, pytest.File) and not _nested() else None
         if f is None:
             yield
             return
@@ -58,36 +75,70 @@ if _tracer is not None:
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_fixture_setup(fixturedef, request):
-        _tracer.push("fixture:%s@%s" % (fixturedef.argname, fixturedef.baseid))
+        if _nested():
+            yield
+            return
+        ctx = _fixture_ctx(fixturedef)
+        if _running:
+            _requested.add(ctx)  # also when requested dynamically
+        _tracer.push(ctx)
         try:
             yield
         finally:
             _tracer.pop()
 
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_teardown(item, nextitem):
+        yield
+        if _nested():
+            return
+        # Fixtures resolved by the test's request, those requested dynamically
+        # (request.getfixturevalue) included: one set up for an earlier test is cached,
+        # so pytest_fixture_setup does not see it again. The request is gone afterwards.
+        defs = getattr(getattr(item, "_request", None), "_fixture_defs", None)
+        if isinstance(defs, dict):
+            for fd in defs.values():
+                _requested.add(_fixture_ctx(fd))
+
 
 if _tracer is not None or _results_dir:
 
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_sessionstart(session):
+        global _ended
+        if not _sessions and _ended:
+            # An earlier session of this process (pytest.main called again) is over.
+            _ended = False
+            _tracer.pop()
+        _sessions.append(session)
+
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_protocol(item, nextitem):
+        if _nested():
+            yield
+            return
         f = _file_of(item)
         start = time.time()
+        _running.append(f)
+        _requested.clear()
         if _tracer is not None:
             _tracer.push("test:" + f)
         try:
             yield
         finally:
+            _running.pop()
             r = _results.setdefault(f, {"ms": 0, "failed": False})
             r["ms"] += int((time.time() - start) * 1000)
             if _tracer is not None:
                 _tracer.pop()
                 names = getattr(item, "fixturenames", ()) or ()
                 defs = getattr(getattr(item, "_fixtureinfo", None), "name2fixturedefs", {}) or {}
-                ctx = []
+                ctx = set(_requested)
                 for name in names:
                     for fd in defs.get(name, ()):
-                        ctx.append("fixture:%s@%s" % (fd.argname, fd.baseid))
+                        ctx.add(_fixture_ctx(fd))
                 if ctx:
-                    _tracer.write({"k": "uses", "id": f, "ctx": sorted(set(ctx))})
+                    _tracer.write({"k": "uses", "id": f, "ctx": sorted(ctx)})
 
     _failed_nodeids = set()
     # Failure output per test file (bounded: it only feeds smates' failure hints).
@@ -110,11 +161,11 @@ if _tracer is not None or _results_dir:
         _messages[f] = msg[:_MAX_MSG]
 
     def pytest_runtest_logreport(report):
-        if report.failed:
+        if report.failed and not _nested():
             _note_failure(report)
 
     def pytest_collectreport(report):
-        if report.failed:
+        if report.failed and not _nested():
             _note_failure(report)
 
     @pytest.hookimpl(hookwrapper=True, trylast=True)
@@ -125,12 +176,18 @@ if _tracer is not None or _results_dir:
         # resumes before the other plugins' (pytest-cov reports in its own wrapper).
         # Only in a process that ran tests: a pytest-xdist controller has no test
         # contexts of its own.
+        global _ended
         yield
-        if _results:
+        if _results and _tracer is not None and not _nested() and not _ended:
+            _ended = True
             _tracer.push("session:end")
 
     @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(session, exitstatus):
+        if _sessions and session is not _sessions[0]:
+            if session in _sessions:
+                _sessions.remove(session)
+            return
         rootdir = str(session.config.rootpath)
         failed = {}
         for n in _failed_nodeids:
@@ -147,3 +204,7 @@ if _tracer is not None or _results_dir:
                 if msg:
                     ev["msg"] = msg
                 _write_result(ev)
+        _results.clear()
+        _failed_nodeids.clear()
+        _messages.clear()
+        del _sessions[:]
