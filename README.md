@@ -497,7 +497,9 @@ the user with exit 1 instead of blocking; failing tests still block when the sta
 not be saved. The entry is spliced into the file's text, so everything else (other keys
 and hooks, their order and formatting) stays byte for byte, and installing again changes
 nothing; `smates hook uninstall --claude` removes exactly that text (and a `Stop` or
-`hooks` it leaves empty), `smates hook status` shows it, and `SMATES_SKIP_HOOK=1` skips it. The command does
+`hooks` it leaves empty). A file smates cannot edit unambiguously (invalid JSON, a
+duplicate key, `hooks` that is not an object or `Stop` that is not an array) is reported
+and left alone. `smates hook status` shows the hook, and `SMATES_SKIP_HOOK=1` skips it. The command does
 nothing where `smates` is not installed.
 
 **Exit codes** tell "fix the code" from "fix the setup":

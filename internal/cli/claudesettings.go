@@ -36,6 +36,7 @@ func jsonChildren(data []byte, start, end int) ([]jsonSpan, error) {
 		return nil, errors.New("not an object or array")
 	}
 	var out []jsonSpan
+	seen := map[string]bool{}
 	for dec.More() {
 		var sp jsonSpan
 		if object {
@@ -45,6 +46,12 @@ func jsonChildren(data []byte, start, end int) ([]jsonSpan, error) {
 				return nil, err
 			}
 			sp.key, _ = kt.(string)
+			// Claude Code (JSON.parse) takes the last of duplicate keys; smates would
+			// read the first. Rather than guess which one the user means, refuse.
+			if object && seen[sp.key] {
+				return nil, fmt.Errorf("duplicate key %q", sp.key)
+			}
+			seen[sp.key] = true
 			sp.keyStart = off + bytes.IndexByte(data[off:end], '"')
 		}
 		var raw json.RawMessage
@@ -108,6 +115,8 @@ type claudeDoc struct {
 type smatesEntry struct {
 	command  string
 	cmdSpan  jsonSpan   // the "command" value
+	timeout  string     // the "timeout" value as written ("" when absent)
+	tSpan    jsonSpan   // the "timeout" value
 	entry    jsonSpan   // the hook entry in its group's "hooks" array
 	group    jsonSpan   // the group in "Stop"
 	entries  []jsonSpan // the group's entries
@@ -122,16 +131,20 @@ func (d *claudeDoc) stop() (root []jsonSpan, hooks, stop jsonSpan, hasHooks, has
 	if err != nil {
 		return
 	}
-	if hooks, hasHooks = findKey(root, "hooks"); !hasHooks || !isKind(d.data, hooks, '{') {
-		hasHooks = false
+	if hooks, hasHooks = findKey(root, "hooks"); !hasHooks {
+		return
+	}
+	if !isKind(d.data, hooks, '{') {
+		err = errors.New(`"hooks" is not an object`)
 		return
 	}
 	members, err := jsonChildren(d.data, hooks.start, hooks.end)
 	if err != nil {
 		return
 	}
-	stop, hasStop = findKey(members, "Stop")
-	hasStop = hasStop && isKind(d.data, stop, '[')
+	if stop, hasStop = findKey(members, "Stop"); hasStop && !isKind(d.data, stop, '[') {
+		err = errors.New(`"hooks"."Stop" is not an array`)
+	}
 	return
 }
 
@@ -178,7 +191,11 @@ func (d *claudeDoc) entries() ([]smatesEntry, error) {
 			if !ok || json.Unmarshal(d.data[c.start:c.end], &cmd) != nil || !strings.Contains(cmd, claudeHookMarker) {
 				continue
 			}
-			out = append(out, smatesEntry{command: cmd, cmdSpan: c, entry: e, group: g, entries: entries, groupArr: arr})
+			se := smatesEntry{command: cmd, cmdSpan: c, entry: e, group: g, entries: entries, groupArr: arr}
+			if t, ok := findKey(em, "timeout"); ok {
+				se.timeout, se.tSpan = string(d.data[t.start:t.end]), t
+			}
+			out = append(out, se)
 		}
 	}
 	return out, nil
@@ -305,7 +322,12 @@ func readClaudeDoc(path string) (*claudeDoc, error) {
 	}
 	root, err := jsonChildren(data, s, e)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w; fix it first", path, err)
+	}
+	// What smates edits must be unambiguous: a duplicate key or a "hooks"/"Stop" of
+	// another kind is reported, and the file left alone, rather than worked around.
+	if _, err := d.entries(); err != nil {
+		return nil, fmt.Errorf("%s: %w; fix it first", path, err)
 	}
 	if len(root) > 0 && lineOffset(data, root[0].keyStart) > 0 && bytes.ContainsRune(data[s:root[0].keyStart], '\n') {
 		d.unit = lineIndent(data, root[0].keyStart)
@@ -329,7 +351,8 @@ func installClaudeHook(path string, command string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) == 1 && entries[0].command == command {
+	timeout := fmt.Sprint(claudeHookTimeout)
+	if len(entries) == 1 && entries[0].command == command && entries[0].timeout == timeout {
 		fmt.Fprintf(stdout, "smates Claude Code Stop hook already installed in %s\n", path)
 		return nil
 	}
@@ -341,9 +364,20 @@ func installClaudeHook(path string, command string, stdout io.Writer) error {
 	group := map[string]any{"hooks": []any{entry}}
 	switch {
 	case len(entries) > 0:
-		// Update the first entry's command in place; drop duplicates.
-		cmd := marshalIndented(command, "", "")
-		d.splice(entries[0].cmdSpan.start, entries[0].cmdSpan.end, cmd)
+		// Update the first entry's command and timeout in place (later offsets first);
+		// drop duplicates.
+		e := entries[0]
+		if e.timeout == "" {
+			if err := d.insert(e.entry.start, e.entry.end, "timeout", claudeHookTimeout); err != nil {
+				return err
+			}
+		} else if e.tSpan.start > e.cmdSpan.start {
+			d.splice(e.tSpan.start, e.tSpan.end, []byte(timeout))
+		}
+		d.splice(e.cmdSpan.start, e.cmdSpan.end, marshalIndented(command, "", ""))
+		if e.timeout != "" && e.tSpan.start < e.cmdSpan.start {
+			d.splice(e.tSpan.start, e.tSpan.end, []byte(timeout))
+		}
 		for {
 			es, err := d.entries()
 			if err != nil {

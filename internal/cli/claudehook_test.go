@@ -75,6 +75,76 @@ func TestInitAgentsMDExistingConfig(t *testing.T) {
 	}
 }
 
+// TestClaudeHookSettingsRefused: settings smates cannot edit unambiguously are reported
+// and left byte for byte as they were, by install, uninstall and status alike.
+func TestClaudeHookSettingsRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	g := newGitRepo(t)
+	path := filepath.Join(g.dir, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	smatesEntry := `{"hooks": [{"type": "command", "command": "smates hook claude-stop -- --no-agent"}]}`
+	for name, tc := range map[string]struct{ doc, want string }{
+		"hooks null":         {`{"hooks": null}`, `"hooks" is not an object`},
+		"hooks array":        {`{"hooks": []}`, `"hooks" is not an object`},
+		"Stop object":        {`{"hooks": {"Stop": {}}}`, `"hooks"."Stop" is not an array`},
+		"duplicate hooks":    {`{"hooks": {}, "model": "x", "hooks": {"Stop": []}}`, `duplicate key "hooks"`},
+		"duplicate Stop":     {`{"hooks": {"Stop": [], "Stop": [` + smatesEntry + `]}}`, `duplicate key "Stop"`},
+		"duplicate in entry": {`{"hooks": {"Stop": [{"hooks": [{"command": "a", "command": "smates hook claude-stop"}]}]}}`, `duplicate key "command"`},
+		"duplicate in group": {`{"hooks": {"Stop": [{"hooks": [], "hooks": [` + smatesEntry + `]}]}}`, `duplicate key "hooks"`},
+	} {
+		os.WriteFile(path, []byte(tc.doc), 0o644)
+		for _, sub := range []string{"install", "uninstall"} {
+			code, _, errs := hookCmd(t, g.dir, sub, "--claude")
+			if code != 1 || !strings.Contains(errs, tc.want) || !strings.Contains(errs, "fix it first") {
+				t.Errorf("%s: %s: exit %d, %q", name, sub, code, errs)
+			}
+			if got := readFile(t, path); got != tc.doc {
+				t.Errorf("%s: %s changed the file: %q", name, sub, got)
+			}
+		}
+		if _, out, _ := hookCmd(t, g.dir, "status", "--claude"); !strings.Contains(out, "(project): unreadable") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: status: %q", name, out)
+		}
+	}
+
+	// An entry whose timeout differs (or is missing) is updated in place.
+	for _, doc := range []string{
+		`{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "if command -v smates >/dev/null 2>&1; then smates hook claude-stop -- --no-agent; fi", "timeout": 60}]}]}}`,
+		`{"hooks": {"Stop": [{"hooks": [{"timeout": 60, "command": "smates hook claude-stop", "type": "command"}]}]}}`,
+		`{"hooks": {"Stop": [{"hooks": [{"command": "smates hook claude-stop", "type": "command"}]}]}}`,
+	} {
+		os.WriteFile(path, []byte(doc), 0o644)
+		if code, out, errs := hookCmd(t, g.dir, "install", "--claude"); code != 0 || !strings.Contains(out, "updated") {
+			t.Errorf("update %s: %d %s %s", doc, code, out, errs)
+		}
+		var v struct {
+			Hooks struct {
+				Stop []struct {
+					Hooks []struct {
+						Command string
+						Timeout int
+					} `json:"hooks"`
+				} `json:"Stop"`
+			} `json:"hooks"`
+		}
+		got := readFile(t, path)
+		if err := json.Unmarshal([]byte(got), &v); err != nil || len(v.Hooks.Stop) != 1 || len(v.Hooks.Stop[0].Hooks) != 1 ||
+			v.Hooks.Stop[0].Hooks[0].Timeout != claudeHookTimeout || v.Hooks.Stop[0].Hooks[0].Command != claudeHookCommand(false, []string{"--no-agent"}) {
+			t.Errorf("updated %s:\n%s (%v)", doc, got, err)
+		}
+		if code, out, _ := hookCmd(t, g.dir, "install", "--claude"); code != 0 || !strings.Contains(out, "already installed") {
+			t.Errorf("after update %s: %d %s", doc, code, out)
+		}
+	}
+
+	// --hook and --append are for git hooks.
+	for _, args := range [][]string{{"install", "--claude", "--hook", "pre-commit"}, {"install", "--claude", "--append"}} {
+		if code, _, errs := hookCmd(t, g.dir, args...); code != 2 || !strings.Contains(errs, "not --claude") {
+			t.Errorf("%v: exit %d %s", args, code, errs)
+		}
+	}
+}
+
 func TestClaudeStopHookSharedState(t *testing.T) {
 	g := worktreeFixture(t, "state_shared: true\n")
 	wt := addWorktree(t, g, "feat")

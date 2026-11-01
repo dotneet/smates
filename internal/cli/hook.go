@@ -70,6 +70,15 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return 2, usageError{errors.New("--user applies to --claude")}
 	}
 	if *claude {
+		var bad []string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "hook" || f.Name == "append" {
+				bad = append(bad, "--"+f.Name)
+			}
+		})
+		if len(bad) > 0 {
+			return 2, usageError{fmt.Errorf("%s applies to git hooks, not --claude", strings.Join(bad, " and "))}
+		}
 		return claudeHookCmd(sub, *dir, *user, *useAgent, fs.Args(), stdout)
 	}
 	if !slices.Contains(hookKinds, *kind) {
