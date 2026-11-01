@@ -27,9 +27,14 @@ affected). Do not run the whole test suite yourself: smates already picked what 
 |---|---|---|
 | 0 | passed (or nothing to run) | done |
 | 1 | tests failed | fix the code (or the test) |
-| 2 | usage error | fix the command line |
-| 3 | configuration error | fix `smates.yml`, or the `--suite`/`--only` name (`smates list`) |
-| 4 | environment problem | install the runner or `node_modules`; see `smates doctor` |
+| 2 | usage error (also an `--add` that names no test) | fix the command line |
+| 3 | configuration error | fix `smates.yml` (`smates config ...`), or the `--suite`/`--only` name (`smates list`) |
+| 4 | environment problem | see `smates doctor --format json`: each failed check has a `fix` |
+
+Exit 4 also covers a runner that could not start (exit 126/127 with no test result, in a
+recorded run of any runner but `custom`) and a state that could not be saved (e.g. the
+shared state's lock is held); the summary is printed first. When tests also failed, the
+exit code is 1.
 
 ## Changes no test is known to depend on (orphans)
 
@@ -37,13 +42,15 @@ By default such files make whole suites run (or ask an LLM). You know what you c
 so you can decide instead:
 
 ```sh
-smates select --format json       # read "orphan_candidates": path, referenced_by, suites
+smates select --format json       # read "orphan_candidates": path, referenced_by, suites, handling
 smates run --output failures --orphans=skip --add api:tests/test_users.py
 ```
 
-`--add SUITE:UNIT` (repeatable) adds tests; `--orphans=agent|full|skip` overrides the
-`orphans:` policy for one run. You can only add tests, never remove selected ones. Use
-`--orphans=skip` only when you are sure the orphans cannot break a test.
+`--add SUITE:UNIT` (repeatable; the unit may be a test file path) adds tests;
+`--orphans=agent|full|skip` overrides the `orphans:` policy for one run. You can only add
+tests, never remove selected ones. Use `--orphans=skip` only when you are sure the
+orphans cannot break a test. Neither combines with `--only`. Files that should never
+need tests belong in `ignore:`: `smates config add-ignore 'deploy/**'` (`--dry-run` first).
 
 ## Understanding a selection
 
@@ -51,6 +58,8 @@ smates run --output failures --orphans=skip --add api:tests/test_users.py
 - `smates why <file>`: the tests that depend on a file.
 - `smates deps <test file or Go package dir>`: the files a test depends on.
 - `smates list`: suites and test units (the names `--only` and `--suite` take).
+
+`why`, `deps`, `list`, `doctor` and `init` take `--format json`.
 
 ## Long runs
 
@@ -66,4 +75,4 @@ smates run --output failures --orphans=skip --add api:tests/test_users.py
 ## Do not
 
 - edit `.smates/` (the recorded state) or pass runner filters after `--` to skip tests;
-- treat exit code 3 or 4 as a test failure: the tests did not run, so fix the setup.
+- treat exit code 3 or 4 as a test failure: fix the setup, then run again.

@@ -147,13 +147,8 @@ func TestClaudeHookSettings(t *testing.T) {
 	if code, out, _ := hookCmd(t, g.dir, "uninstall", "--claude"); code != 0 || !strings.Contains(out, "removed") {
 		t.Fatalf("uninstall: %d %s", code, out)
 	}
-	var after, before any
-	json.Unmarshal([]byte(readFile(t, path)), &after)
-	json.Unmarshal([]byte(original), &before)
-	a, _ := json.Marshal(after)
-	b, _ := json.Marshal(before)
-	if string(a) != string(b) {
-		t.Errorf("after uninstall\n got %s\nwant %s", a, b)
+	if got := readFile(t, path); got != original {
+		t.Errorf("after uninstall (byte for byte)\n got %s\nwant %s", got, original)
 	}
 	if _, out, _ := hookCmd(t, g.dir, "status", "--claude"); !strings.Contains(out, "(project): not installed") {
 		t.Errorf("status after uninstall:\n%s", out)
@@ -165,6 +160,55 @@ func TestClaudeHookSettings(t *testing.T) {
 	hookCmd(t, g.dir, "uninstall", "--claude")
 	if c := readFile(t, path); strings.TrimSpace(c) != "{}" {
 		t.Errorf("after install+uninstall: %q", c)
+	}
+
+	// Other layouts: install splices the entry in, uninstall restores the bytes.
+	for name, doc := range map[string]string{
+		"no hooks":      "{\n\t\"model\": \"opus\"\n}\n",
+		"empty object":  "{}",
+		"hooks no Stop": "{\n    \"hooks\": {\n        \"PreToolUse\": []\n    },\n    \"env\": {\"A\": \"<b>&\"}\n}\n",
+		"empty Stop":    "{\n  \"hooks\": {\n    \"Stop\": []\n  }\n}\n",
+		"Stop lines": `{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {"type": "command", "command": "say done"}
+        ]
+      }
+    ]
+  }
+}
+`,
+	} {
+		os.WriteFile(path, []byte(doc), 0o644)
+		if code, _, errs := hookCmd(t, g.dir, "install", "--claude"); code != 0 {
+			t.Fatalf("%s: install: %s", name, errs)
+		}
+		installed := readFile(t, path)
+		var v struct {
+			Hooks struct {
+				Stop []struct {
+					Hooks []struct{ Command string } `json:"hooks"`
+				} `json:"Stop"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal([]byte(installed), &v); err != nil || len(v.Hooks.Stop) == 0 ||
+			!strings.Contains(v.Hooks.Stop[len(v.Hooks.Stop)-1].Hooks[0].Command, claudeHookMarker+" -- --no-agent") ||
+			!strings.Contains(installed, ">/dev/null 2>&1") {
+			t.Errorf("%s: installed (%v):\n%s", name, err, installed)
+		}
+		if name == "Stop lines" && !strings.Contains(installed, "\n      },\n      {\n        \"hooks\": [\n          {\n            \"type\"") {
+			t.Errorf("%s: indentation not followed:\n%s", name, installed)
+		}
+		hookCmd(t, g.dir, "uninstall", "--claude")
+		want := doc
+		if name == "empty Stop" {
+			want = "{}\n" // a "Stop" (and "hooks") left empty is removed
+		}
+		if got := readFile(t, path); got != want {
+			t.Errorf("%s: after uninstall\n got %q\nwant %q", name, got, want)
+		}
 	}
 
 	// --user writes ~/.claude/settings.json and only runs where smates.yml exists.

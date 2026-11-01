@@ -56,7 +56,8 @@ jobs:
         suite:
           - e2e-polyglot-scenarios
           - e2e-polyglot-others
-          - e2e-jest-node
+          - e2e-jest-scenarios
+          - e2e-jest-others
           - e2e-vitest-python
           - e2e-others
     runs-on: ubuntu-latest

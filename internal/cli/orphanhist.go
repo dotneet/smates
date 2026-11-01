@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +23,7 @@ const (
 	orphanKindIgnore    = "ignore"    // nothing reads it: an ignore glob is suggested
 	orphanKindInputs    = "inputs"    // it may change how tests run: inputs/rules, not ignore
 	orphanKindReference = "reference" // a test names it, which explains it without ignore
+	orphanKindUntested  = "untested"  // source code no test reaches: skipped (untested: skip)
 )
 
 // orphanReport is what `smates orphans` prints (the JSON schema of --format json).
@@ -52,6 +52,8 @@ type orphanReport struct {
 	History []orphanCommit `json:"history"`
 	// ExistingIgnore is the ignore list of smates.yml today.
 	ExistingIgnore []string `json:"existing_ignore"`
+	// Applied is what --apply added to smates.yml (absent without --apply).
+	Applied *configEdit `json:"applied,omitempty"`
 }
 
 // orphanFile is a changed file no test depends on, with the number of commits it was an
@@ -89,15 +91,20 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	cf.register(fs)
 	history := fs.Int("history", 100, "replay the last `n` first-parent commits (0: no limit)")
 	since := fs.String("since", "", "replay the first-parent commits after `rev` (no count limit unless --history is set)")
-	format := fs.String("format", "text", "output: text, json")
+	format := formatFlag(fs)
+	apply := fs.Bool("apply", false, "add the suggested ignore globs to smates.yml (and nothing else)")
+	dryRun := fs.Bool("dry-run", false, "with --apply: print the diff instead of writing")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
-	if *format != "text" && *format != "json" {
-		return usageError{fmt.Errorf("unknown format %q", *format)}
+	if err := checkFormat(*format); err != nil {
+		return err
 	}
 	if fs.NArg() > 0 {
 		return usageError{fmt.Errorf("unexpected arguments %v", fs.Args())}
+	}
+	if *dryRun && !*apply {
+		return usageError{errors.New("--dry-run needs --apply")}
 	}
 	if *history < 0 {
 		return usageError{errors.New("--history must be >= 0")}
@@ -115,7 +122,13 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(p.suites) == 0 {
-		return fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")
+		return configError{fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")}
+	}
+	var cfgAbs, cfgName string
+	if *apply {
+		if cfgAbs, cfgName, err = configFile(cf.dir, cf.config); err != nil {
+			return err
+		}
 	}
 	if *since != "" && !p.repo.RefExists(*since) {
 		return usageError{fmt.Errorf("unknown revision %q", *since)}
@@ -152,15 +165,32 @@ func cmdOrphans(args []string, stdout, stderr io.Writer) error {
 	if shallow > 0 {
 		rep.Warnings = append(rep.Warnings, fmt.Sprintf("shallow clone: stopped at the oldest fetched commit, whose parent is missing (%d commit(s) not replayed); fetch more history (`git fetch --deepen=N` or `--unshallow`) to replay further", shallow))
 	}
+	if *apply {
+		globs := make([]string, 0, len(rep.Ignore))
+		for _, g := range rep.Ignore {
+			globs = append(globs, g.Glob)
+		}
+		if len(globs) == 0 {
+			rep.Applied = &configEdit{File: cfgName, Key: "ignore", Added: []string{}, Present: []string{}, DryRun: *dryRun}
+		} else if rep.Applied, err = addGlobs(cfgAbs, cfgName, "ignore", globs, *dryRun); err != nil {
+			return err
+		}
+	}
 	if *format == "json" {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return writeJSON(stdout, rep)
 	}
 	for _, w := range rep.Warnings {
 		fmt.Fprintf(stderr, "smates: warning: %s\n", w)
 	}
 	printOrphanReport(stdout, rep, p.cfg.Path)
+	if rep.Applied != nil {
+		fmt.Fprintln(stdout)
+		if len(rep.Applied.Added)+len(rep.Applied.Present) == 0 {
+			fmt.Fprintln(stdout, "--apply: no ignore globs to add.")
+		} else {
+			printConfigEdit(stdout, rep.Applied)
+		}
+	}
 	return nil
 }
 
@@ -203,6 +233,16 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 	for _, f := range explained {
 		referenced[f] = true
 	}
+	// Source code no test reaches selects nothing with `untested: skip` (judged
+	// against the recorded state, as runs do).
+	untested := map[string]bool{}
+	if p.cfg.Untested == config.UntestedSkip && !p.state.Empty() {
+		rs := *res
+		rs.Mode = selector.ModeState
+		for _, f := range rs.Untested(subtract(all, explained)) {
+			untested[f] = true
+		}
+	}
 
 	// Classify and rank.
 	for _, f := range all {
@@ -210,6 +250,8 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 		switch {
 		case referenced[f]:
 			of.Kind = orphanKindReference
+		case untested[f]:
+			of.Kind = orphanKindUntested
 		case affectsExecution(f) != "":
 			of.Kind, of.Why = orphanKindInputs, affectsExecution(f)
 		}
@@ -240,6 +282,9 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 		for _, f := range perCommit[i] {
 			if referenced[f] {
 				refs = append(refs, f)
+				continue
+			}
+			if untested[f] {
 				continue
 			}
 			orphans = append(orphans, f)
@@ -442,6 +487,8 @@ func printOrphanReport(w io.Writer, rep *orphanReport, configPath string) {
 			note = of.Why + ": consider inputs:/rules: instead of ignore"
 		case orphanKindReference:
 			note = "explained by reference (a test names it)"
+		case orphanKindUntested:
+			note = "untested code: no test reaches it, nothing runs (untested: skip)"
 		}
 		fmt.Fprintf(tw, "  %d\t%s\t%s\n", of.Commits, of.Path, note)
 	}

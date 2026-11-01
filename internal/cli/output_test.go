@@ -199,6 +199,8 @@ func TestExitCodes(t *testing.T) {
 		{"usage: bad --output", suite("sh -c 'exit 0'"), []string{"run", "--output", "bogus"}, ExitUsage},
 		{"usage: bad --only", suite("sh -c 'exit 0'"), []string{"run", "--only", "nocolon"}, ExitUsage},
 		{"usage: --only with --all", suite("sh -c 'exit 0'"), []string{"run", "--all", "--only", "sh:t/a_check.sh"}, ExitUsage},
+		{"usage: --only with --add", suite("sh -c 'exit 0'"), []string{"run", "--only", "sh:t/a_check.sh", "--add", "sh:t/a_check.sh"}, ExitUsage},
+		{"usage: --only with --orphans", suite("sh -c 'exit 0'"), []string{"run", "--only", "sh:t/a_check.sh", "--orphans=skip"}, ExitUsage},
 		{"config: unknown field", suite("sh -c 'exit 0'") + "bogus: 1\n", []string{"run", "--all"}, ExitConfig},
 		{"config: unknown runner", "version: 1\nsuites:\n  - name: x\n    runner: nope\n", []string{"run", "--all"}, ExitConfig},
 		{"config: unknown --suite", suite("sh -c 'exit 0'"), []string{"run", "--suite", "nope"}, ExitConfig},
@@ -207,6 +209,10 @@ func TestExitCodes(t *testing.T) {
 		{"config: unparsable command", suite(`"sh -c 'exit 0"`), []string{"run", "--all"}, ExitConfig},
 		{"env: runner not installed", suite("smates-no-such-tool-x1"), []string{"run", "--all"}, ExitEnv},
 		{"env: npx tool not installed", suite("npx smates-no-such-tool-x2"), []string{"run", "--all"}, ExitEnv},
+		// Untraced tests of a custom runner (and --no-record) report nothing even when they
+		// ran: 126/127 cannot be told from a test failure (see TestExit126And127).
+		{"tests: launcher exits 127 without results", suite("sh -c 'smates-no-such-tool-x3'"), []string{"run", "--all"}, ExitFailed},
+		{"tests: launcher exits 126 without results", suite("sh -c 'exit 126'"), []string{"run", "--all", "--output", "failures"}, ExitFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,6 +227,31 @@ func TestExitCodes(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := Main([]string{"run", "-C", t.TempDir()}, &out, &errb); code != ExitEnv {
 		t.Errorf("not a repository: exit %d\n%s", code, errb.String())
+	}
+
+	// smates config follows the same table.
+	cfgRun := func(dir string, args ...string) (int, string) {
+		var out, errb bytes.Buffer
+		code := Main(append([]string{"config", args[0], "-C", dir}, args[1:]...), &out, &errb)
+		return code, errb.String()
+	}
+	write("smates.yml", suite("sh -c 'exit 0'"))
+	if code, errs := cfgRun(g.dir, "set", "orphans", "all"); code != ExitOK {
+		t.Errorf("config set: exit %d\n%s", code, errs)
+	}
+	if code, errs := cfgRun(g.dir, "set", "orphans", "sometimes"); code != ExitConfig {
+		t.Errorf("config set invalid value: exit %d\n%s", code, errs)
+	}
+	write("smates.yml", suite("sh -c 'exit 0'")+"bogus: 1\n")
+	if code, errs := cfgRun(g.dir, "set", "orphans", "all"); code != ExitConfig {
+		t.Errorf("config set on an invalid config: exit %d\n%s", code, errs)
+	}
+	os.Remove(filepath.Join(g.dir, "smates.yml"))
+	if code, errs := cfgRun(g.dir, "add-ignore", "docs/**"); code != ExitConfig {
+		t.Errorf("config without smates.yml: exit %d\n%s", code, errs)
+	}
+	if code, errs := cfgRun(t.TempDir(), "add-ignore", "docs/**"); code != ExitEnv {
+		t.Errorf("config outside a repository: exit %d\n%s", code, errs)
 	}
 }
 
@@ -318,5 +349,63 @@ func TestPrintFailedBatch(t *testing.T) {
 	c.printFailedBatch(sr, b, buf, obs)
 	if want := "── smates: FAIL web (3 test unit(s) with vitest); its output:\nwhole batch output\n"; w.String() != want {
 		t.Errorf("batch:\n%s", w.String())
+	}
+}
+
+// TestExit126And127: a recorded run whose runner (any but custom) exits 126/127
+// although no test reported a result is an environment problem; a custom runner, or a
+// run with --no-record, may report nothing when its tests ran: a test failure.
+func TestExit126And127(t *testing.T) {
+	_, write, run := outputFixture(t) // records traced results for good/a_check.py
+	cfg := func(runner, tests, command string) string {
+		return "version: 1\norphans: ignore\nsuites:\n  - name: s\n    runner: " + runner + "\n    tests: [\"" + tests + "\"]\n    command: " + command + "\n"
+	}
+
+	// Custom runner: the tests run and report results, then the command exits 127.
+	write("smates.yml", cfg("custom", "good/*_check.py", `sh -c 'for f; do python3 "$f"; done; exit 127' sh`))
+	if code, _, errs := run("run", "--all"); code != ExitFailed {
+		t.Errorf("results then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
+		t.Errorf("--no-record, tests ran then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+	// Custom runner, tool missing: nothing tells it from a failing test.
+	write("smates.yml", cfg("custom", "good/*_check.py", "sh -c 'smates-no-such-tool-x5'"))
+	if code, _, errs := run("run", "--all"); code != ExitFailed {
+		t.Errorf("custom, missing tool: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+
+	// pytest launched through a shell that cannot find it: no test ran.
+	write("pt/test_x.py", "def test_x():\n    pass\n")
+	write("smates.yml", cfg("pytest", "pt/test_*.py", "sh -c 'smates-no-such-pytest-x6' sh"))
+	code, out, errs := run("run", "--all", "--output", "failures")
+	if code != ExitEnv || !strings.Contains(out, "smates-no-such-pytest-x6") ||
+		!strings.Contains(errs, "exited with code 127 before any test reported a result") || !strings.Contains(errs, "smates: FAILED") {
+		t.Errorf("pytest, missing tool: exit %d\n%s\n--- stderr\n%s", code, out, errs)
+	}
+	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
+		t.Errorf("pytest, missing tool, --no-record: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+}
+
+func TestNotStarted(t *testing.T) {
+	obs := map[string]*runner.Observation{"a": {Status: state.Fail}}
+	for _, tc := range []struct {
+		runner string
+		record bool
+		r      *runner.RunResult
+		want   bool
+	}{
+		{"pytest", true, &runner.RunResult{ExitCode: 127}, true},
+		{"vitest", true, &runner.RunResult{ExitCode: 126}, true},
+		{"pytest", true, &runner.RunResult{ExitCode: 127, Observations: obs}, false},
+		{"pytest", false, &runner.RunResult{ExitCode: 127}, false},
+		{"custom", true, &runner.RunResult{ExitCode: 127}, false},
+		{"pytest", true, &runner.RunResult{ExitCode: 1}, false},
+		{"pytest", true, &runner.RunResult{ExitCode: 0}, false},
+	} {
+		if got := notStarted(tc.runner, tc.record, tc.r); got != tc.want {
+			t.Errorf("notStarted(%s, record=%t, exit %d, %d obs) = %t", tc.runner, tc.record, tc.r.ExitCode, len(tc.r.Observations), got)
+		}
 	}
 }

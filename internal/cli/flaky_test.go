@@ -162,7 +162,9 @@ assert not v.startswith("fail"), v
 	if code != 0 {
 		t.Fatalf("retried flake must not fail the run: %d\n%s", code, errs)
 	}
-	if f := flakesIn(); len(f) != 1 || f[0].Flip != "fail->pass" || !f[0].Retried || f[0].Count != 3 {
+	// Editing flaky.retry does not change any test's inputs (it is not part of the
+	// suite's configuration fingerprint), so the failure is a flip too.
+	if f := flakesIn(); len(f) != 2 || f[0].Flip != "pass->fail" || f[0].Count != 3 || f[1].Flip != "fail->pass" || !f[1].Retried || f[1].Count != 4 {
 		t.Fatalf("flakes after retry %+v\n%s", f, errs)
 	}
 	if !strings.Contains(errs, "retrying after 1 known flaky test unit(s) failed") {
@@ -181,6 +183,18 @@ assert not v.startswith("fail"), v
 	if code, _, errs = run("run", "--all", "--report", report); code == 0 {
 		t.Fatalf("persistent failure must fail the run\n%s", errs)
 	}
+
+	// A retry whose runner cannot start is an environment error; in failures mode the
+	// first attempt's output is still printed.
+	write("run.sh", "#!/bin/sh\n[ \"$(cat \"$SMATES_COIN\")\" = fail-break ] && chmod -x \"$0\"\nexec python3 run.py \"$@\"\n")
+	os.Chmod(filepath.Join(g.dir, "run.sh"), 0o755)
+	write("smates.yml", strings.Replace(config, "python3 run.py", "./run.sh", 1)+"flaky:\n  retry: 1\n")
+	os.WriteFile(coin, []byte("fail-break"), 0o644)
+	code, out, errs := run("run", "--all", "--output", "failures")
+	if code != ExitEnv || !strings.Contains(errs, "py: retry: ") || strings.Contains(errs, "py: py:") || !strings.Contains(out, "AssertionError: fail-break") {
+		t.Errorf("retry that cannot start: exit %d\n%s\n--- stderr\n%s", code, out, errs)
+	}
+	write("smates.yml", config)
 
 	if code, _, errs := run("flaky", "--clear"); code != 0 || !strings.Contains(errs, "cleared flake evidence of 1") {
 		t.Fatalf("clear: %d %s", code, errs)

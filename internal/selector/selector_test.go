@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,7 +107,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 	f.t.Helper()
 	st := state.New()
 	res := f.sel(st, func(in *Input) { in.All = true })
-	h := NewHasher(f.snap())
+	h := NewHasher(f.snap()).WithConfig(f.cfg)
 	for _, sr := range res.Suites {
 		obs := map[string]*runner.Observation{}
 		for _, tt := range sr.Tests {
@@ -119,7 +120,7 @@ func (f *fixture) record(extra map[string][]string, status map[string]string) *s
 			}
 			obs[tt.ID] = o
 		}
-		Record(st, sr, obs, h, RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
+		Record(st, sr, obs, h.ForSuite(sr.Suite), RecordOptions{Commit: "c1", Now: time.Unix(1, 0), Full: true})
 	}
 	st.Files = map[string]string(f.snap())
 	return st
@@ -209,7 +210,19 @@ func TestSelectStateMode(t *testing.T) {
 		{name: "suite input changed", edit: func(f *fixture) { f.write("web/vitest.config.ts", "export default {x:1}") }, want: all(ReasonChanged)},
 		{name: "repo-relative suite input changed", edit: func(f *fixture) { f.write("package-lock.json", `{"x":1}`) }, want: all(ReasonChanged)},
 		{name: "global input added", edit: func(f *fixture) { f.write(".tool-versions", "node 22") }, want: all(ReasonChanged)},
-		{name: "config file changed", edit: func(f *fixture) { f.write("smates.yml", "version: 1\n#") }, want: all(ReasonChanged)},
+		// smates.yml hashes as the suite's settings: other edits select nothing.
+		{name: "config file edited, suite unchanged", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n#")
+			f.cfg.Orphans, f.cfg.Agent.Model, f.cfg.Flaky.Retry = config.OrphansAll, "m", 1
+		}, want: base},
+		{name: "suite settings changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# env")
+			f.suites[0].Env = map[string]string{"TZ": "UTC"}
+		}, want: all(ReasonChanged)},
+		{name: "env_track changed", edit: func(f *fixture) {
+			f.write("smates.yml", "version: 1\n# track")
+			f.cfg.EnvTrack = []string{"LANG"}
+		}, want: all(ReasonChanged)},
 		{name: "rule dep changed", edit: func(f *fixture) { f.write("migrations/001.sql", "create table u()") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "rule dep added", edit: func(f *fixture) { f.write("migrations/002.sql", "x") }, want: with(map[string]string{"web/db/q.test.ts": ReasonChanged})},
 		{name: "new test file", edit: func(f *fixture) { f.write("web/src/d.test.ts", "test('d')") }, want: with(map[string]string{"web/src/d.test.ts": ReasonNew})},
@@ -822,6 +835,23 @@ func TestReferences(t *testing.T) {
 	if _, ex := r.References(g, []string{"fixtures/users_seed.sql"}); !reflect.DeepEqual(ex, []string{"fixtures/users_seed.sql"}) {
 		t.Errorf("qualified match: %v", ex)
 	}
+	// Mentions also lists the tests already selected (References only adds the others),
+	// with the file that names the orphan.
+	ms, _ := r.Mentions(g, []string{"fixtures/users_seed.sql", "conf/routes.yaml"})
+	var mgot []string
+	for _, m := range ms {
+		mgot = append(mgot, fmt.Sprintf("%s %s %s %t", m.Test, m.Orphan, m.File, m.Qualified))
+	}
+	if want := []string{
+		"t/test_users.py fixtures/users_seed.sql t/test_users.py true",
+		"t/test_other.py conf/routes.yaml t/helper.py false",
+		"t/test_sel.py fixtures/users_seed.sql t/test_sel.py false",
+	}; !reflect.DeepEqual(mgot, want) {
+		t.Errorf("mentions:\n%s\nwant\n%s", strings.Join(mgot, "\n"), strings.Join(want, "\n"))
+	}
+	if adds := r.ReferenceAdditions(ms); len(adds) != 2 || adds[0].Test != "t/test_users.py" || adds[1].Test != "t/test_other.py" {
+		t.Errorf("reference additions from mentions: %+v", adds)
+	}
 	if a, e := r.References(nil, []string{"x"}); a != nil || e != nil {
 		t.Error("nil graph")
 	}
@@ -999,6 +1029,174 @@ func TestExistenceProbe(t *testing.T) {
 	}
 }
 
+// Go test functions (granularity func) depend on the bodies they executed and on the
+// declarations of the rest of their package's closure.
+func TestSelectGoFuncUnits(t *testing.T) {
+	f := newFixture(t, map[string]string{
+		"go.mod":      "module example.com/m\n\ngo 1.22\n",
+		"p/a.go":      "package p\n\nconst K = 1\n\nfunc A() int { return K }\n",
+		"p/b.go":      "package p\n\nfunc B() int { return 2 }\n",
+		"p/a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
+		"p/b_test.go": "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n",
+	})
+	s := suite(t, config.Suite{Runner: "go", Tests: []string{"**/*_test.go"}, Inputs: []string{"go.mod"}, Granularity: config.GranularityFunc})
+	s.RepoRoot = f.dir
+	f.suites = []*runner.Suite{s}
+	repo := &gitx.Repo{Root: f.dir}
+	sel := func(st *state.State, all bool) *Result {
+		return f.sel(st, func(in *Input) { in.Repo, in.All = repo, all })
+	}
+	st := state.New()
+	res := sel(st, true)
+	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB"}) {
+		t.Fatalf("units %v", got)
+	}
+	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
+		t.Errorf("known %v", known)
+	}
+	if files := res.Suites[0].Files["p#TestA"]; !reflect.DeepEqual(files, []string{"p/a_test.go"}) {
+		t.Errorf("files %v", files)
+	}
+	executed := map[string]string{"p#TestA": "p/a.go", "p#TestB": "p/b.go"}
+	obs := map[string]*runner.Observation{}
+	for u, f := range executed {
+		obs[u] = &runner.Observation{Files: map[string]bool{f: true}, Status: state.Pass}
+	}
+	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
+	st.Files = map[string]string(f.snap())
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+		t.Fatalf("unchanged: %v", got)
+	}
+
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}) {
+		t.Errorf("body: %v", got)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged}) {
+		t.Errorf("declarations: %v", got)
+	}
+	for _, tt := range res.Suites[0].Tests {
+		if tt.ID == "p#TestB" && (!reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) || tt.Via["p/a.go#decls"] != ViaImport) {
+			t.Errorf("TestB changed %v via %v", tt.Changed, tt.Via)
+		}
+	}
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n")
+
+	// A new test file in the package selects every function (and its own as new).
+	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew}) {
+		t.Errorf("new file: %v", got)
+	}
+}
+
+func TestCoversDeclarations(t *testing.T) {
+	deps := map[string]bool{"p/a.go#decls": true}
+	if got := Covers(deps, "p/a.go", false); got != "declarations" {
+		t.Errorf("Covers = %q", got)
+	}
+	// Without a recording, a changed file changes its declarations.
+	tt := &Test{}
+	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, map[string]bool{"p/a.go": true})
+	if !tt.Selected || !reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) {
+		t.Errorf("diff mode: %+v", tt)
+	}
+}
+
+func TestUntested(t *testing.T) {
+	mk := func(runner_, root string, static bool) *Suite {
+		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
+	}
+	r := &Result{Mode: ModeState, Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	r.Suites[0].Suite.Exclude = []string{"e2e/**"}
+	got := r.Untested([]string{
+		"cmd/tool/main.go",   // Go code under the go suite
+		"web/src/Button.tsx", // TS under the vitest suite
+		"web/vite.config.ts", // tool configuration
+		"web/src/types.d.ts", // declarations
+		"web/.eslintrc.js",   // rc file
+		"scripts/build.ts",   // not under a JS suite root
+		"py/app.py",          // static analysis off for that suite
+		"web/setup-tests.ts", // setup file
+		"Dockerfile",         // not code
+		"web/src/data.json",  // not code
+		"pkg/testdata/in.go", // read as data by tests
+		"web/__mocks__/a.ts", // mocks
+		"e2e/fixture/x/x.go", // excluded from the go suite
+		"e2e/new/x.go",       // excluded from the go suite
+	})
+	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Untested = %v, want %v", got, want)
+	}
+	// A suite with a test that has no recorded entry knows only its import closure.
+	// (The go suite is rooted at the repository root: unrecorded, it blocks all.)
+	r.Suites[1].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go", "web/src/Button.tsx"}); !reflect.DeepEqual(got, []string{"cmd/tool/main.go"}) {
+		t.Errorf("unrecorded vitest suite: %v", got)
+	}
+	r.Suites[0].Unrecorded = true
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("unrecorded root suite: %v", got)
+	}
+	r.Suites[0].Unrecorded, r.Suites[1].Unrecorded = false, false
+	// Without a recorded state only the static closure is known.
+	r.Mode = ModeDiff
+	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
+		t.Errorf("diff mode: %v", got)
+	}
+}
+
+// An entry recorded before smates.yml was hashed as the suite's settings holds the
+// file's content hash: it still matches while the file is unchanged.
+func TestSelectLegacyConfigHash(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	blob := f.snap()["smates.yml"]
+	for _, e := range st.Suites["web"].Tests {
+		delete(e.Deps, ConfigKey("smates.yml"))
+		e.Deps["smates.yml"] = blob
+	}
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != "-unaffected" {
+		t.Errorf("legacy hash, file unchanged: %v", d)
+	}
+	f.write("smates.yml", "version: 1\n#")
+	if d := decisions(f.sel(st, nil)); d["web/src/a.test.ts"] != ReasonChanged {
+		t.Errorf("legacy hash, file changed: %v", d)
+	}
+}
+
+// A test that reads smates.yml itself depends on the file's content.
+func TestSelectConfigReadByTest(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(map[string][]string{"web/src/c.test.ts": {"smates.yml"}}, nil)
+	f.write("smates.yml", "version: 1\n# comment")
+	want := map[string]string{"web/src/a.test.ts": "-unaffected", "web/src/b.test.ts": "-unaffected", "web/src/c.test.ts": ReasonChanged, "web/db/q.test.ts": "-unaffected"}
+	res := f.sel(st, nil)
+	if d := decisions(res); !reflect.DeepEqual(d, want) {
+		t.Errorf("got %v want %v", d, want)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("smates.yml is not an orphan: %v", res.Orphans)
+	}
+	// The suite's settings changing reports the file, not the internal key.
+	f.suites[0].Env = map[string]string{"TZ": "UTC"}
+	for _, s := range f.sel(st, nil).Suites {
+		for _, tt := range s.Tests {
+			if tt.ID == "web/src/c.test.ts" {
+				continue // also read the edited file: traced
+			}
+			if !reflect.DeepEqual(tt.Changed, []string{"smates.yml"}) || tt.Via["smates.yml"] != ViaInput {
+				t.Errorf("%s: changed %v via %v", tt.ID, tt.Changed, tt.Via)
+			}
+		}
+	}
+}
+
 func TestSnapshotHash(t *testing.T) {
 	files := map[string]string{"a": "h1", "b": Unrecorded + "h2", "c": Unrecorded}
 	for f, want := range map[string]struct {
@@ -1008,6 +1206,27 @@ func TestSnapshotHash(t *testing.T) {
 		if h, ok := SnapshotHash(files, f); h != want.h || ok != want.ok {
 			t.Errorf("%s: %q %v", f, h, ok)
 		}
+	}
+}
+
+func TestConfigKeyDisplay(t *testing.T) {
+	if got := Covers(map[string]bool{ConfigKey("smates.yml"): true}, "smates.yml", false); got != "content" {
+		t.Errorf("Covers via the settings key: %q", got)
+	}
+	if DisplayKey(ConfigKey("smates.yml")) != "smates.yml" || DisplayKey("a/b.ts") != "a/b.ts" {
+		t.Error("DisplayKey")
+	}
+}
+
+func TestSelectMarksUnrecordedSuites(t *testing.T) {
+	f := webFixture(t)
+	st := f.record(nil, nil)
+	if res := f.sel(st, nil); res.Suites[0].Unrecorded {
+		t.Error("every test recorded")
+	}
+	delete(st.Suites["web"].Tests, "web/src/a.test.ts")
+	if res := f.sel(st, nil); !res.Suites[0].Unrecorded {
+		t.Error("a test without an entry")
 	}
 }
 

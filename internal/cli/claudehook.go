@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
 )
 
@@ -68,257 +69,6 @@ func claudeHookCommand(user bool, runArgs []string) string {
 	return "if command -v smates >/dev/null 2>&1; then " + cmd + "; fi"
 }
 
-// orderedObject is a JSON object that keeps its keys' order and the values it does not
-// touch as they were, so rewriting settings.json preserves what smates does not own.
-type orderedObject struct {
-	keys []string
-	vals map[string]json.RawMessage
-}
-
-func parseObject(data []byte) (*orderedObject, error) {
-	o := &orderedObject{vals: map[string]json.RawMessage{}}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return o, nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return nil, errors.New("not a JSON object")
-	}
-	for dec.More() {
-		t, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		k, _ := t.(string)
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, err
-		}
-		o.set(k, v)
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	return o, nil
-}
-
-func (o *orderedObject) set(k string, v json.RawMessage) {
-	if _, ok := o.vals[k]; !ok {
-		o.keys = append(o.keys, k)
-	}
-	o.vals[k] = v
-}
-
-func (o *orderedObject) del(k string) {
-	delete(o.vals, k)
-	o.keys = slices.DeleteFunc(o.keys, func(x string) bool { return x == k })
-}
-
-func (o *orderedObject) MarshalJSON() ([]byte, error) {
-	var b bytes.Buffer
-	b.WriteByte('{')
-	for i, k := range o.keys {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		kj, _ := json.Marshal(k)
-		b.Write(kj)
-		b.WriteByte(':')
-		b.Write(o.vals[k])
-	}
-	b.WriteByte('}')
-	return b.Bytes(), nil
-}
-
-// indented renders v with two-space indentation and a final newline.
-func indented(v any) ([]byte, error) {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	var b bytes.Buffer
-	if err := json.Indent(&b, raw, "", "  "); err != nil {
-		return nil, err
-	}
-	b.WriteByte('\n')
-	return b.Bytes(), nil
-}
-
-// claudeSettings is a settings.json with its Stop hook groups decoded.
-type claudeSettings struct {
-	root  *orderedObject
-	hooks *orderedObject
-	stop  []json.RawMessage
-}
-
-func readClaudeSettings(path string) (*claudeSettings, error) {
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	root, err := parseObject(data)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	s := &claudeSettings{root: root, hooks: &orderedObject{vals: map[string]json.RawMessage{}}}
-	if raw, ok := root.vals["hooks"]; ok {
-		if s.hooks, err = parseObject(raw); err != nil {
-			return nil, fmt.Errorf("%s: hooks: %w", path, err)
-		}
-	}
-	if raw, ok := s.hooks.vals["Stop"]; ok {
-		if err := json.Unmarshal(raw, &s.stop); err != nil {
-			return nil, fmt.Errorf("%s: hooks.Stop: %w", path, err)
-		}
-	}
-	return s, nil
-}
-
-// smatesCommands lists the commands of smates' Stop hook entries.
-func (s *claudeSettings) smatesCommands() []string {
-	var out []string
-	for _, g := range s.stop {
-		var group struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		}
-		if json.Unmarshal(g, &group) != nil {
-			continue
-		}
-		for _, h := range group.Hooks {
-			if strings.Contains(h.Command, claudeHookMarker) {
-				out = append(out, h.Command)
-			}
-		}
-	}
-	return out
-}
-
-// removeSmates removes smates' entries, and the groups they leave empty.
-func (s *claudeSettings) removeSmates() error {
-	var kept []json.RawMessage
-	for _, g := range s.stop {
-		group, err := parseObject(g)
-		if err != nil {
-			kept = append(kept, g)
-			continue
-		}
-		var entries []json.RawMessage
-		if json.Unmarshal(group.vals["hooks"], &entries) != nil {
-			kept = append(kept, g)
-			continue
-		}
-		n := len(entries)
-		entries = slices.DeleteFunc(entries, func(e json.RawMessage) bool {
-			var h struct {
-				Command string `json:"command"`
-			}
-			return json.Unmarshal(e, &h) == nil && strings.Contains(h.Command, claudeHookMarker)
-		})
-		switch {
-		case len(entries) == n:
-			kept = append(kept, g)
-		case len(entries) > 0:
-			raw, err := json.Marshal(entries)
-			if err != nil {
-				return err
-			}
-			group.set("hooks", raw)
-			raw, err = json.Marshal(group)
-			if err != nil {
-				return err
-			}
-			kept = append(kept, raw)
-		}
-	}
-	s.stop = kept
-	return nil
-}
-
-func (s *claudeSettings) write(path string) error {
-	if len(s.stop) > 0 {
-		raw, err := json.Marshal(s.stop)
-		if err != nil {
-			return err
-		}
-		s.hooks.set("Stop", raw)
-	} else {
-		s.hooks.del("Stop")
-	}
-	if len(s.hooks.keys) > 0 {
-		raw, err := json.Marshal(s.hooks)
-		if err != nil {
-			return err
-		}
-		s.root.set("hooks", raw)
-	} else {
-		s.root.del("hooks")
-	}
-	data, err := indented(s.root)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-func installClaudeHook(path string, command string, stdout io.Writer) error {
-	s, err := readClaudeSettings(path)
-	if err != nil {
-		return err
-	}
-	cmds := s.smatesCommands()
-	if len(cmds) == 1 && cmds[0] == command {
-		fmt.Fprintf(stdout, "smates Claude Code Stop hook already installed in %s\n", path)
-		return nil
-	}
-	if err := s.removeSmates(); err != nil {
-		return err
-	}
-	group := map[string]any{"hooks": []map[string]any{{"type": "command", "command": command, "timeout": claudeHookTimeout}}}
-	raw, err := json.Marshal(group)
-	if err != nil {
-		return err
-	}
-	s.stop = append(s.stop, raw)
-	if err := s.write(path); err != nil {
-		return err
-	}
-	verb := "installed"
-	if len(cmds) > 0 {
-		verb = "updated"
-	}
-	fmt.Fprintf(stdout, "%s the smates Claude Code Stop hook in %s\n"+
-		"When Claude ends its turn, the tests its changes can affect run; failures make it continue and fix them.\n", verb, path)
-	return nil
-}
-
-func uninstallClaudeHook(path string, stdout io.Writer) error {
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "no Claude Code settings at %s\n", path)
-		return nil
-	}
-	s, err := readClaudeSettings(path)
-	if err != nil {
-		return err
-	}
-	if len(s.smatesCommands()) == 0 {
-		fmt.Fprintf(stdout, "no smates Stop hook in %s\n", path)
-		return nil
-	}
-	if err := s.removeSmates(); err != nil {
-		return err
-	}
-	if err := s.write(path); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "removed the smates Stop hook from %s (other settings are kept)\n", path)
-	return nil
-}
-
 // claudeHookCmd is `smates hook install|uninstall|status --claude [--user]`.
 func claudeHookCmd(sub, dir string, user, useAgent bool, extra []string, stdout io.Writer) (int, error) {
 	if dir == "" {
@@ -367,9 +117,9 @@ func claudeHookStatus(repo *gitx.Repo, stdout io.Writer) {
 			scope = "user"
 		}
 		status := "not installed"
-		if s, err := readClaudeSettings(path); err != nil {
+		if ok, err := claudeHookInstalled(path); err != nil {
 			status = "unreadable: " + err.Error()
-		} else if len(s.smatesCommands()) > 0 {
+		} else if ok {
 			status = "installed"
 		}
 		fmt.Fprintf(stdout, "Claude Code Stop hook (%s): %s\n  %s\n", scope, status, path)
@@ -429,8 +179,11 @@ func hookClaudeStop(ctx context.Context, args []string, stdin io.Reader, stdout,
 		return 0, nil // not a git repository: nothing to test
 	}
 	if requireConfig && f.config == "" {
-		if _, err := os.Stat(filepath.Join(repo.Root, "smates.yml")); err != nil {
-			return 0, nil
+		if !slices.ContainsFunc(config.FileNames, func(n string) bool {
+			_, err := os.Stat(filepath.Join(repo.Root, n))
+			return err == nil
+		}) {
+			return 0, nil // not configured for smates (an invalid config is reported by the run)
 		}
 	}
 	f.dir = repo.Root

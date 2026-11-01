@@ -24,6 +24,7 @@ import (
 
 type runFlags struct {
 	commonFlags
+	callerFlags
 	all      bool
 	selectOn bool
 	base     string
@@ -76,7 +77,8 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f runFlags
-	f.register(fs)
+	f.commonFlags.register(fs)
+	f.callerFlags.register(fs)
 	fs.BoolVar(&f.all, "all", false, "run every test (and rewrite the recorded state)")
 	fs.BoolVar(&f.selectOn, "select", false, "select tests even where the default is a full run (default branch on CI)")
 	fs.StringVar(&f.base, "base", "", "git revision to diff against when nothing is recorded yet")
@@ -98,6 +100,9 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	}
 	f.extra = fs.Args()
 	f.heartbeat = heartbeatInterval()
+	if err := f.callerFlags.validate(); err != nil {
+		return nil, err
+	}
 	var err error
 	fs.Visit(func(fl *flag.Flag) { f.outputFlag = f.outputFlag || fl.Name == "output" })
 	if f.output, err = parseOutputMode(f.output, stderr); err != nil {
@@ -108,6 +113,9 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	}
 	if len(f.onlySpecs) > 0 && (f.all || f.shadow) {
 		return nil, usageError{fmt.Errorf("--only runs exactly the named tests and cannot be combined with --all or --shadow")}
+	}
+	if len(f.onlySpecs) > 0 && (len(f.adds) > 0 || f.orphans != "") {
+		return nil, usageError{fmt.Errorf("--only runs exactly the named tests and cannot be combined with --add or --orphans")}
 	}
 	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
 		return nil, err
@@ -156,7 +164,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			all = true
 		}
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), noOrphans: len(f.onlySpecs) > 0})
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), noOrphans: len(f.onlySpecs) > 0, orphans: f.orphans, adds: f.adds})
 	if err != nil {
 		return 1, err
 	}
@@ -166,6 +174,9 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 	}
 	hooks.onSelected(p, sel)
+	if hooks != nil {
+		sel.hint = false // smates watch: a person at the terminal, no calling agent
+	}
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
@@ -199,7 +210,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 		defer cleanup()
 	}
-	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
+	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root).WithConfig(p.cfg)
 	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
 	start := time.Now()
@@ -223,11 +234,15 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	hooks.onRan(c.started)
 	c.failures.wait()
 	elapsed := time.Since(start).Round(time.Millisecond)
+	// A state that cannot be saved (e.g. the shared state stays locked by another
+	// worktree's run) is an environment error, reported after the run's summary and
+	// report so that the test results are not lost.
+	var saveErr error
 	if c.record {
 		c.recordSuites() // before runRecord: it counts the flakes recording found
 		p.state.AddRun(c.runRecord(elapsed, hooks != nil))
 		if err := c.saveState(); err != nil {
-			return 1, err
+			saveErr = envError{err}
 		}
 	}
 	if c.quiet {
@@ -243,7 +258,20 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			return c.worst, fmt.Errorf("writing report: %w", err)
 		}
 	}
-	return c.worst, nil
+	// A batch whose tests never started (notStarted) makes the run an environment
+	// error, reported after the usual failure handling and summary.
+	if c.envErr != nil {
+		if saveErr != nil {
+			p.logf("%v", saveErr)
+		}
+		return c.worst, c.envErr
+	}
+	if saveErr != nil && c.worst != 0 {
+		// Failing tests matter more: report them (exit 1) and the save error as a note.
+		p.logf("%v", saveErr)
+		return c.worst, nil
+	}
+	return c.worst, saveErr
 }
 
 // cycle is one `smates run` over the selected suites.
@@ -278,13 +306,15 @@ type cycle struct {
 	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
 	// failedBatches are the batches that exited non-zero.
 	failedBatches []failedBatch
-	started       map[string][]string     // suite -> units started
-	notRun        map[string][]string     // --fail-fast: suite -> units not started after a failure
-	stopped       bool                    // --fail-fast stopped the run
-	results       map[string]*suiteResult // suite -> outcomes to record
-	escapes       []string                // shadow: failing tests the selection would have skipped
-	possible      []string                // shadow: skipped tests failed only by the run's exit code
-	flakes        []flakeReport
+	// envErr is set when a batch's tests never started (notStarted).
+	envErr   error
+	started  map[string][]string     // suite -> units started
+	notRun   map[string][]string     // --fail-fast: suite -> units not started after a failure
+	stopped  bool                    // --fail-fast stopped the run
+	results  map[string]*suiteResult // suite -> outcomes to record
+	escapes  []string                // shadow: failing tests the selection would have skipped
+	possible []string                // shadow: skipped tests failed only by the run's exit code
+	flakes   []flakeReport
 }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
@@ -339,6 +369,7 @@ func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runne
 	}
 	unitOf := unitIndex(sr)
 	rc.UnitOf = func(f string) string { return unitOf[f] }
+	rc.Known = func(u string) []string { return sr.Known[u] }
 	return rc
 }
 
@@ -346,6 +377,14 @@ func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runne
 func (c *cycle) printCommands(batches []*batch) {
 	for _, b := range batches {
 		rc := c.runContext(b.sr, b.units, b.full)
+		if cmd, ok := b.sr.Suite.Adapter.(runner.Commander); ok {
+			if argvs, err := cmd.Commands(rc); err == nil && argvs != nil {
+				for _, argv := range argvs {
+					fmt.Fprintf(c.stdout, "(cd %s && %s)\n", b.sr.Suite.Root, strings.Join(argv, " "))
+				}
+				continue
+			}
+		}
 		argv, _ := rc.CommandLine(nil, rc.RelArgs(""))
 		if rc.All {
 			argv, _ = rc.CommandLine(nil, nil)
@@ -413,8 +452,17 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	var retried map[string]*runner.Observation
 	if c.record && len(c.f.extra) == 0 {
 		if r, retried, err = retryFlaky(ctx, p, rc, sr, r); err != nil {
-			return 0, err
+			if buf != nil {
+				c.printFailedBatch(sr, b, buf, nil)
+			}
+			return 0, runError(sr.Name, err)
 		}
+	}
+	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
+	// executable or not installed: when tests that report results reported none, they
+	// never ran. The batch is still handled as a failure below.
+	if c.envErr == nil && notStarted(sr.Suite.Runner, c.record, r) {
+		c.envErr = envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
 	for _, w := range r.Warnings {
@@ -588,7 +636,7 @@ func (c *cycle) saveState() error {
 		}
 	}
 	p.state.Tool = "smates/" + Version
-	if err := p.state.Save(p.statePath); err != nil {
+	if err := p.store.Save(p.state); err != nil {
 		return fmt.Errorf("saving state: %w", err)
 	}
 	return nil
@@ -639,6 +687,15 @@ func subsetOf(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// notStarted reports a batch whose process exited 126 (not executable) or 127
+// (command not found) although none of its tests reported a result, while they would
+// have: the run is recorded and the runner (any but custom) reports per-test results.
+// A custom runner, or a run with --no-record, may report nothing even when its tests
+// ran: its exit code is a test failure.
+func notStarted(runnerName string, record bool, r *runner.RunResult) bool {
+	return (r.ExitCode == 126 || r.ExitCode == 127) && len(r.Observations) == 0 && record && runnerName != "custom"
 }
 
 // runError classifies an error of a runner that could not run a batch: a suite command
@@ -762,9 +819,12 @@ func unitIndex(sr *selector.Suite) map[string]string {
 	return idx
 }
 
-// unitFiles lists the test files of a unit (a unit is a test file, or for Go a
-// package directory whose test files are known from its deps).
+// unitFiles lists the test files of a unit (a unit is a test file, for Go a package
+// directory whose test files are known from its deps, or a test function).
 func unitFiles(sr *selector.Suite, unit string) []string {
+	if files, ok := sr.Files[unit]; ok {
+		return files
+	}
 	if sr.Suite.IsTestFile(unit) {
 		return []string{unit}
 	}
@@ -779,6 +839,7 @@ func unitFiles(sr *selector.Suite, unit string) []string {
 
 type selectFlags struct {
 	commonFlags
+	callerFlags
 	all      bool
 	base     string
 	noAgent  bool
@@ -792,7 +853,8 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs := flag.NewFlagSet("select", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f selectFlags
-	f.register(fs)
+	f.commonFlags.register(fs)
+	f.callerFlags.register(fs)
 	fs.BoolVar(&f.all, "all", false, "select everything")
 	fs.StringVar(&f.base, "base", "", "git revision to diff against when nothing is recorded yet")
 	fs.BoolVar(&f.noAgent, "no-agent", false, "do not call the agent for unattributed changes")
@@ -803,6 +865,9 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
+	if err := f.callerFlags.validate(); err != nil {
+		return 2, err
+	}
 	shardI, shardN, err := parseShard(f.shard)
 	if err != nil {
 		return 2, err
@@ -811,14 +876,14 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent})
+	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds})
 	if err != nil {
 		return 1, err
 	}
 	applyShard(sel.res, shardI, shardN)
 	if sel.agentDec != nil && !sel.agentCache {
 		// Keep the agent's answer for the next run on the same change.
-		if err := p.state.Save(p.statePath); err != nil {
+		if err := p.store.Save(p.state); err != nil {
 			p.logf("could not save agent cache: %v", err)
 		}
 	}
@@ -861,11 +926,17 @@ type jsonOut struct {
 	Agent    any                 `json:"agent,omitempty"`
 	Note     string              `json:"agent_note,omitempty"`
 	Tests    map[string][]string `json:"selected_tests"`
+	// Candidates describe the orphans for a calling agent that decides about them
+	// itself (--add, --orphans).
+	Candidates []orphanCandidate `json:"orphan_candidates"`
 }
 
 func jsonSelection(sel *selection) jsonOut {
 	s, t := sel.res.Counts()
-	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}}
+	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates}
+	if out.Candidates == nil {
+		out.Candidates = []orphanCandidate{}
+	}
 	if sel.agentDec != nil {
 		out.Agent = sel.agentDec
 	}
@@ -889,6 +960,9 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 	if sel.agentNote != "" {
 		p.logf("%s", sel.agentNote)
+	}
+	if sel.hint {
+		p.logf("%s", orphanHint)
 	}
 	pct := 0.0
 	if t > 0 {
