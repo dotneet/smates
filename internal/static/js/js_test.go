@@ -711,3 +711,54 @@ func BenchmarkScanSource(b *testing.B) {
 		scanSource(src)
 	}
 }
+
+func TestHashTSPaths(t *testing.T) {
+	h := newHost(t, map[string]string{
+		"tsconfig.json":    `{"compilerOptions":{"paths":{"#lib/*":["./src/lib/*"]}}}`,
+		"package.json":     `{"name":"app","imports":{"#db":"./src/db.ts"}}`,
+		"src/a.test.ts":    "import x from \"#lib/util\"\nimport db from \"#db\"\nconst m = await import(`#lib/${n}`)",
+		"src/lib/util.ts":  ``,
+		"src/lib/other.ts": ``,
+		"src/db.ts":        ``,
+	})
+	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/db.ts", "src/lib/other.ts", "src/lib/util.ts"})
+}
+
+// TestConfigDirTemplate checks that ${configDir} expands to the directory of the config
+// that uses it, not the one that declares it.
+func TestConfigDirTemplate(t *testing.T) {
+	h := newHost(t, map[string]string{
+		"tsconfig.base.json":  `{"compilerOptions":{"baseUrl":"${configDir}/src","paths":{"~lib/*":["${configDir}/src/lib/*"]}}}`,
+		"app/tsconfig.json":   `{"extends":"../tsconfig.base.json"}`,
+		"app/src/a.test.ts":   "import x from \"~lib/util\"\nconst m = await import(`~lib/${n}`)",
+		"app/src/lib/util.ts": ``,
+		"web/tsconfig.json":   `{"extends":"../tsconfig.base.json"}`,
+		"web/src/b.test.ts":   `import x from "lib/util"`,
+		"web/src/lib/util.ts": ``,
+	})
+	assertDeps(t, deps(t, h, "app/src/a.test.ts"), []string{"app/src/lib/util.ts"})
+	assertDeps(t, deps(t, h, "web/src/b.test.ts"), []string{"web/src/lib/util.ts"})
+}
+
+func TestTemplateQuerySuffix(t *testing.T) {
+	h := newHost(t, map[string]string{
+		"src/a.test.ts":   "const m = await import(`./icons/${n}.svg?raw`)\nconst u = await import(`./img/${n}.png#hash`)",
+		"src/icons/x.svg": ``,
+		"src/icons/y.ts":  ``,
+		"src/img/p.png":   ``,
+	})
+	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/icons/x.svg", "src/img/p.png"})
+}
+
+func TestDirnameTemplate(t *testing.T) {
+	h := newHost(t, map[string]string{
+		"src/a.test.ts": "require(`${__dirname}/fixtures/${n}.json`)\n" +
+			"await import(`${import.meta.dirname}/cases/${n}.ts`)\n" +
+			"require(__dirname + \"/data/\" + n + \".js\")",
+		"src/fixtures/f.json": ``,
+		"src/cases/c.ts":      ``,
+		"src/data/d.js":       ``,
+		"src/other.ts":        ``,
+	})
+	assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/cases/c.ts", "src/data/d.js", "src/fixtures/f.json"})
+}
