@@ -131,7 +131,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 		defer cleanup()
 	}
-	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root)
+	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root).WithConfig(p.cfg)
 	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
 	start := time.Now()

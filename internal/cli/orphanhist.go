@@ -23,6 +23,7 @@ const (
 	orphanKindIgnore    = "ignore"    // nothing reads it: an ignore glob is suggested
 	orphanKindInputs    = "inputs"    // it may change how tests run: inputs/rules, not ignore
 	orphanKindReference = "reference" // a test names it, which explains it without ignore
+	orphanKindUntested  = "untested"  // source code no test reaches: skipped (untested: skip)
 )
 
 // orphanReport is what `smates orphans` prints (the JSON schema of --format json).
@@ -232,6 +233,16 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 	for _, f := range explained {
 		referenced[f] = true
 	}
+	// Source code no test reaches selects nothing with `untested: skip` (judged
+	// against the recorded state, as runs do).
+	untested := map[string]bool{}
+	if p.cfg.Untested == config.UntestedSkip && !p.state.Empty() {
+		rs := *res
+		rs.Mode = selector.ModeState
+		for _, f := range rs.Untested(subtract(all, explained)) {
+			untested[f] = true
+		}
+	}
 
 	// Classify and rank.
 	for _, f := range all {
@@ -239,6 +250,8 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 		switch {
 		case referenced[f]:
 			of.Kind = orphanKindReference
+		case untested[f]:
+			of.Kind = orphanKindUntested
 		case affectsExecution(f) != "":
 			of.Kind, of.Why = orphanKindInputs, affectsExecution(f)
 		}
@@ -269,6 +282,9 @@ func (p *project) orphanHistory(res *selector.Result, commits []gitx.Commit, cha
 		for _, f := range perCommit[i] {
 			if referenced[f] {
 				refs = append(refs, f)
+				continue
+			}
+			if untested[f] {
 				continue
 			}
 			orphans = append(orphans, f)
@@ -471,6 +487,8 @@ func printOrphanReport(w io.Writer, rep *orphanReport, configPath string) {
 			note = of.Why + ": consider inputs:/rules: instead of ignore"
 		case orphanKindReference:
 			note = "explained by reference (a test names it)"
+		case orphanKindUntested:
+			note = "untested code: no test reaches it, nothing runs (untested: skip)"
 		}
 		fmt.Fprintf(tw, "  %d\t%s\t%s\n", of.Commits, of.Path, note)
 	}

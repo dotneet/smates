@@ -50,6 +50,7 @@ const (
 	OrphanNoImpact  = "no-impact" // the agent judged it irrelevant to every test
 	OrphanPolicy    = "policy"    // orphan policy "all": the suites it may affect run in full
 	OrphanIgnored   = "ignored"   // orphan policy "ignore"
+	OrphanUntested  = "untested"  // source code no test reaches (untested: skip)
 )
 
 // Input is everything selection needs.
@@ -110,6 +111,9 @@ type Suite struct {
 	Known map[string][]string `json:"-"`
 	// Inputs are the files every test of the suite depends on (suite and global inputs).
 	Inputs map[string]bool `json:"-"`
+	// Unrecorded is set when some test of the suite has no recorded entry: its
+	// dependencies are known from the static closure only.
+	Unrecorded bool `json:"-"`
 	// Services are the suite's depends_on/serves declarations, expanded at HEAD.
 	Services []*ServiceDeps `json:"-"`
 }
@@ -301,7 +305,12 @@ func Select(in *Input) (*Result, error) {
 
 	globalInputs := expandInputs(in.Config.Inputs, files)
 	if in.Config.Path != "" {
-		globalInputs = append(globalInputs, in.Config.Path)
+		// Every test depends on its suite's settings (ConfigKey), not on the whole
+		// file: a test that reads smates.yml itself records the file's content.
+		globalInputs = append(globalInputs, ConfigKey(in.Config.Path))
+		if changedSet[in.Config.Path] {
+			changedSet[ConfigKey(in.Config.Path)] = true
+		}
 	}
 
 	var baseChanged map[string]bool
@@ -314,10 +323,16 @@ func Select(in *Input) (*Result, error) {
 		for _, f := range list {
 			baseChanged[f] = true
 		}
+		if in.Config.Path != "" && baseChanged[in.Config.Path] {
+			baseChanged[ConfigKey(in.Config.Path)] = true
+		}
 	}
 	covered := map[string]bool{} // union of all D(T)
+	if in.Config.Path != "" {
+		covered[in.Config.Path] = true // explained by ConfigKey
+	}
 	res.Covered = covered
-	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...)
+	hasher := NewHasher(in.Snap, IgnoreGlobs(in.Config)...).WithConfig(in.Config)
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
@@ -390,6 +405,9 @@ func Select(in *Input) (*Result, error) {
 			if st != nil {
 				entry = st.Tests[u]
 			}
+			if entry == nil {
+				sr.Unrecorded = true
+			}
 			if entry != nil {
 				for f := range entry.Deps {
 					// A variable env_ignore lists now (it may have been recorded before).
@@ -419,6 +437,19 @@ func Select(in *Input) (*Result, error) {
 				setFiles = setChangedBase
 			} else {
 				decide(t, res.Mode, entry, dl, hs, suiteChanged)
+			}
+			if in.Config.Path != "" {
+				// The suite's settings key is reported as the file.
+				if i := slices.Index(t.Changed, ConfigKey(in.Config.Path)); i >= 0 {
+					t.Changed = slices.Delete(t.Changed, i, i+1)
+					if !slices.Contains(t.Changed, in.Config.Path) {
+						t.Changed = append(t.Changed, in.Config.Path)
+						sort.Strings(t.Changed)
+						if via[in.Config.Path] == "" {
+							via[in.Config.Path] = ViaInput
+						}
+					}
+				}
 			}
 			explain(t, sr, via, setFiles)
 			sr.Tests = append(sr.Tests, t)
@@ -550,7 +581,7 @@ func IgnoreGlobs(c *config.Config) []string {
 // repository root explains nothing: it would hide every change from the orphan check.
 func Covers(deps map[string]bool, f string, existenceChanged bool) string {
 	switch {
-	case deps[f]:
+	case deps[f], deps[f+configKeySuffix]:
 		return "content"
 	case existenceChanged && deps[depkey.Listing(path.Dir(f))]:
 		return "listing"
@@ -627,6 +658,9 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 	for _, d := range deps {
 		recorded, ok := entry.Deps[d]
+		if !ok && h.legacyConfig(d, entry.Deps) {
+			continue
+		}
 		if !ok || h.Hash(d) != recorded {
 			t.Changed = append(t.Changed, d)
 		}
@@ -1110,4 +1144,84 @@ func isSourceLike(f string) bool {
 		return true
 	}
 	return false
+}
+
+// staticLangs are the source file extensions each runner's static analysis follows.
+var staticLangs = map[string][]string{
+	"go":     {".go"},
+	"pytest": {".py"},
+	"vitest": jsExts, "jest": jsExts, "node": jsExts, "bun": jsExts,
+}
+
+var jsExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"}
+
+// Untested returns the orphans that are source code no test can reach: a file in a
+// language whose imports a suite follows statically (Go, Python, JS/TS) under that
+// suite's root. Every test's import closure is part of its dependencies, so such a file
+// is imported by no test, directly or through other code; and no test read or executed
+// it in its last recorded run. Changing it cannot change a test's outcome — unless
+// something outside the repository's tests runs it (a server an e2e suite talks to,
+// which depends_on/rules declare, or a script started by a command smates cannot see
+// into). Tool and runner configuration written as code (vite.config.ts, setup.py, ...)
+// is never counted as untested.
+func (r *Result) Untested(orphans []string) []string {
+	if r.Mode != ModeState {
+		// Without a recorded state D(T) holds the static closure only: files tests
+		// read as data (fixtures, testdata) or import by name are not known yet.
+		return nil
+	}
+	var out []string
+	for _, o := range orphans {
+		if r.untested(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func (r *Result) untested(f string) bool {
+	base := strings.ToLower(path.Base(f))
+	ext := path.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	if strings.HasSuffix(base, ".d.ts") || strings.Contains(stem, ".config") || strings.HasSuffix(stem, "rc") || untestedExcluded[stem] {
+		return false
+	}
+	for _, seg := range strings.Split(path.Dir(f), "/") {
+		if dataDirs[strings.ToLower(seg)] {
+			return false // source files tests read as data
+		}
+	}
+	// Every suite that may run f's code must have recorded all its tests: a test
+	// with no entry is known by its import closure only, which misses code loaded by
+	// name (a settings module, a plugin) and data reads.
+	for _, s := range r.Suites {
+		if s.Unrecorded && pathutil.Under(f, s.Suite.Root) {
+			return false
+		}
+	}
+	for _, s := range r.Suites {
+		if !config.Bool(s.Suite.Static, true) || !slices.Contains(staticLangs[s.Suite.Runner], ext) {
+			continue
+		}
+		if pathutil.Under(f, s.Suite.Root) && !pathutil.Match(s.Suite.Exclude, pathutil.RelTo(f, s.Suite.Root)) {
+			return true
+		}
+	}
+	return false
+}
+
+// dataDirs are directories whose source files tests use as data (inputs of analyzers
+// and generators, golden files, fixture projects, mocks loaded by the runner).
+var dataDirs = map[string]bool{
+	"testdata": true, "fixtures": true, "fixture": true, "__fixtures__": true, "__mocks__": true,
+	"__snapshots__": true, "golden": true,
+}
+
+// untestedExcluded are file stems of code that configures or drives tools rather than
+// being imported: a change to them is left to the orphan policy.
+var untestedExcluded = map[string]bool{
+	"setup": true, "noxfile": true, "tasks": true, "fabfile": true, "conftest": true, "manage": true,
+	"gulpfile": true, "gruntfile": true, "jakefile": true, "magefile": true, "dangerfile": true,
+	"globalsetup": true, "global-setup": true, "globalteardown": true, "global-teardown": true, "setuptests": true,
+	"setup-tests": true, "test-setup": true, "testsetup": true, "vitest.workspace": true, "jest.preset": true,
 }

@@ -162,7 +162,9 @@ assert not v.startswith("fail"), v
 	if code != 0 {
 		t.Fatalf("retried flake must not fail the run: %d\n%s", code, errs)
 	}
-	if f := flakesIn(); len(f) != 1 || f[0].Flip != "fail->pass" || !f[0].Retried || f[0].Count != 3 {
+	// Editing flaky.retry does not change any test's inputs (it is not part of the
+	// suite's configuration fingerprint), so the failure is a flip too.
+	if f := flakesIn(); len(f) != 2 || f[0].Flip != "pass->fail" || f[0].Count != 3 || f[1].Flip != "fail->pass" || !f[1].Retried || f[1].Count != 4 {
 		t.Fatalf("flakes after retry %+v\n%s", f, errs)
 	}
 	if !strings.Contains(errs, "retrying after 1 known flaky test unit(s) failed") {
