@@ -29,12 +29,121 @@ type goTest struct{}
 func (goTest) Name() string { return "go" }
 
 func (goTest) Defaults(repo *gitx.Repo, root string) Defaults {
+	exclude := []string{"**/testdata/**", "**/vendor/**", "**/_*/**", "**/.*/**"}
+	if repo != nil {
+		// Packages of a nested module are not the suite's: go test of the outer module
+		// cannot build them (and ./... skips them), unless the go.work workspace has them.
+		dir := filepath.Join(repo.Root, filepath.FromSlash(root))
+		nested, _ := nestedGoModules(repo.Root, dir, os.Getenv("GOWORK"))
+		for _, m := range nested {
+			exclude = append(exclude, m+"/**")
+		}
+	}
 	return Defaults{
 		Tests:   []string{"**/*_test.go"},
-		Exclude: []string{"**/testdata/**", "**/vendor/**", "**/_*/**", "**/.*/**"},
+		Exclude: exclude,
 		Inputs:  []string{"go.mod", "go.sum", "/go.work", "/go.work.sum", "/.tool-versions"},
 		Command: "go test",
 	}
+}
+
+// nestedGoModules finds the Go modules below the suite directory dir (absolute), as
+// directories relative to it: those outside the go.work workspace go uses there
+// (other: the suite cannot run their tests) and those in it (workspace: go test runs
+// them when named, but ./... does not reach them). Directories go ignores (testdata,
+// vendor, names starting with "." or "_") are not searched. gowork is $GOWORK.
+func nestedGoModules(root, dir, gowork string) (other, workspace []string) {
+	use := goWorkModules(root, dir, gowork)
+	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || p == dir {
+			return nil
+		}
+		if n := d.Name(); n == "testdata" || n == "vendor" || n == "node_modules" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_") {
+			return filepath.SkipDir
+		}
+		if _, err := os.Stat(filepath.Join(p, "go.mod")); err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return filepath.SkipDir
+		}
+		if use[filepath.Clean(p)] {
+			workspace = append(workspace, filepath.ToSlash(rel))
+			return nil
+		}
+		other = append(other, filepath.ToSlash(rel))
+		return filepath.SkipDir // everything below belongs to that module
+	})
+	return other, workspace
+}
+
+// goWorkModules returns the module directories (absolute) of the go.work file go uses
+// in dir: $GOWORK, or the first go.work found in dir or its parents up to root (none
+// with GOWORK=off).
+func goWorkModules(root, dir, gowork string) map[string]bool {
+	file := ""
+	switch {
+	case gowork == "off":
+		return nil
+	case gowork != "":
+		file = gowork
+	default:
+		for d := dir; file == ""; d = filepath.Dir(d) {
+			if _, err := os.Stat(filepath.Join(d, "go.work")); err == nil {
+				file = filepath.Join(d, "go.work")
+			} else if d == root || len(d) <= len(root) {
+				return nil
+			}
+		}
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	block := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0:
+			continue
+		case block && f[0] == ")":
+			block = false
+			continue
+		case !block && len(f) >= 2 && f[0] == "use" && f[1] == "(":
+			block = true
+			continue
+		case !block && len(f) >= 2 && f[0] == "use":
+			f = f[1:]
+		case !block:
+			continue
+		}
+		p := filepath.FromSlash(strings.Trim(f[0], "\""))
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(file), p)
+		}
+		out[filepath.Clean(p)] = true
+	}
+	return out
+}
+
+// allPkgArgs are the go test arguments running every package of the suite: ./... and
+// the nested modules of the go.work workspace, which ./... does not reach.
+func allPkgArgs(rc *RunContext) []string {
+	gowork := os.Getenv("GOWORK")
+	if v, ok := rc.Suite.Env["GOWORK"]; ok {
+		gowork = v
+	}
+	args := []string{"./..."}
+	_, ws := nestedGoModules(rc.Repo.Root, rc.Dir(), gowork)
+	for _, m := range ws {
+		args = append(args, "./"+m+"/...")
+	}
+	return args
 }
 
 // Units are package directories, or with granularity "func" top-level test functions
@@ -68,7 +177,7 @@ func (goTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, run string, out io.Writer) (*RunResult, error) {
 	var testArgs []string
 	if all {
-		testArgs = []string{"./..."}
+		testArgs = allPkgArgs(rc)
 	} else {
 		testArgs = pkgArgs(rc.Suite, units)
 	}
@@ -157,9 +266,8 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	}
 	addCoverPkgDeps(ctx, rc, res)
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
-		modDir, mod := findModule(rc.Repo.Root, rc.Dir())
 		for _, u := range units {
-			ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+			ip := failed.key(rc, u)
 			if ip == "" {
 				continue
 			}
@@ -332,10 +440,9 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 	if len(b.status) == 0 {
 		return nil
 	}
-	modDir, mod := findModule(rc.Repo.Root, rc.Dir())
 	obs := map[string]*Observation{}
 	for _, u := range rc.Units {
-		ip := importPath(modDir, mod, filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+		ip := b.key(rc, u)
 		st, ok := b.status[ip]
 		if ip == "" || !ok {
 			continue
@@ -347,6 +454,17 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 		obs[u] = o
 	}
 	return obs
+}
+
+// key is the name go test printed for the package directory unit u in its summary and
+// build failure lines: its import path (in the module of its own directory, which in a
+// workspace is not the suite's), or the relative argument naming it when go test could
+// not resolve that ("FAIL ./x [setup failed]").
+func (b *buildFailures) key(rc *RunContext, u string) string {
+	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" {
+		return arg
+	}
+	return dirImportPath(rc.Repo.Root, u)
 }
 
 // findModule finds the go.mod governing dir (searching up to root) and returns its

@@ -14,6 +14,9 @@ expected failures pass. A module that loaded but ran no test at all is "unknown"
 "pass": it runs again next time) when it looks written for pytest (module-level test
 functions or `import pytest`, which unittest cannot run), and "pass" with a warning
 otherwise (a helper module matching the test pattern). Both are explained on stderr.
+When the run stopped early (--failfast, or an interrupt with -c), a module that did not
+fail and either ran no test or was the one running when it stopped is "unknown": its
+tests did not all run.
 """
 
 import json
@@ -30,6 +33,8 @@ _tracer = smates_trace.install()
 # File -> {"ms": total test time, "failed": bool, "msg": failure output}.
 _results = {}
 _MAX_MSG = 4000
+# The result object of the run, and the file of the test started last.
+_run = {"result": None, "last": None}
 
 
 def _module_file(name):
@@ -101,6 +106,10 @@ _NO_TESTS = (
     "set `runner: pytest` on the suite in smates.yml; if it is a helper matching the test "
     "pattern, add it to the suite's `exclude`."
 )
+_STOPPED = (
+    "smates: the run stopped (--failfast or an interrupt) before every test of this "
+    "module ran; not recorded as passed."
+)
 _NO_TESTS_HELPER = (
     "smates: unittest ran no test from this module (a helper matching the test pattern?); "
     "recorded as passed. Add it to the suite's `exclude` in smates.yml, or set "
@@ -156,6 +165,7 @@ class _Result(unittest.TextTestResult):
         _enter(f)
         if f is not None:
             _result(f)["ran"] += 1
+            _run["last"] = f
         self._smates_start = time.time()
         super().startTest(test)
 
@@ -200,6 +210,10 @@ class _Result(unittest.TextTestResult):
 class _Runner(unittest.TextTestRunner):
     resultclass = _Result
 
+    def _makeResult(self):
+        _run["result"] = result = super()._makeResult()
+        return result
+
     def run(self, test):
         try:
             return super().run(test)
@@ -211,9 +225,15 @@ def _finish():
     if _tracer is None:
         return
     _tracer.switch("")
+    stopped = getattr(_run["result"], "shouldStop", False)
     for f, r in sorted(_results.items()):
         status = "fail" if r["failed"] else "pass"
-        if not r["failed"] and r["ran"] == 0:
+        if not r["failed"] and stopped and (r["ran"] == 0 or f == _run["last"]):
+            # --failfast or an interrupt ended the run before this module's tests ran
+            # (or while they ran): nothing to pass, so the module runs again.
+            status, r["msg"] = "unknown", _STOPPED
+            sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _STOPPED))
+        elif not r["failed"] and r["ran"] == 0:
             if _pytest_style(f):
                 # Tests unittest cannot run: never a pass, so the module runs again.
                 status, r["msg"] = "unknown", _NO_TESTS

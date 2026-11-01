@@ -394,6 +394,47 @@ source = ["src"]
 	})
 }
 
+// pytest does not recurse into norecursedirs (by default *.egg .* _darcs build CVS dist
+// node_modules venv {arch}); a configured value replaces the default.
+func TestDiscoverPytestNoRecurseDirs(t *testing.T) {
+	pytest := config.Suite{Runner: "pytest"}
+	files := map[string]string{
+		"tests/test_ok.py":       "",
+		"legacy/test_old.py":     "",
+		"build/test_b.py":        "",
+		"src/dist/test_d.py":     "",
+		".hidden/test_h.py":      "",
+		"x.egg/test_e.py":        "",
+		"{arch}/test_arch.py":    "",
+		"arch/test_arch.py":      "",
+		"venv/lib/test_v.py":     "",
+		"build/tests/test_bt.py": "",
+	}
+	runDiscoverCases(t, []discoverCase{
+		{
+			name: "default", suite: pytest, files: files, source: SourceDefaults,
+			tests: []string{"arch/test_arch.py", "legacy/test_old.py", "tests/test_ok.py"},
+		},
+		{
+			name: "configured", suite: pytest, files: with(files, "pytest.ini", "[pytest]\nnorecursedirs = legacy .*\n"),
+			source: "pytest.ini [pytest] norecursedirs",
+			tests:  []string{"arch/test_arch.py", "build/test_b.py", "build/tests/test_bt.py", "src/dist/test_d.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
+		},
+		{
+			name: "pyproject, nested pattern", suite: pytest, files: with(files, "pyproject.toml", "[tool.pytest.ini_options]\nnorecursedirs = [\"src/dist\", \"build\"]\n"),
+			source: "pyproject.toml [tool.pytest.ini_options] norecursedirs",
+			tests:  []string{".hidden/test_h.py", "arch/test_arch.py", "legacy/test_old.py", "tests/test_ok.py", "x.egg/test_e.py", "{arch}/test_arch.py"},
+		},
+		{
+			// The default applies with other options; testpaths are collected even when
+			// a pattern matches them.
+			name: "testpaths below a default pattern", suite: pytest, files: with(files, "setup.cfg", "[tool:pytest]\ntestpaths = build/tests tests\n"),
+			source: "setup.cfg [tool:pytest] testpaths",
+			tests:  []string{"build/tests/test_bt.py", "tests/test_ok.py"},
+		},
+	})
+}
+
 func TestMicromatchToGlob(t *testing.T) {
 	cases := []struct {
 		in, want string

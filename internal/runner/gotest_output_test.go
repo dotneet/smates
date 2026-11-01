@@ -1,11 +1,20 @@
 package runner
 
 import (
+	"bytes"
+	"context"
 	"io"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 func TestGoFailureOutput(t *testing.T) {
@@ -50,5 +59,79 @@ func TestFindModuleImportPath(t *testing.T) {
 	}
 	if d, m := findModule(repo.Root, filepath.Join(repo.Root, "other")); d != "" || m != "" {
 		t.Errorf("no go.mod: %q %q", d, m)
+	}
+}
+
+// A nested module is not part of the outer module's suite (go test cannot build its
+// packages there) unless the go.work workspace has it; then its packages run, and
+// their outcomes are found under their own import paths.
+func TestGoNestedModule(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not on PATH")
+	}
+	t.Setenv("GOWORK", "")
+	repo := tempRepo(t)
+	write := func(rel, content string) { testutil.Write(t, repo.Root, rel, content) }
+	write("go.mod", "module example.com/m\n\ngo 1.22\n")
+	write("a/a_test.go", "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n")
+	write("tools/go.mod", "module example.com/tools\n\ngo 1.22\n")
+	write("tools/x/x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestX(t *testing.T) {}\n")
+	write("tools/.hidden/go.mod", "module example.com/hidden\n")
+	files := []string{"go.mod", "a/a_test.go", "tools/go.mod", "tools/x/x_test.go"}
+	run := func(units []string, all bool) *RunResult {
+		t.Helper()
+		var out, errb bytes.Buffer
+		suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go", Env: map[string]string{"GOFLAGS": ""}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc := &RunContext{Repo: repo, Suite: suites[0], Units: units, All: all, Fresh: true, TraceDir: t.TempDir(), Stdout: &out, Stderr: &errb}
+		res, err := goTest{}.Run(context.Background(), rc)
+		if err != nil {
+			t.Fatalf("run: %v\n%s%s", err, &out, &errb)
+		}
+		if res.ExitCode != 0 {
+			t.Errorf("units %v all=%v: exit %d\n%s%s", units, all, res.ExitCode, &out, &errb)
+		}
+		return res
+	}
+	units := func() []string {
+		suites, err := Resolve(repo, []config.Suite{{Name: "go", Root: ".", Runner: "go"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return suites[0].Adapter.Units(suites[0], suites[0].TestFiles(files))
+	}
+	if got := units(); !slices.Equal(got, []string{"a"}) {
+		t.Errorf("units without a workspace: %v", got)
+	}
+	if res := run([]string{"a"}, false); res.Observations["a"] == nil {
+		t.Errorf("observations %v", res.Observations)
+	}
+
+	write("go.work", "go 1.22\n\nuse (\n\t.\n\t./tools // the tools\n)\n")
+	if got := units(); !slices.Equal(got, []string{"a", "tools/x"}) {
+		t.Fatalf("units in a workspace: %v", got)
+	}
+	for _, all := range []bool{false, true} {
+		res := run([]string{"a", "tools/x"}, all)
+		for _, u := range []string{"a", "tools/x"} {
+			if o := res.Observations[u]; o == nil || o.Status != state.Pass {
+				t.Errorf("all=%v %s: %+v", all, u, o)
+			}
+		}
+	}
+}
+
+func TestGoWorkModules(t *testing.T) {
+	root := t.TempDir()
+	testutil.Write(t, root, "go.work", "go 1.22\n\nuse ./a\nuse \"b/c\" // comment\nuse (\n\t.\n\t// ./skipped\n\t../outside\n)\nreplace x => ./y\n")
+	got := goWorkModules(root, filepath.Join(root, "sub"), "")
+	want := map[string]bool{filepath.Join(root, "a"): true, filepath.Join(root, "b", "c"): true, root: true, filepath.Join(filepath.Dir(root), "outside"): true}
+	if !maps.Equal(got, want) {
+		t.Errorf("goWorkModules = %v, want %v", got, want)
+	}
+	if got := goWorkModules(root, root, "off"); got != nil {
+		t.Errorf("GOWORK=off: %v", got)
 	}
 }

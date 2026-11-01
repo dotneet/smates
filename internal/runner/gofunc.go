@@ -106,7 +106,7 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 	pkgs, dirs, funcs := splitUnits(rc.Units)
 	var out [][]string
 	if rc.All && !rc.Suite.Narrowed {
-		argv, err := rc.CommandLine(nil, []string{"./..."})
+		argv, err := rc.CommandLine(nil, allPkgArgs(rc))
 		return [][]string{argv}, err
 	}
 	if len(pkgs) > 0 {

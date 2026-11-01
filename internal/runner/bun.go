@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/trace"
@@ -87,10 +88,15 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			obs[u] = o
 		}
 		files, err := readLcov(filepath.Join(rc.TraceDir, fmt.Sprintf("bun-%d", i), "lcov.info"), rc.Dir(), rc.Repo.Root)
-		if err != nil {
-			delete(obs, u) // no coverage: do not record a partial picture
+		if err != nil && codes[u] == 0 && bunImportsSource(rc, u) {
+			// Bun writes no report when no source file was covered: a passing test
+			// that imports some would be recorded without them.
+			delete(obs, u)
 			continue
 		}
+		// Otherwise a missing report is no loss: the test is self-contained (bun skips
+		// test files in coverage), or it failed, also when it could not import a
+		// module, which ends bun before it writes coverage.
 		for _, f := range files {
 			o.AddFile(f)
 		}
@@ -99,6 +105,25 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	}
 	res.Observations, res.Warnings = obs, warns
 	return res, nil
+}
+
+// bunImportsSource reports whether the static closure of test file unit has repository
+// code bun's coverage would list: a JavaScript or TypeScript file that is neither a test
+// file nor a suite input (true when the closure is unknown).
+func bunImportsSource(rc *RunContext, unit string) bool {
+	if rc.Known == nil {
+		return true
+	}
+	for _, k := range rc.Known(unit) {
+		kind, p := depkey.Parse(k)
+		if kind != depkey.KindContent || p == unit || !pathutil.Match([]string{"**/*." + jsTestExts}, p) {
+			continue
+		}
+		if (rc.IsTest == nil || !rc.IsTest(p)) && !rc.Suite.InputMatch(p) {
+			return true
+		}
+	}
+	return false
 }
 
 var (

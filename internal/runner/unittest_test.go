@@ -329,3 +329,55 @@ func TestPytestStyle(t *testing.T) {
 		}
 	}
 }
+
+// With --failfast, the modules whose tests never ran are not recorded as passing.
+func TestUnittestFailfastStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix paths")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	repo := tempRepo(t)
+	write := func(rel, content string) { testutil.Write(t, repo.Root, rel, content) }
+	write("tests/__init__.py", "")
+	write("tests/test_a.py", "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.fail('a')\n")
+	write("tests/test_b.py", "import unittest\nclass T(unittest.TestCase):\n    def test_b(self):\n        raise RuntimeError('b')\n")
+	shimDir := t.TempDir()
+	if _, err := trace.ExtractShims(shimDir); err != nil {
+		t.Fatal(err)
+	}
+	s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest -f", Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}}, Adapter: unittestRunner{}}
+	s.Tests = []string{"**/test*.py"}
+	var out bytes.Buffer
+	rc := &RunContext{
+		Repo: repo, Suite: s, Units: []string{"tests/test_a.py", "tests/test_b.py"}, All: true, Record: true,
+		TraceDir: t.TempDir(), ShimDir: shimDir, Stdout: &out, Stderr: &out,
+		IsTest: s.IsTestFile,
+		UnitOf: func(f string) string {
+			if s.IsTestFile(f) {
+				return f
+			}
+			return ""
+		},
+	}
+	res, err := unittestRunner{}.Run(context.Background(), rc)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if res.ExitCode == 0 {
+		t.Errorf("exit code 0\n%s", out.String())
+	}
+	if o := res.Observations["tests/test_a.py"]; o == nil || o.Status != state.Fail {
+		t.Errorf("test_a: %+v\n%s", o, out.String())
+	}
+	if o := res.Observations["tests/test_b.py"]; o != nil && o.Status == state.Pass {
+		t.Errorf("test_b never ran but is recorded as passed: %+v\n%s", o, out.String())
+	}
+	if o := res.Observations["tests/test_b.py"]; o == nil || o.Status != state.Unknown || o.Inferred || !strings.Contains(o.Failure, "--failfast") {
+		t.Errorf("test_b: %+v", o)
+	}
+	if strings.Contains(out.String(), "a helper matching") {
+		t.Errorf("helper warning for a module that never ran:\n%s", out.String())
+	}
+}
