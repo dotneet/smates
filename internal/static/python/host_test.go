@@ -1,12 +1,12 @@
 package python
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/dotneet/smates/internal/static/host"
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // dirHost implements host.Host over a directory on disk.
@@ -22,30 +22,8 @@ var _ host.Host = (*dirHost)(nil)
 func newFixture(t testing.TB, files map[string]string) *dirHost {
 	t.Helper()
 	root := t.TempDir()
-	for p, content := range files {
-		abs := filepath.Join(root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h := &dirHost{root: root, files: map[string]bool{}}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		h.files[filepath.ToSlash(rel)] = true
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteTree(t, root, files)
+	h := &dirHost{root: root, files: testutil.Files(t, root)}
 	return h
 }
 
