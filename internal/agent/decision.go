@@ -190,11 +190,15 @@ func envelopeUsage(env map[string]json.RawMessage) Usage {
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	}
 	var turns int
+	var cost float64
 	if raw, ok := env["usage"]; ok {
 		_ = json.Unmarshal(raw, &u)
 	}
 	if raw, ok := env["num_turns"]; ok {
 		_ = json.Unmarshal(raw, &turns)
+	}
+	if raw, ok := env["total_cost_usd"]; ok {
+		_ = json.Unmarshal(raw, &cost)
 	}
 	return Usage{
 		InputTokens:      u.InputTokens,
@@ -202,6 +206,7 @@ func envelopeUsage(env map[string]json.RawMessage) Usage {
 		CacheReadTokens:  u.CacheReadInputTokens,
 		CacheWriteTokens: u.CacheCreationInputTokens,
 		Turns:            turns,
+		CostUSD:          cost,
 	}
 }
 

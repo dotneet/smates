@@ -41,6 +41,8 @@ type State struct {
 	Suites map[string]*Suite
 	// AgentCache maps a cache key to a stored agent decision.
 	AgentCache map[string]json.RawMessage
+	// Runs summarizes the recent runs, oldest first (bounded, see AddRun).
+	Runs []Run
 }
 
 // Suite holds the entries of one suite.
@@ -136,6 +138,7 @@ type diskState struct {
 	Files      [][2]int                   `json:"files"`
 	Suites     map[string]diskSuite       `json:"suites"`
 	AgentCache map[string]json.RawMessage `json:"agent_cache,omitempty"`
+	Runs       []Run                      `json:"runs,omitempty"`
 }
 
 type diskSuite struct {
@@ -223,7 +226,7 @@ func encodeMap(m map[string]string, paths, blobs *interner) [][2]int {
 func (s *State) toDisk() *diskState {
 	var paths, blobs interner
 	// Intern snapshot paths first in sorted order for better compression.
-	d := &diskState{Version: Version, Tool: s.Tool, Commit: s.Commit, Created: s.Created, Suites: map[string]diskSuite{}, AgentCache: s.AgentCache}
+	d := &diskState{Version: Version, Tool: s.Tool, Commit: s.Commit, Created: s.Created, Suites: map[string]diskSuite{}, AgentCache: s.AgentCache, Runs: s.Runs}
 	d.Files = encodeMap(s.Files, &paths, &blobs)
 	for name, su := range s.Suites {
 		ds := diskSuite{Tests: map[string]diskEntry{}}
@@ -261,7 +264,7 @@ func fromDisk(d *diskState) (*State, error) {
 		return m, nil
 	}
 	s := New()
-	s.Tool, s.Commit, s.Created = d.Tool, d.Commit, d.Created
+	s.Tool, s.Commit, s.Created, s.Runs = d.Tool, d.Commit, d.Created, d.Runs
 	var err error
 	if s.Files, err = decode(d.Files); err != nil {
 		return nil, err
@@ -355,7 +358,7 @@ func (s *State) Write(w io.Writer, gz bool) error {
 // Merge copies entries from other that are newer than ours (by At). The snapshot and
 // commit are taken from whichever state has the newer Created time. Outcome histories
 // and flake evidence of a unit known to both are combined, so a flake seen on one
-// branch or shard is not forgotten.
+// branch or shard is not forgotten. Run records are unioned.
 func (s *State) Merge(other *State) {
 	if other.Created.After(s.Created) {
 		s.Files, s.Commit, s.Created = other.Files, other.Commit, other.Created
@@ -381,6 +384,7 @@ func (s *State) Merge(other *State) {
 	for k, v := range other.AgentCache {
 		s.AgentCache[k] = v
 	}
+	s.Runs = mergeRuns(s.Runs, other.Runs)
 }
 
 // mergeHistory unions two outcome histories (both usually share a common past),
