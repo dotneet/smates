@@ -103,7 +103,8 @@ suites:
       - { tests: ["."], deps: *js }
       - { tests: ["."], deps: *vitest } # pnpm-monorepo
       - { tests: ["."], deps: *gotest }
-      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,flaky,go-module,pnpm-monorepo}/**"] }
+      - { tests: ["."], deps: *pytest } # env (Python through a custom runner)
+      - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,pnpm-monorepo}/**"] }
 
 # Release packaging and CI files that no test reads; action.yml is covered by the
 # action job in .github/workflows/ci.yml.

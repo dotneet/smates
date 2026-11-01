@@ -43,6 +43,7 @@ const (
 	KindSource  = "source"  // code (a direct import of the test ranks first)
 	KindTest    = "test"    // the unit's own test file
 	KindData    = "data"    // fixtures and other data the test read
+	KindEnv     = "env"     // an environment variable the test read ("$NAME")
 	KindConfig  = "config"  // suite inputs: manifests, lockfiles, runner configuration
 	KindListing = "listing" // a directory listing, existence check or opaque tree
 )
@@ -255,6 +256,8 @@ func changed(in Input, key string) (Candidate, bool) {
 func classify(c *Candidate, in Input, own, direct map[string]bool) {
 	p := c.Path
 	switch {
+	case depkey.IsEnv(p):
+		c.Kind, c.tier = KindEnv, 2
 	case depkey.IsPseudo(p):
 		c.Kind, c.tier = KindListing, 5
 	case own[p]:
@@ -283,7 +286,7 @@ func classify(c *Candidate, in Input, own, direct map[string]bool) {
 }
 
 // Rank orders candidates: code the test imports directly, other code, the test file
-// itself, data, configuration, then directory listings; within a tier the most
+// itself and environment variables, data, configuration, then directory listings; within a tier the most
 // recently modified first, then the files closest to the test, then by path.
 func Rank(cands []Candidate) {
 	sort.SliceStable(cands, func(i, j int) bool {

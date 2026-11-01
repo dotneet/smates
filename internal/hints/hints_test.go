@@ -250,3 +250,21 @@ func TestCleanOutput(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 }
+
+func TestEnvCandidate(t *testing.T) {
+	in := baseInput(map[string]string{"$TZ": "env:2", "fixtures/prices.json": "j2", "$APP_MODE": ""})
+	in.Entry.Deps["$TZ"] = "env:1"
+	in.Entry.Deps["$APP_MODE"] = "env:3"
+	in.Entry.Deps["$LANG"] = "env:4" // unchanged
+	in.Deps = append(in.Deps, "$TZ", "$APP_MODE", "$LANG")
+	h := Compute(in)
+	if got := paths(h.Candidates); !reflect.DeepEqual(got, []string{"$APP_MODE", "$TZ", "fixtures/prices.json"}) {
+		t.Fatalf("candidates %v", got)
+	}
+	if c := h.Candidates[0]; c.Kind != KindEnv || c.Change != "deleted" || c.Link != LinkTraced {
+		t.Errorf("unset variable %+v", c)
+	}
+	if c := h.Candidates[1]; c.Kind != KindEnv || c.Change != "modified" {
+		t.Errorf("changed variable %+v", c)
+	}
+}

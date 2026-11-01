@@ -1,0 +1,5 @@
+{
+  "requires": ["node", "go", "python3", "sh"],
+  "setup": [],
+  "mutation_only": ["node/lib/**"]
+}

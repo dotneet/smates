@@ -1,0 +1,14 @@
+version: 1
+orphans: ignore
+env_ignore: [BUILD_LABEL]
+suites:
+  - name: node
+    runner: node
+    tests: ["node/*.test.js"]
+  - name: go
+    runner: go
+    root: go
+  - name: py
+    runner: custom
+    tests: ["py/test_*.py"]
+    command: sh py/run.sh

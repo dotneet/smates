@@ -62,8 +62,9 @@ const GoFlagsOrigEnv = "SMATES_GOFLAGS_ORIG"
 
 // GoRun is one traced Go test binary execution.
 type GoRun struct {
-	Dir   string   `json:"dir"`   // absolute package directory (the binary's cwd)
-	Files []string `json:"files"` // absolute paths opened or stat'ed by the test
+	Dir   string   `json:"dir"`           // absolute package directory (the binary's cwd)
+	Files []string `json:"files"`         // absolute paths opened or stat'ed by the test
+	Env   []string `json:"env,omitempty"` // environment variables the test looked up
 	Exit  int      `json:"exit"`
 	Ms    int64    `json:"ms"`
 }
@@ -137,7 +138,7 @@ func GoExec(args []string) int {
 	if traceDir != "" {
 		cwd, _ := os.Getwd()
 		run := GoRun{Dir: cwd, Exit: code, Ms: time.Since(start).Milliseconds()}
-		run.Files = parseTestLog(logFile, cwd)
+		run.Files, run.Env = parseTestLog(logFile, cwd)
 		if data, err := json.Marshal(run); err == nil {
 			_ = os.WriteFile(filepath.Join(traceDir, fmt.Sprintf("go-%d.json", os.Getpid())), data, 0o644)
 		}
@@ -145,11 +146,13 @@ func GoExec(args []string) int {
 	return code
 }
 
-// parseTestLog reads a Go test log ("# test log" then "open|stat|chdir|getenv <arg>").
-func parseTestLog(file, cwd string) []string {
+// parseTestLog reads a Go test log ("# test log" then "open|stat|chdir|getenv <arg>"):
+// the files the test used and the environment variables it looked up (os.Getenv,
+// os.LookupEnv; the same records go test uses to invalidate its cache).
+func parseTestLog(file, cwd string) (files, env []string) {
 	f, err := os.Open(file)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer f.Close()
 	var out []string
@@ -163,6 +166,11 @@ func parseTestLog(file, cwd string) []string {
 			continue
 		}
 		switch op {
+		case "getenv":
+			if !seen[sc.Text()] {
+				seen[sc.Text()] = true
+				env = append(env, arg)
+			}
 		case "chdir":
 			if !filepath.IsAbs(arg) {
 				arg = filepath.Join(dir, arg)
@@ -190,7 +198,7 @@ func parseTestLog(file, cwd string) []string {
 			}
 		}
 	}
-	return out
+	return out, env
 }
 
 var goRunRe = regexp.MustCompile(`^go-(\d+)\.json$`)

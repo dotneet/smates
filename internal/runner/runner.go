@@ -282,6 +282,21 @@ func baseEnv() []string {
 	return out
 }
 
+// LookupEnv returns an environment variable as the tests of suite s (nil: no suite)
+// see it: the suite's env, otherwise smates' own environment without AgentSecrets.
+// Variables the adapters set to trace a run are not taken into account.
+func (s *Suite) LookupEnv(name string) (string, bool) {
+	if s != nil {
+		if v, ok := s.Env[name]; ok {
+			return v, true
+		}
+	}
+	if slices.Contains(AgentSecrets, name) {
+		return "", false
+	}
+	return os.LookupEnv(name)
+}
+
 func suiteEnv(s *Suite) []string {
 	var env []string
 	for k, v := range s.Env {

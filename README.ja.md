@@ -31,7 +31,8 @@ smates は実際のテスト実行をトレースして、各テストが *本�
 git blob ハッシュを保存します。
 
 ```
-D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込みされたファイル
+D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込みされたファイルと、
+                   T のコードが読んだ環境変数
      ∪ static(T)   現時点で計算した import グラフの閉包(新しい import も即座に反映)
      ∪ inputs      lockfile、マニフェスト、ランナー設定、smates.yml、指定した glob
 ```
@@ -40,6 +41,38 @@ D(T) = traced(T)   T の実行中(子プロセス含む)に実行・読み込み
 それ以外は理由付きで **選択** します(`smates run --explain`)。比較は `git diff` ではなく
 内容ハッシュなので、履歴不要(`fetch-depth: 1` で可)、未コミットの変更にも対応し、
 rebase やマージコミットにも惑わされません。
+
+**環境変数** も、テストが読んだものはファイルと同じく依存として記録します(Node と Bun の
+`process.env`。jest と vitest がテストファイルごとに作る複製や `import.meta.env` も含む。
+Python の `os.environ` / `os.getenv`、Go の `os.Getenv` / `os.LookupEnv`)。
+`smates deps` では `$TZ` のように表示され、値のハッシュで比較します(値そのものは保存せず、
+未設定と空文字は区別します)。値が変わったテストだけが `[env changed: TZ]` の理由で選択され、
+失敗ヒントや `smates flaky` にも現れます。数えるのはリポジトリのコードがスタック上にある
+読み取りだけで、ランナー自身の参照や、環境全体のコピー(`{...process.env}`、
+`dict(os.environ)`、子プロセスの起動)、テスト自身が設定した値は含めません。比較するのは
+そのスイートのテストから見える値で、`smates.yml` の `env:` はシェルの値より優先されます。
+
+CI で記録した状態を手元に `state pull` しても全件が再実行されないよう、マシンや CI と
+ローカルで値が違う変数は既定で無視します: `PATH`、`HOME`、`USER`、`TMPDIR`、ロケール
+(`LANG`、`LC_*`)、端末(`TERM`、`COLUMNS`、色の指定)、CI のメタデータ(`CI`、`GITHUB_*`、
+`RUNNER_*` など)、プロキシ、ツールチェーンの場所(`GOPATH`、`VIRTUAL_ENV`、`npm_*` など)、
+smates 自身が設定するもの(`SMATES_*`、`NODE_OPTIONS`、`PYTHONPATH`、`GOFLAGS` など)。
+一覧は [internal/config/config.go](internal/config/config.go) の `DefaultEnvIgnore` です。
+`smates.yml` の `env_ignore` で追加、`env_track` で既定の無視リストから除外できます
+(トップレベルとスイートごと)。`env_ignore: ["*"]` で環境変数の追跡を止められます。
+
+```yaml
+env_ignore: ["BUILD_*", DEPLOY_ID]
+env_track: [LANG]
+```
+
+見えないもの: ランタイム自身が参照する変数(日付の `TZ`、ロケール、`GODEBUG`)、ネイティブ
+コード、Go の `syscall.Getenv`、Bun の `Bun.env` / `import.meta.env`、トレースできない
+コマンド(シェルスクリプト、バイナリ)からの読み取り。Go の `t.Setenv` は元の値を戻すために
+参照するので、変数を設定する Go のテストもその外側の値に依存します(必要以上に実行されることがあります)。値は SHA-256 のハッシュで保存する
+ため、推測しやすい値(弱いパスワードなど)は状態ファイルを読める人に確かめられます。
+気になる変数は `env_ignore` に入れてください。CI とローカルの違いの扱いは
+[docs/DESIGN.md](docs/DESIGN.md) にあります。
 
 **オーファン(どのテストにも紐付かない変更)** は次の順で扱います(`--suite` で絞った
 場合も、他のスイートのテストが依存する変更はオーファンになりません)。
@@ -142,15 +175,15 @@ notice を出してスキップし、ジョブは失敗させません。シャ�
 
 smates は各テストの全入力の内容ハッシュを知っているので、**入力が何ひとつ変わって
 いないのにテスト結果が pass と fail の間で反転した** 場合、そのテストは flaky である
-(または smates から見えないもの — 時刻、ネットワーク、環境変数、リポジトリ外のファイル —
-に依存している)と、ヒューリスティックではなく証拠に基づいて判定できます。たとえば
+(または smates から見えないもの — 時刻、ネットワーク、無視している・読み取りが見えない
+環境変数、リポジトリ外のファイル — に依存している)と、ヒューリスティックではなく証拠に基づいて判定できます。たとえば
 失敗したテストが再実行で成功した場合や、デフォルトブランチの全件実行で、何も触れて
 いないテストが失敗した場合です。
 
 `smates run` はこれを実行ログ、`--report` の `flaky`、ジョブサマリ、GitHub の出力
 (`flaky` / `flaky-tests`)で報告し、証拠(反転回数、最後のコミット、直近の結果)を
 状態ファイルに記録します。`smates flaky`(`--format json`、`--clear [テスト...]`)で
-一覧できます。flaky な失敗も通常どおり実行を失敗させ、次回も必ず選択されます。
+一覧できます(そのテストが読む環境変数も表示します。反転の前後で値は同じでした)。flaky な失敗も通常どおり実行を失敗させ、次回も必ず選択されます。
 
 `smates.yml` に `flaky: {retry: 1}` を書くと、スイート実行の失敗がすべて *既に flaky と
 分かっている* テストだったときに、同じテスト一式でスイート実行を 1 回だけやり直し、
@@ -185,13 +218,14 @@ smates: failure hints for 1 failing test unit(s):
   web: src/cart.test.ts — 2 of its 37 known inputs changed since its last recorded run (3f2a1c9, passed)
       src/price.ts  (source, direct import, modified)
       fixtures/prices.json  (data, traced, modified)
+      $TZ  (environment variable, read in its last run, changed)
     → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
 ```
 
 - 「変更」は、そのテストを最後に実行したときに記録した内容との比較です(記録のない
   テストは、今回の選択で変更と判定されたファイルとの比較)。候補は、テストが直接
-  import するコード、その他のコード、テストファイル自身、データ、設定、ディレクトリ
-  列挙の順に並べ、同じ種類の中では更新時刻の新しい順にします。
+  import するコード、その他のコード、テストファイル自身と読んだ環境変数、データ、設定、
+  ディレクトリ列挙の順に並べ、同じ種類の中では更新時刻の新しい順にします。
 - **入力が何も変わっていない** 場合は、flaky なテストか環境要因(時刻、ネットワーク、
   実行順、トレースで見えないもの)を示唆します。前回も成功していなければ、原因はその
   実行より前にあります。どのテストにも紐付かない変更ファイルがあれば、それを候補として

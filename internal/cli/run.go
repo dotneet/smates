@@ -316,6 +316,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		p.logf("%s: %s", sr.Name, w)
 	}
 	settleOutcomes(r, b.units, c.record, len(c.f.extra) > 0)
+	selector.DropIgnoredEnv(p.cfg, sr.Suite, r)
 	if c.ran[sr.Name] == nil {
 		c.ran[sr.Name] = map[string]string{}
 	}
@@ -359,7 +360,7 @@ func (c *cycle) recordSuites() {
 			continue
 		}
 		full := res.full && len(c.notRun[sr.Name]) == 0
-		events := selector.Record(p.state, sr, res.obs, c.hasher, selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
+		events := selector.Record(p.state, sr, res.obs, c.hasher.ForSuite(sr.Suite), selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
 	}
 }
@@ -694,13 +695,7 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 			if !tt.Selected {
 				continue
 			}
-			why := tt.Reason
-			if len(tt.Changed) > 0 {
-				why += ": " + strings.Join(limit(tt.Changed, 3), ", ")
-			} else if tt.Detail != "" {
-				why += ": " + tt.Detail
-			}
-			fmt.Fprintf(w, "    + %s  [%s]\n", tt.ID, why)
+			fmt.Fprintf(w, "    + %s  [%s]\n", tt.ID, selectionReason(tt))
 		}
 	}
 }
