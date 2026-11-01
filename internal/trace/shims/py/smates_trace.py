@@ -310,6 +310,8 @@ class _Tracer:
             self._profile()
         if hasattr(os, "register_at_fork"):
             os.register_at_fork(after_in_child=self._forked)
+            # Children forked before the first context switch follow from no context.
+            self._publish("%d-0:" % os.getpid())
         import atexit
 
         atexit.register(self._exit)
@@ -328,7 +330,7 @@ class _Tracer:
             self.out = os.path.join(self.trace_dir, "proc-%d-0.jsonl" % os.getpid())
             self.seen = set()
             self._seen_codes.clear()
-            if self._shared:
+            if self._shared is not None and self._shared is not False:
                 self._follow, self._shared = self._shared, None
             if self._follow is not None:
                 self._gen = int.from_bytes(self._follow[0:8], "little")
@@ -337,7 +339,10 @@ class _Tracer:
                 anc = os.environ.get("SMATES_TRACE_PARENT", "")
             finally:
                 self._local.busy = False
-            self._pending = (self._start_event(anc, self.exported or ""), [])
+            # The parent's context: one it exported (or inherited), else none of its own
+            # yet (a pool a conftest creates at import), followed from there.
+            pctx = self.exported or "%d-0:%s" % (os.getppid(), self.ctx)
+            self._pending = (self._start_event(anc, pctx), [])
             mon = getattr(sys, "monitoring", None)
             if mon is not None and self.tool is not None:
                 mon.restart_events()  # code the parent ran is disabled
@@ -512,6 +517,25 @@ class _Tracer:
 
         # Not imported here: that would slow down the start of every traced process.
         _on_import("subprocess", patch)
+
+        def patch_mp(process):
+            # A forked multiprocessing worker is a process of its own from the start
+            # (one that only runs code may be terminated, ending with no os._exit).
+            cls = getattr(process, "BaseProcess", None)
+            orig = getattr(cls, "_bootstrap", None)
+            if orig is None or getattr(orig, "__smates__", False):
+                return
+
+            def _bootstrap(*args, **kwargs):
+                if tracer._pending is not None:
+                    tracer._begin()
+                return orig(*args, **kwargs)
+
+            _bootstrap.__smates__ = True
+            _bootstrap.__wrapped__ = orig
+            cls._bootstrap = _bootstrap
+
+        _on_import("multiprocessing.process", patch_mp)
 
     def child_env(self, env):
         """Returns env, a child's own environment, with the variables that trace the

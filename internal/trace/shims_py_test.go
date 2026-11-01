@@ -333,6 +333,96 @@ def close():
 	checkUnit(t, a, "test_c.py", nil, []string{"a.txt", "b.txt", "shared.txt"})
 }
 
+// A pool forked when the conftest is imported, before any context: its workers follow
+// the contexts of the tests that use it, and one that only runs code and is terminated
+// reports that code still.
+func TestPytestPoolForkedAtImport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no fork")
+	}
+	root := shimRepo(t, map[string]string{
+		"conftest.py": `import multiprocessing
+
+import pytest
+
+import calc  # imported (run) here: in test_c only the worker runs its code
+import helper
+
+POOL = multiprocessing.get_context("fork").Pool(1)
+CODE_POOL = multiprocessing.get_context("fork").Pool(1)  # its worker only runs code
+
+
+@pytest.fixture
+def pool():
+    return POOL
+
+
+@pytest.fixture
+def code_pool():
+    return CODE_POOL
+
+
+@pytest.fixture(scope="session", autouse=True)
+def stop_pool():
+    yield
+    for p in (POOL, CODE_POOL):
+        p.terminate()
+        p.join()
+`,
+		"helper.py": `import os
+
+
+def work(name):
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+        return f.read()
+`,
+		"calc.py":   "def double(x):\n    return 2 * x\n",
+		"test_a.py": "import helper\n\n\ndef test_a(pool):\n    pool.apply(helper.work, ('a.txt',))\n",
+		"test_b.py": "import helper\n\n\ndef test_b(pool):\n    pool.apply(helper.work, ('b.txt',))\n",
+		"test_c.py": "def test_c(code_pool):\n    import calc\n\n    assert code_pool.apply(calc.double, (2,)) == 4\n",
+		"a.txt":     "", "b.txt": "",
+	})
+	a := tracePytest(t, root, "-W", "ignore::DeprecationWarning")
+	checkUnit(t, a, "test_a.py", []string{"a.txt"}, []string{"b.txt"})
+	checkUnit(t, a, "test_b.py", []string{"b.txt"}, []string{"a.txt"})
+	checkUnit(t, a, "test_c.py", []string{"calc.py"}, []string{"a.txt", "b.txt"})
+}
+
+// The shim chains to the next sitecustomize on sys.path: another copy of the shim (smates
+// run under smates) is skipped, and one doing file and process work at import runs once.
+func TestPythonShimChainedSitecustomize(t *testing.T) {
+	py := testPython(t)
+	root := shimRepo(t, map[string]string{
+		"main.py":  "import pathlib\n\nprint(pathlib.Path('main.py').exists())\n",
+		"data.txt": "",
+	})
+	sh, traceDir := extractShims(t)
+	outer, err := ExtractShims(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := t.TempDir()
+	testutil.Write(t, user, "sitecustomize.py", `import os
+import pathlib
+import subprocess
+import sys
+
+os.stat(".")
+os.close(os.open(os.devnull, os.O_RDONLY))
+pathlib.Path(".").exists()
+subprocess.run([sys.executable, "-c", "pass"], env={"PATH": os.environ.get("PATH", "")}, check=True)
+print("user sitecustomize")
+`)
+	base := append(os.Environ(), "PYTHONPATH="+outer.Python+string(os.PathListSeparator)+user)
+	out, code := runPy(t, root, PythonEnv(traceDir, root, sh, base), py, "main.py")
+	if code != 0 || out != "user sitecustomize\nTrue\n" {
+		t.Errorf("exit %d, output:\n%s", code, out)
+	}
+	if m, _ := filepath.Glob(filepath.Join(traceDir, "proc-*.jsonl")); len(m) == 0 {
+		t.Errorf("not traced")
+	}
+}
+
 // A child forked to exec another program (preexec_fn) is that program: what Python ran
 // in between (the preexec function of a test file) is no part of it.
 func TestPytestPreexecChild(t *testing.T) {
