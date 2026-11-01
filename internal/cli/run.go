@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -431,10 +432,29 @@ func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observati
 func (c *cycle) saveState() error {
 	p, res := c.p, c.sel.res
 	switch {
-	case p.filtered, c.stopped:
-		// Only some suites ran (--suite, or --fail-fast stopped the run): the
-		// repository-wide snapshot stays as it was, so changes and orphans the tests
-		// that did not run would have covered are seen again next time.
+	case c.stopped:
+		// --fail-fast stopped the run: the repository-wide snapshot stays as it was,
+		// so changes and orphans the tests that did not run would have covered are
+		// seen again next time.
+	case len(p.others) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
+		// Every test of the suites --suite picked ran. Files only they own get their
+		// hash; files suites left out also own (or own alone) are marked as seen by
+		// the picked suites (selector.Marker), so the suites left out still find
+		// them changed on a shared state (locally, after `state merge`, or in CI
+		// without a cache-key per job). Commit and Created stay as they were on
+		// purpose: a partial refresh must not win State.Merge over a full
+		// snapshot, and hooks judge staleness by the last full run.
+		if p.state.Files == nil {
+			p.state.Files = map[string]string{}
+		}
+		for f, h := range p.snap {
+			p.recordSeen(f, h)
+		}
+		for f := range p.state.Files {
+			if _, ok := p.snap[f]; !ok {
+				p.recordSeen(f, "")
+			}
+		}
 	case res.Mode == selector.ModeAll || c.f.shadow:
 		p.state.Files = map[string]string(p.snap)
 		p.state.Commit = p.repo.Head()
@@ -445,7 +465,9 @@ func (c *cycle) saveState() error {
 		// branch does not ask again. Other files stay as recorded; per-test entries
 		// track them.
 		for _, o := range res.Orphans {
-			if h, ok := p.snap[o]; ok {
+			if len(p.others) > 0 {
+				p.recordSeen(o, p.snap[o])
+			} else if h, ok := p.snap[o]; ok {
 				p.state.Files[o] = h
 			} else {
 				delete(p.state.Files, o)
@@ -457,6 +479,53 @@ func (c *cycle) saveState() error {
 		return fmt.Errorf("saving state: %w", err)
 	}
 	return nil
+}
+
+// recordSeen records in the snapshot that the suites of a --suite run saw f with hash h
+// ("" = absent): the hash itself when no suite left out owns f, a marker otherwise
+// (selector.Marker). An entry still equal to h stays as it is, and so does the content
+// hash of a file only suites left out own (they have not compared it yet).
+func (p *project) recordSeen(f, h string) {
+	all := append(slices.Clip(p.suites), p.others...)
+	n := len(p.suites)
+	v, ok := p.state.Files[f]
+	_, _, marked := selector.ParseMarker(v)
+	switch {
+	case selector.OwnedOnly(f, all, n):
+		if h == "" {
+			delete(p.state.Files, f)
+		} else {
+			p.state.Files[f] = h
+		}
+	case ok && !marked && v == h:
+	case ok && !marked && !selector.Owned(f, all, n):
+	case !ok && h == "":
+	default:
+		var names []string
+		for _, s := range p.suites {
+			names = append(names, s.Name)
+		}
+		m := selector.MarkSeen(v, h, names)
+		if _, seen, _ := selector.ParseMarker(m); subsetOf(selector.Owners(f, all), seen) {
+			// Every suite that owns f has now seen this content: a plain entry.
+			if h == "" {
+				delete(p.state.Files, f)
+			} else {
+				p.state.Files[f] = h
+			}
+			return
+		}
+		p.state.Files[f] = m
+	}
+}
+
+func subsetOf(a, b []string) bool {
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
+	}
+	return true
 }
 
 // logOutcome logs how the run went.
