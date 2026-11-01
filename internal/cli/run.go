@@ -435,7 +435,9 @@ func (c *cycle) saveState() error {
 		// seen again next time.
 	case len(p.others) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
 		// Every test of the suites --suite picked ran: the snapshot is brought up to
-		// date for the files they own (selector.Owned). The entries of files only the
+		// date for the files they own (selector.Owned). Commit and Created stay as
+		// they were on purpose: a partial refresh must not win State.Merge over a
+		// full snapshot, and hooks judge staleness by the last full run. The entries of files only the
 		// suites left out own stay as recorded, so their pending changes are still
 		// seen by a run of those suites on a shared state (locally, after `state
 		// merge`, or in CI without a cache-key per job).
@@ -447,6 +449,10 @@ func (c *cycle) saveState() error {
 		for f, h := range p.snap {
 			if selector.Owned(f, all, n) {
 				p.state.Files[f] = h
+			} else if _, ok := p.state.Files[f]; !ok {
+				// Not compared by this state yet: still a change for the suites that
+				// own it, but not for this run's suites (selector.Unrecorded).
+				p.state.Files[f] = selector.Unrecorded
 			}
 		}
 		for f := range p.state.Files {

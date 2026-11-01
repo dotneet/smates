@@ -120,7 +120,9 @@ suites left out would run for under the orphan policy (it is under their root, n
 the root of a picked suite, and no suite rooted at the repository root is picked) is not
 an orphan of the run either (`selector.Owned`): the job that runs those suites handles
 it. A `--suite` run that runs every test of its suites (`--all`, `--shadow`) refreshes
-the snapshot like a full run.
+the snapshot entries of the files its suites own; files only the suites left out own
+keep their entry, or get the marker `?` (`selector.Unrecorded`) when they had none, so
+they stay changes for a run of their own suites but not for runs of the others.
 
 Orphans go through, in order:
 

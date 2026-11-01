@@ -415,8 +415,8 @@ suites:
 	if strings.Contains(out.String(), "Dockerfile") {
 		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
 	}
-	if _, ok := st.Files["b/notes.cfg"]; ok {
-		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run")
+	if h := st.Files["b/notes.cfg"]; h != selector.Unrecorded {
+		t.Errorf("b/notes.cfg (b's) was recorded by a --suite a run: %q", h)
 	}
 	out.Reset()
 	errb.Reset()
@@ -428,6 +428,26 @@ suites:
 	}
 	if err := json.Unmarshal(out.Bytes(), &jb); err != nil || !reflect.DeepEqual(jb.Orphans, []string{"b/notes.cfg"}) {
 		t.Errorf("b's pending change is lost: %v %s", err, out.String())
+	}
+
+	// With a recorded snapshot, a file added under b's root that a's test names still
+	// selects that test in a's job.
+	write("b/fixtures/users.json", "[]")
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select --suite a: %d %s", code, errb.String())
+	}
+	var ja struct {
+		Suites []struct {
+			Tests []struct {
+				Reason string `json:"reason"`
+			} `json:"tests"`
+		} `json:"suites"`
+		Orphans []string `json:"orphans"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &ja); err != nil || ja.Suites[0].Tests[0].Reason != "reference" || len(ja.Orphans) != 0 {
+		t.Errorf("new file under b's root named by a's test: %v %s", err, out.String())
 	}
 
 	out.Reset()

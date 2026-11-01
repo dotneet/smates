@@ -206,12 +206,14 @@ func Select(in *Input) (*Result, error) {
 			return nil, err
 		}
 		if len(in.Others) > 0 && len(in.State.Files) > 0 {
-			// A --suite --all run refreshes only the files its suites own (see
-			// cli saveState): a file the suites left out own that the snapshot has
-			// never held is theirs to compare, not a change of this run.
+			// A --suite --all run that found no snapshot entry for a file only the
+			// suites left out own records it as Unrecorded (cli saveState): its
+			// content was never compared by this state, so it is not a change of a
+			// run of other suites. A run of its own suites, or of every suite, sees
+			// it as changed.
 			all := append(slices.Clip(in.Suites), in.Others...)
 			for f := range changedSet {
-				if _, recorded := in.State.Files[f]; !recorded && in.Snap[f] != "" && !Owned(f, all, len(in.Suites)) {
+				if in.State.Files[f] == Unrecorded && !Owned(f, all, len(in.Suites)) {
 					delete(changedSet, f)
 				}
 			}
@@ -606,6 +608,12 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	}
 	return adds
 }
+
+// Unrecorded is the snapshot hash of a file whose content the snapshot does not hold:
+// a --suite --all run records it for the files only the suites left out own and the
+// snapshot had no entry for. It never equals a content hash, so any run that compares
+// the file finds it changed; only --suite runs of other suites skip it.
+const Unrecorded = "?"
 
 // orphanOwners returns the indexes of the suites (by root) an orphan may affect: the
 // suites whose root contains it, where a suite rooted at the repository root contains
