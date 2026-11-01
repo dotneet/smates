@@ -205,13 +205,13 @@ func TestListingGoFuncIgnoredFiles(t *testing.T) {
 		return decisions(f.sel(st, func(in *Input) { in.Repo = repo }))
 	}
 	run(nil)
-	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected", "p#(build)": "-unaffected"}) {
 		t.Fatalf("after the run: %v", got)
 	}
 	for i := range 3 {
 		os.Remove(filepath.Join(f.dir, "p/run.log")) // a fresh checkout
 		got := sel()
-		if want := map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected"}; !reflect.DeepEqual(got, want) {
+		if want := map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected", "p#(build)": "-unaffected"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("fresh checkout %d: %v, want %v", i, got, want)
 		}
 		run([]string{"p#TestA"})
@@ -219,7 +219,7 @@ func TestListingGoFuncIgnoredFiles(t *testing.T) {
 	for _, p := range []string{"p/.DS_Store", "p/cover.out", "p/p.test", "p/cpu.prof", "p/.a.go.swp", "p/.#a.go", "p/a.go~"} {
 		f.writeUntracked(p, "x")
 	}
-	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected"}) {
+	if got := sel(); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected", "p#(build)": "-unaffected"}) {
 		t.Errorf("ignored files in the package: %v", got)
 	}
 }

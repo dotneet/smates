@@ -24,9 +24,18 @@ package runner
 //     log recorded (files read, directories listed, environment variables), and what
 //     processes it started read — as for a package.
 //
+// Coverage also counts what re-executions of the test binary ran (the helper-process
+// pattern, exec.Command(os.Args[0], "-test.run=...")): the binary carries an init
+// that hands them the function's coverage directory (see childCoverSource).
+//
 // When the binary cannot be built with coverage (or the suite command is not a plain
 // `go test`), the package is recorded as a whole: every selected function gets the
 // package's observation, with every Go file of the closure as content.
+//
+// Every package with functions also has a compile-check unit, "dir#(build)", which
+// depends on the content of the package's whole static closure and builds and vets its
+// test binary without running it (gofunc_check.go): go test fails a package that does
+// not compile, whichever bodies its tests execute.
 //
 // Without recording, selected functions run with go test -run '^(A|B)$' and their
 // outcomes are read from go test's output.
@@ -54,13 +63,14 @@ func SplitFuncUnit(unit string) (dir, name string, ok bool) {
 	return unit[:i], unit[i+1:], true
 }
 
-// funcUnits lists the test functions of the test files. A file that does not parse
-// yields its package directory as a unit (the package does not compile; it runs, and
-// fails, as a whole). Files the suite's configuration does not compile (build
-// constraints, see excludedTestFiles) have no units.
+// funcUnits lists the test functions of the test files, then the compile-check unit
+// (BuildCheck) of each of their packages. A file that does not parse yields its
+// package directory as a unit (the package does not compile; it runs, and fails, as a
+// whole). Files the suite's configuration does not compile (build constraints, see
+// excludedTestFiles) have no units.
 func funcUnits(s *Suite, testFiles []string) []string {
 	seen := map[string]bool{}
-	var out []string
+	var out, checks []string
 	add := func(u string) {
 		if !seen[u] {
 			seen[u] = true
@@ -73,6 +83,10 @@ func funcUnits(s *Suite, testFiles []string) []string {
 			continue
 		}
 		d := path.Dir(f)
+		if c := FuncUnit(d, BuildCheck); !seen[c] {
+			seen[c] = true
+			checks = append(checks, c)
+		}
 		tf, err := readTestFile(s.RepoRoot, f)
 		if err != nil {
 			add(d)
@@ -82,17 +96,21 @@ func funcUnits(s *Suite, testFiles []string) []string {
 			add(FuncUnit(d, n))
 		}
 	}
-	return out
+	return append(out, checks...)
 }
 
-// splitUnits separates package units from function units (grouped by directory, in
-// order of first appearance).
-func splitUnits(units []string) (pkgs, dirs []string, funcs map[string][]string) {
+// splitUnits separates package units, function units (grouped by directory, in order
+// of first appearance) and the directories of compile checks.
+func splitUnits(units []string) (pkgs, dirs []string, funcs map[string][]string, checks []string) {
 	funcs = map[string][]string{}
 	for _, u := range units {
 		d, n, ok := SplitFuncUnit(u)
-		if !ok {
+		switch {
+		case !ok:
 			pkgs = append(pkgs, u)
+			continue
+		case n == BuildCheck:
+			checks = append(checks, d)
 			continue
 		}
 		if _, seen := funcs[d]; !seen {
@@ -100,7 +118,7 @@ func splitUnits(units []string) (pkgs, dirs []string, funcs map[string][]string)
 		}
 		funcs[d] = append(funcs[d], n)
 	}
-	return pkgs, dirs, funcs
+	return pkgs, dirs, funcs, checks
 }
 
 // Commands implements Commander (for --dry-run).
@@ -108,11 +126,17 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 	if !funcGranularity(rc.Suite) {
 		return nil, nil
 	}
-	pkgs, dirs, funcs := splitUnits(rc.Units)
+	pkgs, dirs, funcs, checks := splitUnits(rc.Units)
 	var out [][]string
+	for _, args := range chunk(pkgArgs(rc.Suite, checks)) {
+		if len(args) > 0 {
+			argv, _ := checkArgv(rc, args)
+			out = append(out, argv)
+		}
+	}
 	if rc.All && !rc.Suite.Narrowed {
 		argv, err := rc.CommandLine(nil, allPkgArgs(rc))
-		return [][]string{argv}, err
+		return append(out, argv), err
 	}
 	if len(pkgs) > 0 {
 		argv, err := rc.CommandLine(nil, pkgArgs(rc.Suite, pkgs))
@@ -148,8 +172,15 @@ func (res *RunResult) merge(r *RunResult) {
 }
 
 func runFuncs(ctx context.Context, rc *RunContext) (*RunResult, error) {
-	pkgs, dirs, funcs := splitUnits(rc.Units)
+	pkgs, dirs, funcs, checks := splitUnits(rc.Units)
 	res := &RunResult{}
+	if len(checks) > 0 {
+		r, err := runBuildChecks(ctx, rc, checks)
+		res.merge(r)
+		if err != nil {
+			return res, err
+		}
+	}
 	if len(pkgs) > 0 {
 		r, err := runPackages(ctx, rc, pkgs, false, "", nil)
 		res.merge(r)

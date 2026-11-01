@@ -147,13 +147,16 @@ func (s *selection) unitDeps(ss *suiteSel) {
 // how it reaches the test; later sources win: the sets of the depends_on/serves
 // declarations that apply to it, its static import closure (static), the suite's
 // inputs, the suite's rules and the unit's own test files. A declaration a unit
-// depends on is declared (see declare).
+// depends on is declared (see declare). A Go compile check (runner.IsBuildCheck)
+// depends on what the compiler reads, not on what the tests do at run time: neither
+// declarations nor rules apply to it.
 func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bool, mapper runner.StaticMapper) map[string]string {
 	sr, su := ss.sr, ss.sr.Suite
 	files := sr.Files[u]
 	via := map[string]string{}
+	check := runner.IsBuildCheck(u)
 	for _, d := range sr.Services {
-		if d.applies(su, u, files) {
+		if !check && d.applies(su, u, files) {
 			via[d.Key] = ViaService
 			s.declare(d)
 		}
@@ -170,8 +173,10 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 	for _, f := range inputs {
 		via[f] = ViaInput
 	}
-	for _, f := range ruleDeps(su, u, files, s.files) {
-		via[f] = ViaInput
+	if !check {
+		for _, f := range ruleDeps(su, u, files, s.files) {
+			via[f] = ViaInput
+		}
 	}
 	for _, f := range files {
 		via[f] = ViaTest

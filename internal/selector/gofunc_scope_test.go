@@ -10,7 +10,7 @@ import (
 
 // Scoped rules and depends_on declarations select Go test functions
 // (granularity: func) by their package directory or their test file, as they select
-// the package unit.
+// the package unit. They do not apply to the packages' compile checks.
 func TestScopedDepsGoFuncUnits(t *testing.T) {
 	f := newFixture(t, map[string]string{
 		"go.mod":                   "module example.com/m\n\ngo 1.22\n",
@@ -40,6 +40,7 @@ func TestScopedDepsGoFuncUnits(t *testing.T) {
 		{"backend/server/server.go", map[string]string{"e2e/login#TestLogin": "-unaffected", "e2e/admin#TestAdmin": "-unaffected", "e2e/admin#TestExtra": ReasonChanged}},
 		{"docker-compose.yml", map[string]string{"e2e/login#TestLogin": "-unaffected", "e2e/admin#TestAdmin": ReasonChanged, "e2e/admin#TestExtra": ReasonChanged}},
 	} {
+		c.want["e2e/login#(build)"], c.want["e2e/admin#(build)"] = "-unaffected", "-unaffected"
 		orig := f.files[c.file]
 		f.write(c.file, orig+"\n-- changed\n")
 		if got := decisions(f.sel(st, nil)); !reflect.DeepEqual(got, c.want) {

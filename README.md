@@ -153,6 +153,22 @@ build flags such as `-tags` and `-race`) and runs every function in its own proc
   full; and the listing of its package directory (a file added there selects every
   function of the package).
 
+Code a test runs in a re-execution of its own test binary (the helper-process pattern,
+`exec.Command(os.Args[0], "-test.run=^TestX$")`) counts for that test too: the binary
+hands such children the function's coverage directory. A child that writes no coverage
+(it panics, or is killed) makes the function depend on every Go file it could reach.
+
+A package that does not compile fails in `go test` whichever bodies its tests execute, so
+every package with test functions also has a **compile check**, the unit
+`internal/api#(build)`. It depends on the content of the package's whole static closure
+(its Go and test files, those of the packages it imports, embedded files) and runs
+`go test -run '^$'` with the test binaries built and vetted but not executed (smates is
+their `-exec` program; `TestMain` does not run). A body edit no test executes (an
+unused helper that no longer type-checks, an unused import, a vet failure) thus selects
+the checks of its package and of the packages importing it, which fail with the
+compiler's output; an ordinary body edit selects the functions that executed it plus
+these cheap checks.
+
 A changed test file selects the functions it declares; a new function is selected as new.
 Selected functions run with `go test -run '^(TestA|TestB)$'` (or the whole package when
 the pattern would be too long) when not recording. When the binary cannot be built with

@@ -28,6 +28,7 @@
     "p/b_test.go",
     "p/b_test.go#decls",
     "q/",
+    "q/q.go",
     "q/q.go#decls",
     "q/q_extra_test.go",
     "q/q_extra_test.go#decls",
@@ -134,9 +135,42 @@
             "q/q_extra_test.go#decls": "import"
           },
           "duration_ms": 10
+        },
+        {
+          "id": "p#(build)",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "p/b.go"
+          ],
+          "via": {
+            "p/b.go": "import"
+          },
+          "duration_ms": 10
+        },
+        {
+          "id": "q#(build)",
+          "selected": true,
+          "reason": "changed",
+          "changed": [
+            "p/b.go",
+            "q/q_extra_test.go"
+          ],
+          "via": {
+            "p/b.go": "import",
+            "q/q_extra_test.go": "test"
+          },
+          "duration_ms": 10
         }
       ],
       "deps": {
+        "p#(build)": [
+          "go.mod",
+          "p/a.go",
+          "p/a_test.go",
+          "p/b.go",
+          "p/b_test.go"
+        ],
         "p#TestA": [
           "@set:paths:docker-compose.yml",
           "go.mod",
@@ -166,6 +200,14 @@
           "p/b.go#decls",
           "p/b_test.go"
         ],
+        "q#(build)": [
+          "go.mod",
+          "p/a.go",
+          "p/b.go",
+          "q/q.go",
+          "q/q_extra_test.go",
+          "q/q_test.go"
+        ],
         "q#TestQ": [
           "go.mod",
           "migrations/001.sql",
@@ -190,6 +232,13 @@
         ]
       },
       "known": {
+        "p#(build)": [
+          "go.mod",
+          "p/a.go",
+          "p/a_test.go",
+          "p/b.go",
+          "p/b_test.go"
+        ],
         "p#TestA": [
           "@set:paths:docker-compose.yml",
           "go.mod",
@@ -216,6 +265,14 @@
           "p/a_test.go#decls",
           "p/b.go#decls",
           "p/b_test.go"
+        ],
+        "q#(build)": [
+          "go.mod",
+          "p/a.go",
+          "p/b.go",
+          "q/q.go",
+          "q/q_extra_test.go",
+          "q/q_test.go"
         ],
         "q#TestQ": [
           "go.mod",
@@ -244,6 +301,10 @@
         "go.mod"
       ],
       "files": {
+        "p#(build)": [
+          "p/a_test.go",
+          "p/b_test.go"
+        ],
         "p#TestA": [
           "p/a_test.go"
         ],
@@ -252,6 +313,10 @@
         ],
         "p#TestB2": [
           "p/b_test.go"
+        ],
+        "q#(build)": [
+          "q/q_extra_test.go",
+          "q/q_test.go"
         ],
         "q#TestQ": [
           "q/q_test.go"

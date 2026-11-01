@@ -293,7 +293,7 @@ can alter test results.
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
-| go test, `granularity: func` | top-level test function | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`) + declarations of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`) |
+| go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
 
 Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
 the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
@@ -414,6 +414,66 @@ the top-level `--- FAIL/PASS/SKIP` lines (or `-json` events) before each package
 summary line: a package that passed passes all its functions, a failed build fails them
 all, other functions of a failed package are unknown (inferred).
 
+*Re-executions of the test binary.* The helper-process pattern runs part of a test in a
+child of the same binary (`exec.Command(os.Args[0], "-test.run=^TestX$")` with a
+variable telling the child what to do). A test binary writes its counters only where
+`-test.gocoverdir` says (otherwise to a temporary directory it removes; `GOCOVERDIR` is
+used only by the exit hook of a binary whose tests did not finish, an `os.Exit` in a
+test), and the child's arguments are the test's, so recording adds one test file to the
+package through `-overlay` (merged with a user `-overlay`; never written into the
+package): its `init` puts `-test.gocoverdir=$SMATES_GOCOVERDIR` in front of the
+arguments and leaves a start marker named after the process ID there. The function runs
+with that variable set to its coverage directory, so its own process and every
+re-execution inheriting its environment write counters into the same directory, from
+which go builds the function's profile when its tests end. A marker without a counter
+file of its process (a child that panicked or was killed: no exit hook runs) makes the
+function's coverage uncertain, as a missing profile does: every Go file of its closure
+becomes a content dependency (otherwise a failing run would record less than the code
+the child ran, and the run fixing it would look like a flake). A child given an
+environment of its own (`cmd.Env` without `os.Environ()`) or started from a copy of the
+binary is not seen; neither is a child of a binary built without coverage.
+
+*Compile checks.* A function's dependencies are the bodies it executed and the
+declarations around them, which is what its outcome depends on once the package builds.
+But go test fails a package, and every package importing it, when any file of the
+package or of its test files does not type-check, misses an import or fails go test's
+vet checks — whichever bodies its tests run: an edit inside a body no test executes
+(an unused helper now returning the wrong type) would select nothing while `go test`
+reports `[build failed]`. Every package with function units (any compiled test file)
+therefore also has the unit `dir#(build)` (`runner.BuildCheck`; not an identifier, so no
+test function has the name; listed after the functions). Its test files are all the
+package's test files, and `MapStatic` leaves its static closure as content: it depends
+on every Go and test file of the package, the Go files of the in-repository packages it
+imports (transitively), embedded files and `go.mod`, as a package unit does — but not on
+depends_on/serves declarations, rules or files read at run time (`knownDeps`: they
+cannot change whether it compiles), and the reference scan never pulls it in. Running
+the selected checks is one `go test -run '^$' -count=1 -exec=<smates> <packages>`
+(chunked like other argument lists) with `SMATES_GOCHECK=1`, in which smates exits at
+once: go builds, links and vets each test binary as go test does, and never runs it, so
+`TestMain`, `init` functions and package variables of the tests do not run. It takes the
+build flags of the suite command and the arguments passed through and the `-vet`
+setting, and `GOFLAGS` without its test flags (`-run`, `-json`, `-exec`, profiles), so it
+builds what go test builds. Without a usable path to smates (not known, or quoted) the
+binaries run with `-run '^$'` instead. A package go test reports as `[build failed]` or
+`[setup failed]` fails its check, with the compiler's output (a package that fails only
+because one it imports does not build gets the invocation's output); when go test
+fails before reporting any package (a go.mod that does not parse), every check fails.
+Checks are recorded with their known dependencies, so a passing check is skipped until
+a file of its closure changes, and a failed one runs until it passes. With static
+analysis off (`static: false`) a check knows only its test files and the suite's
+inputs, as a package unit then does.
+
+The check carries the package's failure; the function units do not take it over. Their
+recorded outcomes still hold for their dependencies (a broken body none of them ran is
+in none of their deps), so after a fix only the checks run again, and a body edit that
+breaks the build selects the cheap checks, not every function of the package and its
+importers. Functions of a non-compiling package that are selected anyway fail as before
+(the coverage build fails, the package is recorded as a whole and go test reports
+`[build failed]`); in shadow mode they are no escapes when their package's check was
+selected and failed. The cost is a compile of the test binaries of the changed package and
+its importers per change to them (go's build cache keeps it small); package granularity
+needs no check, since its unit runs the whole package.
+
 **Python module-level state.** pytest imports a module once per process, and caches
 (`functools.cache`) run once: a read made then belongs to the module that made it
 (`by` in the trace), and is given to every test that depends on that module (`ReadsBy`,
@@ -437,7 +497,8 @@ not reported as definite misses; so is a process exit code that covers several u
 `--test-isolation=none`). Units that ran but left no trace in a failing run are
 `unknown` (re-run next time), and so are files the vitest reporter saw cut short (`--bail`,
 an interrupted run: never started, or tests that were declared to run but did not
-finish). Go packages that fail to build are failures.
+finish). Go packages that fail to build are failures (with `granularity: func`, of the
+package's compile check `dir#(build)` and of the functions that ran).
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected

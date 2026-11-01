@@ -16,6 +16,7 @@ type goFlags struct {
 	tail  []string // arguments after -args
 	exec  []string // a user -exec program
 	p     int      // -p: packages built and tested at once (0 = the default)
+	vet   string   // the -vet setting ("" = go test's default)
 	// why is set when per-function recording cannot be used with this command.
 	why string
 }
@@ -107,8 +108,10 @@ func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
 			g.test = append(g.test, "-test."+name+"="+val)
 		case name == "v" || name == "short" || name == "failfast" || name == "fullpath":
 			g.test = append(g.test, "-test."+name+suffixValue(val, hasVal))
+		case name == "vet":
+			g.vet = val // for compile checks (gofunc_check.go)
 		case goTestValueFlags[name] || goTestBoolFlags[name]:
-			// Profiles, -json, coverage settings (smates sets its own), -vet: not used.
+			// Profiles, -json, coverage settings (smates sets its own): not used.
 		default:
 			if name == "p" {
 				if n, err := strconv.Atoi(val); err == nil && n > 0 {
