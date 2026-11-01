@@ -62,8 +62,8 @@ const GoFlagsOrigEnv = "SMATES_GOFLAGS_ORIG"
 
 // GoRun is one traced Go test binary execution.
 type GoRun struct {
-	Dir   string   `json:"dir"`   // absolute package directory (the binary's cwd)
-	Files []string `json:"files"` // absolute paths opened or stat'ed by the test
+	Dir   string   `json:"dir"`           // absolute package directory (the binary's cwd)
+	Files []string `json:"files"`         // absolute paths opened or stat'ed by the test
 	Env   []string `json:"env,omitempty"` // environment variables the test looked up
 	Exit  int      `json:"exit"`
 	Ms    int64    `json:"ms"`
