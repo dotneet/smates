@@ -322,14 +322,23 @@ func Select(in *Input) (*Result, error) {
 	}
 
 	if res.Mode != ModeAll {
+		all := append(slices.Clip(in.Suites), in.Others...)
+		leftOut := 0
 		for _, f := range res.Changed {
 			if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
 				continue
 			}
 			existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)
 			if Covers(covered, f, existenceChanged) == "" {
+				if len(in.Others) > 0 && !Owned(f, all, len(in.Suites)) {
+					leftOut++
+					continue
+				}
 				res.Orphans = append(res.Orphans, f)
 			}
+		}
+		if leftOut > 0 {
+			res.Notes = append(res.Notes, fmt.Sprintf("%d unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them", leftOut))
 		}
 	}
 	return res, nil
@@ -565,20 +574,14 @@ func (r *Result) Apply(adds []Addition) (unknown []Addition) {
 // suites whose root contains the orphan (a suite rooted at the repository root contains
 // every file), or all suites for orphans outside any non-root suite.
 func (r *Result) OrphanAll(orphans []string) []Addition {
+	roots := make([]string, len(r.Suites))
+	for i, s := range r.Suites {
+		roots[i] = s.Suite.Root
+	}
 	pick := map[string][]string{} // suite -> orphans that pull it in
 	for _, o := range orphans {
-		matched := false
-		for _, s := range r.Suites {
-			if s.Suite.Root != "." && pathutil.Under(o, s.Suite.Root) {
-				pick[s.Name] = append(pick[s.Name], o)
-				matched = true
-			}
-		}
-		for _, s := range r.Suites {
-			// With a match, also the root suites ("." or ""), which contain every file.
-			if (!matched || pathutil.Under(o, s.Suite.Root)) && !slices.Contains(pick[s.Name], o) {
-				pick[s.Name] = append(pick[s.Name], o)
-			}
+		for _, i := range orphanOwners(o, roots) {
+			pick[r.Suites[i].Name] = append(pick[r.Suites[i].Name], o)
 		}
 	}
 	var adds []Addition
@@ -588,6 +591,49 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 		}
 	}
 	return adds
+}
+
+// orphanOwners returns the indexes of the suites (by root) an orphan may affect: the
+// suites whose root contains it, where a suite rooted at the repository root contains
+// every file but only counts on its own when no other suite contains the orphan (then
+// every suite may be affected).
+func orphanOwners(o string, roots []string) []int {
+	var out []int
+	for i, r := range roots {
+		if r != "." && r != "" && pathutil.Under(o, r) {
+			out = append(out, i)
+		}
+	}
+	if len(out) == 0 {
+		for i := range roots {
+			out = append(out, i)
+		}
+		return out
+	}
+	for i, r := range roots {
+		if r == "." || r == "" {
+			out = append(out, i)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// Owned reports whether a change belongs to at least one of the first n suites of all
+// (the suites a --suite run selects; the rest are the suites left out): the orphan
+// policy over every suite would run one of them for it. A change only suites left out
+// own is theirs to handle, in the job that runs them.
+func Owned(f string, all []*runner.Suite, n int) bool {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	for _, i := range orphanOwners(f, roots) {
+		if i < n {
+			return true
+		}
+	}
+	return false
 }
 
 // References finds tests that mention an orphan file by name in their own sources or

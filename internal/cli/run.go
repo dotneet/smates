@@ -428,11 +428,15 @@ func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observati
 func (c *cycle) saveState() error {
 	p, res := c.p, c.sel.res
 	switch {
-	case p.filtered, c.stopped:
-		// Only some suites ran (--suite, or --fail-fast stopped the run): the
-		// repository-wide snapshot stays as it was, so changes and orphans the tests
-		// that did not run would have covered are seen again next time.
+	case c.stopped:
+		// --fail-fast stopped the run: the repository-wide snapshot stays as it was,
+		// so changes and orphans the tests that did not run would have covered are
+		// seen again next time.
 	case res.Mode == selector.ModeAll || c.f.shadow:
+		// Every test ran, or with --suite every test of the suites it picked: a
+		// change the suites left out own is never this run's orphan
+		// (selector.Owned), and a job that runs them keeps its own state, so the
+		// whole snapshot is brought up to date either way.
 		p.state.Files = map[string]string(p.snap)
 		p.state.Commit = p.repo.Head()
 		p.state.Created = c.now

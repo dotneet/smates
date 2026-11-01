@@ -16,6 +16,7 @@ import (
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 func TestParseShard(t *testing.T) {
@@ -383,7 +384,32 @@ suites:
 		t.Errorf("a change no suite depends on: %s, orphans %v", reason, orphans)
 	}
 
+	// A change under suite b's root that no test depends on is b's orphan, not a's.
+	write("b/notes.cfg", "x")
+	if reason, orphans := selectA(); reason != "orphan" || !reflect.DeepEqual(orphans, []string{"Dockerfile"}) {
+		t.Errorf("a change under another suite's root: %s, orphans %v", reason, orphans)
+	}
+
+	// --suite a --all records the snapshot: afterwards only new changes count.
 	var out, errb bytes.Buffer
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "a", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite a --all: %d %s", code, errb.String())
+	}
+	st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz"))
+	if err != nil || len(st.Files) == 0 || st.Files["Dockerfile"] == "" {
+		t.Fatalf("snapshot after --suite --all: %v, %d files", err, len(st.Files))
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--suite", "a", "--format", "json"}, &out, &errb); code != 0 {
+		t.Fatalf("select: %d %s", code, errb.String())
+	}
+	if strings.Contains(out.String(), "Dockerfile") {
+		t.Errorf("Dockerfile is in the recorded snapshot: %s", out.String())
+	}
+
+	out.Reset()
+	errb.Reset()
 	if code := Main([]string{"select", "-C", g.dir, "--suite", "nope"}, &out, &errb); code == 0 || !strings.Contains(errb.String(), "unknown suite") {
 		t.Errorf("unknown suite: %d %s", code, errb.String())
 	}

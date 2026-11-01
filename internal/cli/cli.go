@@ -144,9 +144,6 @@ type project struct {
 	ci        ciInfo
 	log       io.Writer
 	verbose   bool
-	// filtered is set when --suite limited the suites (repository-wide bookkeeping
-	// such as the snapshot is then left alone).
-	filtered bool
 	// others are the suites --suite left out (they still explain changes, see
 	// selector.Input.Others).
 	others []*runner.Suite
@@ -234,7 +231,6 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	p := &project{
 		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, state: st, snap: snap, files: files,
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose,
-		filtered: len(cf.suites) > 0,
 	}
 	return p, nil
 }
