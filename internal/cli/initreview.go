@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/dotneet/smates/internal/agent"
@@ -85,9 +86,16 @@ func slug(s string) string {
 	return strings.TrimSuffix(b.String(), "-")
 }
 
-// initReview collects the items of init that need a decision.
-func initReview(repo *gitx.Repo, suites []config.Suite, files []string, mk []makeHint, github bool) []reviewItem {
+// initReview collects the items of init that need a decision. existing is the config
+// init --github runs over (nil for a fresh init, judged with the defaults it writes):
+// its orphans policy, agent settings and suite env count.
+func initReview(repo *gitx.Repo, existing *config.Config, suites []config.Suite, files []string, mk []makeHint, github bool) []reviewItem {
 	out := []reviewItem{}
+	cfg := existing
+	if cfg == nil {
+		cfg = &config.Config{}
+		_ = cfg.Normalize()
+	}
 	if len(suites) == 0 {
 		out = append(out, reviewItem{
 			ID: "no-suites", Kind: "no-suites", Reason: "no test suite was detected", Evidence: []string{},
@@ -166,6 +174,9 @@ func initReview(repo *gitx.Repo, suites []config.Suite, files []string, mk []mak
 		})
 	}
 	for _, e := range in.Env {
+		if slices.ContainsFunc(suites, func(s config.Suite) bool { _, ok := s.Env[e.Name]; return ok }) {
+			continue // a suite's env: sets it
+		}
 		act := reviewAction{
 			Description: "set it in the shell, in the suite's env: in smates.yml, or in the CI workflow's env:",
 			Config:      &configFix{Key: "suites." + suiteOf(suites, e.ReadBy) + ".env." + e.Name, Value: e.Example},
@@ -205,12 +216,11 @@ func initReview(repo *gitx.Repo, suites []config.Suite, files []string, mk []mak
 		}
 		out = append(out, it)
 	}
-	cfg := &config.Config{}
-	if cfg.Normalize() == nil {
+	if cfg.Orphans == config.OrphansAgent {
 		if ok, why := agent.Available(cfg.Agent); !ok {
 			out = append(out, reviewItem{
 				ID: "orphans-policy", Kind: "orphans-policy",
-				Reason:   "orphans: agent (the default) asks an LLM about changes no test is known to depend on, but no agent is available (" + why + "): such changes run the suites they may affect in full",
+				Reason:   "orphans: agent asks an LLM about changes no test is known to depend on, but no agent is available (" + why + "): such changes run the suites they may affect in full",
 				Evidence: []string{why},
 				Action: reviewAction{
 					Description: "keep orphans: agent and set ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY (locally and as a CI secret), or choose all explicitly",

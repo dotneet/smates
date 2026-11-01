@@ -98,6 +98,11 @@ func configFile(dir, explicit string) (abs, display string, err error) {
 // editConfig applies edit to the config file at path and writes the result unless
 // dryRun (always computing the diff).
 func editConfig(path, display string, dryRun bool, res *configEdit, edit func([]byte) ([]byte, error)) error {
+	// Edit the target of a symlinked config, keeping the link.
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

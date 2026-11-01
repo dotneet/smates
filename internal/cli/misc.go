@@ -91,7 +91,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		rep.ConfigYAML = doc
-		rep.NeedsReview = initReview(repo, suites, files, mk, *github)
+		rep.NeedsReview = initReview(repo, nil, suites, files, mk, *github)
 		return writeJSON(stdout, rep)
 	}
 	path := filepath.Join(repo.Root, "smates.yml")
@@ -130,7 +130,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	if asJSON {
-		rep.NeedsReview = initReview(repo, suites, files, mk, *github)
+		rep.NeedsReview = initReview(repo, nil, suites, files, mk, *github)
 		return writeJSON(stdout, rep)
 	}
 	fmt.Fprint(stdout, initNextStepsText)
@@ -170,7 +170,7 @@ func initWorkflowOnly(repo *gitx.Repo, cfg *config.Config, files []string, patch
 		rep.FilesWritten = append(rep.FilesWritten, wf.PatchFile)
 	}
 	if asJSON {
-		rep.NeedsReview = initReview(repo, cfg.Suites, files, nil, true)
+		rep.NeedsReview = initReview(repo, cfg, cfg.Suites, files, nil, true)
 		return writeJSON(stdout, rep)
 	}
 	return nil

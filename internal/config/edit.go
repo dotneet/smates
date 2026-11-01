@@ -6,6 +6,7 @@ package config
 // edit is checked by parsing the result again (Parse) before it is returned.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"reflect"
@@ -349,6 +350,16 @@ func lookup(m *yaml.Node, key string) (k, v *yaml.Node) {
 type text struct {
 	data  []byte
 	start []int // byte offset of each line (line n starts at start[n-1])
+	// eol ends the lines the edits insert: "\r\n" when the document uses CRLF.
+	eol string
+}
+
+// block converts block (lines ending in "\n") to the document's line endings.
+func (t *text) block(b string) string {
+	if t.eol == "\n" {
+		return b
+	}
+	return strings.ReplaceAll(b, "\n", t.eol)
 }
 
 // parseDoc parses data and returns its top-level mapping (nil for an empty document).
@@ -357,7 +368,10 @@ func parseDoc(data []byte) (*text, *yaml.Node, error) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, nil, err
 	}
-	t := &text{data: data, start: []int{0}}
+	t := &text{data: data, start: []int{0}, eol: "\n"}
+	if bytes.Contains(data, []byte("\r\n")) {
+		t.eol = "\r\n"
+	}
 	for i, c := range data {
 		if c == '\n' {
 			t.start = append(t.start, i+1)
@@ -389,11 +403,23 @@ func (t *text) offset(line, col int) int {
 	return o
 }
 
-// lineEnd is the offset of the newline ending line (len(data) for the last line
-// without one).
+// lineEnd is the offset of the line break ("\n" or "\r\n") ending line (len(data)
+// for the last line without one).
 func (t *text) lineEnd(line int) int {
 	if line < len(t.start) {
-		return t.start[line] - 1
+		e := t.start[line] - 1
+		if e > t.start[line-1] && t.data[e-1] == '\r' {
+			e--
+		}
+		return e
+	}
+	return len(t.data)
+}
+
+// next is the offset of the line after line (len(data) for the last line).
+func (t *text) next(line int) int {
+	if line < len(t.start) {
+		return t.start[line]
 	}
 	return len(t.data)
 }
@@ -433,11 +459,11 @@ func (t *text) insertAfterLine(line int, block string) []byte {
 	at := t.lineEnd(line)
 	var b []byte
 	b = append(b, t.data[:at]...)
-	b = append(b, '\n')
-	b = append(b, strings.TrimSuffix(block, "\n")...)
+	b = append(b, t.eol...)
+	b = append(b, t.block(strings.TrimSuffix(block, "\n"))...)
 	b = append(b, t.data[at:]...)
 	if at == len(t.data) {
-		b = append(b, '\n')
+		b = append(b, t.eol...)
 	}
 	return b
 }
@@ -446,9 +472,9 @@ func (t *text) insertAfterLine(line int, block string) []byte {
 func (t *text) appendBlock(root *yaml.Node, block string) []byte {
 	b := append([]byte{}, t.data...)
 	if len(b) > 0 && b[len(b)-1] != '\n' {
-		b = append(b, '\n')
+		b = append(b, t.eol...)
 	}
-	return append(b, block...)
+	return append(b, t.block(block)...)
 }
 
 // replaceNull replaces a null value (empty, ~ or null) with block, written on the
@@ -466,10 +492,8 @@ func (t *text) replaceNull(v *yaml.Node, block string) ([]byte, error) {
 		return nil, fmt.Errorf("line %d: unexpected text after the value: edit it by hand", v.Line)
 	}
 	var b strings.Builder
-	b.WriteString(head + rest + "\n" + block)
-	if end < len(t.data) {
-		b.Write(t.data[end+1:])
-	}
+	b.WriteString(head + rest + t.eol + t.block(block))
+	b.Write(t.data[t.next(v.Line):])
 	return []byte(b.String()), nil
 }
 
@@ -493,7 +517,7 @@ func (t *text) replaceScalar(k, v *yaml.Node, val string) ([]byte, error) {
 		n = quotedLen(line, '\'')
 	default:
 		n = len(line)
-		if i := strings.Index(line, " #"); i >= 0 {
+		if i := commentStart(line); i >= 0 {
 			n = i
 		}
 		n = len(strings.TrimRight(line[:n], " \t"))
@@ -502,6 +526,17 @@ func (t *text) replaceScalar(k, v *yaml.Node, val string) ([]byte, error) {
 		return nil, fmt.Errorf("line %d: multi-line value: edit it by hand", v.Line)
 	}
 	return []byte(string(t.data[:from]) + val + string(t.data[from+n:])), nil
+}
+
+// commentStart is the offset of the first "#" after a space or a tab in s (-1 when
+// there is none).
+func commentStart(s string) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] == '#' && (s[i-1] == ' ' || s[i-1] == '\t') {
+			return i
+		}
+	}
+	return -1
 }
 
 // quotedLen returns the length of the quoted scalar starting s (0 when it does not end
