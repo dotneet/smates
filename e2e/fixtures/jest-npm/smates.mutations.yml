@@ -1,9 +1,0 @@
-# The mutation sweep runs with this config (fixture.json "mutation_config"): smates.yml
-# without isolate. A sweep only checks that the failing tests were selected and drops
-# the state it records, so exact per-file attribution buys it nothing, while one jest
-# process per test file costs more than twice as much. It also runs jest's default
-# recording path (one worker restarted after every file).
-version: 1
-suites:
-  - name: jest
-    runner: jest

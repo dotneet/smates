@@ -29,7 +29,8 @@ type Adapter interface {
 	// For most runners a unit is a test file; for Go it is a package directory.
 	Units(s *Suite, testFiles []string) []string
 	// Run executes the suite (all tests, or the given units) and, when rc.Record is set,
-	// returns per-unit observations.
+	// returns per-unit observations. Without rc.Record it returns the statuses the
+	// runner reported per unit when it can do so without tracing (no dependencies).
 	Run(ctx context.Context, rc *RunContext) (*RunResult, error)
 }
 
@@ -89,11 +90,15 @@ type RunContext struct {
 	Suite *Suite
 	// Units to run (repo-relative IDs; always the full list). When All is set, adapters
 	// may let the runner discover tests itself instead of passing Units.
-	Units     []string
-	All       bool
-	Record    bool
+	Units  []string
+	All    bool
+	Record bool
+	// Fresh asks for outcomes the runner did not take from a cache of earlier runs
+	// (shadow mode evaluates the selection against them). Recording always runs fresh.
+	Fresh     bool
 	ExtraArgs []string
-	// TraceDir is an empty directory for trace output owned by this run.
+	// TraceDir is an empty directory for trace output owned by this run. Without Record
+	// it only receives the per-file results of runner reporters ("" for none).
 	TraceDir string
 	// ShimDir holds the extracted language shims (see package trace).
 	ShimDir string
@@ -114,7 +119,7 @@ type RunContext struct {
 type RunResult struct {
 	ExitCode int
 	Duration time.Duration
-	// Observations per unit ID (only when recording).
+	// Observations per unit ID (without recording: only reported statuses).
 	Observations map[string]*Observation
 	// Warnings to show the user (e.g. attribution was coarse).
 	Warnings []string

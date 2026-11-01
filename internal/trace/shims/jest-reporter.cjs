@@ -25,6 +25,12 @@ function failureMessage(result) {
 }
 
 class SmatesReporter {
+  constructor() {
+    // Tells smates the reporter was accepted, even if no test file runs.
+    try {
+      fs.writeFileSync(path.join(process.env.SMATES_TRACE_DIR || '.', `reporter-loaded-${process.pid}`), '');
+    } catch (_) {}
+  }
   onTestResult(test, result) {
     const failed = result.numFailingTests > 0 || Boolean(result.testExecError) || Boolean(result.failureMessage && result.numPassingTests === 0 && result.numPendingTests === 0);
     const ms = result.perfStats ? result.perfStats.end - result.perfStats.start : 0;

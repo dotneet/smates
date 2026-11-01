@@ -76,8 +76,13 @@ func (pytest) Units(s *Suite, testFiles []string) []string { return unitsAreFile
 func (pytest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	var env []string
 	var extra []string
-	if rc.Record {
-		env = trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	if rc.TraceDir != "" {
+		if rc.Record {
+			env = trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+		} else {
+			// Without recording the plugin only writes per-file results.
+			env = trace.PytestResultsEnv(rc.TraceDir, rc.Shims(), suiteEnv(rc.Suite))
+		}
 		// One module failing to import would otherwise stop the whole session, leaving
 		// every other test file without a result.
 		if !hasArg(rc, "-x") && !hasArg(rc, "--exitfirst") && !hasArg(rc, "--continue-on-collection-errors") {
@@ -92,8 +97,12 @@ func (pytest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	}
 	code, err := runBatches(ctx, rc, extra, rc.RelArgs(""), env, ok...)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
-	if err != nil || !rc.Record {
+	if err != nil {
 		return res, err
+	}
+	if !rc.Record {
+		res.Observations, res.Warnings = reported(rc)
+		return res, nil
 	}
 	res.Observations, res.Warnings, res.ReadsBy, err = observeAll(rc, code, traceOptions{})
 	return res, err

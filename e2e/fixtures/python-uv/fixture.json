@@ -1,4 +1,5 @@
 {
   "requires": ["uv", "git", "sh"],
-  "setup": [["uv", "sync", "--frozen"]]
+  "setup": [["uv", "sync", "--frozen"]],
+  "mutation_no_record": true
 }

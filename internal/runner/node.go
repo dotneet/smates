@@ -45,7 +45,7 @@ func exportNodeV8(rc *RunContext, res *RunResult) {
 // runNodeAttempt is runNode without exporting the coverage: one attempt that may be
 // retried (runNodeWithFallback).
 func runNodeAttempt(ctx context.Context, rc *RunContext, extra, testArgs []string, opt traceOptions) (*RunResult, error) {
-	var env []string
+	env := resultsEnv(rc)
 	if rc.Record {
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
@@ -55,8 +55,12 @@ func runNodeAttempt(ctx context.Context, rc *RunContext, extra, testArgs []strin
 	start := time.Now()
 	code, err := runBatches(ctx, rc, extra, testArgs, env)
 	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
-	if err != nil || !rc.Record {
+	if err != nil {
 		return res, err
+	}
+	if !rc.Record {
+		res.Observations, res.Warnings = reported(rc)
+		return res, nil
 	}
 	res.Observations, res.Warnings, err = observe(rc, code, opt)
 	return res, err
@@ -86,9 +90,10 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// Vitest runs each test file in a fresh worker (isolate: true, the default), so V8
 	// coverage per worker attributes exactly. Per-file status comes from a reporter we
 	// add next to the default one, unless the user configures reporters (CLI reporters
-	// would replace theirs); then a failing run marks every recorded file failed.
+	// would replace theirs); then a failing run marks every recorded file failed. The
+	// reporter is also added without recording (no tracing), for per-file status.
 	var extra []string
-	if rc.Record && !userConfigures(rc, []string{"vitest.config.*", "vite.config.*", "vitest.workspace.*"}, "reporters", "--reporter") {
+	if rc.TraceDir != "" && !userConfigures(rc, []string{"vitest.config.*", "vite.config.*", "vitest.workspace.*"}, "reporters", "--reporter") {
 		// Older Vitest loads reporters through Vite, which only serves files inside
 		// the project, so the reporter is placed in node_modules/.cache.
 		if path, cleanup := placeInProject(rc, "vitest-reporter.mjs"); path != "" {
@@ -117,7 +122,7 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 // rejected first attempt's files are discarded with its trace.
 func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs []string, opt traceOptions) (*RunResult, error) {
 	res, err := runNodeAttempt(ctx, rc, injected, testArgs, opt)
-	if err != nil || len(injected) == 0 || res.ExitCode == 0 || len(res.Observations) > 0 || !rc.Record {
+	if err != nil || len(injected) == 0 || res.ExitCode == 0 || len(res.Observations) > 0 || rc.TraceDir == "" {
 		exportNodeV8(rc, res)
 		return res, err
 	}
@@ -125,7 +130,15 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 		exportNodeV8(rc, res)
 		return res, ctx.Err() // interrupted, not rejected
 	}
-	if len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
+	keep := []string{}
+	for _, a := range injected {
+		if a == "--runTestsByPath" {
+			keep = append(keep, a)
+		}
+	}
+	// A run that loaded the reporter, or would run again with the same arguments,
+	// failed on its own.
+	if len(keep) == len(injected) || trace.ReporterLoaded(rc.TraceDir) || len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
 		exportNodeV8(rc, res)
 		return res, nil
 	}
@@ -135,12 +148,6 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 	}
 	if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
 		return res, err
-	}
-	keep := []string{}
-	for _, a := range injected {
-		if a == "--runTestsByPath" {
-			keep = append(keep, a)
-		}
 	}
 	res, err = runNode(ctx, rc, keep, testArgs, opt)
 	if res != nil {
@@ -240,8 +247,10 @@ func (jest) Defaults(repo *gitx.Repo, root string) Defaults {
 func (jest) Units(s *Suite, testFiles []string) []string { return unitsAreFiles(testFiles) }
 
 func (jest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
+	// Per-file status comes from a reporter added next to the default one, with or
+	// without recording.
 	var extra []string
-	if rc.Record && !userConfigures(rc, []string{"jest.config.*"}, "reporters", "--reporters") {
+	if rc.TraceDir != "" && !userConfigures(rc, []string{"jest.config.*"}, "reporters", "--reporters") {
 		extra = []string{"--reporters=default", "--reporters=" + filepath.Join(rc.ShimDir, "jest-reporter.cjs")}
 	}
 	// Jest workers run many test files each, which merges their dependencies. With

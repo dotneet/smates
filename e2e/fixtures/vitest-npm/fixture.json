@@ -1,4 +1,5 @@
 {
   "requires": ["node", "npm", "git", "sh"],
-  "setup": [["npm", "ci", "--no-audit", "--no-fund"]]
+  "setup": [["npm", "ci", "--no-audit", "--no-fund"]],
+  "mutation_no_record": true
 }

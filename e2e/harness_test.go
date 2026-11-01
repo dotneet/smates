@@ -85,6 +85,10 @@ type fixtureSpec struct {
 	MutationSkip []string `json:"mutation_skip"`
 	// MutationOnly, when set, limits the sweep to these globs.
 	MutationOnly []string `json:"mutation_only"`
+	// MutationNoRecord runs the sweep with --no-record: the sweep discards every state it
+	// records, so tracing is wasted when the fixture's runners report per-file status
+	// without it (jest, vitest, pytest, go). SMATES_E2E_MUTATION_RECORD=1 records anyway.
+	MutationNoRecord bool `json:"mutation_no_record"`
 	// MutationConfig names a config file in the fixture directory (not copied into the
 	// repository) the sweep runs smates with instead of the repository's smates.yml.
 	MutationConfig string `json:"mutation_config"`
@@ -139,10 +143,12 @@ type report struct {
 	Tests   map[string][]string          `json:"selected_tests"`
 	Results map[string]map[string]string `json:"results"`
 	Escapes []string                     `json:"escapes"`
-	Exit    int                          `json:"exit_code"`
-	Total   int                          `json:"total"`
-	Sel     int                          `json:"selected"`
-	Hints   []reportHint                 `json:"failure_hints"`
+	// Possible are unselected tests marked failed only because the run failed.
+	Possible []string     `json:"possible_escapes"`
+	Exit     int          `json:"exit_code"`
+	Total    int          `json:"total"`
+	Sel      int          `json:"selected"`
+	Hints    []reportHint `json:"failure_hints"`
 }
 
 // reportHint mirrors hints.Hint.
@@ -736,6 +742,10 @@ func TestMutations(t *testing.T) {
 						t.Fatal(err)
 					}
 					args := []string{"run", "--shadow", "--no-agent", "--report", r.reportPath()}
+					noRecord := r.spec.MutationNoRecord && os.Getenv("SMATES_E2E_MUTATION_RECORD") == ""
+					if noRecord {
+						args = append(args, "--no-record")
+					}
 					if r.spec.MutationConfig != "" {
 						cfg, err := filepath.Abs(filepath.Join("fixtures", name, r.spec.MutationConfig))
 						if err != nil {
@@ -746,6 +756,11 @@ func TestMutations(t *testing.T) {
 					out, _ := r.smates(args...)
 					rep := r.readReport()
 					failing := rep.failing()
+					if noRecord && len(rep.Possible) > 0 {
+						// Escapes could not be told apart: the runner reported no per-file
+						// status for unselected tests of a failing run.
+						t.Errorf("mutating %s: without recording, unselected tests have no reported status: %v\n%s", f, rep.Possible, tail(out, 60))
+					}
 					mu.Lock()
 					stats = append(stats, fmt.Sprintf("%-50s selected %3d/%-3d failing %3d  orphans %d", f, rep.Sel, rep.Total, len(failing), len(rep.Orphans)))
 					totalSel += rep.Sel

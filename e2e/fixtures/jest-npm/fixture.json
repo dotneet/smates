@@ -14,5 +14,5 @@
   "mutation_skip": [
     "smates.yml"
   ],
-  "mutation_config": "smates.mutations.yml"
+  "mutation_no_record": true
 }

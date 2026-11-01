@@ -11,6 +11,13 @@ import (
 	"github.com/dotneet/smates/internal/state"
 )
 
+// ReporterLoaded reports whether a runner loaded smates' reporter during a run (the
+// reporter leaves reporter-loaded-* in the trace directory when it starts).
+func ReporterLoaded(traceDir string) bool {
+	m, _ := filepath.Glob(filepath.Join(traceDir, "reporter-loaded-*"))
+	return len(m) > 0
+}
+
 // Results reads per-test-file results written by runner reporters
 // (results-*.jsonl in the trace directory), keyed by repo-relative file.
 func Results(traceDir, repoRoot string) map[string]Result {

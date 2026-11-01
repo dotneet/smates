@@ -114,6 +114,13 @@ func PythonEnv(traceDir, repoRoot string, sh *Shims, base []string) []string {
 	}
 }
 
+// PytestResultsEnv returns environment variables that load the pytest plugin without
+// tracing: it only writes per-file results into traceDir (see Results).
+func PytestResultsEnv(traceDir string, sh *Shims, base []string) []string {
+	// With an empty SMATES_REPO_ROOT the shims trace nothing.
+	return PythonEnv(traceDir, "", sh, base)
+}
+
 func getenv(env []string, key string) string {
 	for i := len(env) - 1; i >= 0; i-- {
 		if strings.HasPrefix(env[i], key+"=") {

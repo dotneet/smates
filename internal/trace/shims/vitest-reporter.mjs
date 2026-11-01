@@ -1,6 +1,6 @@
 // smates reporter for Vitest: writes per-file results to $SMATES_TRACE_DIR.
 // Supports the Vitest 3+ API (onTestRunEnd) and the older onFinished(files).
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const out = () => join(process.env.SMATES_TRACE_DIR || '.', `results-vitest-${process.pid}.jsonl`);
@@ -70,6 +70,10 @@ export default class SmatesReporter {
   constructor() {
     this.done = false;
     this.inGlobal = false;
+    // Tells smates the reporter was accepted, even if no test file runs.
+    try {
+      writeFileSync(join(process.env.SMATES_TRACE_DIR || '.', `reporter-loaded-${process.pid}`), '');
+    } catch {}
   }
   onTestRunStart() {
     this.inGlobal = true;

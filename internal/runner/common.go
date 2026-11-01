@@ -127,16 +127,8 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 	if attr.SharedProcs > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d test process(es) ran several test files; their dependencies were merged (still correct, less precise). Set \"isolate: true\" on the suite in smates.yml (one process per test file while recording) for exact attribution.", attr.SharedProcs))
 	}
-	results := trace.Results(rc.TraceDir, rc.Repo.Root)
-	if rc.Suite.Junit != "" {
-		jr, err := trace.JUnit(filepath.Join(rc.Dir(), filepath.FromSlash(rc.Suite.Junit)), rc.Dir(), rc.Repo.Root)
-		if err != nil {
-			warnings = append(warnings, "could not read JUnit report: "+err.Error())
-		}
-		for f, r := range jr {
-			results[f] = r
-		}
-	}
+	results, warns := reportedResults(rc)
+	warnings = append(warnings, warns...)
 	obs := map[string]*Observation{}
 	for id, u := range attr.Units {
 		o := &Observation{Files: map[string]bool{}, DurationMs: u.Ms}
@@ -181,6 +173,61 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		warnings = append(warnings, fmt.Sprintf("%d test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time", untraced))
 	}
 	return obs, warnings, readsBy, nil
+}
+
+// reportedResults reads the per-file results runner reporters wrote into the trace
+// directory and the suite's JUnit report, which wins.
+func reportedResults(rc *RunContext) (map[string]trace.Result, []string) {
+	results := trace.Results(rc.TraceDir, rc.Repo.Root)
+	if rc.Suite.Junit == "" {
+		return results, nil
+	}
+	var warnings []string
+	jr, err := trace.JUnit(filepath.Join(rc.Dir(), filepath.FromSlash(rc.Suite.Junit)), rc.Dir(), rc.Repo.Root)
+	if err != nil {
+		warnings = append(warnings, "could not read JUnit report: "+err.Error())
+	}
+	for f, r := range jr {
+		results[f] = r
+	}
+	return results, warnings
+}
+
+// resultsEnv is the environment of a run that is not traced but whose runner
+// reporters write per-file results (rc.TraceDir set without rc.Record).
+func resultsEnv(rc *RunContext) []string {
+	if rc.TraceDir == "" {
+		return nil
+	}
+	return []string{"SMATES_TRACE_DIR=" + rc.TraceDir}
+}
+
+// reported returns the outcomes of the units runner reporters (or the suite's JUnit
+// report) gave in a run that was not traced: statuses and failure output, no
+// dependencies. Units without a report have no observation.
+func reported(rc *RunContext) (map[string]*Observation, []string) {
+	if rc.TraceDir == "" {
+		return nil, nil
+	}
+	results, warnings := reportedResults(rc)
+	obs := map[string]*Observation{}
+	for f, r := range results {
+		id := rc.UnitOf(f)
+		if id == "" {
+			continue
+		}
+		o := obs[id]
+		if o == nil {
+			o = &Observation{Files: map[string]bool{}}
+			obs[id] = o
+		}
+		if o.Status != state.Fail {
+			o.Status = r.Status
+		}
+		o.DurationMs += r.Ms
+		o.Failure = trace.JoinMessage(o.Failure, r.Message)
+	}
+	return obs, warnings
 }
 
 // overallStatus combines a unit status with the exit code of the whole run: a failed
