@@ -145,3 +145,85 @@ class Tax(unittest.TestCase):
 		t.Errorf("after fix: %v", got)
 	}
 }
+
+// TestUnittestHelperModule checks that a helper module matching test*.py (no tests)
+// neither fails runs nor is selected again and again.
+func TestUnittestHelperModule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix paths")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	clearCI(t)
+	t.Setenv("GITHUB_OUTPUT", "")
+	t.Setenv("GITHUB_STEP_SUMMARY", "")
+	noAgentCredentials(t)
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
+	g := newGitRepo(t)
+	write := func(rel, content string) { testutil.Write(t, g.dir, rel, content) }
+	write(".gitignore", ".smates/\n")
+	write("smates.yml", "version: 1\norphans: ignore\nsuites:\n  - name: ut\n    runner: unittest\n")
+	write("lib/__init__.py", "")
+	write("lib/calc.py", "def add(a, b):\n    return a + b\n")
+	write("lib/support.py", "BASE = 1\n")
+	write("README.md", "docs\n")
+	write("tests/__init__.py", "")
+	write("tests/test_calc.py", "import unittest\nfrom lib.calc import add\n\nclass Calc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1, 2), 3)\n")
+	write("tests/test_support.py", "from lib.support import BASE\n\ndef make():\n    return BASE\n")
+	g.git("add", "-A")
+	g.commit("fixture")
+	run := func(args ...string) (int, string) {
+		var out, errb bytes.Buffer
+		code := Main(append(args[:1:1], append([]string{"-C", g.dir, "--no-agent"}, args[1:]...)...), &out, &errb)
+		return code, out.String() + errb.String()
+	}
+	selected := func() []string {
+		var stdout, stderr bytes.Buffer
+		if code := Main([]string{"select", "-C", g.dir, "--no-agent", "--format", "json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("select: %d %s", code, stderr.String())
+		}
+		out := stdout.String()
+		var js struct {
+			Suites []struct {
+				Tests []struct {
+					ID       string `json:"id"`
+					Selected bool   `json:"selected"`
+				} `json:"tests"`
+			} `json:"suites"`
+		}
+		if err := json.Unmarshal([]byte(out), &js); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		var ids []string
+		for _, s := range js.Suites {
+			for _, tt := range s.Tests {
+				if tt.Selected {
+					ids = append(ids, tt.ID)
+				}
+			}
+		}
+		return ids
+	}
+	if code, out := run("run", "--all"); code != 0 {
+		t.Fatalf("baseline with a helper module: %d\n%s", code, out)
+	}
+	write("README.md", "docs, edited\n")
+	if got := selected(); len(got) != 0 {
+		t.Errorf("unrelated change selected %v", got)
+	}
+	if code, out := run("run"); code != 0 {
+		t.Errorf("run after an unrelated change: %d\n%s", code, out)
+	}
+	// A change to what only the helper uses selects it alone: that run passes too.
+	write("lib/support.py", "BASE = 2\n")
+	if got := selected(); len(got) != 1 || got[0] != "tests/test_support.py" {
+		t.Errorf("helper dependency changed: selected %v", got)
+	}
+	if code, out := run("run"); code != 0 {
+		t.Errorf("run of the helper alone: %d\n%s", code, out)
+	}
+	if got := selected(); len(got) != 0 {
+		t.Errorf("after running the helper: %v", got)
+	}
+}

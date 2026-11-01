@@ -70,10 +70,11 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 	if err != nil {
 		return nil, fmt.Errorf("suite %q: %w", rc.Suite.Name, err)
 	}
-	var modules []string
+	var modules, moduleUnits []string
 	for _, u := range rc.Units {
 		if m, ok := uc.moduleName(relToSuite(rc.Suite, u)); ok {
 			modules = append(modules, m)
+			moduleUnits = append(moduleUnits, u)
 		}
 	}
 	start := time.Now()
@@ -108,8 +109,9 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		codes, err := isolatedRun(ctx, rc, units, runtime.NumCPU(), func(u string, _ int) ([]string, []string, error) {
 			return uc.argv(rc, true, []string{byUnit[u]}), env, nil
 		})
-		// A module without tests is reported by the wrapper ("unknown"); the run only
-		// fails for it when no module ran any test, as in a single process.
+		// A process exits 5 when its module ran no test. That fails the run only when
+		// no module ran any test and one of them looks written for pytest, as in a
+		// single process.
 		empty := 0
 		for _, c := range codes {
 			if c == unittestNoTests {
@@ -118,14 +120,17 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		}
 		worst := 0
 		for _, c := range codes {
-			if c != unittestNoTests || empty == len(codes) {
+			if c != unittestNoTests {
 				worst = max(worst, c)
 			}
 		}
-		res.ExitCode, res.Duration = worst, time.Since(start)
-		if empty == len(codes) && empty > 0 {
-			res.Warnings = append(res.Warnings, noTestsWarning(len(units)))
+		if empty > 0 && empty == len(codes) {
+			if code, warn := noTestsOutcome(rc, units); code != 0 {
+				worst = code
+				res.Warnings = append(res.Warnings, warn)
+			}
 		}
+		res.ExitCode, res.Duration = worst, time.Since(start)
 		if err != nil {
 			return res, err
 		}
@@ -140,21 +145,26 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		res.Warnings = append(res.Warnings, warns...)
 		return res, err
 	}
-	worst := 0
+	worst, done := 0, 0
 	for _, b := range chunk(modules) {
+		batchUnits := moduleUnits[done : done+len(b)]
+		done += len(b)
 		code, err := rc.Exec(ctx, uc.argv(rc, rc.Record, b), env)
 		if err != nil {
 			res.ExitCode, res.Duration = code, time.Since(start)
 			return res, err
 		}
-		// "No tests ran" (exit 5, Python 3.12+) stays a failure: the selected modules
-		// define no unittest tests (pytest-style tests under the wrong runner?).
+		if code == unittestNoTests {
+			// "No tests ran" (Python 3.12+): helper modules matching the pattern are
+			// fine; pytest-style tests under the wrong runner are not.
+			var warn string
+			if code, warn = noTestsOutcome(rc, batchUnits); warn != "" {
+				res.Warnings = append(res.Warnings, warn)
+			}
+		}
 		worst = max(worst, code)
 	}
 	res.ExitCode, res.Duration = worst, time.Since(start)
-	if worst == unittestNoTests {
-		res.Warnings = append(res.Warnings, noTestsWarning(len(modules)))
-	}
 	if !rc.Record {
 		return res, nil
 	}
@@ -164,9 +174,39 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 	return res, err
 }
 
-// noTestsWarning explains a unittest run that ran no test at all.
-func noTestsWarning(modules int) string {
-	return fmt.Sprintf("unittest ran no test in the %d selected module(s) (exit code %d): unittest only runs unittest.TestCase methods. If the suite holds pytest-style tests (plain `def test_...` functions), set \"runner: pytest\" on it in smates.yml; helper modules matching the test pattern belong in its exclude.", modules, unittestNoTests)
+// noTestsOutcome decides a unittest run in which none of units (repo-relative) ran a
+// test: a failure (unittestNoTests, with a warning) when one of them looks written for
+// pytest, which unittest cannot run; a pass otherwise (helper modules matching the test
+// pattern, which `python -m unittest discover` accepts too).
+func noTestsOutcome(rc *RunContext, units []string) (int, string) {
+	var styled []string
+	for _, u := range units {
+		data, err := os.ReadFile(filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+		if err == nil && PytestStyle(data) {
+			styled = append(styled, u)
+		}
+	}
+	if len(styled) == 0 {
+		return 0, ""
+	}
+	return unittestNoTests, fmt.Sprintf("unittest ran no test, and %s looks written for pytest (`import pytest` or module-level `def test_...` functions, which unittest does not run): set \"runner: pytest\" on suite %q in smates.yml", strings.Join(styled, ", "), rc.Suite.Name)
+}
+
+// pytestStyleRe finds what marks a Python test file written for pytest; PytestStyle
+// checks the test function names it captures.
+var pytestStyleRe = regexp.MustCompile(`(?m)^(?:import pytest\b|from pytest import|(?:async )?def (test_\w*))`)
+
+// PytestStyle reports whether a Python test file is written for pytest: it imports
+// pytest or defines module-level test functions (unittest runs neither those functions
+// nor pytest's marks and fixtures). unittest's own `def test_suite()` convention does
+// not count.
+func PytestStyle(src []byte) bool {
+	for _, m := range pytestStyleRe.FindAllSubmatch(src, -1) {
+		if string(m[1]) != "test_suite" {
+			return true
+		}
+	}
+	return false
 }
 
 // unittestNoTests is unittest's exit code when no test ran (Python 3.12+).

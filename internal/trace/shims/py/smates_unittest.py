@@ -10,13 +10,15 @@ unittest's own main, adding the contexts the pytest plugin uses:
 
 and per-file results ({"k": "result"}): a failure, an error (also in a fixture or while
 importing the module) or an unexpected success fails the file; skipped tests and
-expected failures pass. A module that loaded but ran no test at all (pytest-style test
-functions, which unittest does not collect, or a helper module matching the pattern) is
-"unknown", never "pass": it runs again next time, and smates says why.
+expected failures pass. A module that loaded but ran no test at all is "unknown" (never
+"pass": it runs again next time) when it looks written for pytest (module-level test
+functions or `import pytest`, which unittest cannot run), and "pass" with a warning
+otherwise (a helper module matching the test pattern). Both are explained on stderr.
 """
 
 import json
 import os
+import re
 import sys
 import time
 import unittest
@@ -99,6 +101,23 @@ _NO_TESTS = (
     "set `runner: pytest` on the suite in smates.yml; if it is a helper matching the test "
     "pattern, add it to the suite's `exclude`."
 )
+_NO_TESTS_HELPER = (
+    "smates: unittest ran no test from this module (a helper matching the test pattern?); "
+    "recorded as passed. Add it to the suite's `exclude` in smates.yml, or set "
+    "`runner: pytest` if it holds pytest tests."
+)
+# A test file written for pytest (as runner.PytestStyle in smates): it imports pytest or
+# defines module-level test functions other than unittest's `test_suite()` convention.
+_PYTEST_STYLE = re.compile(r"^(?:import pytest\b|from pytest import|(?:async )?def (?!test_suite\b)test_\w*)", re.M)
+
+
+def _pytest_style(f):
+    try:
+        with open(f, "rb") as fh:
+            src = fh.read(256 << 10).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return _PYTEST_STYLE.search(src) is not None
 
 
 def _fail(f, text):
@@ -195,8 +214,14 @@ def _finish():
     for f, r in sorted(_results.items()):
         status = "fail" if r["failed"] else "pass"
         if not r["failed"] and r["ran"] == 0:
-            status, r["msg"] = "unknown", _NO_TESTS
-            sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _NO_TESTS))
+            if _pytest_style(f):
+                # Tests unittest cannot run: never a pass, so the module runs again.
+                status, r["msg"] = "unknown", _NO_TESTS
+                sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _NO_TESTS))
+            else:
+                # A helper module matching the test pattern: nothing to fail (its
+                # dependencies are still recorded).
+                sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _NO_TESTS_HELPER))
         ev = {"k": "result", "id": f, "status": status, "ms": r["ms"]}
         if r["msg"]:
             ev["msg"] = r["msg"]

@@ -186,10 +186,6 @@ var (
 	requirementsFile = regexp.MustCompile(`\.(txt|in)$`)
 	workflowFile     = regexp.MustCompile(`\.ya?ml$`)
 	pytestWord       = regexp.MustCompile(`\bpytest\b`)
-	// pytestStyle marks a test file written for pytest. A TestCase class next to it does
-	// not make it a unittest file: unittest runs neither module-level test functions nor
-	// pytest marks, fixtures or parametrization, while pytest runs TestCase classes too.
-	pytestStyle = regexp.MustCompile(`(?m)^(import pytest\b|from pytest import|(async )?def test_)`)
 	// pyTestFile is a file either runner would collect.
 	pyTestFile = regexp.MustCompile(`^(test.*|.*_test)\.py$`)
 )
@@ -208,9 +204,10 @@ const (
 //     setup.py, tox.ini, noxfile.py, Pipfile, poetry/pdm/uv locks, *requirements*.txt or
 //     .in, any .txt/.in under a requirements/ directory) in the project or a directory
 //     above it up to the repository root;
-//   - a GitHub workflow that runs pytest;
+//   - a GitHub workflow that runs pytest, for the project at the repository root or
+//     one whose directory the workflow names;
 //   - a test file written for pytest: `import pytest` or a module-level `def test_`
-//     function (even next to TestCase classes).
+//     function other than unittest's `test_suite()` (even next to TestCase classes).
 func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
 	mentions := func(rel string) bool {
 		data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(rel)))
@@ -248,12 +245,25 @@ func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool 
 			}
 		}
 	}
+	// Workflows run pytest somewhere in the repository: they count for the project at
+	// the root, or for a project whose directory they name.
 	for _, n := range dirFiles[".github/workflows"] {
-		if workflowFile.MatchString(n) && mentions(".github/workflows/"+n) {
+		if !workflowFile.MatchString(n) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repo.Root, ".github", "workflows", n))
+		if err == nil && pytestWord.Match(data) && (dir == "." || mentionsDir(data, dir)) {
 			return true
 		}
 	}
 	return hasPytestStyleTests(repo, dir, dirFiles)
+}
+
+// mentionsDir reports whether data names the repository directory dir as a whole path
+// (not as part of a longer name: "svc" is not in "svc2" or "my-svc").
+func mentionsDir(data []byte, dir string) bool {
+	re := regexp.MustCompile(`(^|[^\w./-])(\./)?` + regexp.QuoteMeta(dir) + `($|[^\w.-])`)
+	return re.Match(data)
 }
 
 // hasPytestStyleTests reports whether a test file under dir is written for pytest
@@ -283,7 +293,9 @@ func hasPytestStyleTests(repo *gitx.Repo, dir string, dirFiles map[string][]stri
 		n, _ := io.ReadFull(fh, buf)
 		fh.Close()
 		src := buf[:n]
-		if pytestStyle.Match(src) {
+		// A TestCase class next to pytest-style code does not make it a unittest file:
+		// pytest runs TestCase classes too, unittest none of pytest's.
+		if runner.PytestStyle(src) {
 			return true
 		}
 	}

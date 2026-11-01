@@ -171,13 +171,15 @@ class T(unittest.TestCase):
 	// pytest-style tests under unittest: the module loads and runs nothing, which must
 	// not count as a pass.
 	write("lib/tests/test_pytest_style.py", "def test_x():\n    assert False\n")
+	// A helper matching test*.py, without tests: a pass, not a failure.
+	write("lib/tests/test_support.py", "from pkg import a\n\ndef make():\n    return a.V\n")
 	shimDir := t.TempDir()
 	if _, err := trace.ExtractShims(shimDir); err != nil {
 		t.Fatal(err)
 	}
 	s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest discover -s lib/tests -t lib", Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}}, Adapter: unittestRunner{}}
 	s.Tests = []string{"lib/tests/**/test*.py"}
-	units := []string{"lib/tests/test_0_raises.py", "lib/tests/test_a.py", "lib/tests/test_b.py", "lib/tests/test_broken.py", "lib/tests/test_pytest_style.py", "lib/tests/test_skipped.py"}
+	units := []string{"lib/tests/test_0_raises.py", "lib/tests/test_a.py", "lib/tests/test_b.py", "lib/tests/test_broken.py", "lib/tests/test_pytest_style.py", "lib/tests/test_skipped.py", "lib/tests/test_support.py"}
 	var out bytes.Buffer
 	rc := &RunContext{
 		Repo: repo, Suite: s, Units: units, All: true, Record: true,
@@ -202,6 +204,7 @@ class T(unittest.TestCase):
 		"lib/tests/test_a.py": state.Pass, "lib/tests/test_b.py": state.Fail,
 		"lib/tests/test_broken.py": state.Fail, "lib/tests/test_skipped.py": state.Pass,
 		"lib/tests/test_0_raises.py": state.Fail, "lib/tests/test_pytest_style.py": state.Unknown,
+		"lib/tests/test_support.py": state.Pass,
 	}
 	for u, st := range want {
 		o := obs[u]
@@ -275,6 +278,43 @@ class T(unittest.TestCase):
 		}
 		if o := res.Observations["lib/tests/test_pytest_style.py"]; record && (o == nil || o.Status != state.Unknown) {
 			t.Errorf("recorded status %+v", o)
+		}
+	}
+
+	// A helper module matching the pattern (no tests, nothing pytest-style) passes, also
+	// when it is the only module selected (`python -m unittest discover` accepts it too).
+	for _, isolate := range []bool{false, true} {
+		for _, record := range []bool{true, false} {
+			out.Reset()
+			s.Isolate = &isolate
+			rc.Record, rc.TraceDir, rc.Units = record, t.TempDir(), []string{"lib/tests/test_support.py"}
+			res, err = unittestRunner{}.Run(context.Background(), rc)
+			if err != nil || res.ExitCode != 0 || len(res.Warnings) != 0 {
+				t.Errorf("helper alone (record=%v isolate=%v): exit %d err %v warnings %q\n%s", record, isolate, res.ExitCode, err, res.Warnings, out.String())
+			}
+			if o := res.Observations["lib/tests/test_support.py"]; record && (o == nil || o.Status != state.Pass || !o.Files["lib/pkg/a.py"]) {
+				t.Errorf("helper alone (isolate=%v): recorded %+v", isolate, o)
+			}
+		}
+	}
+	s.Isolate = nil
+}
+
+func TestPytestStyle(t *testing.T) {
+	cases := map[string]bool{
+		"import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\n": false,
+		"def test_suite():\n    return unittest.TestSuite()\n":                       false,
+		"import pytest_mock\n":                         false,
+		"helper = 1\n# def test_x(): commented\n":      false,
+		"def test_x():\n    pass\n":                    true,
+		"async def test_x():\n    pass\n":              true,
+		"import pytest\n":                              true,
+		"from pytest import raises\n":                  true,
+		"def test_suite():\n    pass\ndef test_y(): 1": true,
+	}
+	for src, want := range cases {
+		if got := PytestStyle([]byte(src)); got != want {
+			t.Errorf("PytestStyle(%q) = %v, want %v", src, got, want)
 		}
 	}
 }

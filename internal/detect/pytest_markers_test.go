@@ -25,6 +25,10 @@ func TestDetectPytestMarkers(t *testing.T) {
 		{"pdm.lock", map[string]string{"pyproject.toml": "", "pdm.lock": "name = \"pytest\"\n", "tests/test_a.py": tc}, "pytest"},
 		{"uv.lock", map[string]string{"pyproject.toml": "", "uv.lock": "name = \"pytest\"\n", "tests/test_a.py": tc}, "pytest"},
 		{"workflow runs pytest", map[string]string{"pyproject.toml": "", ".github/workflows/ci.yml": "steps:\n  - run: python -m pytest -q\n", "tests/test_a.py": tc}, "pytest"},
+		{"workflow runs pytest elsewhere", map[string]string{"svc/pyproject.toml": "", ".github/workflows/ci.yml": "steps:\n  - run: pytest\n    working-directory: api\n", "svc/tests/test_a.py": tc}, "unittest"},
+		{"workflow runs pytest in the project", map[string]string{"svc/pyproject.toml": "", ".github/workflows/ci.yml": "steps:\n  - run: pytest\n    working-directory: svc\n", "svc/tests/test_a.py": tc}, "pytest"},
+		{"workflow runs pytest in ./project/tests", map[string]string{"libs/core/setup.py": "", ".github/workflows/ci.yml": "steps:\n  - run: python -m pytest ./libs/core/tests\n", "libs/core/tests/test_a.py": tc}, "pytest"},
+		{"workflow names a longer directory", map[string]string{"svc/pyproject.toml": "", ".github/workflows/ci.yml": "steps:\n  - run: cd svc2 && pytest\n  - run: cd my-svc && pytest\n", "svc/tests/test_a.py": tc}, "unittest"},
 		{"workflow runs unittest", map[string]string{"pyproject.toml": "", ".github/workflows/ci.yaml": "steps:\n  - run: python -m unittest\n", "tests/test_a.py": tc}, "unittest"},
 		// Test files written for pytest.
 		{"module-level test function", map[string]string{"pyproject.toml": "", "tests/test_a.py": tc, "tests/test_b.py": "def test_b():\n    assert 1\n"}, "pytest"},
@@ -34,6 +38,8 @@ func TestDetectPytestMarkers(t *testing.T) {
 		{"from pytest import", map[string]string{"pyproject.toml": "", "tests/test_b.py": "from pytest import raises\n" + tc}, "pytest"},
 		{"test functions next to a TestCase", map[string]string{"pyproject.toml": "", "tests/test_b.py": tc + "\n\ndef test_c():\n    pass\n"}, "pytest"},
 		{"TestCase methods are not module-level functions", map[string]string{"pyproject.toml": "", "tests/test_a.py": tc + "\n    def test_b(self):\n        pass\n"}, "unittest"},
+		{"unittest's test_suite() convention", map[string]string{"pyproject.toml": "", "tests/test_a.py": tc + "\n\ndef test_suite():\n    return unittest.defaultTestLoader.loadTestsFromTestCase(T)\n"}, "unittest"},
+		{"test_suite() next to a test function", map[string]string{"pyproject.toml": "", "tests/test_a.py": tc + "\n\ndef test_suite():\n    pass\n\n\ndef test_x():\n    pass\n"}, "pytest"},
 		{"test function in a file that is not a test", map[string]string{"pyproject.toml": "", "lib/util.py": "def test_util():\n    pass\n", "tests/test_a.py": tc}, "unittest"},
 	}
 	for _, c := range cases {

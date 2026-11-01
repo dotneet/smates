@@ -186,10 +186,11 @@ are not tests. While recording, the selected modules run in one process through
 `python -m smates_unittest` (shipped with the Python shims), which also turns an
 exception raised while importing a module into a failure of that module instead of the
 end of the run. `isolate: true` runs one process per module instead. A module that
-runs no unittest test (pytest-style functions, or a helper matching the pattern) is never
-recorded as passed: its status is unknown, so it runs again, with a message suggesting
-`runner: pytest` (or `exclude` for a helper); a run in which no selected module has a
-test fails (unittest's exit code 5) with the same advice.
+runs no unittest test is told apart by its source: a helper matching the pattern passes
+(with a warning suggesting `exclude`), while one written for pytest (`import pytest`,
+module-level `def test_…` functions) is never recorded as passed: its status is unknown,
+so it runs again, with a message suggesting `runner: pytest`. A run in which no module
+ran a test fails (unittest's exit code 5) only when one of them is written for pytest.
 
 Package managers: npm, pnpm, yarn, bun (local `node_modules/.bin` binaries are used
 directly), uv / virtualenvs for Python. Monorepos with several suites, workspaces
