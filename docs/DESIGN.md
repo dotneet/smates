@@ -342,7 +342,7 @@ can alter test results.
 | node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run, else its existence (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
-| pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
+| pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy`; results keyed by each item's file (node ids of files outside the rootdir are relative to the arguments); a file some of whose collected tests did not run (`-x`, `--maxfail`, `pytest.exit()`, an interrupt; with pytest-xdist counted by the controller) is `unknown` |
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
 | go test, `granularity: func` | top-level test function | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`) + declarations of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`) |
@@ -361,7 +361,16 @@ Processes are linked to their test even through untraced intermediaries: every t
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
 so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
 without a test of its own belongs to its nearest traced ancestor that has one; processes
-under a Go test binary belong to that package. Helpers of the runner itself that execute
+under a Go test binary belong to that package. A process started inside a test of a
+process with contexts (`SMATES_TRACE_CTX`) is that test's helper even when it runs test
+files itself: a pytest session a test runs in a subprocess (which inherits the context
+and then records none of its own) belongs to the test, even through an untraced chain
+of parents. smates itself clears the inherited context for the runners it starts, so a
+`smates run` from inside a traced test records a run of its own. A forked child records the
+context of its parent only when the parent exported it itself: one only inherited (the
+multiprocessing forkserver, started during the first test using it, forks the workers
+of later tests too) leaves the child to the context its nearest traced ancestor with
+contexts is in when it starts. Helpers of the runner itself that execute
 repository code (a server from global setup) are global dependencies; helpers that only
 read files (crawlers, transformers) are ignored. A process smates started that names a
 test file on its command line is the runner even when that test left no trace (a jest
@@ -401,7 +410,8 @@ analyzed from their command line when the child starts (`child_process.*` in Nod
   of command substitutions (`$(<file)` reads the file);
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name), and on
-  the program itself when it is named by path (`../bin/tool`).
+  the program itself when it is named by path (`../bin/tool`); so does a command line the
+  shims cut short (beyond 256 Ki characters).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
@@ -489,7 +499,8 @@ not reported as definite misses; so is a process exit code that covers several u
 `--test-isolation=none`). Units that ran but left no trace in a failing run are
 `unknown` (re-run next time), and so are files the vitest reporter saw cut short (`--bail`,
 an interrupted run: never started, or tests that were declared to run but did not
-finish). Go packages that fail to build are failures.
+finish) and files the pytest plugin saw only some tests of run. Go packages that fail to
+build are failures.
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected

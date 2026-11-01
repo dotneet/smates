@@ -74,10 +74,23 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		return nil
 	}
 
+	// A process started inside a test of a process with contexts (a script, a pool
+	// worker, a pytest session the test runs in a subprocess) is that test's helper,
+	// also when it executes test files itself (a test running pytest on files of the
+	// suite) or has contexts of its own that belong to no unit (the session's tests are
+	// temporary files).
+	helper := map[*Proc]bool{}
+	for _, p := range procs {
+		sp := byKey[p.SpawnKey]
+		if sp != nil && sp != p && sp.HasContexts() && testContext(p.SpawnCtx) && !(p.HasContexts() && hasUnitContexts(p, unitOf)) {
+			helper[p] = true
+		}
+	}
+
 	// Units each process executed itself.
 	own := map[*Proc][]string{}
 	for _, p := range procs {
-		if p.HasContexts() {
+		if p.HasContexts() || helper[p] {
 			continue
 		}
 		seen := map[string]bool{}
@@ -103,7 +116,7 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		sort.Strings(own[p])
 	}
-	owner := func(p *Proc) bool { return len(own[p]) > 0 || p.HasContexts() }
+	owner := func(p *Proc) bool { return !helper[p] && (len(own[p]) > 0 || p.HasContexts()) }
 
 	// Processes that are ancestors of a unit-owning process are runner infrastructure,
 	// and so is a runner smates started (no traced parent) whose test process left no
@@ -111,10 +124,12 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	// runner per test file): a process that owns nothing but names a test file on its
 	// command line. Its crawls and probes (jest's find, watchman: the whole tree) are not
 	// reads of every test. A setup script the suite command runs first (sh -c "node
-	// setup.js && jest") names no test: what it reads stays global.
+	// setup.js && jest") names no test: what it reads stays global. Nor is a helper of a
+	// test (a pytest session the test runs on a file of the suite) one, even with its
+	// traced ancestry broken: what it uses is the test's.
 	infra := map[*Proc]bool{}
 	for _, p := range procs {
-		if !owner(p) && parent(p) == nil && namesUnit(p, unitOf, opt.Rel) {
+		if !owner(p) && !helper[p] && parent(p) == nil && namesUnit(p, unitOf, opt.Rel) {
 			infra[p] = true
 		}
 	}
@@ -139,6 +154,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 				target = a
 				break
 			}
+		}
+		if target == nil && helper[p] {
+			target = byKey[p.SpawnKey] // started through an untraced chain
 		}
 		switch {
 		case target != nil && target.HasContexts():
@@ -201,6 +219,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		return u
 	}
 	for _, p := range procs {
+		if helper[p] {
+			continue
+		}
 		if p.HasContexts() {
 			attributeContexts(p, unitOf, unit)
 			continue
@@ -287,6 +308,33 @@ func namedUnit(p *Proc, units []string, unitOf func(string) string, rel func(str
 	return named
 }
 
+// testContext reports whether ctx is a context of a test file, of a test or a fixture.
+func testContext(ctx string) bool {
+	kind, _, _ := strings.Cut(ctx, ":")
+	return kind == "test" || kind == "collect" || kind == "fixture"
+}
+
+// hasUnitContexts reports whether contexts, fixtures used or results of p belong to a
+// unit.
+func hasUnitContexts(p *Proc, unitOf func(string) string) bool {
+	for ctx := range p.Ctx {
+		if kind, file, ok := strings.Cut(ctx, ":"); ok && (kind == "test" || kind == "collect") && unitOf(file) != "" {
+			return true
+		}
+	}
+	for file := range p.Uses {
+		if unitOf(file) != "" {
+			return true
+		}
+	}
+	for file := range p.Results {
+		if unitOf(file) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *Unit) {
 	touched := map[string]*Unit{}
 	for ctx, files := range p.Ctx {
@@ -363,7 +411,9 @@ func attributeContexts(p *Proc, unitOf func(string) string, unit func(string) *U
 	}
 }
 
-// worse combines statuses: fail beats unknown beats pass.
+// Worse combines statuses: fail beats unknown beats pass.
+func Worse(a, b string) string { return worse(a, b) }
+
 func worse(a, b string) string {
 	rank := func(s string) int {
 		switch s {

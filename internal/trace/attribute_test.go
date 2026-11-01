@@ -352,6 +352,63 @@ func TestAttributeChildSpawnContext(t *testing.T) {
 	}
 }
 
+// A process started inside a test (a pytest session it runs in a subprocess) is that
+// test's helper, even when it executes test files of the suite or has contexts that
+// belong to no unit of the suite.
+func TestAttributeHelperOfTest(t *testing.T) {
+	py := mkProc(100, 1, 0).
+		ctx(10, "test:test_a.py", "test_a.py").
+		ctx(50, "test:test_b.py", "test_b.py").
+		ctx(90, "")
+	meta := mkProc(200, 100, 0).times(20, 30).code("sub/test_sub.py", "helper.py").read("sub.txt").exit(1)
+	meta.p.SpawnKey, meta.p.SpawnCtx = "100-0", "test:test_a.py"
+	inner := mkProc(201, 100, 0).times(60, 70).
+		ctx(61, "collect:/tmp/x/inner_check.py", "helper.py").
+		ctx(62, "test:/tmp/x/inner_check.py", "inner.txt")
+	inner.p.SpawnKey, inner.p.SpawnCtx = "100-0", "test:test_b.py"
+	a := attr(Options{}, py, meta, inner)
+	for id, want := range map[string][]string{
+		"test_a.py": {"helper.py", "sub.txt", "sub/test_sub.py", "test_a.py"},
+		"test_b.py": {"helper.py", "inner.txt", "test_b.py"},
+	} {
+		if got := unitFiles(a, id); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: got %v, want %v", id, got, want)
+		}
+	}
+	if u := a.Units["sub/test_sub.py"]; u != nil {
+		t.Errorf("unit of the helper: %+v", u)
+	}
+	if s := a.Units["test_a.py"].Status; s != "" {
+		t.Errorf("test_a.py status %q (the helper's exit code is not the test's)", s)
+	}
+}
+
+// A helper of a test whose traced ancestry is broken (no traced parent, its ancestor
+// not in the trace) that names a test file of the suite on its command line is still
+// the test's helper, not a runner without a traced test; a runner smates started that
+// names one (no test context exported to it) still is.
+func TestAttributeHelperVersusRunner(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "test_a.py", "test_b.py", "sub/test_sub.py", "helper.py", "sub.txt", "conftest.py", "tree.txt")
+	py := mkProc(100, 1, 0).ctx(10, "test:test_a.py", "test_a.py").ctx(50, "")
+	meta := mkProc(200, 999, 0).times(20, 30).code("sub/test_sub.py", "helper.py").read("sub.txt").exit(1)
+	meta.p.SpawnKey, meta.p.SpawnCtx, meta.p.Anc = "100-0", "test:test_a.py", "998-0"
+	meta.p.Argv, meta.p.Cwd = []string{"python", "-m", "pytest", "sub/test_sub.py"}, root
+	runner := mkProc(300, 1, 0).code("conftest.py").read("tree.txt")
+	runner.p.Argv, runner.p.Cwd = []string{"python", "-m", "pytest", "test_b.py"}, root
+	a := attr(Options{Rel: RelFunc(root)}, py, meta, runner)
+	if got, want := unitFiles(a, "test_a.py"), []string{"helper.py", "sub.txt", "sub/test_sub.py", "test_a.py"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("test_a.py: got %v, want %v", got, want)
+	}
+	// The runner's code is global, its reads are no one's; the helper's are the test's.
+	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"conftest.py"}) {
+		t.Errorf("global %v", got)
+	}
+	if u := a.Units["sub/test_sub.py"]; u != nil {
+		t.Errorf("unit of the helper: %+v", u)
+	}
+}
+
 func TestAttributeUnitsFromArgv(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "web/src/a.test.ts", "web/src/b.test.ts", "web/src/a.ts")

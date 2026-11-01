@@ -623,6 +623,37 @@ func TestObserveUntracedResults(t *testing.T) {
 	}
 }
 
+// A JUnit report lists only the tests that ran: a file the pytest plugin saw the run
+// stop in (unknown), or saw fail, does not become a pass.
+func TestJUnitKeepsWorseReporterStatus(t *testing.T) {
+	repo := tempRepo(t, "test_a.py", "test_b.py", "test_c.py", "junit.xml")
+	td := t.TempDir()
+	abs := func(r string) string { return filepath.Join(repo.Root, filepath.FromSlash(r)) }
+	var lines []string
+	for _, r := range []map[string]any{
+		{"k": "result", "id": abs("test_a.py"), "status": "unknown", "msg": "stopped"},
+		{"k": "result", "id": abs("test_b.py"), "status": "pass"},
+		{"k": "result", "id": abs("test_c.py"), "status": "fail", "msg": "plugin"},
+	} {
+		lines = append(lines, mustJSON(r))
+	}
+	os.WriteFile(filepath.Join(td, "results-pytest-1.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	os.WriteFile(abs("junit.xml"), []byte(`<testsuite>`+
+		`<testcase file="test_a.py" name="t1" time="0.002"/>`+
+		`<testcase file="test_b.py" name="t2"><failure message="junit"/></testcase>`+
+		`<testcase file="test_c.py" name="t3"/></testsuite>`), 0o644)
+	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Junit: "junit.xml"}}, TraceDir: td}
+	res, _ := reportedResults(rc)
+	for f, want := range map[string]string{"test_a.py": state.Unknown, "test_b.py": state.Fail, "test_c.py": state.Fail} {
+		if res[f].Status != want {
+			t.Errorf("%s: %+v, want %s", f, res[f], want)
+		}
+	}
+	if !strings.Contains(res["test_a.py"].Message, "stopped") || res["test_a.py"].Ms != 2 || !strings.Contains(res["test_b.py"].Message, "junit") || !strings.Contains(res["test_c.py"].Message, "plugin") {
+		t.Errorf("messages and durations: %+v", res)
+	}
+}
+
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {

@@ -176,7 +176,8 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 }
 
 // reportedResults reads the per-file results runner reporters wrote into the trace
-// directory and the suite's JUnit report, which wins.
+// directory and the suite's JUnit report, which wins unless theirs is worse (fail beats
+// unknown beats pass).
 func reportedResults(rc *RunContext) (map[string]trace.Result, []string) {
 	results := trace.Results(rc.TraceDir, rc.Repo.Root)
 	if rc.Suite.Junit == "" {
@@ -188,6 +189,13 @@ func reportedResults(rc *RunContext) (map[string]trace.Result, []string) {
 		warnings = append(warnings, "could not read JUnit report: "+err.Error())
 	}
 	for f, r := range jr {
+		// A JUnit report lists only the tests that ran: a file a reporter saw the run
+		// stop in (unknown) or fail does not pass because the tests that ran passed.
+		if prev, ok := results[f]; ok {
+			if st := trace.Worse(r.Status, prev.Status); st != r.Status {
+				r.Status, r.Message = st, trace.JoinMessage(prev.Message, r.Message)
+			}
+		}
 		results[f] = r
 	}
 	return results, warnings
