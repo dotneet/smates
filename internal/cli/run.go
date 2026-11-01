@@ -309,6 +309,9 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	} else {
 		p.logf("%s: running %d test unit(s) with %s", sr.Name, len(b.units), sr.Suite.Runner)
 	}
+	if err := runner.Preflight(p.repo.Root, sr.Suite); err != nil {
+		return 0, fmt.Errorf("%s: %w", sr.Name, err)
+	}
 	c.started[sr.Name] = append(c.started[sr.Name], b.units...)
 	r, err := sr.Suite.Adapter.Run(ctx, rc)
 	if err != nil {

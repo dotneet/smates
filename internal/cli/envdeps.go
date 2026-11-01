@@ -10,12 +10,18 @@ import (
 )
 
 // selectionReason is what --explain prints for a selected test: its reason with the
-// changed files ("changed: src/a.ts") and environment variables ("env changed: TZ").
+// changed files ("changed: src/a.ts", or "changed: backend/user.go (depends_on suite
+// api)" for a depends_on/serves dependency) and environment variables ("env changed: TZ").
 func selectionReason(t *selector.Test) string {
 	var files, env []string
 	for _, c := range t.Changed {
 		if kind, name := depkey.Parse(c); kind == depkey.KindEnv {
 			env = append(env, name)
+		} else if label := t.Service[c]; label != "" && depkey.IsSet(c) {
+			// A declaration whose changed files cannot be named.
+			files = append(files, "code of "+label)
+		} else if label != "" {
+			files = append(files, c+" ("+label+")")
 		} else {
 			files = append(files, c)
 		}

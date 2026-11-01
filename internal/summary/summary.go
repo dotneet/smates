@@ -290,7 +290,7 @@ func (v *view) why(b *strings.Builder) {
 			for _, c := range changed {
 				for _, f := range v.expand(c) {
 					if !slices.ContainsFunc(byFile[f], func(h hit) bool { return h.test == t && h.suite == si }) {
-						byFile[f] = append(byFile[f], hit{si, t, viaLabel(t.Via[c], c)})
+						byFile[f] = append(byFile[f], hit{si, t, viaLabel(t.Via[c], c, t.Service[c])})
 					}
 				}
 			}
@@ -461,7 +461,9 @@ func (v *view) expand(key string) []string {
 
 const orphanVia = "orphan policy: suite runs in full"
 
-func viaLabel(via, key string) string {
+// viaLabel says how a changed dependency key reached a test (service: the depends_on
+// or serves declaration, for ViaService).
+func viaLabel(via, key, service string) string {
 	switch kind, p := depkey.Parse(key); kind {
 	case depkey.KindEnv:
 		return "read it in its last run (traced)"
@@ -481,6 +483,11 @@ func viaLabel(via, key string) string {
 		return "static dependency"
 	case selector.ViaInput:
 		return "suite input"
+	case selector.ViaService:
+		if service == "" {
+			return "server code its tests exercise"
+		}
+		return "server code its tests exercise (" + code(service) + ")"
 	case selector.ViaTraced:
 		return "read it in its last run (traced)"
 	case selector.ViaReference:

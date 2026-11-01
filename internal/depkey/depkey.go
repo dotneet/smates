@@ -8,6 +8,7 @@
 //	f.go#decls the declarations of a Go file: its source without the bodies of its
 //	          functions and methods (Go per-function selection: a test depends on the
 //	          bodies it executed and on the declarations of everything it could reach)
+//	@set:ID   a set of files declared in smates.yml (depends_on/serves), hashed as one
 //
 // Paths are repo-relative slash paths; the repository root is ".". A path at the
 // repository root whose name starts with "$" cannot be told from an environment
@@ -26,6 +27,7 @@ const (
 	KindTree                  // dir/**
 	KindEnv                   // $NAME
 	KindDecls                 // file.go#decls
+	KindSet                   // @set:ID
 )
 
 const (
@@ -34,6 +36,7 @@ const (
 	treeSuffix      = "/**"
 	envPrefix       = "$"
 	declsSuffix     = "#decls"
+	setPrefix       = "@set:"
 )
 
 // Decls is the key of the declarations of a Go file.
@@ -61,6 +64,12 @@ func Tree(dir string) string { return strings.TrimSuffix(dir, "/") + treeSuffix 
 // Env is the key of an environment variable.
 func Env(name string) string { return envPrefix + name }
 
+// Set is the key of a declared set of files (id names the declaration).
+func Set(id string) string { return setPrefix + id }
+
+// IsSet reports whether a key is a declared set of files.
+func IsSet(key string) bool { return strings.HasPrefix(key, setPrefix) }
+
 // Make is the key of kind for path p (the variable name for KindEnv).
 func Make(k Kind, p string) string {
 	switch k {
@@ -74,13 +83,19 @@ func Make(k Kind, p string) string {
 		return Env(p)
 	case KindDecls:
 		return Decls(p)
+	case KindSet:
+		return Set(p)
 	}
 	return p
 }
 
 // Parse returns the kind of a key and the path it names (the directory of a listing
-// or tree, the probed path of an existence check, the name of a variable).
+// or tree, the probed path of an existence check, the name of a variable, the id of a
+// set).
 func Parse(key string) (Kind, string) {
+	if id, ok := strings.CutPrefix(key, setPrefix); ok {
+		return KindSet, id
+	}
 	if name, ok := strings.CutPrefix(key, envPrefix); ok {
 		return KindEnv, name
 	}
@@ -106,8 +121,8 @@ func KindOf(key string) Kind {
 }
 
 // IsPseudo reports whether a key stands for something other than a file's content (a
-// listing, an existence check, a tree, an environment variable or a Go file's
-// declarations).
+// listing, an existence check, a tree, an environment variable, a declared set or a
+// Go file's declarations).
 func IsPseudo(key string) bool { return KindOf(key) != KindContent }
 
 // IsEnv reports whether a key is an environment variable.

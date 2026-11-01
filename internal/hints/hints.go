@@ -56,6 +56,7 @@ const (
 	LinkInput        = "suite input"
 	LinkTraced       = "traced"       // observed at runtime only
 	LinkUnattributed = "unattributed" // a changed file no test is known to depend on
+	LinkService      = "server code"  // declared with depends_on/serves in smates.yml
 )
 
 // MaxCandidates bounds the candidates kept per hint.
@@ -138,6 +139,8 @@ type Input struct {
 	Hash func(string) string
 	// Direct returns the static direct imports of a file (nil allowed).
 	Direct func(string) []string
+	// Service reports files the unit depends on through depends_on/serves (nil allowed).
+	Service func(string) bool
 	// Root is the repository root, used for modification times ("" to skip).
 	Root string
 }
@@ -292,6 +295,8 @@ func classify(c *Candidate, in Input, own, direct map[string]bool) {
 		c.Link = LinkStatic
 	case in.Inputs[p]:
 		c.Link = LinkInput
+	case in.Service != nil && in.Service(p):
+		c.Link = LinkService
 	default:
 		c.Link = LinkTraced
 	}

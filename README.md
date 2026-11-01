@@ -43,6 +43,7 @@ D(T) = traced(T)        files executed or read while T ran (incl. its child proc
                         and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
      ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
+     ∪ depends_on       code of a server the tests talk to in another process (declared)
 ```
 
 `T` is **skipped** only if it passed last time and every file in `D(T)` hashes the same
@@ -176,6 +177,18 @@ smates hook install  # optional: run the affected tests before every git push
 Without `smates.yml` smates auto-detects suites (`smates list`); `smates doctor` checks
 the setup.
 
+`init --github` sets up toolchains from `mise.toml`/`.tool-versions` (via
+`jdx/mise-action`), `.nvmrc`/`.node-version` or `package.json` `engines.node`/`volta`, and
+`.python-version`. Databases from `docker-compose.yml`/`compose.yaml` or `localhost` URLs
+in the code, and variables from `.env.example` the code reads, become commented-out
+`services:`/`env:` blocks to check and enable. If an existing workflow already runs the
+tests, it writes no second one (unless `--force`) and prints a patch replacing those
+steps with the smates action (`--patch FILE` writes it for `git apply`). Flags and
+variables of a Makefile `test` target become commented `command:`/`env:` hints in
+`smates.yml`. `smates doctor` reports the same, plus missing `node_modules`, a Node
+version outside `engines.node`, and services that are not running. smates never lets
+`npx`/`bunx` download a runner: one missing from `node_modules/.bin` is an error.
+
 ### Git hook
 
 `smates hook install` writes a `pre-push` hook (`--hook pre-commit` for a pre-commit
@@ -252,9 +265,9 @@ suites:
     exclude: ["src/legacy/**"]
     command: "pnpm exec vitest run"   # selected files are appended (or put in {tests})
     inputs: ["/proto/**"]            # extra files all tests of the suite depend on ("/" = repo root)
-    rules:                           # dependencies tracing cannot see
-      - tests: ["e2e/**"]
-        deps: ["server/**", "docker-compose.yml"]
+    rules:                           # other dependencies tracing cannot see
+      - tests: ["src/db/**"]
+        deps: ["migrations/**"]
     env: { TZ: UTC }
     isolate: true                    # jest/bun: one process per file while recording
     junit: reports/junit.xml          # per-file status from a JUnit report you produce
@@ -263,6 +276,15 @@ suites:
     root: services/api
     granularity: func                # select Go tests per test function (default: package)
     record_jobs: 4                   # with func: functions of one package recorded at once (default 1)
+  - name: e2e                        # Playwright against the api server (docker compose)
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on:                      # code of the server(s) the tests talk to
+      - api                          # = {suite: api}: what suite api covers (its root minus its tests)
+      - paths: ["docker-compose.yml"]  # repo-relative globs
+        tests: ["admin/**"]          # optional: only these tests (relative to root)
+    serves: ["services/worker/**"]   # shorthand for depends_on: [{paths: [...]}]
   - name: tools
     runner: pytest
     root: tools
@@ -280,11 +302,45 @@ agent:
   # model: gpt-6-luna   # default depends on the provider (see "The agent")
   max_turns: 12
   timeout: 120s
-  instructions: "e2e/ tests talk to the server built from server/."
+  instructions: "Files under deploy/ configure production only."
   explain_failures: true   # one-line probable cause for failing tests (built-in backend only)
   explain_max: 3           # failing tests explained per run
   # command: "fx ask --json --no-save"   # use any external agent CLI instead
 ```
+
+### Tests that exercise a server
+
+End-to-end tests (Playwright, vitest e2e, pytest against an HTTP API) often talk to a
+server running in another process or container, e.g. a Go backend started by docker
+compose. Tracing sees the test process, not the server, so a change to the server's code
+would select none of these tests. Declare the dependency on the e2e suite:
+
+```yaml
+  - name: e2e
+    runner: custom
+    root: e2e
+    command: "npx playwright test"
+    depends_on: [api]              # the code of suite api
+    # or: depends_on: [{paths: ["backend/**", "docker-compose.yml"], tests: ["admin/**"]}]
+    # or: serves: ["backend/**"]
+```
+
+`{suite: api}` (or just `api`) stands for the files under that suite's root, minus test
+files (of any suite), ignored and vendored files and files of suites rooted below it.
+`paths` are repo-relative globs; `tests` (relative to the suite root) narrows which tests
+get the dependency. Each declaration joins `D(T)` as one key whose hash covers all its
+files (computed at HEAD, recorded when the test runs, so the state does not grow with the
+size of the server), so a change to them selects the tests and is no longer an orphan,
+also with `--suite`. `--explain`, `smates why` and the pull request summary name the
+changed files and the declaration:
+
+```
++ e2e/login.spec.ts  [changed: backend/api/user.go (depends_on suite api)]
+```
+
+`smates doctor` points at suites that look like end-to-end tests (name or root mentions
+e2e, the command runs Playwright or Cypress, or a test calls `http://localhost`) and
+declare none of `depends_on`, `serves` or `rules`.
 
 ## Commands
 
@@ -447,8 +503,12 @@ ok  	example.com/shop/internal/store	0.170s
 
 ## Limitations
 
-- Dependencies outside the repository (services, databases, network) are not traced;
-  declare them with `rules`/`inputs`, or let orphans reach the agent.
+- Tracing follows the test process and its children, not a server the tests reach over
+  the network (docker compose, a separately started backend): declare its code with
+  `depends_on`/`serves` (see [Tests that exercise a server](#tests-that-exercise-a-server)).
+  What it reads from outside the repository (databases, external services) is not
+  tracked; declare files it depends on with `rules`/`inputs`, or let orphans reach the
+  agent.
 - Environment variables are seen only when code reads them through `process.env` (not
   Bun's `Bun.env` / `import.meta.env`), `os.environ` or Go's `os.Getenv`/`os.LookupEnv`.
   What the runtime itself consults (`TZ` for dates, the locale, `GODEBUG`), native code,
