@@ -199,6 +199,8 @@ func TestExitCodes(t *testing.T) {
 		{"usage: bad --output", suite("sh -c 'exit 0'"), []string{"run", "--output", "bogus"}, ExitUsage},
 		{"usage: bad --only", suite("sh -c 'exit 0'"), []string{"run", "--only", "nocolon"}, ExitUsage},
 		{"usage: --only with --all", suite("sh -c 'exit 0'"), []string{"run", "--all", "--only", "sh:t/a_check.sh"}, ExitUsage},
+		{"usage: --only with --add", suite("sh -c 'exit 0'"), []string{"run", "--only", "sh:t/a_check.sh", "--add", "sh:t/a_check.sh"}, ExitUsage},
+		{"usage: --only with --orphans", suite("sh -c 'exit 0'"), []string{"run", "--only", "sh:t/a_check.sh", "--orphans=skip"}, ExitUsage},
 		{"config: unknown field", suite("sh -c 'exit 0'") + "bogus: 1\n", []string{"run", "--all"}, ExitConfig},
 		{"config: unknown runner", "version: 1\nsuites:\n  - name: x\n    runner: nope\n", []string{"run", "--all"}, ExitConfig},
 		{"config: unknown --suite", suite("sh -c 'exit 0'"), []string{"run", "--suite", "nope"}, ExitConfig},

@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -833,6 +834,23 @@ func TestReferences(t *testing.T) {
 	// A match naming the directory too explains it (also through an already selected test).
 	if _, ex := r.References(g, []string{"fixtures/users_seed.sql"}); !reflect.DeepEqual(ex, []string{"fixtures/users_seed.sql"}) {
 		t.Errorf("qualified match: %v", ex)
+	}
+	// Mentions also lists the tests already selected (References only adds the others),
+	// with the file that names the orphan.
+	ms, _ := r.Mentions(g, []string{"fixtures/users_seed.sql", "conf/routes.yaml"})
+	var mgot []string
+	for _, m := range ms {
+		mgot = append(mgot, fmt.Sprintf("%s %s %s %t", m.Test, m.Orphan, m.File, m.Qualified))
+	}
+	if want := []string{
+		"t/test_users.py fixtures/users_seed.sql t/test_users.py true",
+		"t/test_other.py conf/routes.yaml t/helper.py false",
+		"t/test_sel.py fixtures/users_seed.sql t/test_sel.py false",
+	}; !reflect.DeepEqual(mgot, want) {
+		t.Errorf("mentions:\n%s\nwant\n%s", strings.Join(mgot, "\n"), strings.Join(want, "\n"))
+	}
+	if adds := r.ReferenceAdditions(ms); len(adds) != 2 || adds[0].Test != "t/test_users.py" || adds[1].Test != "t/test_other.py" {
+		t.Errorf("reference additions from mentions: %+v", adds)
 	}
 	if a, e := r.References(nil, []string{"x"}); a != nil || e != nil {
 		t.Error("nil graph")

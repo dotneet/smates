@@ -30,6 +30,7 @@ const (
 	ReasonDiff       = "diff"       // diff mode: static deps changed since base
 	ReasonRerun      = "rerun"      // smates watch reran the previous selection
 	ReasonOnly       = "only"       // named with smates run --only
+	ReasonCaller     = "caller"     // the caller added it (smates run --add)
 	ReasonUnaffected = "unaffected" // skipped
 )
 
@@ -51,6 +52,7 @@ const (
 	OrphanNoImpact  = "no-impact" // the agent judged it irrelevant to every test
 	OrphanPolicy    = "policy"    // orphan policy "all": the suites it may affect run in full
 	OrphanIgnored   = "ignored"   // orphan policy "ignore"
+	OrphanSkipped   = "skipped"   // the caller opted out of the orphan policy (--orphans=skip)
 	OrphanUntested  = "untested"  // source code no test reaches (untested: skip)
 )
 
@@ -1072,10 +1074,65 @@ func Owned(f string, all []*runner.Suite, n int) bool {
 	return false
 }
 
+// Mention is a test that names a changed file in one of its own sources or
+// dependencies (see Mentions).
+type Mention struct {
+	Suite  string
+	Test   string
+	Orphan string
+	// File is the test source or dependency that names Orphan.
+	File string
+	// Qualified: File also names the orphan's directory (or full path), so the
+	// mention explains the orphan.
+	Qualified bool
+}
+
 // References finds tests that mention an orphan file by name in their own sources or
 // dependencies (fixtures, migrations, schemas, scripts referenced as strings). It returns
 // the additions and the orphans that were explained this way.
 func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []string) {
+	ms, ex := r.Mentions(g, orphans)
+	return r.ReferenceAdditions(ms), ex
+}
+
+// ReferenceAdditions turns mentions into one addition per test not selected yet.
+func (r *Result) ReferenceAdditions(ms []Mention) []Addition {
+	type key struct{ suite, test string }
+	var order []key
+	why, named := map[key][]string{}, map[key][]string{}
+	for _, m := range ms {
+		k := key{m.Suite, m.Test}
+		if _, ok := why[k]; !ok {
+			order = append(order, k)
+		}
+		why[k] = append(why[k], m.Orphan+" (in "+m.File+")")
+		if !slices.Contains(named[k], m.Orphan) {
+			named[k] = append(named[k], m.Orphan)
+		}
+	}
+	var adds []Addition
+	for _, k := range order {
+		s := r.SuiteByName(k.suite)
+		if s == nil {
+			continue
+		}
+		i := slices.IndexFunc(s.Tests, func(t *Test) bool { return t.ID == k.test })
+		if i < 0 || s.Tests[i].Selected {
+			continue
+		}
+		w, n := why[k], named[k]
+		sort.Strings(w)
+		sort.Strings(n)
+		adds = append(adds, Addition{Suite: k.suite, Test: k.test, Reason: ReasonReference, Detail: "references " + strings.Join(w, ", "), Files: n})
+	}
+	return adds
+}
+
+// Mentions finds every test, selected or not, that mentions an orphan file by name in
+// its own sources or dependencies, and the orphans explained this way (by a mention
+// that also names the file's directory). Mentions in files every test of a suite
+// depends on come last, and only for orphans no test-specific file explains.
+func (r *Result) Mentions(g *static.Graph, orphans []string) ([]Mention, []string) {
 	if g == nil || len(orphans) == 0 {
 		return nil, nil
 	}
@@ -1109,7 +1166,7 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 		}
 		return string(g.Read(f))
 	}
-	var adds []Addition
+	var out []Mention
 	explained := map[string]bool{}
 	// Files every test of a suite depends on (package.json, lockfiles, runner config)
 	// mention scripts and setup files: a match there would select the whole suite, so
@@ -1117,7 +1174,7 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 	for tier := 0; tier < 2; tier++ {
 		for _, s := range r.Suites {
 			for _, t := range s.Tests {
-				var why, named []string
+				var ms []Mention
 				searched := map[string]bool{}
 				for _, d := range s.Deps[t.ID] {
 					if s.Inputs[d] != (tier == 1) {
@@ -1149,20 +1206,19 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 						if tier == 1 && explainedTier0[o] {
 							continue
 						}
-						why = append(why, o+" (in "+d+")")
-						if !slices.Contains(named, o) {
-							named = append(named, o)
-						}
+						ms = append(ms, Mention{Suite: s.Name, Test: t.ID, Orphan: o, File: d, Qualified: qualified})
 						if qualified {
 							explained[o] = true
 						}
 					}
 				}
-				if len(why) > 0 && !t.Selected {
-					sort.Strings(why)
-					sort.Strings(named)
-					adds = append(adds, Addition{Suite: s.Name, Test: t.ID, Reason: ReasonReference, Detail: "references " + strings.Join(why, ", "), Files: named})
-				}
+				sort.Slice(ms, func(i, j int) bool {
+					if ms[i].Orphan != ms[j].Orphan {
+						return ms[i].Orphan < ms[j].Orphan
+					}
+					return ms[i].File < ms[j].File
+				})
+				out = append(out, ms...)
 			}
 		}
 		if tier == 0 {
@@ -1176,7 +1232,7 @@ func (r *Result) References(g *static.Graph, orphans []string) ([]Addition, []st
 		ex = append(ex, o)
 	}
 	sort.Strings(ex)
-	return adds, ex
+	return out, ex
 }
 
 var genericNames = map[string]bool{
