@@ -205,7 +205,9 @@ run on one branch never makes another branch's changes look like this one's. Sav
 a lock file next to the shared state and merges this run's changes into what is on disk,
 so smates processes in several worktrees at once do not lose each other's results (when
 two of them re-ran the same test, the newer result wins and outcome histories are
-combined). A lock left behind by a crashed process is taken over after two minutes.
+combined; `smates flaky --clear` and `smates state clear`, which clears it for every
+worktree, are not undone by a run that started earlier). A lock left behind by a
+crashed process is taken over after two minutes.
 `smates state show` says where the state lives, whether it is shared, and where it was
 seeded from.
 

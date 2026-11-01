@@ -83,6 +83,73 @@ func TestMergeChanges(t *testing.T) {
 	}
 }
 
+func TestMergeChangesDeletions(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	base := sample()
+	base.Runs = []Run{{ID: "old", At: t0}}
+
+	// Deleted on disk (`state clear` = an empty disk state, or another process's full
+	// run pruned it): entries ours did not change stay deleted, and so do old runs.
+	ours := clone(t, base)
+	ours.Suites["web"].Tests["src/b.test.ts"].Status = Pass // changed by ours
+	ours.Runs = append(ours.Runs, Run{ID: "new", At: t0.Add(time.Hour)})
+	disk := New()
+	disk.MergeChanges(base, ours)
+	tests := disk.Suites["web"].Tests
+	if tests["src/a.test.ts"] != nil {
+		t.Errorf("an entry deleted on disk was put back")
+	}
+	if tests["src/b.test.ts"] == nil {
+		t.Errorf("an entry ours changed was not written")
+	}
+	if len(disk.Runs) != 1 || disk.Runs[0].ID != "new" {
+		t.Errorf("runs after clear: %v, want only the new one", disk.Runs)
+	}
+
+	// Deleted by ours (a full run pruned it): removed unless disk changed it.
+	ours = clone(t, base)
+	delete(ours.Suites["web"].Tests, "src/a.test.ts")
+	delete(ours.Suites["web"].Tests, "src/b.test.ts")
+	disk = clone(t, base)
+	disk.Suites["web"].Tests["src/b.test.ts"].At = t0.Add(time.Hour)
+	disk.MergeChanges(base, ours)
+	tests = disk.Suites["web"].Tests
+	if tests["src/a.test.ts"] != nil {
+		t.Errorf("an entry ours pruned survived")
+	}
+	if tests["src/b.test.ts"] == nil {
+		t.Errorf("an entry another process updated was pruned")
+	}
+}
+
+func TestMergeChangesFlakyClear(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	base := sample()
+	base.Suites["web"].Tests["src/a.test.ts"].Flaky = &Flake{Count: 2, First: t0, Last: t0, Flip: "pass->fail"}
+	base = clone(t, base)
+	ours := clone(t, base)
+	ours.Suites["web"].Tests["src/a.test.ts"].Flaky = nil // flaky --clear
+	// Meanwhile another worktree re-ran the test (no new flip).
+	disk := clone(t, base)
+	da := disk.Suites["web"].Tests["src/a.test.ts"]
+	da.At, da.DurationMs = t0.Add(time.Hour), 99
+	disk.MergeChanges(base, ours)
+	got := disk.Suites["web"].Tests["src/a.test.ts"]
+	if got.Flaky != nil || got.DurationMs != 99 {
+		t.Errorf("clear lost to a concurrent update: flaky %+v, duration %d", got.Flaky, got.DurationMs)
+	}
+
+	// A flip seen after the clear's base is new evidence and is kept.
+	disk = clone(t, base)
+	da = disk.Suites["web"].Tests["src/a.test.ts"]
+	da.At = t0.Add(time.Hour)
+	da.Flaky = &Flake{Count: 3, First: t0, Last: t0.Add(time.Hour), Flip: "fail->pass"}
+	disk.MergeChanges(base, ours)
+	if f := disk.Suites["web"].Tests["src/a.test.ts"].Flaky; f == nil || f.Count != 3 {
+		t.Errorf("a new flip was dropped: %+v", f)
+	}
+}
+
 func TestSameEntry(t *testing.T) {
 	s := sample()
 	c := clone(t, s)

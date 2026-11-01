@@ -3,6 +3,7 @@
 package state
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha1"
 	"encoding/hex"
@@ -395,45 +396,102 @@ func mergeEntry(cur, e *Entry) *Entry {
 }
 
 // MergeChanges applies to s (typically the state just re-read from disk) the changes
-// ours made to the per-test entries since it was loaded as base (nil: everything in
-// ours counts as a change). An entry ours changed replaces the one in s unless s's
-// entry changed too since base, a concurrent update: then the two are combined like
-// Merge does (newer wins, histories and flake evidence combined). Entries ours left
-// alone keep s's version (or are added when s lacks them). Agent cache entries and run
-// records are unioned. The snapshot (Files, Commit, Created) is left to the caller: it
-// describes one working tree, not the shared entries.
+// ours made since it was loaded as base (nil: everything in ours counts as a change),
+// a three-way merge per test entry:
+//
+//   - an entry ours did not change keeps s's version, and stays deleted when s no
+//     longer has it (`state clear`, or a full run of another process pruned it);
+//   - an entry ours added or changed replaces s's, unless s's changed too since base
+//     (a concurrent update): then the two are combined like Merge does (newer wins,
+//     histories combined), except that flake evidence one side cleared stays cleared
+//     unless the other side saw a new flip after base;
+//   - an entry ours deleted (a full run prunes units that no longer exist) is deleted
+//     from s unless s's changed since base.
+//
+// Agent cache entries and run records ours added are added. The snapshot (Files,
+// Commit, Created) is left to the caller: it describes one working tree, not the
+// shared entries.
 func (s *State) MergeChanges(base, ours *State) {
+	baseEntry := func(suite, id string) *Entry {
+		if base == nil || base.Suites[suite] == nil {
+			return nil
+		}
+		return base.Suites[suite].Tests[id]
+	}
 	for name, osu := range ours.Suites {
 		su := s.Suite(name)
-		var bsu *Suite
-		if base != nil {
-			bsu = base.Suites[name]
-		}
 		for id, o := range osu.Tests {
-			var b *Entry
-			if bsu != nil {
-				b = bsu.Tests[id]
-			}
-			d := su.Tests[id]
+			b, d := baseEntry(name, id), su.Tests[id]
 			switch {
-			case b != nil && SameEntry(b, o): // unchanged by ours
-				if d == nil {
-					su.Tests[id] = o
-				}
+			case b != nil && SameEntry(b, o): // unchanged by ours: s's version, or deleted
 			case d == nil || (b != nil && SameEntry(d, b)): // changed by ours only
 				su.Tests[id] = o
 			default: // changed on both sides
-				su.Tests[id] = mergeEntry(d, o)
+				m := mergeEntry(d, o)
+				if b != nil {
+					m.Flaky = mergeFlake3(b.Flaky, d.Flaky, o.Flaky)
+				}
+				su.Tests[id] = m
+			}
+		}
+	}
+	if base != nil {
+		for name, bsu := range base.Suites {
+			osu, su := ours.Suites[name], s.Suites[name]
+			if su == nil {
+				continue
+			}
+			for id, b := range bsu.Tests {
+				if osu != nil && osu.Tests[id] != nil {
+					continue
+				}
+				if d := su.Tests[id]; d != nil && SameEntry(d, b) {
+					delete(su.Tests, id) // deleted by ours, untouched on disk
+				}
 			}
 		}
 	}
 	for k, v := range ours.AgentCache {
-		s.AgentCache[k] = v
+		if base == nil || !bytes.Equal(base.AgentCache[k], v) {
+			s.AgentCache[k] = v
+		}
 	}
-	s.Runs = mergeRuns(s.Runs, ours.Runs)
+	known := map[string]bool{}
+	if base != nil {
+		for _, r := range base.Runs {
+			known[r.ID] = true
+		}
+	}
+	var added []Run
+	for _, r := range ours.Runs {
+		if !known[r.ID] {
+			added = append(added, r)
+		}
+	}
+	s.Runs = mergeRuns(s.Runs, added)
 	if ours.Tool != "" {
 		s.Tool = ours.Tool
 	}
+}
+
+// mergeFlake3 combines the flake evidence of an entry two sides (d, o) changed since
+// base: a side that cleared the evidence (`smates flaky --clear`) wins, unless the
+// other side recorded a flip after base.
+func mergeFlake3(b, d, o *Flake) *Flake {
+	newer := func(f *Flake) bool { return f != nil && (b == nil || f.Last.After(b.Last)) }
+	switch {
+	case b != nil && o == nil: // ours cleared
+		if newer(d) {
+			return d
+		}
+		return nil
+	case b != nil && d == nil: // disk cleared
+		if newer(o) {
+			return o
+		}
+		return nil
+	}
+	return mergeFlake(d, o)
 }
 
 // SameEntry reports whether two entries record the same thing (times compared to the

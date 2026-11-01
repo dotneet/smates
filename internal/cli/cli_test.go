@@ -207,10 +207,16 @@ type gitRepo struct {
 
 func newGitRepo(t *testing.T) *gitRepo {
 	t.Helper()
+	return newGitRepoIn(t, t.TempDir())
+}
+
+// newGitRepoIn creates the repository in dir (an existing, empty directory).
+func newGitRepoIn(t *testing.T, dir string) *gitRepo {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
-	g := &gitRepo{t: t, dir: t.TempDir()}
+	g := &gitRepo{t: t, dir: dir}
 	g.git("init", "-q", "-b", "main")
 	g.commit("one")
 	repo, err := gitx.Open(g.dir)

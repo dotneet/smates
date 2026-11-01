@@ -517,7 +517,11 @@ func showState(st *state.State, store *stateStore, asJSON bool, w io.Writer) err
 		fmt.Fprintf(w, "no recorded state\n")
 		return nil
 	}
-	fmt.Fprintf(w, "recorded: %s (commit %.12s, %s)\nsnapshot: %d files\n", st.Created.Format(time.RFC3339), st.Commit, st.Tool, len(st.Files))
+	if st.Created.IsZero() {
+		fmt.Fprintf(w, "recorded: no snapshot in this worktree yet (%s)\nsnapshot: %d files\n", st.Tool, len(st.Files))
+	} else {
+		fmt.Fprintf(w, "recorded: %s (commit %.12s, %s)\nsnapshot: %d files\n", st.Created.Format(time.RFC3339), st.Commit, st.Tool, len(st.Files))
+	}
 	for _, name := range slices.Sorted(maps.Keys(info.Suites)) {
 		si := info.Suites[name]
 		fmt.Fprintf(w, "suite %s: %d tests (pass %d, fail %d, unknown %d), ~%d deps each\n", name, si.Tests, si.Status["pass"], si.Status["fail"], si.Status["unknown"], si.Deps)

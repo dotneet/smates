@@ -21,11 +21,18 @@ import (
 // and a recorded state in the main worktree.
 func worktreeFixture(t *testing.T, extraConfig string) *gitRepo {
 	t.Helper()
+	return worktreeFixtureIn(t, extraConfig, t.TempDir())
+}
+
+// worktreeFixtureIn builds the fixture in dir, which may be reached through a symlink
+// (as macOS temp dirs are: /var -> /private/var).
+func worktreeFixtureIn(t *testing.T, extraConfig, dir string) *gitRepo {
+	t.Helper()
 	clearCI(t)
 	noAgentCredentials(t)
 	t.Setenv("SMATES_NO_STATE_SEED", "")
 	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
-	g := newGitRepo(t)
+	g := newGitRepoIn(t, dir)
 	write := func(rel, content string) {
 		p := filepath.Join(g.dir, filepath.FromSlash(rel))
 		os.MkdirAll(filepath.Dir(p), 0o755)
@@ -70,12 +77,33 @@ func mustRun(t *testing.T, args ...string) (string, string) {
 
 func addWorktree(t *testing.T, g *gitRepo, branch string, extra ...string) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), branch)
+	// Next to the repository, through the same (possibly symlinked) parent; the path is
+	// left unresolved, as a user would type it.
+	dir := filepath.Join(filepath.Dir(g.dir), "wt-"+branch)
 	g.git(append([]string{"worktree", "add", "-q", "-b", branch, dir}, extra...)...)
-	if r, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = r
-	}
 	return dir
+}
+
+// assertSamePath compares paths after resolving symlinks: git reports resolved paths
+// (on macOS, temp dirs under /var are /private/var).
+func assertSamePath(t *testing.T, what, got, want string) {
+	t.Helper()
+	resolve := func(p string) string {
+		// The file itself may not exist yet: resolve the deepest existing parent.
+		rest := ""
+		for q := filepath.Clean(p); ; q = filepath.Dir(q) {
+			if r, err := filepath.EvalSymlinks(q); err == nil {
+				return filepath.Join(r, rest)
+			}
+			if filepath.Dir(q) == q {
+				return filepath.Clean(p)
+			}
+			rest = filepath.Join(filepath.Base(q), rest)
+		}
+	}
+	if resolve(got) != resolve(want) {
+		t.Errorf("%s = %q, want %q", what, got, want)
+	}
 }
 
 func loadState(t *testing.T, path string) *state.State {
@@ -190,14 +218,34 @@ func TestSeedFromRemote(t *testing.T) {
 }
 
 func TestSharedStateWorktrees(t *testing.T) {
-	g := worktreeFixture(t, "state_shared: true\n")
+	checkSharedWorktrees(t, worktreeFixture(t, "state_shared: true\n"))
+}
+
+// TestSharedStateWorktreesThroughSymlink reaches the repository and its worktrees
+// through a symlinked directory, as on macOS (/var -> /private/var), where git
+// reports the resolved paths.
+func TestSharedStateWorktreesThroughSymlink(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	dir := filepath.Join(link, "repo")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkSharedWorktrees(t, worktreeFixtureIn(t, "state_shared: true\n", dir))
+}
+
+func checkSharedWorktrees(t *testing.T, g *gitRepo) {
+	t.Helper()
 	wt := addWorktree(t, g, "feat")
 	mustRun(t, "run", "-C", g.dir, "--no-agent", "--all")
 
 	common := filepath.Join(g.dir, ".git", "smates", "state.json.gz")
-	out, _ := mustRun(t, "state", "path", "-C", wt)
-	if got := strings.TrimSpace(out); got != common {
-		t.Errorf("state path in the worktree = %q, want %q", got, common)
+	for _, d := range []string{g.dir, wt} {
+		out, _ := mustRun(t, "state", "path", "-C", d)
+		assertSamePath(t, "state path in "+d, strings.TrimSpace(out), common)
 	}
 	if st := loadState(t, common); st.Empty() {
 		t.Fatal("shared state empty after a run in the main worktree")
@@ -207,7 +255,7 @@ func TestSharedStateWorktrees(t *testing.T) {
 		t.Errorf("main worktree snapshot: %d files, entries %v", len(mainSnap.Files), mainSnap.Suites)
 	}
 	// The linked worktree sees the entries but not the main worktree's snapshot.
-	out, _ = mustRun(t, "state", "show", "-C", wt)
+	out, _ := mustRun(t, "state", "show", "-C", wt)
 	if !strings.Contains(out, "location: shared by all worktrees") || !strings.Contains(out, "snapshot: 0 files") || !strings.Contains(out, "suite s: 2 tests") {
 		t.Errorf("state show in the linked worktree:\n%s", out)
 	}
@@ -274,6 +322,97 @@ func TestSharedStateConcurrentWriters(t *testing.T) {
 	}
 	if _, err := os.Stat(common + ".lock"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("lock file left behind: %v", err)
+	}
+}
+
+// sharedStore opens a shared-mode store of the repository at dir.
+func sharedStore(t *testing.T, dir string) *stateStore {
+	t.Helper()
+	repo, err := gitx.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{StateShared: true}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	return openStore(repo, cfg, "", io.Discard)
+}
+
+// TestSharedLoadReadsOnce: another worktree saving while this process loads must not
+// make the load's base newer than its state, or the next save would take the older
+// copy for a change of this process and overwrite the other worktree's update.
+func TestSharedLoadReadsOnce(t *testing.T) {
+	g := worktreeFixture(t, "")
+	wt := addWorktree(t, g, "feat")
+	t0 := time.Now().Add(-time.Hour)
+	ours, other := sharedStore(t, g.dir), sharedStore(t, wt)
+	st := state.New()
+	st.Suite("s").Tests["x"] = &state.Entry{Status: state.Pass, At: t0}
+	if err := ours.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	reads := 0
+	readSharedState = func(path string) ([]byte, error) {
+		data, err := os.ReadFile(path)
+		reads++
+		if reads == 1 {
+			// The other worktree saves a newer result of x right after this read.
+			ost, lerr := other.Load()
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			ost.Suite("s").Tests["x"] = &state.Entry{Status: state.Fail, At: t0.Add(time.Minute)}
+			if serr := other.Save(ost); serr != nil {
+				t.Fatal(serr)
+			}
+		}
+		return data, err
+	}
+	t.Cleanup(func() { readSharedState = os.ReadFile })
+	mine, err := ours.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads != 2 { // ours once, other once
+		t.Errorf("shared state read %d times, want once per load", reads)
+	}
+	mine.Suite("s").Tests["y"] = &state.Entry{Status: state.Pass, At: time.Now()}
+	if err := ours.Save(mine); err != nil {
+		t.Fatal(err)
+	}
+	got := loadState(t, ours.path).Suites["s"].Tests
+	if got["x"] == nil || got["x"].Status != state.Fail || got["y"] == nil {
+		t.Errorf("the other worktree's newer x was overwritten: x=%+v y=%v", got["x"], got["y"] != nil)
+	}
+}
+
+// TestSharedClearNotUndone: `state clear` in one worktree is not undone by the next
+// save of a process that loaded the state before.
+func TestSharedClearNotUndone(t *testing.T) {
+	g := worktreeFixture(t, "state_seed: false\n")
+	wt := addWorktree(t, g, "feat")
+	ours := sharedStore(t, wt)
+	st := state.New()
+	st.Suite("s").Tests["old"] = &state.Entry{Status: state.Pass, At: time.Now()}
+	if err := ours.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	mine, err := ours.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sharedStore(t, g.dir).Clear(); err != nil {
+		t.Fatal(err)
+	}
+	mine.Suite("s").Tests["new"] = &state.Entry{Status: state.Pass, At: time.Now()}
+	if err := ours.Save(mine); err != nil {
+		t.Fatal(err)
+	}
+	got := loadState(t, ours.path).Suites["s"].Tests
+	if got["old"] != nil || got["new"] == nil {
+		t.Errorf("after clear: %v", got)
 	}
 }
 

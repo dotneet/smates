@@ -145,22 +145,43 @@ func (s *stateStore) Load() (*state.State, error) {
 	if !s.shared {
 		return state.Load(s.path)
 	}
-	st, err := state.Load(s.path)
-	if err != nil {
+	// One read, decoded twice: st is this process's copy, base what it started from.
+	// Two reads could see different versions (no lock is held here), and a base newer
+	// than st would make Save take st's older entries for changes of this process.
+	st, base := state.New(), state.New()
+	data, err := readSharedState(s.path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
 		return nil, err
+	default:
+		gz := strings.HasSuffix(s.path, ".gz")
+		if st, err = state.Read(bytes.NewReader(data), gz); err != nil {
+			return nil, err
+		}
+		if base, err = state.Read(bytes.NewReader(data), gz); err != nil {
+			return nil, err
+		}
 	}
-	if s.base, err = state.Load(s.path); err != nil {
-		return nil, err
-	}
+	s.base = base
 	// The shared file's snapshot is the last writer's, possibly another worktree's on
-	// another branch: use this worktree's own, or none.
+	// another branch: use this worktree's own, or none (no snapshot also means no
+	// snapshot time, which the hook's staleness check and State.Merge go by).
 	snap, err := state.Load(s.snapPath)
 	if err == nil && len(snap.Files) > 0 {
 		st.Files, st.Commit, st.Created = snap.Files, snap.Commit, snap.Created
 	} else {
-		st.Files, st.Commit = map[string]string{}, ""
+		dropSnapshot(st)
 	}
 	return st, nil
+}
+
+// readSharedState reads the shared state file (a variable for tests).
+var readSharedState = os.ReadFile
+
+// dropSnapshot removes the full-tree snapshot and what describes it.
+func dropSnapshot(st *state.State) {
+	st.Files, st.Commit, st.Created = map[string]string{}, "", time.Time{}
 }
 
 // Save writes the state. In shared mode it writes this worktree's snapshot, then, under
@@ -282,7 +303,7 @@ func (s *stateStore) seed() {
 		return
 	}
 	if src.Commit == "" || !isAncestor(s.repo, src.Commit) {
-		src.Files, src.Commit = map[string]string{}, ""
+		dropSnapshot(src)
 	}
 	s.base = nil
 	if err := s.Save(src); err != nil {
