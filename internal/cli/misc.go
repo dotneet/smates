@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -46,11 +47,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	}
 	repo, err := gitx.Open(d)
 	if err != nil {
-		return err
+		return asEnvError(err)
 	}
 	snap, err := repo.Snapshot()
 	if err != nil {
-		return err
+		return asEnvError(err)
 	}
 	var files []string
 	for f := range snap {
@@ -62,10 +63,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	var existing *config.Config
 	if !*print && !*force {
 		if existing, err = config.Load(repo.Root); err != nil {
-			return err
+			return asConfigError(err)
 		}
 		if existing != nil && !*github && !*agentsMD {
-			return fmt.Errorf("%s already exists (use --force to overwrite, --github to only generate the workflow from it, or --agents-md to only add the section for coding agents)", existing.Path)
+			return usageError{fmt.Errorf("%s already exists (use --force to overwrite, --github to only generate the workflow from it, or --agents-md to only add the section for coding agents)", existing.Path)}
 		}
 	}
 	if existing != nil {
@@ -77,7 +78,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
 	}
 	doc := renderConfig(suites, configHints(mk))
-	rep := &initReport{Config: "smates.yml", FilesWritten: []string{}, Suites: []initSuite{}, NeedsReview: []reviewItem{}, NextSteps: initNextSteps}
+	// --force overwrites the config file smates reads, whichever of its names it has
+	// (a new smates.yml next to a .smates.yml would shadow it).
+	name := configFileName(repo.Root)
+	rep := &initReport{Config: name, FilesWritten: []string{}, Suites: []initSuite{}, NeedsReview: []reviewItem{}, NextSteps: initNextSteps}
 	for _, s := range suites {
 		rep.Suites = append(rep.Suites, initSuite{Name: s.Name, Runner: s.Runner, Root: s.Root, Exclude: nonNil(s.Exclude)})
 	}
@@ -90,12 +94,12 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		rep.NeedsReview = initReview(repo, nil, suites, files, mk, *github)
 		return writeJSON(stdout, rep)
 	}
-	path := filepath.Join(repo.Root, "smates.yml")
+	path := filepath.Join(repo.Root, name)
 	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
 		return err
 	}
 	rep.Written = true
-	rep.FilesWritten = append(rep.FilesWritten, "smates.yml")
+	rep.FilesWritten = append(rep.FilesWritten, name)
 	if changed, err := ensureGitignore(repo.Root); err != nil {
 		fmt.Fprintf(stderr, "smates: could not update .gitignore: %v\n", err)
 	} else if changed {
@@ -105,7 +109,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if asJSON {
 		out = io.Discard
 	}
-	fmt.Fprintf(out, "wrote smates.yml with %d suite(s):\n", len(suites))
+	fmt.Fprintf(out, "wrote %s with %d suite(s):\n", name, len(suites))
 	for _, s := range suites {
 		fmt.Fprintf(out, "  - %s (%s) in %s\n", s.Name, s.Runner, s.Root)
 	}
@@ -480,9 +484,9 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	if len(funcs) > 0 {
-		return fmt.Errorf("%s is tested per function; pass one of: %s", target, strings.Join(limit(funcs, 20), ", "))
+		return configError{fmt.Errorf("%s is tested per function; pass one of: %s", target, strings.Join(limit(funcs, 20), ", "))}
 	}
-	return fmt.Errorf("%s is not a test unit of any suite (see `smates list`)", target)
+	return configError{fmt.Errorf("%s is not a test unit of any suite (see `smates list`)", target)}
 }
 
 // listReport is the JSON schema of `smates list --format json`.
@@ -740,11 +744,23 @@ func showState(st *state.State, store *stateStore, asJSON bool, w io.Writer) err
 	return nil
 }
 
+// pushState pushes the state file as state.json.gz in a commit of its own; a plain
+// .json state is compressed first, so the blob always matches its name.
 func pushState(repo *gitx.Repo, path, remote, ref string, log io.Writer) error {
-	if _, err := os.Stat(path); err != nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return fmt.Errorf("no state to push at %s", path)
 	}
-	blob, err := repo.Git("hash-object", "-w", path)
+	if !isGzip(data) {
+		var b bytes.Buffer
+		zw := gzip.NewWriter(&b)
+		zw.Write(data)
+		if err := zw.Close(); err != nil {
+			return err
+		}
+		data = b.Bytes()
+	}
+	blob, err := gitStdin(repo, string(data), "hash-object", "-w", "--stdin")
 	if err != nil {
 		return err
 	}
@@ -764,6 +780,9 @@ func pushState(repo *gitx.Repo, path, remote, ref string, log io.Writer) error {
 	return nil
 }
 
+// pullState fetches the first of refs that holds a state and saves it at path, in the
+// format path's name asks for (gzip for .gz). A pushed blob is decoded whatever its
+// encoding: older versions pushed a plain .json state under the same name.
 func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Writer) error {
 	for _, ref := range refs {
 		if _, err := repo.Git("fetch", "--quiet", "--no-tags", remote, "+"+ref+":"+ref); err != nil {
@@ -775,10 +794,11 @@ func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Write
 		if err != nil {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
+		st, err := state.Read(bytes.NewReader(data), isGzip(data))
+		if err != nil {
+			return fmt.Errorf("state on %s %s: %w", remote, ref, err)
 		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
+		if err := st.Save(path); err != nil {
 			return err
 		}
 		fmt.Fprintf(log, "smates: pulled state from %s %s\n", remote, ref)
@@ -786,6 +806,20 @@ func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Write
 	}
 	fmt.Fprintf(log, "smates: no remote state found (%s); the next run will start fresh\n", strings.Join(refs, ", "))
 	return nil
+}
+
+// isGzip reports whether data starts with the gzip magic number.
+func isGzip(data []byte) bool { return len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b }
+
+// configFileName is the name of the config file at root that config.Load reads (the
+// first of config.FileNames there), or smates.yml when there is none.
+func configFileName(root string) string {
+	for _, n := range config.FileNames {
+		if _, err := os.Stat(filepath.Join(root, n)); !errors.Is(err, os.ErrNotExist) {
+			return n
+		}
+	}
+	return "smates.yml"
 }
 
 func gitStdin(repo *gitx.Repo, stdin string, args ...string) (string, error) {

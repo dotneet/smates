@@ -177,7 +177,8 @@ func TestInterruptedRun(t *testing.T) {
 	report := filepath.Join(dir, "r.json")
 	var out, errb bytes.Buffer
 	start := time.Now()
-	code, err := cmdRun(ctx, []string{"-C", dir, "--no-agent", "--report", report}, &out, &errb)
+	md := filepath.Join(dir, "summary.md")
+	code, err := cmdRun(ctx, []string{"-C", dir, "--no-agent", "--report", report, "--markdown", md}, &out, &errb)
 	var ee envError
 	if code != ExitFailed || err == nil || errors.As(err, &ee) || time.Since(start) > 15*time.Second {
 		t.Fatalf("interrupted run: exit %d, %v\n%s", code, err, errb.String())
@@ -194,6 +195,10 @@ func TestInterruptedRun(t *testing.T) {
 	}
 	if err != nil || len(rep.Results) != 1 || len(rep.NotRun) != 2 || !rep.Interrupted || rep.ExitCode == 0 {
 		t.Fatalf("report: %v %+v\n%s", err, rep, errb.String())
+	}
+	// The summary says the run was interrupted, not that --fail-fast stopped it.
+	if s, _ := os.ReadFile(md); !strings.Contains(string(s), "**Interrupted:** 2 selected test units not run") || strings.Contains(string(s), "Fail fast") {
+		t.Errorf("summary:\n%s", s)
 	}
 	units := map[string]string{"good": "good/a_check.py", "bad": "bad/b_check.py", "more": "more/d_check.py"}
 	var ran string

@@ -6,7 +6,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
@@ -55,6 +57,16 @@ type Decision struct {
 	Model   string `json:"model"`
 	// Dropped are additions that named tests/suites that do not exist.
 	Dropped []string `json:"dropped,omitempty"`
+}
+
+// Check rejects a decision that named tests of which none exist: it would add
+// nothing for the orphans while they count as handled by the agent. Callers also check
+// cached decisions, which older versions stored without this validation.
+func (d *Decision) Check() error {
+	if d.RunAll || len(d.Add) > 0 || len(d.Dropped) == 0 {
+		return nil
+	}
+	return fmt.Errorf("none of the %d test(s) the agent named exist (%s)", len(d.Dropped), strings.Join(d.Dropped, "; "))
 }
 
 // Usage reports token consumption.

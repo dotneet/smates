@@ -594,9 +594,11 @@ decoding, errors). Low effort (dropped once a model rejects it), prompt caching,
 read-only tools confined to the repository and to files git does
 not ignore (`list_files`, `grep`, `read_file`, `git_diff`, `tests_for_file`, `test_deps`,
 `search_tests`, `submit_selection`). Bounded by turns, wall-clock time and an input-token
-budget; answers are validated against the test inventory and cached per change. Any
-failure falls back to the orphan policy. An external agent CLI can be plugged in instead
-(`agent.command`).
+budget; answers are validated against the test inventory and cached per change. Unknown
+tests are dropped (the built-in backend asks once for a correction); an answer that
+names tests but none that exist (or decides `tests` without listing any) is a failure,
+never an empty selection, and is not cached. Any failure falls back to the orphan
+policy. An external agent CLI can be plugged in instead (`agent.command`).
 
 ## 6. Watch mode
 

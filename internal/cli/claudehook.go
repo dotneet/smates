@@ -76,14 +76,14 @@ func claudeHookCmd(sub, dir string, user, useAgent bool, extra []string, stdout 
 	}
 	repo, err := gitx.Open(dir)
 	if err != nil && !user {
-		return 1, err
+		return 1, asEnvError(err)
 	}
 	if err != nil {
 		repo = nil
 	}
 	path, err := claudeSettingsPath(repo, user)
 	if err != nil {
-		return 1, err
+		return 1, asEnvError(err)
 	}
 	switch sub {
 	case "install":
