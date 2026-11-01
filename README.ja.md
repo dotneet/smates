@@ -249,6 +249,42 @@ Makefile の `test` ターゲットのフラグや環境変数は、`smates.yml`
 smates は `npx`/`bunx` によるランナーの暗黙のダウンロードを許さず、`node_modules/.bin` に
 ないときはエラーにします。
 
+### どのファイルがテストか
+
+`smates.yml` で `tests:` を指定しないスイートでは、テストファイルをランナー自身の設定から
+静的に(設定ファイルを実行せずに)読み取ります。
+
+- **jest**: コマンドの `--config`、なければスイートのルートから上にたどって最も近い
+  `jest.config.{js,ts,mjs,cjs,mts,cts,json}` か `package.json` の `"jest"`(jest と同じく
+  最も近い `package.json` で探索を止めます)。`rootDir`、`roots`、`testMatch`(`?(x)` や
+  `+(spec|test)` などの micromatch の extglob は変換し、`!` のパターンは除外)、`testRegex`、
+  `testPathIgnorePatterns`(`<rootDir>` を置換)を読みます。
+- **vitest**: コマンドの `--config`、なければ上にたどって最も近い `vitest.config.*` /
+  `vite.config.*`。`root`、`test.root`、`test.dir`、`test.include`、`test.exclude`
+  (`...configDefaults.exclude` も解釈)と、プロジェクト(`test.projects`、`test.workspace`、
+  `vitest.workspace.*`)を読みます。ワークスペースは 1 つのスイートとし、各プロジェクトの
+  include/exclude をそのルート以下に適用した和集合をテストファイルとします。読めない設定の
+  プロジェクトは、そのディレクトリに既定のパターンを使います。ルートの vitest 設定がネストした
+  パッケージ(独自の `vitest.config.*` を持ち、`projects` に含まれないもの)のテストを数えない
+  ときは、自動検出でそのパッケージを別スイートにします。
+- **pytest**: スイートのルートから上にたどって最初に見つかる `pytest.ini`、`.pytest.ini`、
+  `pyproject.toml`(`[tool.pytest.ini_options]` / `[tool.pytest]`)、`tox.ini`(`[pytest]`)、
+  `setup.cfg`(`[tool:pytest]`)。`python_files` と、その設定ファイルがスイートのルートにある
+  場合は `testpaths` を読みます(pytest が `testpaths` を使うのは rootdir で引数なしに
+  起動したときだけのため)。
+
+JS/TS の設定は、オブジェクトリテラルを export していて(`module.exports = {...}`、
+`export default {...}`、`defineConfig({...})`、またはそれが指すトップレベルの `const`)、値が文字列・配列・
+正規表現のリテラルのときに読めます。それ以外(関数、`mergeConfig(base, ...)` などほかの関数呼び出し、`testMatch: dirs.map(...)`、後から `config.roots.push(...)` などで変更される `const`、オプションを
+設定しうる `...spread`、jest の `projects`、Go の `regexp` にない先読みを使う `testRegex` など)
+は既定の glob にフォールバックし、`smates list` / `smates doctor` が理由とともに警告します。
+その場合は `smates.yml` に `tests:`(と `exclude:`)を書いてください。
+
+`smates list` は各スイートのテストの出所を表示し(`tests=jest.config.js testMatch`、`-v` で
+パターンも表示)、`smates doctor` も同様です。`smates.yml` の `tests:`/`exclude:` と違い、
+設定から読み取ったパターンは全件実行(`smates run --all`)で全ファイルを明示的に渡す理由には
+なりません。ランナー自身が見つける集合を表しているためです。
+
 ### git フック
 
 `smates hook install` は `pre-push` フック(`--hook pre-commit` で pre-commit)を書き込み、
@@ -520,6 +556,40 @@ ok  	example.com/shop/internal/store	0.170s
   `smates run --no-agent` と同じく、影響しうるスイートを丸ごと実行します。
 
 設定・コマンド・制限事項の詳細は [README.md](README.md) と [docs/DESIGN.md](docs/DESIGN.md) を参照してください。
+
+## AI コーディングエージェントから使う
+
+エージェントはコマンドの出力をすべて読むため、`smates run --output failures`(または
+環境変数 `SMATES_OUTPUT=agent`。フラグが優先)で出力を小さく保てます。
+
+- ランナーのバッチごとの出力をバッファし、そのバッチが失敗したときだけ表示します。
+  失敗したテストごとの出力を報告するランナー(vitest、jest、pytest、`go test`、JUnit)では
+  その出力だけを、それ以外では失敗したバッチの出力を最大 200 行(先頭 30 行と末尾 170 行、
+  間に省略の注記)表示します。
+- smates 自身の進捗行は省き、選択結果の 1 行だけを残します。
+- 最後に短いサマリを出します。成功なら 1 行、失敗なら失敗したテスト、それぞれの入力の
+  うち変更されたもの(失敗ヒントから)、そしてそのテストだけを再実行するコマンドです。
+
+```
+smates: FAILED 1 of 7 test unit(s) in 3.2s:
+  web: src/cart.test.ts
+    changed inputs: src/price.ts (modified), fixtures/prices.json (modified)
+smates: rerun them: smates run --output failures --only web:src/cart.test.ts
+```
+
+`--only suite:unit`(複数指定可)は指定したテスト単位(テストファイル、Go ではパッケージ
+ディレクトリ)だけを実行し、通常どおり記録します。他のテストや変更は次回の実行に残ります。
+`--report -` は JSON レポートを標準出力に書き、それ以外の出力はすべて標準エラーに出します。
+
+**終了コード**で「コードを直す」のか「環境・設定を直す」のかを区別できます。
+
+| コード | 意味 |
+|---|---|
+| 0 | 成功 |
+| 1 | テストが失敗した(ランナーの終了コードによらず 1。元のコードは `--report` の `exit_code`) |
+| 2 | 使い方の誤り(コマンドラインが不正) |
+| 3 | 設定エラー: `smates.yml` が不正、未知のランナー、解析できないスイートのコマンド、コマンドライン(`--suite`、`--only`)で指定したスイートやテストが設定にない、スイートが一つもない |
+| 4 | 環境の問題: git がない、git リポジトリでない、スイートのコマンドを起動できない(`PATH` にない、実行権限がない)、`npx`/`bunx` がダウンロードしなければならないツール(`node_modules/.bin` にない)、`custom` 以外のランナーを記録しながら実行したとき、どのテストも結果を報告しないままランナーのプロセスが 126 または 127 で終了した(シェルの「実行できない」「コマンドが見つからない」。`npm test`、`yarn`、`pnpm exec`、`sh -c` 経由も含む)。`--no-record` や `custom` ランナーではテストが実行されても結果が報告されないことがあるため、テストの失敗(1)になります。失敗の出力とサマリを出してから 4 で終了します |
 
 ## ライセンス
 

@@ -84,7 +84,7 @@ func configFile(dir, explicit string) (abs, display string, err error) {
 	}
 	repo, err := gitx.Open(dir)
 	if err != nil {
-		return "", "", err
+		return "", "", asEnvError(err)
 	}
 	for _, n := range config.FileNames {
 		p := filepath.Join(repo.Root, n)
@@ -92,24 +92,26 @@ func configFile(dir, explicit string) (abs, display string, err error) {
 			return p, n, nil
 		}
 	}
-	return "", "", errors.New("no smates.yml at the repository root: run `smates init` first")
+	return "", "", asConfigError(errors.New("no smates.yml at the repository root: run `smates init` first"))
 }
 
 // editConfig applies edit to the config file at path and writes the result unless
-// dryRun (always computing the diff).
+// dryRun (always computing the diff). An unreadable config or an edit it refuses
+// (invalid config, invalid value) is a configuration error (exit 3), a failed write an
+// environment error (exit 4).
 func editConfig(path, display string, dryRun bool, res *configEdit, edit func([]byte) ([]byte, error)) error {
 	// Edit the target of a symlinked config, keeping the link.
 	path, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return asConfigError(err)
 	}
 	out, err := edit(data)
 	if err != nil {
-		return fmt.Errorf("%s: %w", display, err)
+		return asConfigError(fmt.Errorf("%s: %w", display, err))
 	}
 	res.File, res.DryRun = display, dryRun
 	res.Changed = string(out) != string(data)
@@ -121,7 +123,7 @@ func editConfig(path, display string, dryRun bool, res *configEdit, edit func([]
 		return nil
 	}
 	if err := writeFileAtomic(path, out); err != nil {
-		return err
+		return asEnvError(err)
 	}
 	res.Written = true
 	return nil

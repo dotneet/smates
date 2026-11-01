@@ -48,6 +48,19 @@ Usage:
   smates doctor [--format json]         check setup
   smates version
 
+Exit codes:
+  0  success
+  1  tests failed
+  2  usage error (invalid command line)
+  3  configuration error (invalid smates.yml, unknown runner, a suite or test it does not define)
+  4  environment problem (git missing, not a git repository, a suite command that cannot start,
+     an npx/bunx tool missing from node_modules, or, in a recorded run of any runner but
+     custom, a runner exiting 126/127 before any test reported a result; with --no-record
+     or the custom runner such an exit is a test failure)
+
+For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
+of failing tests, then a short summary with the command that reruns just those tests.
+
 Run 'smates <command> -h' for flags. Docs: https://github.com/dotneet/smates
 `
 
@@ -103,17 +116,63 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		var ue usageError
 		if errors.As(err, &ue) {
 			fmt.Fprintf(stderr, "smates %s: %v\n", cmd, err)
-			return 2
+			return ExitUsage
 		}
 		fmt.Fprintf(stderr, "smates: %v\n", err)
+		var ce configError
+		var ee envError
+		switch {
+		case errors.As(err, &ce):
+			return ExitConfig
+		case errors.As(err, &ee):
+			return ExitEnv
+		}
 		if code == 0 {
-			code = 1
+			code = ExitFailed
 		}
 	}
 	return code
 }
 
+// Exit codes of smates (see `smates help`).
+const (
+	ExitOK     = 0 // success
+	ExitFailed = 1 // tests failed (or an unexpected error)
+	ExitUsage  = 2 // invalid command line
+	ExitConfig = 3 // invalid configuration: smates.yml, a suite or test the configuration does not define
+	ExitEnv    = 4 // environment problem: git, the repository, a runner or tool that cannot start
+)
+
+// usageError is an invalid command line (exit code 2).
 type usageError struct{ error }
+
+// configError is an invalid configuration (exit code 3): fix smates.yml, or the suite
+// or test named on the command line.
+type configError struct{ error }
+
+func (e configError) Unwrap() error { return e.error }
+
+// envError is a problem of the environment smates runs in (exit code 4): git missing,
+// not a git repository, a runner or tool that is not installed or cannot start.
+type envError struct{ error }
+
+func (e envError) Unwrap() error { return e.error }
+
+// asConfigError marks err (nil stays nil) as a configuration error.
+func asConfigError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return configError{err}
+}
+
+// asEnvError marks err (nil stays nil) as an environment error.
+func asEnvError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return envError{err}
+}
 
 // commonFlags are shared by commands that load the project.
 type commonFlags struct {
@@ -164,26 +223,26 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	}
 	repo, err := gitx.Open(dir)
 	if err != nil {
-		return nil, err
+		return nil, asEnvError(err)
 	}
 	var cfg *config.Config
 	if cf.config != "" {
 		data, err := os.ReadFile(cf.config)
 		if err != nil {
-			return nil, err
+			return nil, asConfigError(err)
 		}
 		if cfg, err = config.Parse(data); err != nil {
-			return nil, fmt.Errorf("%s: %w", cf.config, err)
+			return nil, configError{fmt.Errorf("%s: %w", cf.config, err)}
 		}
 		if rel, err := filepath.Rel(repo.Root, absPath(cf.config)); err == nil && !strings.HasPrefix(rel, "..") {
 			cfg.Path = filepath.ToSlash(rel)
 		}
 	} else if cfg, err = config.Load(repo.Root); err != nil {
-		return nil, err
+		return nil, asConfigError(err)
 	}
 	snap, err := repo.Snapshot()
 	if err != nil {
-		return nil, err
+		return nil, asEnvError(err)
 	}
 	files := make([]string, 0, len(snap))
 	for f := range snap {
@@ -194,12 +253,12 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 		cfg = &config.Config{}
 		cfg.Suites = detect.Suites(repo, files)
 		if err := cfg.Normalize(); err != nil {
-			return nil, err
+			return nil, asConfigError(err)
 		}
 	}
 	suites, err := runner.Resolve(repo, cfg.Suites)
 	if err != nil {
-		return nil, err
+		return nil, asConfigError(err)
 	}
 	var roots []string
 	for _, s := range suites {
@@ -211,7 +270,7 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	if len(cf.suites) > 0 {
 		for _, n := range cf.suites {
 			if !slices.ContainsFunc(suites, func(s *runner.Suite) bool { return s.Name == n }) {
-				return nil, usageError{fmt.Errorf("unknown suite in %v (have: %s)", []string(cf.suites), suiteNames(suites))}
+				return nil, configError{fmt.Errorf("unknown suite in %v (have: %s)", []string(cf.suites), suiteNames(suites))}
 			}
 		}
 		var keep []*runner.Suite
@@ -275,6 +334,8 @@ type selectOptions struct {
 	all     bool
 	base    string
 	noAgent bool
+	// noOrphans skips the orphan policy (--only runs exactly the named tests).
+	noOrphans bool
 	// orphanScope, when non-nil, limits the orphan policy to these files (`smates
 	// watch`: files changed since the previous cycle).
 	orphanScope map[string]bool
@@ -300,7 +361,7 @@ type selection struct {
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {
 	if len(p.suites) == 0 {
-		return nil, fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")
+		return nil, configError{fmt.Errorf("no test suites configured or detected; run `smates init` or write smates.yml")}
 	}
 	base := opt.base
 	// Locally the state only knows the tests that ran on this machine: tests it has
@@ -321,7 +382,9 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		return nil, err
 	}
 	sel := &selection{res: res}
-	p.handleOrphans(ctx, sel, opt, base)
+	if !opt.noOrphans {
+		p.handleOrphans(ctx, sel, opt, base)
+	}
 	if err := p.applyCallerAdds(res, opt.adds); err != nil {
 		return nil, err
 	}

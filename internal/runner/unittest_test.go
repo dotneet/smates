@@ -118,6 +118,17 @@ func TestUnittestDefaultsAndUnits(t *testing.T) {
 	if _, err := Resolve(repo, []config.Suite{{Name: "u", Root: ".", Runner: "unittest", Command: "make test"}}); err != nil {
 		t.Errorf("an unusual command only fails when run: %v", err)
 	}
+	// pytest's configuration (python_files) is not unittest's: its test files follow
+	// unittest's discovery pattern.
+	cfgRepo := tempRepo(t)
+	testutil.Write(t, cfgRepo.Root, "pyproject.toml", "[tool.pytest.ini_options]\npython_files = [\"check_*.py\"]\n")
+	us, err := NewSuite(cfgRepo, config.Suite{Name: "u", Root: ".", Runner: "unittest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(us.Tests, []string{"**/test*.py"}) || len(us.Discovered) != 0 || !us.IsTestFile("tests/test_a.py") || us.IsTestFile("tests/check_a.py") {
+		t.Errorf("unittest suite with a pytest config: tests %v discovered %v", us.Tests, us.Discovered)
+	}
 	uvRepo := tempRepo(t, "uv.lock")
 	if d := (unittestRunner{}).Defaults(uvRepo, "."); d.Command != "uv run python -m unittest" {
 		t.Errorf("uv: %q", d.Command)

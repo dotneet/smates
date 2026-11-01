@@ -29,6 +29,7 @@ const (
 	ReasonAgent      = "agent"      // the agent asked for it
 	ReasonDiff       = "diff"       // diff mode: static deps changed since base
 	ReasonRerun      = "rerun"      // smates watch reran the previous selection
+	ReasonOnly       = "only"       // named with smates run --only
 	ReasonCaller     = "caller"     // the caller added it (smates run --add)
 	ReasonUnaffected = "unaffected" // skipped
 )
