@@ -212,3 +212,15 @@ func TestText(t *testing.T) {
 		}
 	}
 }
+
+func TestSavings(t *testing.T) {
+	in := &Input{Result: prResult()}
+	if strings.Contains(Markdown(in), "So far") {
+		t.Error("savings shown without Savings")
+	}
+	in.Savings = &Savings{Runs: 12, SavedMs: 3_725_000, Since: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)}
+	want := "_So far: about **1h 2m** of recorded test time skipped over 12 recorded runs since 2026-10-01 (`smates stats`)._"
+	if md := Markdown(in); !strings.Contains(md, want) {
+		t.Errorf("missing %q in:\n%s", want, md)
+	}
+}

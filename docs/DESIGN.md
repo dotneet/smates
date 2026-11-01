@@ -192,6 +192,15 @@ histories and flake evidence (flip counts take the maximum, since both sides usu
 a past). Outcome histories and flake evidence are optional fields, so state files from
 before them still load and the format version is unchanged.
 
+The state also keeps a short record of each `smates run` (`runs`: selection mode, units
+selected/total, recorded duration of the skipped units, exit code, shadow misses, orphan
+handling, agent usage, flaky flips) for `smates stats`. Records carry a random ID, so
+`smates state merge` unions them without double counting what both sides inherited; the
+list is bounded to the newest 1000 records within 180 days of the newest one. It is an
+optional field too. A sharded run records only the units its shard owns, so the records
+of all shards add up to one selection. Records describe the state's own lineage: a state
+restored from the default branch carries the default branch's records forward.
+
 ### Summaries for reviewers
 
 `internal/summary` renders a selection (and, for `run`, its result) as Markdown for the

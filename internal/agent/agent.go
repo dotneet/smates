@@ -64,6 +64,8 @@ type Usage struct {
 	CacheReadTokens  int `json:"cache_read_tokens"`
 	CacheWriteTokens int `json:"cache_write_tokens"`
 	Turns            int `json:"turns"`
+	// CostUSD is the cost the backend reported (0 when it reports none).
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // Backend runs the agent.
