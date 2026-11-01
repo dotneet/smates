@@ -62,8 +62,8 @@ Go 1.26 以降があれば次のコマンドでインストールできます。
 go install github.com/dotneet/smates/cmd/smates@latest
 ```
 
-バイナリは `$(go env GOPATH)/bin` に置かれます。この方法でビルドしたものはバージョンが
-`dev` と表示されます。
+バイナリは `$(go env GOPATH)/bin` に置かれ、ビルド元のモジュールのバージョンを表示します
+（`@v1.2.3` なら `smates 1.2.3`）。
 
 ## GitHub Actions { #github-actions }
 

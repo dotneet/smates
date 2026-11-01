@@ -22,10 +22,11 @@ The guides explain when and why you use it.
 | [`smates hook`](#smates-hook) | Install a git pre-push/pre-commit hook or a Claude Code Stop hook |
 | [`smates version`](#smates-version-and-help) | Print the version |
 
-Run `smates <command> -h` to print a command's flags. Flags take one dash or two
-(`-all` and `--all` are the same). Flags must come before the positional arguments
-(`smates why --format json src/a.ts`, not `smates why src/a.ts --format json`), except
-in `smates config`. In `run` and `watch`, arguments after `--` go to the test runner.
+Run `smates <command> -h` to print a command's flags (exit code 0); for `config`,
+`state` and `hook` it also lists the subcommands. Flags take one dash or two (`-all`
+and `--all` are the same). Flags may come before or after positional arguments
+(`smates why src/a.ts --format json`); `--` ends the flags. In `run`, `select` and
+`watch`, arguments after `--` go to the test runner.
 
 ## Common flags
 

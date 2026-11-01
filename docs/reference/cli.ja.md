@@ -21,7 +21,7 @@
 | [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code の Stop フックを設定する |
 | [`smates version`](#smates-version-and-help) | バージョンを表示する |
 
-各コマンドのフラグは `smates <command> -h` で確認できます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数より前に置きます（`smates why src/a.ts --format json` ではなく `smates why --format json src/a.ts`）。例外は `smates config` です。`run` と `watch` では、`--` より後ろの引数はテストランナーに渡されます。
+各コマンドのフラグは `smates <command> -h` で確認できます（終了コード 0）。`config`、`state`、`hook` ではサブコマンドの一覧も表示されます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数の前にも後ろにも置けます（`smates why src/a.ts --format json`）。`--` 以降はフラグとして扱いません。`run`、`select`、`watch` では、`--` より後ろの引数はテストランナーに渡されます。
 
 ## 共通フラグ { #common-flags }
 

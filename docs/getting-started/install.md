@@ -62,8 +62,8 @@ With Go 1.26 or newer:
 go install github.com/dotneet/smates/cmd/smates@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin`. Builds made this way report their version as
-`dev`.
+The binary lands in `$(go env GOPATH)/bin` and reports the module version it was built
+from (`@v1.2.3` prints `smates 1.2.3`).
 
 ## GitHub Actions
 
