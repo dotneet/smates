@@ -87,6 +87,9 @@ env_track: [LANG]
    ことはできないため、誤答や指示注入があっても「追加し損ねる」以上の害はありません。
 3. それ以外の場合は、そのファイルが影響しうるスイートを丸ごと実行します。
 
+smates を呼ぶコーディングエージェントが `--add` と `--orphans` で代わりに判断することも
+できます([呼び出し元のエージェントに判断させる](#呼び出し元のエージェントに判断させるletting-the-calling-agent-decide))。
+
 多くのコミットで繰り返しオーファンになるファイル(`.env.example`、デプロイ設定、どのスイートにも
 属さないフロントエンドなど)は `ignore:` に入れるべきものです。**`smates orphans`** は直近の
 first-parent コミット(既定 100 件。`--history N`、`--since rev`)を現在の依存マップに同じ規則で
@@ -96,6 +99,40 @@ first-parent コミット(既定 100 件。`--history N`、`--since rev`)を現�
 ツールチェーンの版指定)は無視せず `inputs:` か `rules:` に書くよう案内します。依存が記録されて
 いないと静的解析だけで判定するため結果は悲観的になります。先に `smates run --all` を実行して
 ください(`--format json` で機械可読な出力)。
+
+### 呼び出し元のエージェントに判断させる(Letting the calling agent decide)
+
+smates を呼ぶのがコーディングエージェント(Claude Code、Codex など)なら、何をなぜ変更したかは
+そのエージェントが一番よく知っています。そこから別の LLM を呼ぶのは無駄で、スイートを丸ごと
+実行するのは遅いので、オーファンの判断を呼び出し元に任せられます。
+
+1. `smates select --format json` の `orphan_candidates` にオーファンごとの情報が入ります:
+   `path`、`status`(`added`/`modified`/`deleted`)、`referenced_by`(そのファイル名に言及
+   するテストと、言及している `file`、すでに `selected` か)、`suites`(オーファンポリシーが
+   丸ごと実行するスイート)、`handling`(この選択での扱い: `reference`・`agent`・
+   `no-impact`・`policy`・`ignored`・`skipped`)。JSON の既存フィールドは変わりません。
+2. `smates run --add <suite>:<unit>` でテストを追加します(繰り返し指定可、理由は `caller`)。
+   unit の代わりにテストファイルも指定できます(`--add api:tests/test_users.py`、Go の
+   パッケージ単位なら `--add pkg/foo_test.go`。パスはリポジトリ相対、カレントディレクトリ相対、
+   `suite:` の後ならスイートの root 相対。該当するスイートが 1 つならスイート名は省略可)。
+   この実行のどのテストにも当たらない指定はエラー(終了コード 2)です。
+3. `--orphans=agent|full|skip` でこの実行に限り `orphans:` の設定を上書きします。`agent` は
+   組み込みエージェント、`full` は影響しうるスイートの丸ごと実行(`orphans: all`)、`skip` は
+   参照スキャンで説明できなかった変更にオーファンポリシーを適用しません。
+
+```sh
+smates select --format json        # orphan_candidates を読む
+smates run --orphans=skip --add api:tests/test_users.py --add web:src/app.test.ts
+```
+
+安全原則は変わりません。呼び出し元はテストを追加できるだけで、決定的な選択(と名前参照
+スキャン)が選んだテストを外すことはできません。`--orphans=skip` は、変更を自分で判断した
+呼び出し元のための唯一の明示的なオプトアウトです。ログ・ジョブサマリ・実行記録
+(`smates stats`)ではそのオーファンが「skipped by caller」と表示され、処理済みのオーファンと
+同じく同じブランチで再び報告されることはありません。どちらのフラグも `smates select`
+(結果の確認用)と git フックの run フラグ(`smates hook install -- --orphans=full`)でも
+使えます。オーファンのためにスイートが丸ごと実行され、呼び出し元が何も指定していない場合
+(API キーがないときなど)は、代わりに判断する方法をログに表示します。
 
 ### サーバーを叩くテスト
 

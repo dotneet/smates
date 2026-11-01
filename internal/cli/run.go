@@ -23,6 +23,7 @@ import (
 
 type runFlags struct {
 	commonFlags
+	callerFlags
 	all      bool
 	selectOn bool
 	base     string
@@ -55,7 +56,8 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f runFlags
-	f.register(fs)
+	f.commonFlags.register(fs)
+	f.callerFlags.register(fs)
 	fs.BoolVar(&f.all, "all", false, "run every test (and rewrite the recorded state)")
 	fs.BoolVar(&f.selectOn, "select", false, "select tests even where the default is a full run (default branch on CI)")
 	fs.StringVar(&f.base, "base", "", "git revision to diff against when nothing is recorded yet")
@@ -73,6 +75,9 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 		return nil, usageError{err}
 	}
 	f.extra = fs.Args()
+	if err := f.callerFlags.validate(); err != nil {
+		return nil, err
+	}
 	var err error
 	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
 		return nil, err
@@ -104,11 +109,14 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			all = true
 		}
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope()})
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), orphans: f.orphans, adds: f.adds})
 	if err != nil {
 		return 1, err
 	}
 	hooks.onSelected(p, sel)
+	if hooks != nil {
+		sel.hint = false // smates watch: a person at the terminal, no calling agent
+	}
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
@@ -641,6 +649,7 @@ func unitFiles(sr *selector.Suite, unit string) []string {
 
 type selectFlags struct {
 	commonFlags
+	callerFlags
 	all      bool
 	base     string
 	noAgent  bool
@@ -654,7 +663,8 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs := flag.NewFlagSet("select", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var f selectFlags
-	f.register(fs)
+	f.commonFlags.register(fs)
+	f.callerFlags.register(fs)
 	fs.BoolVar(&f.all, "all", false, "select everything")
 	fs.StringVar(&f.base, "base", "", "git revision to diff against when nothing is recorded yet")
 	fs.BoolVar(&f.noAgent, "no-agent", false, "do not call the agent for unattributed changes")
@@ -665,6 +675,9 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
+	if err := f.callerFlags.validate(); err != nil {
+		return 2, err
+	}
 	shardI, shardN, err := parseShard(f.shard)
 	if err != nil {
 		return 2, err
@@ -673,7 +686,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent})
+	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds})
 	if err != nil {
 		return 1, err
 	}
@@ -723,11 +736,17 @@ type jsonOut struct {
 	Agent    any                 `json:"agent,omitempty"`
 	Note     string              `json:"agent_note,omitempty"`
 	Tests    map[string][]string `json:"selected_tests"`
+	// Candidates describe the orphans for a calling agent that decides about them
+	// itself (--add, --orphans).
+	Candidates []orphanCandidate `json:"orphan_candidates"`
 }
 
 func jsonSelection(sel *selection) jsonOut {
 	s, t := sel.res.Counts()
-	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}}
+	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates}
+	if out.Candidates == nil {
+		out.Candidates = []orphanCandidate{}
+	}
 	if sel.agentDec != nil {
 		out.Agent = sel.agentDec
 	}
@@ -751,6 +770,9 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 	if sel.agentNote != "" {
 		p.logf("%s", sel.agentNote)
+	}
+	if sel.hint {
+		p.logf("%s", orphanHint)
 	}
 	pct := 0.0
 	if t > 0 {
