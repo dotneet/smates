@@ -1,7 +1,6 @@
 package golang
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/dotneet/smates/internal/testutil"
 )
 
 // fsHost implements host.Host over a directory on disk.
@@ -31,31 +32,8 @@ func (h *fsHost) Read(p string) []byte {
 func newRepo(t *testing.T, files map[string]string) *fsHost {
 	t.Helper()
 	root := t.TempDir()
-	for p, c := range files {
-		abs := filepath.Join(root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte(c), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	h := &fsHost{root: root, files: map[string]bool{}}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		h.files[filepath.ToSlash(rel)] = true
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
+	testutil.WriteTree(t, root, files)
+	return &fsHost{root: root, files: testutil.Files(t, root)}
 }
 
 // deps runs the analyzer on file p of h, reading its content from disk.

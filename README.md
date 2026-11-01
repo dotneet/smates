@@ -42,7 +42,9 @@ used and their git blob hashes at the time it last ran:
 D(T) = traced(T)        files executed or read while T ran (incl. its child processes),
                         and environment variables its code read
      ∪ static(T)        import-graph closure computed now (new imports are seen at once)
-     ∪ inputs           lockfiles, manifests, runner config, smates.yml, your globs
+     ∪ inputs           lockfiles, manifests, runner config, your globs, and the
+                        suite's own settings in smates.yml (editing ignore, agent,
+                        orphans or another suite re-runs nothing)
      ∪ depends_on       code of a server the tests talk to in another process (declared)
 ```
 
@@ -87,11 +89,20 @@ left to the job that runs that suite). smates then
 
 1. selects tests whose sources or dependencies mention the file by name (fixtures,
    migrations, schemas referenced as strings);
-2. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+2. skips **untested code**: Go, Python and JS/TS source under a suite's root that no
+   test imports, directly or through other code, and that no test executed (a `main`
+   package, a component without tests). No test can be affected, so nothing runs; the
+   summary and the pull request comment list these files as "changes to untested code".
+   Tool configuration written as code (`vite.config.ts`, `setup.py`, setup files), files
+   under `testdata/`, `fixtures/` or `__mocks__/`, and files a suite excludes are not
+   counted, and without a recorded state (when only imports are known) nothing is. Code another process runs (a server an e2e suite talks to) needs `rules` so its
+   tests are selected; `untested: orphan` hands these files to the
+   next steps instead;
+3. asks the **agent** about the rest (when `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
    `OPENROUTER_API_KEY` is set): it explores the
    repository with read-only tools and adds specific tests or requests a full run.
    It never removes tests, so a wrong or manipulated answer can only fail to *add*;
-3. otherwise runs the suites the orphan can affect in full.
+4. otherwise runs the suites the orphan can affect in full.
 
 A coding agent that calls smates can decide instead, with `--add` and `--orphans`: see
 [Letting the calling agent decide](#letting-the-calling-agent-decide).
@@ -115,8 +126,42 @@ dependencies it only knows the static graph and overstates the orphans.
 | `node` (`node --test`) | test file | V8 coverage per test process + fs hooks | process exit code |
 | `bun` | test file | per-file `bun test --coverage` + module cache, preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` (while recording) | process exit code |
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
-| `go` | package | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
+| `go` | package, or test function with `granularity: func` | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests. Per function: coverage per test process (below) | binary exit code, build failures; per function: its own process (recording) or go test's `--- FAIL` lines |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code |
+
+**Go test functions** (`granularity: func` on a `go` suite). When one package holds most
+of the tests and most changes reach it, selecting packages saves little. With
+`granularity: func` a unit is a top-level test function (`internal/api#TestCreateUser`:
+`TestXxx`, `FuzzXxx` with its seed corpus, `ExampleXxx`; subtests run with their parent).
+While recording, smates builds each package's test binary once with coverage over the
+repository packages it links (`go test -c -cover -coverpkg=...`, with the suite command's
+build flags such as `-tags` and `-race`) and runs every function in its own process
+(`-test.run '^TestX$'`, a coverage profile and a test log). A function then depends on:
+
+- the Go files in which it executed code (a file counts when any of its blocks ran;
+  package initialization runs in every process, so it counts for every function);
+- the *declarations* of every other Go file it may reach (the file without its function
+  bodies): a changed constant, variable initializer, type, signature or method selects
+  every function that could see it, an edit inside a body only those that executed it;
+- its own `_test.go` file, the test files declaring helpers it names, and test files with
+  `TestMain`, `init` or package-level variables initialized by calls;
+- as for a package: files and directories its test log recorded, environment variables
+  it read, embedded and other non-Go files of the static closure, `go.mod`/`go.sum`,
+  what its child processes used; Go packages it builds or runs as a subprocess count in
+  full; and the listing of its package directory (a file added there selects every
+  function of the package).
+
+A changed test file selects the functions it declares; a new function is selected as new.
+Selected functions run with `go test -run '^(TestA|TestB)$'` (or the whole package when
+the pattern would be too long) when not recording. When the binary cannot be built with
+coverage, or the suite command is not a plain `go test` (or passes `-run`, `-skip`,
+`-bench`, `-fuzz`, `-c`), that package is recorded as a whole and says so: each of its
+functions then depends on everything the package does. Recording costs one process per
+function (plus one coverage build per package); functions of one package run one at a
+time, as `go test` runs them, unless `record_jobs` allows more, and packages as many at a
+time as `-p` allows (in the command or `GOFLAGS`; default GOMAXPROCS). Test flags such as
+`-timeout`, `-short`, `-count` or `-v`, in the command or in `GOFLAGS`, reach every
+function's process.
 
 Child processes are followed everywhere: Node and Python children trace themselves (even
 when started through a shell), and shell scripts, `grep`, `cat` and other commands are
@@ -244,6 +289,8 @@ suites:
   - name: api
     runner: go
     root: services/api
+    granularity: func                # select Go tests per test function (default: package)
+    record_jobs: 4                   # with func: functions of one package recorded at once (default 1)
   - name: e2e                        # Playwright against the api server (docker compose)
     runner: custom
     root: e2e
@@ -258,6 +305,7 @@ suites:
     root: tools
 
 orphans: agent        # agent | all | ignore
+untested: skip        # skip | orphan: changed source code no test reaches (default skip: nothing to run)
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults
 env_ignore: ["BUILD_*", DEPLOY_ID]  # environment variables whose changes select nothing ("*": tracking off)
 env_track: [LANG]     # track a variable the built-in ignore list has (suites may also set both)
@@ -522,8 +570,14 @@ instead.
   be confirmed by whoever reads the state file; list such variables in `env_ignore`.
 - Code executed in a browser (vitest browser mode, Playwright) is covered by the static
   graph only.
-- Granularity is the file (the package for Go): a change anywhere in a module re-runs
-  every test that loaded it. For Python, data a module reads at import time or behind a
+- Granularity is the file (the package for Go, or the test function with
+  `granularity: func`): a change anywhere in a module re-runs every test that loaded it.
+  Go per-function selection costs one process per test function while recording (the
+  default branch's full runs get slower; selective runs only start the selected
+  functions); functions share no process, so a test relying on state another test of
+  its package left behind in memory behaves differently than under `go test`. Code that
+  matters without running (an unexecuted method satisfying an interface) is covered
+  through declarations, but code executed through reflection alone is not. For Python, data a module reads at import time or behind a
   cache belongs to that module.
 - Jest occasionally runs two files back to back in one worker even when recycling; their
   dependencies are then merged (still correct). `isolate: true` makes it exact at the cost

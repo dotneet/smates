@@ -53,7 +53,21 @@ func (p *project) handleOrphans(ctx context.Context, sel *selection, opt selectO
 		return
 	}
 
-	// 2. Policy for what is left (--orphans overrides smates.yml for this run).
+	// 2. Source code no test reaches: no test can be affected.
+	if untested := res.Untested(remaining); len(untested) > 0 {
+		if p.cfg.Untested == config.UntestedSkip {
+			res.HandleOrphans(untested, selector.OrphanUntested)
+			res.Notes = append(res.Notes, fmt.Sprintf("%d changed source file(s) no test reaches (untested code): no tests to run for them", len(untested)))
+			remaining = subtract(remaining, untested)
+			if len(remaining) == 0 {
+				return
+			}
+		} else {
+			p.debugf("%d unattributed change(s) are source files no test reaches; `untested: skip` would skip them", len(untested))
+		}
+	}
+
+	// 3. Policy for what is left (--orphans overrides smates.yml for this run).
 	policy := p.cfg.Orphans
 	switch opt.orphans {
 	case orphansAgent:

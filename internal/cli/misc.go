@@ -227,12 +227,21 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 			case "content":
 				if service != "" {
 					how = append(how, service)
-				} else if slices.Contains(s.Known[t.ID], target) {
+				} else if slices.Contains(s.Known[t.ID], target) || slices.Contains(s.Known[t.ID], selector.ConfigKey(target)) {
 					how = append(how, "static/inputs")
 				}
 				if st != nil && st.Tests[t.ID] != nil {
-					if _, ok := st.Tests[t.ID].Deps[target]; ok {
+					_, ok := st.Tests[t.ID].Deps[target]
+					_, okCfg := st.Tests[t.ID].Deps[selector.ConfigKey(target)]
+					if ok || okCfg {
 						how = append(how, "recorded")
+					}
+				}
+			case "declarations":
+				how = append(how, "static: its declarations (edits inside function bodies count only where the test executed them)")
+				if st != nil && st.Tests[t.ID] != nil {
+					if _, ok := st.Tests[t.ID].Deps[target]; ok {
+						how = append(how, "executed")
 					}
 				}
 			case "listing":
@@ -293,17 +302,43 @@ func cmdDeps(args []string, stdout, stderr io.Writer) error {
 		for _, d := range s.Known[target] {
 			known[d] = true
 		}
+		// The suite's settings key and the file itself print as one line.
+		type source struct{ static, recorded bool }
+		var order []string
+		srcs := map[string]*source{}
 		for _, d := range deps {
+			name := selector.DisplayKey(d)
+			if srcs[name] == nil {
+				order = append(order, name)
+				srcs[name] = &source{}
+			}
+			_, rec := traced[d]
+			srcs[name].static = srcs[name].static || known[d]
+			srcs[name].recorded = srcs[name].recorded || rec
+		}
+		for _, name := range order {
 			var src []string
-			if known[d] {
+			if srcs[name].static {
 				src = append(src, "static")
 			}
-			if _, ok := traced[d]; ok {
+			if srcs[name].recorded {
 				src = append(src, "recorded")
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", d, strings.Join(src, ","))
+			fmt.Fprintf(stdout, "%s\t%s\n", name, strings.Join(src, ","))
 		}
 		return nil
+	}
+	// A Go package directory whose units are its test functions.
+	var funcs []string
+	for _, s := range res.Suites {
+		for _, t := range s.Tests {
+			if d, _, ok := runner.SplitFuncUnit(t.ID); ok && d == target {
+				funcs = append(funcs, t.ID)
+			}
+		}
+	}
+	if len(funcs) > 0 {
+		return fmt.Errorf("%s is tested per function; pass one of: %s", target, strings.Join(limit(funcs, 20), ", "))
 	}
 	return fmt.Errorf("%s is not a test unit of any suite (see `smates list`)", target)
 }

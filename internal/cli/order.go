@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"slices"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 )
@@ -63,7 +64,7 @@ func priorityOf(sr *selector.Suite, t *selector.Test, e *state.Entry, direct fun
 						}
 					}
 				}
-				if imports[c] {
+				if f, ok := depkey.File(c); ok && imports[f] {
 					return prioDirect
 				}
 			}
