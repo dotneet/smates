@@ -117,25 +117,26 @@
   // (it may return other arguments to call orig with) and has orig's properties. A
   // util.promisify.custom implementation is wrapped the same way: those of
   // child_process.exec and execFile call the internal functions, not the exports.
-  // spawning is above zero while a wrapped isSpawn function runs, so that the functions
-  // it calls (exec calls execFile, Bun's child_process calls Bun.spawn) record nothing.
+  // A depth counter ({n}) given is above zero while orig runs: spawning, so that the
+  // functions a spawn function calls (exec calls execFile, Bun's child_process calls
+  // Bun.spawn) record nothing; cloning, likewise for the cloning functions.
   let promisifyCustom = null;
   try {
     promisifyCustom = require('util').promisify.custom;
   } catch (_) {}
-  let spawning = 0;
-  const wrapFn = (orig, before, isSpawn) => {
+  const spawning = { n: 0 };
+  const wrapFn = (orig, before, depth) => {
     const wrapped = function () {
       let args = arguments;
       try {
         args = before.apply(null, arguments) || arguments;
       } catch (_) {}
-      if (!isSpawn) return orig.apply(this, args);
-      spawning++;
+      if (!depth) return orig.apply(this, args);
+      depth.n++;
       try {
         return orig.apply(this, args);
       } finally {
-        spawning--;
+        depth.n--;
       }
     };
     Object.defineProperty(wrapped, '__smates', { value: true });
@@ -145,7 +146,7 @@
       if (k === 'length' || k === 'name' || k === 'prototype') continue;
       try {
         const d = Object.getOwnPropertyDescriptor(orig, k);
-        if (k === promisifyCustom && typeof d.value === 'function') d.value = wrapFn(d.value, before, isSpawn);
+        if (k === promisifyCustom && typeof d.value === 'function') d.value = wrapFn(d.value, before, depth);
         Object.defineProperty(wrapped, k, d);
       } catch (_) {}
     }
@@ -333,12 +334,12 @@
       cp[name] = wrapFn(
         orig,
         function () {
-          if (spawning) return;
+          if (spawning.n) return;
           const i = at(arguments);
           if (ev) ev(arguments, i);
           return withEnv(arguments, i, true);
         },
-        true,
+        spawning,
       );
     };
     // (file, args?, options?, callback?): args may be omitted or null.
@@ -366,19 +367,24 @@
     const proto = Object.getPrototypeOf(v);
     const arr = Array.isArray(v);
     if (arr ? v.length > 64 : proto !== Object.prototype && proto !== null) return v;
+    // Data properties only: a getter runs once, when the value is cloned.
     let copy = null;
     for (const k of Object.keys(v)) {
-      const x = v[k];
-      const tx = x && typeof x === 'object' && envTargets.get(x);
+      const d = Object.getOwnPropertyDescriptor(v, k);
+      const tx = d && 'value' in d && d.value && typeof d.value === 'object' && envTargets.get(d.value);
       if (!tx) continue;
       if (!copy) copy = arr ? v.slice() : Object.assign(Object.create(proto), v);
       copy[k] = tx;
     }
     return copy || v;
   };
-  // cloneArg returns a wrapFn hook that unproxies argument i.
+  // cloneArg returns a wrapFn hook that unproxies argument i. cloning is above zero
+  // while a wrapped function runs: Node 18's structuredClone posts its value through
+  // MessagePort.prototype.postMessage, which then has nothing to do.
+  const cloning = { n: 0 };
   const cloneArg = (i) =>
     function () {
+      if (cloning.n) return;
       const v = arguments[i];
       const u = unproxy(v);
       if (u === v) return;
@@ -390,7 +396,7 @@
     const orig = obj && obj[name];
     if (typeof orig !== 'function' || orig.__smates) return;
     try {
-      obj[name] = wrapFn(orig, cloneArg(0));
+      obj[name] = wrapFn(orig, cloneArg(0), cloning);
     } catch (_) {}
   };
   wrapClone(globalThis, 'structuredClone');
@@ -489,7 +495,7 @@
         const orig = Bun[name];
         if (typeof orig !== 'function' || orig.__smates) continue;
         Bun[name] = wrapFn(orig, function (cmd, opts) {
-          if (spawning) return;
+          if (spawning.n) return;
           const i = Array.isArray(cmd) ? 1 : 0;
           const argv = i ? cmd : cmd && cmd.cmd;
           if (Array.isArray(argv)) execEv(argv, false, arguments[i]);

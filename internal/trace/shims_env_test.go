@@ -104,6 +104,16 @@ if (wt.isMainThread) {
   if (structuredClone(process.env).APP_COPIED !== 'x') throw new Error('structuredClone');
   if (structuredClone({ env: process.env }).env.APP_COPIED !== 'x') throw new Error('nested');
   structuredClone([process.env]);
+  // Getters run once, as without the shim (Node 18's structuredClone posts through a
+  // MessagePort).
+  let n = 0;
+  const getter = { get g() { n++; return 1; } };
+  structuredClone(getter);
+  structuredClone({ get g() { n++; return 1; }, env: process.env });
+  const ch = new wt.MessageChannel();
+  ch.port1.postMessage(getter);
+  ch.port1.close();
+  if (n !== 3) throw new Error('getters ran ' + n + ' times, want 3');
   const { port1 } = new wt.MessageChannel();
   port1.postMessage({ env: process.env });
   port1.close();

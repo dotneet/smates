@@ -63,15 +63,21 @@ func TestBunConfigWithShim(t *testing.T) {
 }
 
 // bun itself reads the recording bunfig of a project setting [test] keys at the top
-// level: the shim and the project's preload both run.
+// level, or with comments and strings that look like TOML: the shim and the project's
+// preload both run, and nothing commented out does.
 func TestBunConfigTopLevelTestKeys(t *testing.T) {
 	bun, err := exec.LookPath("bun")
 	if err != nil {
 		t.Skip("bun not on PATH")
 	}
+	const multiline = "x = \"\"\"\ntest.y = 1\n[test]\n\"\"\"\n"
 	for name, cfg := range map[string]string{
-		"dotted": "test.preload = [\"./setup.ts\"]\n",
-		"inline": "test = { preload = [\"./setup.ts\"] }\n",
+		"dotted":            "test.preload = [\"./setup.ts\"]\n",
+		"inline":            "test = { preload = [\"./setup.ts\"] }\n",
+		"quoted dotted":     "\"test\".preload = [\"./setup.ts\"]\n",
+		"multi-line string": multiline + "test.preload = [\"./setup.ts\"]\n",
+		"header comment":    "[test] # setup\npreload = [\"./setup.ts\"]\n",
+		"comments in array": "[test]\npreload = [\n  # \"./nope.ts\"\n  \"./setup.ts\", # x ]\n]\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -87,6 +93,9 @@ func TestBunConfigTopLevelTestKeys(t *testing.T) {
 			}
 			defer cleanup()
 			data, _ := os.ReadFile(path)
+			if strings.HasPrefix(cfg, multiline) && !strings.HasPrefix(string(data), multiline) {
+				t.Errorf("multi-line string changed:\n%s", data)
+			}
 			// From another directory: the project's preload path must be absolute.
 			cmd := exec.Command(bun, "test", "--config="+path, filepath.Join(dir, "x.test.ts"))
 			cmd.Dir = t.TempDir()

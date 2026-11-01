@@ -126,14 +126,6 @@ func bunImportsSource(rc *RunContext, unit string) bool {
 	return false
 }
 
-var (
-	tomlSection = regexp.MustCompile(`(?m)^\s*\[([^\]]+)\]\s*$`)
-	tomlPreload = regexp.MustCompile(`(?ms)^[ \t]*preload[ \t]*=[ \t]*(\[.*?\]|"[^"\n]*"|'[^'\n]*')[ \t]*$`)
-	tomlString  = regexp.MustCompile(`"([^"]*)"|'([^']*)'`)
-	// coverageThreshold = 0.9 or = { lines = 0.9, functions = 0.8 }
-	tomlThreshold = regexp.MustCompile(`(?m)^[ \t]*coverageThreshold[ \t]*=[ \t]*(\{[^}]*\}|[^\n]*)[ \t]*$`)
-)
-
 // bunConfigWithShim writes a copy of the suite's bunfig.toml whose [test].preload starts
 // with the shim (relative preload paths made absolute). It returns "" when the project
 // has no bunfig.toml (then --preload is enough).
@@ -150,13 +142,6 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 		}
 		return filepath.Join(rc.Dir(), p)
 	}
-	list := func(value string) []string {
-		var out []string
-		for _, m := range tomlString.FindAllStringSubmatch(value, -1) {
-			out = append(out, abs(m[1]+m[2]))
-		}
-		return out
-	}
 	render := func(items []string) string {
 		q := make([]string, len(items))
 		for i, it := range items {
@@ -164,50 +149,86 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 		}
 		return "preload = [" + strings.Join(q, ", ") + "]"
 	}
-	// Locate the [test] section.
-	secs := tomlSection.FindAllStringSubmatchIndex(text, -1)
-	start, end := -1, len(text)
-	for i, m := range secs {
-		if strings.TrimSpace(text[m[2]:m[3]]) == "test" {
-			start = m[1]
-			if i+1 < len(secs) {
-				end = secs[i+1][0]
-			}
+	// preloads returns the paths of a preload value (a string or an array of strings).
+	preloads := func(value string) []string {
+		var out []string
+		for _, s := range tomlStrings(value) {
+			out = append(out, abs(s))
+		}
+		return out
+	}
+	// Locate the [test] table: from the end of its header to the next header.
+	stmts := tomlStatements(text)
+	top, start, end := len(text), -1, len(text)
+	for _, s := range stmts {
+		if !s.header {
+			continue
+		}
+		if top == len(text) {
+			top = s.start
+		}
+		if start >= 0 {
+			end = s.start
 			break
 		}
-	}
-	top := len(text)
-	if len(secs) > 0 {
-		top = secs[0][0]
-	}
-	head := text[:top]
-	// Without a [test] table, the top level may set its keys as dotted keys
-	// (test.preload = [...]) or an inline table (test = { preload = [...] }). A table is
-	// defined once in TOML: they move into the [test] table appended.
-	var keys []string
-	if start < 0 {
-		head, keys = bunTestKeys(head)
-	}
-	// Top-level preload paths move with the file too.
-	head = tomlPreload.ReplaceAllStringFunc(head, func(m string) string {
-		return render(list(m[strings.Index(m, "=")+1:]))
-	})
-	// Recording runs one file per process with coverage on: a project coverage
-	// threshold would fail every one of them.
-	const noThreshold = "coverageThreshold = 0"
-	testSection := func(section string) string {
-		section = tomlThreshold.ReplaceAllString(section, "")
-		if loc := tomlPreload.FindStringIndex(section); loc != nil {
-			m := section[loc[0]:loc[1]]
-			return section[:loc[0]] + render(append([]string{shim}, list(m[strings.Index(m, "=")+1:])...)) + "\n" + noThreshold + section[loc[1]:]
+		if !s.array && len(s.key) == 1 && s.key[0] == "test" {
+			start = s.end
 		}
-		return "\n" + render([]string{shim}) + "\n" + noThreshold + section
+	}
+	// The top level: its preload paths move with the file too. Without a [test] table it
+	// may set the table's keys as dotted keys (test.preload = [...]) or an inline table
+	// (test = { preload = [...] }); a table is defined once in TOML, so they move into
+	// the [test] table appended.
+	var head strings.Builder
+	var keys []string
+	last := 0
+	for _, s := range stmts {
+		if s.start >= top {
+			break
+		}
+		if s.header || s.key == nil {
+			continue
+		}
+		switch {
+		case len(s.key) == 1 && s.key[0] == "preload":
+			head.WriteString(text[last:s.start] + render(preloads(text[s.value:s.end])))
+		case start < 0 && len(s.key) > 1 && s.key[0] == "test":
+			keys = append(keys, tomlKeyString(s.key[1:])+" = "+strings.TrimSpace(text[s.value:s.end]))
+			head.WriteString(text[last:s.start])
+		case start < 0 && len(s.key) == 1 && s.key[0] == "test":
+			keys = append(keys, tomlInlineTable(text[s.value:s.end])...)
+			head.WriteString(text[last:s.start])
+		default:
+			continue
+		}
+		last = s.end
+	}
+	head.WriteString(text[last:top])
+	// The [test] table: the shim's preload first, and no coverage threshold (recording
+	// runs one file per process with coverage on: a project threshold would fail every
+	// one of them).
+	testTable := func(table string) string {
+		var b strings.Builder
+		items := []string{shim}
+		last := 0
+		for _, s := range tomlStatements(table) {
+			if s.header || len(s.key) != 1 || (s.key[0] != "preload" && s.key[0] != "coverageThreshold") {
+				continue
+			}
+			if s.key[0] == "preload" {
+				items = append(items, preloads(table[s.value:s.end])...)
+			}
+			b.WriteString(table[last:s.start])
+			last = s.end
+		}
+		b.WriteString(table[last:])
+		return "\n" + render(items) + "\ncoverageThreshold = 0" + b.String()
 	}
 	var out string
 	if start < 0 {
-		out = head + text[top:] + "\n[test]" + testSection("\n"+strings.Join(keys, "\n")+"\n")
+		out = head.String() + text[top:] + "\n[test]" + testTable("\n"+strings.Join(keys, "\n")+"\n")
 	} else {
-		out = head + text[top:start] + testSection(text[start:end]) + text[end:]
+		out = head.String() + text[top:start] + testTable(text[start:end]) + text[end:]
 	}
 	f, err := os.CreateTemp(rc.TraceDir, "bunfig-*.toml")
 	if err != nil {
@@ -220,72 +241,177 @@ func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
 	return f.Name(), func() { os.Remove(f.Name()) }, nil
 }
 
-// tomlTestKey matches the start of a top-level test.key = ... or test = {...} line.
-var tomlTestKey = regexp.MustCompile(`(?m)^[ \t]*test[ \t]*([.=])[ \t]*`)
+// tomlStmt is a statement of a TOML document: a table header or a key = value pair.
+type tomlStmt struct {
+	start, end int      // text[start:end], with its comment, without the line break
+	header     bool     // [table] or [[array of tables]]
+	array      bool     // [[array of tables]]
+	key        []string // the table's or the key's dotted parts, unquoted
+	value      int      // where a key's value starts
+}
 
-// bunTestKeys removes the [test] keys the top level of a bunfig sets with dotted keys
-// (test.preload = [...]) or an inline table (test = { preload = [...] }) from head and
-// returns them as lines of a [test] table (preload = [...]).
-func bunTestKeys(head string) (string, []string) {
-	var keys []string
-	for {
-		m := tomlTestKey.FindStringSubmatchIndex(head)
-		if m == nil {
-			return head, keys
-		}
-		rest := m[1]
-		if head[m[2]] == '.' {
-			// The rest of the line (and of a multi-line value) is key = value.
-			end := tomlScan(head, rest, func(c byte, depth int) bool { return depth == 0 && (c == '\n' || c == '#') })
-			keys = append(keys, strings.TrimSpace(head[rest:end]))
-			head = head[:m[0]] + head[end:]
+// tomlStatements splits a TOML document into its statements. Strings (also multi-line
+// ones) and comments are skipped, so that nothing inside them is taken for a statement.
+func tomlStatements(text string) []tomlStmt {
+	var out []tomlStmt
+	for i := 0; i < len(text); {
+		if c := text[i]; c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			i++
 			continue
 		}
-		if rest >= len(head) || head[rest] != '{' {
-			// test = <something else>: not a table, nothing bun reads.
-			head = head[:m[0]] + "#" + head[m[0]:]
+		if text[i] == '#' {
+			for i < len(text) && text[i] != '\n' {
+				i++
+			}
 			continue
 		}
-		// The inline table's key = value pairs, split at its top-level commas.
-		end := tomlScan(head, rest+1, func(c byte, depth int) bool { return depth < 0 })
-		for i := rest + 1; i < end; {
-			j := tomlScan(head, i, func(c byte, depth int) bool { return depth == 0 && c == ',' })
-			if j > end {
-				j = end
+		end := tomlScan(text, i, func(c byte, depth int) bool { return depth == 0 && c == '\n' })
+		s := tomlStmt{start: i, end: len(strings.TrimRight(text[:end], "\r"))}
+		if text[i] == '[' {
+			j := i + 1
+			if j < end && text[j] == '[' {
+				s.array = true
+				j++
 			}
-			if kv := strings.TrimSpace(head[i:j]); kv != "" {
-				keys = append(keys, kv)
-			}
-			i = j + 1
+			k := tomlScan(text, j, func(c byte, depth int) bool { return depth == 0 && (c == ']' || c == '\n') })
+			s.header, s.key = true, tomlKey(text[j:min(k, end)])
+		} else if eq := tomlScan(text, i, func(c byte, depth int) bool { return depth == 0 && (c == '=' || c == '\n') }); eq < end {
+			s.key, s.value = tomlKey(text[i:eq]), eq+1
 		}
-		if end < len(head) {
-			end++ // the closing brace
-		}
-		head = head[:m[0]] + head[end:]
+		out = append(out, s)
+		i = end
 	}
+	return out
+}
+
+// tomlKey returns the dotted parts of a key or table name, unquoted ("test".preload is
+// test, preload).
+func tomlKey(s string) []string {
+	var parts []string
+	for i := 0; i <= len(s); {
+		j := tomlScan(s, i, func(c byte, depth int) bool { return c == '.' })
+		p := strings.TrimSpace(s[i:j])
+		if len(p) >= 2 && (p[0] == '"' || p[0] == '\'') && p[len(p)-1] == p[0] {
+			if p[0] == '"' {
+				if u, err := strconv.Unquote(p); err == nil {
+					p = u
+				} else {
+					p = p[1 : len(p)-1]
+				}
+			} else {
+				p = p[1 : len(p)-1]
+			}
+		}
+		parts = append(parts, p)
+		i = j + 1
+	}
+	return parts
+}
+
+var tomlBareKey = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// tomlKeyString renders dotted key parts, quoting those that are not bare keys.
+func tomlKeyString(parts []string) string {
+	q := make([]string, len(parts))
+	for i, p := range parts {
+		if q[i] = p; !tomlBareKey.MatchString(p) {
+			q[i] = strconv.Quote(p)
+		}
+	}
+	return strings.Join(q, ".")
+}
+
+// tomlInlineTable returns the key = value pairs of an inline table value ({ a = 1, b = [2,
+// 3] }), split at its top-level commas; nothing when the value is no inline table.
+func tomlInlineTable(value string) []string {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "{") {
+		return nil
+	}
+	end := tomlScan(value, 1, func(c byte, depth int) bool { return depth < 0 })
+	var pairs []string
+	for i := 1; i < end; {
+		j := min(tomlScan(value, i, func(c byte, depth int) bool { return depth == 0 && c == ',' }), end)
+		if kv := strings.TrimSpace(value[i:j]); kv != "" {
+			pairs = append(pairs, kv)
+		}
+		i = j + 1
+	}
+	return pairs
+}
+
+// tomlStrings returns the strings of a TOML value (a string or an array of strings),
+// leaving out comments.
+func tomlStrings(value string) []string {
+	var out []string
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; c {
+		case '#':
+			for i < len(value) && value[i] != '\n' {
+				i++
+			}
+		case '"', '\'':
+			j := tomlStringEnd(value, i)
+			q := value[i:j]
+			n := 1
+			if strings.HasPrefix(q, strings.Repeat(string(c), 3)) {
+				n = 3
+			}
+			s := q[min(n, len(q)):max(len(q)-n, min(n, len(q)))]
+			if c == '"' && n == 1 {
+				if u, err := strconv.Unquote(q); err == nil {
+					s = u
+				}
+			}
+			out = append(out, s)
+			i = j - 1
+		}
+	}
+	return out
+}
+
+// tomlStringEnd returns the index just past the string starting at s[i] (a quote).
+func tomlStringEnd(s string, i int) int {
+	q := s[i]
+	if strings.HasPrefix(s[i:], strings.Repeat(string(q), 3)) {
+		if k := strings.Index(s[i+3:], strings.Repeat(string(q), 3)); k >= 0 {
+			return i + 3 + k + 3
+		}
+		return len(s)
+	}
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case q:
+			return j + 1
+		case '\\':
+			if q == '"' {
+				j++
+			}
+		case '\n':
+			return j // unterminated
+		}
+	}
+	return len(s)
 }
 
 // tomlScan returns the index of the first byte at or after i for which stop reports
-// true, given the bracket depth relative to i; quoted strings and comments are skipped.
+// true, given the bracket depth relative to i; strings and comments are skipped.
 func tomlScan(s string, i int, stop func(c byte, depth int) bool) int {
 	depth := 0
-	for ; i < len(s); i++ {
+	for i < len(s) {
 		c := s[i]
 		if stop(c, depth) {
 			return i
 		}
 		switch c {
 		case '"', '\'':
-			for i++; i < len(s) && s[i] != c; i++ {
-				if c == '"' && s[i] == '\\' {
-					i++
-				}
-			}
+			i = tomlStringEnd(s, i)
+			continue
 		case '#':
 			for i < len(s) && s[i] != '\n' {
 				i++
 			}
-			i-- // the newline is seen next
+			continue
 		case '[', '{':
 			depth++
 		case ']', '}':
@@ -294,6 +420,7 @@ func tomlScan(s string, i int, stop func(c byte, depth int) bool) int {
 				return i
 			}
 		}
+		i++
 	}
 	return len(s)
 }
