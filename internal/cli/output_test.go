@@ -228,6 +228,31 @@ func TestExitCodes(t *testing.T) {
 	if code := Main([]string{"run", "-C", t.TempDir()}, &out, &errb); code != ExitEnv {
 		t.Errorf("not a repository: exit %d\n%s", code, errb.String())
 	}
+
+	// smates config follows the same table.
+	cfgRun := func(dir string, args ...string) (int, string) {
+		var out, errb bytes.Buffer
+		code := Main(append([]string{"config", args[0], "-C", dir}, args[1:]...), &out, &errb)
+		return code, errb.String()
+	}
+	write("smates.yml", suite("sh -c 'exit 0'"))
+	if code, errs := cfgRun(g.dir, "set", "orphans", "all"); code != ExitOK {
+		t.Errorf("config set: exit %d\n%s", code, errs)
+	}
+	if code, errs := cfgRun(g.dir, "set", "orphans", "sometimes"); code != ExitConfig {
+		t.Errorf("config set invalid value: exit %d\n%s", code, errs)
+	}
+	write("smates.yml", suite("sh -c 'exit 0'")+"bogus: 1\n")
+	if code, errs := cfgRun(g.dir, "set", "orphans", "all"); code != ExitConfig {
+		t.Errorf("config set on an invalid config: exit %d\n%s", code, errs)
+	}
+	os.Remove(filepath.Join(g.dir, "smates.yml"))
+	if code, errs := cfgRun(g.dir, "add-ignore", "docs/**"); code != ExitConfig {
+		t.Errorf("config without smates.yml: exit %d\n%s", code, errs)
+	}
+	if code, errs := cfgRun(t.TempDir(), "add-ignore", "docs/**"); code != ExitEnv {
+		t.Errorf("config outside a repository: exit %d\n%s", code, errs)
+	}
 }
 
 func TestParseOnly(t *testing.T) {
