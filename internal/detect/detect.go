@@ -88,10 +88,15 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		test := pj.Scripts["test"]
-		r := ""
+		r, command, env := "", "", map[string]string(nil)
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
+		case strings.Contains(test, "react-scripts test"):
+			// Create React App runs jest with a configuration react-scripts generates,
+			// which a bare jest would not see.
+			r = "jest"
+			command, env = craCommand(repo.Root, d, test)
 		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
 		case strings.Contains(test, "bun test"):
@@ -115,17 +120,15 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			continue
 		}
 		jsRoots[d] = r
-		out = append(out, config.Suite{Root: d, Runner: r})
+		out = append(out, config.Suite{Root: d, Runner: r, Command: command, Env: env})
 	}
 
 	// Python: one suite per project with pytest configuration or tests. Projects that
 	// show no sign of pytest (no dependency, configuration or conftest.py) use the
-	// standard library's unittest.
-	for _, d := range dirs {
-		isProject := has(d, "pyproject.toml") || has(d, "pytest.ini") || has(d, "setup.cfg") || has(d, "setup.py")
-		if !isProject {
-			continue
-		}
+	// standard library's unittest, except Django projects: their TestCase classes need
+	// the settings `manage.py test` sets up, which `python -m unittest` (the only
+	// command the unittest runner drives) does not, so they get no suite.
+	for _, d := range pythonProjects(repo, dirs, dirFiles) {
 		nested := false
 		for _, s := range out {
 			if (s.Runner == "pytest" || s.Runner == "unittest") && pathutil.Under(d, s.Root) {
@@ -138,6 +141,8 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		r := "unittest"
 		if usesPytest(repo, d, dirFiles) {
 			r = "pytest"
+		} else if isDjango(d, dirFiles) {
+			continue
 		}
 		out = append(out, config.Suite{Root: d, Runner: r})
 	}
@@ -176,7 +181,132 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	return kept
 }
 
+// pythonProjects returns the Python project directories, sorted (parents before
+// children). A project file (pyproject.toml, setup.cfg, setup.py) or a pytest config
+// (pytest.ini, a tox.ini with a [pytest] section) marks its directory; whether that
+// project has tests is checked by the caller.
+//
+// Weaker signs mark a directory too: a pip requirements file (*requirements*.txt, or
+// any .txt/.in in a requirements/ directory, which marks the directory above), a
+// Pipfile, a Django manage.py, or a conftest.py (inside a test/ or tests/ directory it
+// marks the directory above, the one pytest runs from). As such files also appear in
+// repositories that are not Python projects (mkdocs' requirements.txt next to a Go
+// module), a weakly marked directory is a project only when it is outside testdata,
+// vendor and fixture directories, is not inside a marked project, and holds Python
+// test files of its own outside such directories and outside the marked projects
+// below it.
+func pythonProjects(repo *gitx.Repo, dirs []string, dirFiles map[string][]string) []string {
+	strong, weak := map[string]bool{}, map[string]bool{}
+	var tests []string // Python test files outside fixture directories
+	for _, d := range dirs {
+		fixture := inFixtureDir(d)
+		for _, n := range dirFiles[d] {
+			switch {
+			case n == "pyproject.toml", n == "setup.cfg", n == "setup.py", n == "pytest.ini":
+				strong[d] = true
+			case n == "tox.ini":
+				data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(d), n))
+				if err == nil && toxPytestSection.Match(data) {
+					strong[d] = true
+				}
+			case fixture:
+			case requirementsTxt.MatchString(n), n == "Pipfile", n == "manage.py":
+				weak[d] = true
+			case n == "conftest.py":
+				weak[conftestProject(d)] = true
+			case path.Base(d) == "requirements" && requirementsFile.MatchString(n):
+				weak[path.Dir(d)] = true
+			}
+			if !fixture && pyTestFile.MatchString(n) {
+				tests = append(tests, path.Join(d, n))
+			}
+		}
+	}
+	out := make([]string, 0, len(strong)+len(weak))
+	for d := range strong {
+		out = append(out, d)
+	}
+	// Test files outside every marked project, sorted so that the ones under a
+	// directory are one range.
+	var unowned []string
+	for _, t := range tests {
+		if !underAny(path.Dir(t), strong) {
+			unowned = append(unowned, t)
+		}
+	}
+	sort.Strings(unowned)
+	for d := range weak {
+		if inFixtureDir(d) || underAny(d, strong) || !hasUnder(unowned, d) {
+			continue
+		}
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// underAny reports whether directory d is in set or below a directory of it.
+func underAny(d string, set map[string]bool) bool {
+	for {
+		if set[d] {
+			return true
+		}
+		if d == "." || d == "" {
+			return false
+		}
+		d = path.Dir(d)
+	}
+}
+
+// hasUnder reports whether the sorted file list has a file under directory d.
+func hasUnder(sorted []string, d string) bool {
+	if d == "." || d == "" {
+		return len(sorted) > 0
+	}
+	i := sort.SearchStrings(sorted, d+"/")
+	return i < len(sorted) && strings.HasPrefix(sorted[i], d+"/")
+}
+
+// isDjango reports whether the project at d is a Django project (manage.py in it).
+func isDjango(d string, dirFiles map[string][]string) bool {
+	return slices.Contains(dirFiles[d], "manage.py")
+}
+
+// inFixtureDir reports whether d is inside a testdata, vendor or fixtures directory,
+// whose files are data of other tests rather than a project.
+func inFixtureDir(d string) bool {
+	if underTestdata(d) {
+		return true
+	}
+	for _, seg := range strings.Split(d, "/") {
+		if seg == "fixtures" || seg == "fixture" || seg == "__fixtures__" {
+			return true
+		}
+	}
+	return false
+}
+
+// conftestProject returns the directory a conftest.py in dir marks as a project: the
+// parent of its outermost test/tests directory, or dir itself.
+func conftestProject(dir string) string {
+	segs := strings.Split(dir, "/")
+	for i, s := range segs {
+		if s == "tests" || s == "test" {
+			if i == 0 {
+				return "."
+			}
+			return strings.Join(segs[:i], "/")
+		}
+	}
+	return dir
+}
+
 var (
+	// toxPytestSection is the [pytest] section of a tox.ini that configures pytest.
+	toxPytestSection = regexp.MustCompile(`(?m)^\s*\[pytest\]`)
+	// requirementsTxt is a pip requirements file (requirements.txt, dev-requirements.txt,
+	// requirements-test.txt).
+	requirementsTxt = regexp.MustCompile(`^.*requirements.*\.txt$`)
 	// pytestManifests are manifests, lockfiles and task files whose mention of pytest
 	// means the project uses it.
 	pytestManifests = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|noxfile\.py|Pipfile|Pipfile\.lock|poetry\.lock|pdm\.lock|uv\.lock|.*requirements.*\.(txt|in))$`)

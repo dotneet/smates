@@ -1,12 +1,14 @@
 package detect
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/testutil"
 )
 
@@ -211,6 +213,189 @@ func TestDetectNestedSameRunnerExcludes(t *testing.T) {
 	}
 }
 
+func TestDetectPythonWithoutProjectFile(t *testing.T) {
+	test := "def test_a():\n    pass\n"
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []got
+	}{
+		{
+			name:  "requirements.txt and conftest.py",
+			files: map[string]string{"requirements.txt": "pytest==8.0\n", "conftest.py": "", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "tox.ini with a [pytest] section",
+			files: map[string]string{"tox.ini": "[tox]\nenvlist = py3\n\n[pytest]\naddopts = -q\n", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "conftest.py in tests/ marks the directory above",
+			files: map[string]string{"svc/tests/conftest.py": "", "svc/tests/unit/test_x.py": test, "svc/app.py": ""},
+			want:  []got{{"pytest", "svc", "pytest"}},
+		},
+		{
+			name:  "requirements file without pytest",
+			files: map[string]string{"requirements-dev.txt": "black\n", "tests/test_x.py": "import unittest\n"},
+			want:  []got{{"unittest", ".", "unittest"}},
+		},
+		{
+			name: "requirements above project files do not merge the projects",
+			files: map[string]string{
+				"requirements-dev.txt": "pytest\n", "conftest.py": "",
+				"svc1/pyproject.toml": "", "svc1/tests/test_a.py": test,
+				"svc2/setup.py": "", "svc2/tests/test_b.py": test,
+			},
+			want: []got{{"pytest:svc1", "svc1", "pytest"}, {"pytest:svc2", "svc2", "pytest"}},
+		},
+		{
+			name:  "tox.ini without [pytest] and requirements without tests",
+			files: map[string]string{"tox.ini": "[testenv]\ncommands = make\n", "docs/requirements.txt": "sphinx\n", "src/app.py": ""},
+			want:  nil,
+		},
+		{
+			name: "requirements next to a Go module with Python fixtures in testdata",
+			files: map[string]string{
+				"go.mod": "module m", "main.go": "", "main_test.go": "",
+				"requirements.txt": "mkdocs\n", "internal/py/testdata/proj/test_fixture.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "pytest in requirements does not make fixtures a project",
+			files: map[string]string{
+				"go.mod": "module m", "main_test.go": "",
+				"requirements-dev.txt": "pytest\n", "internal/fixtures/test_fixture.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "conftest.py in testdata",
+			files: map[string]string{
+				"go.mod": "module m", "main_test.go": "",
+				"internal/py/testdata/tests/conftest.py": "", "internal/py/testdata/tests/test_a.py": test,
+			},
+			want: []got{{"go", ".", "go"}},
+		},
+		{
+			name: "project file without tests below a weakly marked project",
+			files: map[string]string{
+				"requirements.txt": "pytest\n", "conftest.py": "", "tests/test_x.py": test,
+				"third_party/lib/setup.py": "",
+			},
+			want: []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "requirements/ directory",
+			files: map[string]string{"requirements/dev.txt": "pytest\n", "tests/test_x.py": test},
+			want:  []got{{"pytest", ".", "pytest"}},
+		},
+		{
+			name:  "Pipfile",
+			files: map[string]string{"api/Pipfile": "[dev-packages]\npytest = \"*\"\n", "api/tests/test_x.py": test},
+			want:  []got{{"pytest", "api", "pytest"}},
+		},
+		{
+			// `python -m unittest` cannot run Django's TestCase (no settings).
+			name:  "Django project without pytest",
+			files: map[string]string{"manage.py": "", "app/__init__.py": "", "app/tests.py": "from django.test import TestCase\n"},
+			want:  nil,
+		},
+		{
+			name: "Django project with requirements but without pytest",
+			files: map[string]string{
+				"requirements.txt": "django\n", "manage.py": "", "pyproject.toml": "[project]",
+				"app/__init__.py": "", "app/tests.py": "from django.test import TestCase\n",
+			},
+			want: nil,
+		},
+		{
+			name: "Django project with pytest-django",
+			files: map[string]string{
+				"requirements.txt": "django\npytest-django\n", "manage.py": "",
+				"app/__init__.py": "", "app/test_views.py": "from django.test import TestCase\n",
+			},
+			want: []got{{"pytest", ".", "pytest"}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if g, _ := detect(t, c.files); !reflect.DeepEqual(g, c.want) {
+				t.Errorf("got %v\nwant %v", g, c.want)
+			}
+		})
+	}
+}
+
+func TestDetectCreateReactApp(t *testing.T) {
+	g, suites := detect(t, map[string]string{
+		"package.json":    `{"dependencies":{"react-scripts":"5.0.1"},"scripts":{"test":"react-scripts test"}}`,
+		"src/App.test.js": "",
+	})
+	if want := []got{{"jest", ".", "jest"}}; !reflect.DeepEqual(g, want) {
+		t.Fatalf("got %v, want %v", g, want)
+	}
+	if want := "npx --no-install react-scripts test --watchAll=false"; suites[0].Command != want {
+		t.Errorf("command %q, want %q", suites[0].Command, want)
+	}
+}
+
+func TestCRACommand(t *testing.T) {
+	dir := t.TempDir()
+	testutil.Write(t, dir, "pnpm-lock.yaml", "")
+	testutil.Write(t, dir, "web/node_modules/.bin/react-scripts", "")
+	cases := []struct {
+		script string
+		want   string
+		env    map[string]string
+	}{
+		{"react-scripts test", "pnpm exec react-scripts test --watchAll=false", nil},
+		{
+			"CI=true react-scripts test --transformIgnorePatterns 'x/(?!y)' && echo",
+			`pnpm exec react-scripts test --transformIgnorePatterns 'x/(?!y)' --watchAll=false`,
+			map[string]string{"CI": "true"},
+		},
+		{
+			// Operators inside quotes do not end the command.
+			`react-scripts test --transformIgnorePatterns "node_modules/(?!(axios|lodash-es)/)"`,
+			`pnpm exec react-scripts test --transformIgnorePatterns 'node_modules/(?!(axios|lodash-es)/)' --watchAll=false`,
+			nil,
+		},
+		{
+			"npm run build&&cross-env TZ=UTC NODE_ENV=test react-scripts test --env=jsdom;echo done",
+			"pnpm exec react-scripts test --env=jsdom --watchAll=false",
+			map[string]string{"TZ": "UTC", "NODE_ENV": "test"},
+		},
+		{`react-scripts test --testNamePattern "it's a b"`, `pnpm exec react-scripts test --testNamePattern 'it'\''s a b' --watchAll=false`, nil},
+		{"react-scripts test --env=jsdom --watchAll=false", "pnpm exec react-scripts test --env=jsdom --watchAll=false", nil},
+		{"react-scripts test --watch --watchAll true --coverage", "pnpm exec react-scripts test --coverage --watchAll=false", nil},
+	}
+	for _, c := range cases {
+		got, env := craCommand(dir, ".", c.script)
+		if got != c.want || !reflect.DeepEqual(env, c.env) {
+			t.Errorf("craCommand(%q) = %q %v, want %q %v", c.script, got, env, c.want, c.env)
+		}
+		// The command is one runner can split.
+		if _, err := runner.SplitWords(got); err != nil {
+			t.Errorf("%q: %v", got, err)
+		}
+	}
+	// A locally installed react-scripts is run directly.
+	if got, _ := craCommand(dir, "web", "react-scripts test"); got != "./node_modules/.bin/react-scripts test --watchAll=false" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestShellQuoteRoundTrip(t *testing.T) {
+	for _, w := range []string{"plain", "a b", "it's", `"q"`, "x|y", "$HOME", ""} {
+		got, err := runner.SplitWords("cmd " + shellQuote(w))
+		if err != nil || len(got) != 2 || got[1] != w {
+			t.Errorf("shellQuote(%q) = %q, split back to %q (%v)", w, shellQuote(w), got, err)
+		}
+	}
+}
+
 func TestDetectPolyglotRootGoAndRootPytest(t *testing.T) {
 	// A Go module and a Python project sharing the repository root get distinct names.
 	g, suites := detect(t, map[string]string{
@@ -223,5 +408,40 @@ func TestDetectPolyglotRootGoAndRootPytest(t *testing.T) {
 	}
 	if err := (&config.Config{Suites: suites}).Normalize(); err != nil {
 		t.Error(err)
+	}
+}
+
+// BenchmarkPythonProjects measures project detection in a large monorepo: 400 services
+// (half with a project file, half with only a requirements file and a conftest.py) and
+// 32k test files.
+func BenchmarkPythonProjects(b *testing.B) {
+	dirFiles := map[string][]string{".": {"requirements-dev.txt"}}
+	for s := 0; s < 400; s++ {
+		svc := fmt.Sprintf("services/s%d", s)
+		if s%2 == 0 {
+			dirFiles[svc] = []string{"pyproject.toml"}
+		} else {
+			dirFiles[svc] = []string{"requirements.txt", "conftest.py"}
+		}
+		for d := 0; d < 8; d++ {
+			var names []string
+			for f := 0; f < 10; f++ {
+				names = append(names, fmt.Sprintf("test_%d.py", f))
+			}
+			dirFiles[fmt.Sprintf("%s/tests/d%d", svc, d)] = names
+		}
+	}
+	var dirs []string
+	for d := range dirFiles {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	repo := &gitx.Repo{Root: b.TempDir()}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// The services and the root (whose tests are not all in project-file services).
+		if got := pythonProjects(repo, dirs, dirFiles); len(got) != 401 {
+			b.Fatalf("%d projects", len(got))
+		}
 	}
 }

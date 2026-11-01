@@ -21,7 +21,14 @@ type index struct {
 	dirs map[string]bool
 	// pyFiles are all Python sources, sorted (prefix queries for dynamic imports).
 	pyFiles []string
+	// testGlobs are the basename patterns of test modules: pytest's defaults, the
+	// common Django-style names, and every python_files of the repository's configs.
+	testGlobs []string
 }
+
+// defaultTestGlobs name the test modules pytest collects without configuration
+// (test_*.py, *_test.py) and the ones Django-style setups add (tests.py, *_tests.py).
+var defaultTestGlobs = []string{"test_*.py", "*_test.py", "tests.py", "*_tests.py"}
 
 // projectFiles mark a directory as a Python project (and thus <dir>/src a root).
 var projectFiles = map[string]bool{"pyproject.toml": true, "setup.py": true, "setup.cfg": true}
@@ -41,6 +48,19 @@ func buildIndex(h host.Host, extra []string) *index {
 		addRoot("", r)
 	}
 	pyFiles := make([]string, 0, len(files)/4)
+	globSet := map[string]bool{}
+	for _, g := range defaultTestGlobs {
+		globSet[g] = true
+	}
+	addGlobs := func(globs []string) {
+		for _, g := range globs {
+			// Patterns with a directory part are matched against paths by pytest;
+			// the directory heuristics of isTestLike cover them well enough.
+			if !strings.Contains(g, "/") {
+				globSet[g] = true
+			}
+		}
+	}
 	for f := range files {
 		if inNodeModules(f) {
 			continue
@@ -61,13 +81,17 @@ func buildIndex(h host.Host, extra []string) *index {
 		}
 		switch {
 		case base == "pyproject.toml":
-			for _, r := range pyprojectRoots(string(h.Read(f))) {
+			doc := string(h.Read(f))
+			for _, r := range pyprojectRoots(doc) {
 				addRoot(dir, r)
 			}
+			addGlobs(pyprojectTestGlobs(doc))
 		case pytestINIs[base]:
-			for _, r := range iniRoots(string(h.Read(f)), base) {
+			doc := string(h.Read(f))
+			for _, r := range iniRoots(doc, base) {
 				addRoot(dir, r)
 			}
+			addGlobs(iniTestGlobs(doc, base))
 		}
 	}
 	sort.Strings(pyFiles)
@@ -77,6 +101,10 @@ func buildIndex(h host.Host, extra []string) *index {
 		dirs:    map[string]bool{"": true},
 		pyFiles: pyFiles,
 	}
+	for g := range globSet {
+		idx.testGlobs = append(idx.testGlobs, g)
+	}
+	sort.Strings(idx.testGlobs)
 	for r := range rootSet {
 		idx.roots = append(idx.roots, r)
 	}
