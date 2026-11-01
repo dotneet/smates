@@ -335,8 +335,11 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 	}
 	env := trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
 	start := time.Now()
+	// A command that runs files one after another (tests sharing a database or ports)
+	// is recorded one file at a time too; record_jobs overrides this.
 	jobs := runtime.NumCPU()
-	if hasArg(rc, "--runInBand") || hasArg(rc, "-i") || hasArg(rc, "--no-file-parallelism") {
+	if slices.ContainsFunc([]string{"--runInBand", "-i", "--no-file-parallelism", "--test-isolation=none",
+		"--experimental-test-isolation=none", "--test-concurrency=1"}, func(a string) bool { return hasArg(rc, a) }) {
 		jobs = 1
 	}
 	codes, err := isolatedRun(ctx, rc, units, jobs, func(u string, _ int) ([]string, []string, error) {
@@ -450,8 +453,8 @@ func nodeMajor(ctx context.Context, rc *RunContext) int {
 // into character classes. Two cannot be escaped that way: a backslash (a separator to
 // Node's glob) becomes "?" outside Windows, and braces holding a comma or ".." are
 // expanded before classes are read, so in a path with braces commas become "?" and the
-// second dot of ".." is put in a class. "?" can only over-match a file named like the
-// test but for that character.
+// second dot of ".." is put in a class. "?" matches any character, so such a path may
+// also run other test files named like it but for that character.
 func escapeNodeGlob(p string) string {
 	braces := strings.ContainsAny(p, "{}")
 	segs := strings.Split(p, "/")

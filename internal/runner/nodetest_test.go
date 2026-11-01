@@ -196,6 +196,44 @@ func TestNodeRunsGlobLikePaths(t *testing.T) {
 	}
 }
 
+// A failing test file that loads another unit (test/common.js matches node's default
+// test/**/* pattern) is still a definite failure, and the unit it loaded is not failed.
+func TestNodeFailureWithSharedUnit(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
+	t.Setenv("NODE_OPTIONS", "")
+	t.Setenv("NODE_V8_COVERAGE", "")
+	repo := tempRepo(t)
+	os.MkdirAll(filepath.Join(repo.Root, "test"), 0o755)
+	os.WriteFile(filepath.Join(repo.Root, "test", "common.js"), []byte("exports.one = () => 1;\n"), 0o644)
+	os.WriteFile(filepath.Join(repo.Root, "test", "a.test.js"), []byte("const c = require('./common.js');\nrequire('node:test')('a', () => { if (c.one() === 1) throw new Error('boom'); });\n"), 0o644)
+	nodeTestFile(t, repo.Root, "test/b.test.js", false)
+	units := []string{"test/a.test.js", "test/b.test.js", "test/common.js"}
+	sh, err := trace.ExtractShims(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	rc := &RunContext{
+		Repo: repo, Units: units, Record: true, TraceDir: t.TempDir(), ShimDir: sh.Dir, Stdout: &out, Stderr: &out,
+		Suite:  &Suite{Suite: config.Suite{Root: ".", Command: "node --test"}},
+		UnitOf: func(f string) string { return map[bool]string{true: f}[slices.Contains(units, f)] },
+	}
+	res, err := (nodeTest{}).Run(context.Background(), rc)
+	if err != nil || res.ExitCode == 0 {
+		t.Fatalf("run: %+v %v\n%s", res, err, out.String())
+	}
+	if o := res.Observations["test/a.test.js"]; o == nil || o.Status != state.Fail || o.Inferred {
+		t.Errorf("a: %+v", o)
+	}
+	for _, u := range []string{"test/b.test.js", "test/common.js"} {
+		if o := res.Observations[u]; o == nil || o.Status != state.Pass {
+			t.Errorf("%s: %+v", u, o)
+		}
+	}
+}
+
 // node --test --test-isolation=none runs every file in one process: a failing run says
 // nothing definite about each file, and isolate: true records each file on its own.
 func TestNodeIsolationNone(t *testing.T) {
