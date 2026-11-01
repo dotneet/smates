@@ -133,7 +133,7 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				continue
 			}
 			var cmd, match string
-			others := 0
+			others, after := 0, 0
 			for _, l := range strings.Split(run.Value, "\n") {
 				t := strings.TrimSpace(l)
 				if t == "" || strings.HasPrefix(t, "#") {
@@ -144,6 +144,9 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 					continue
 				}
 				others++
+				if cmd != "" {
+					after++
+				}
 			}
 			if cmd == "" {
 				continue
@@ -187,8 +190,10 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				ts.Skip = fmt.Sprintf("%q is not the plain unit-test command; switch it to smates by hand if smates should select those tests", match)
 			case len(shellSepRe.Split(cmd, -1)) > 1 || strings.HasSuffix(cmd, "\\"):
 				ts.Skip = "the test command is chained with other commands on one line; split it out, then use the smates action for the test part"
+			case after > 0:
+				ts.Skip = "commands after the test line use its output (or must run after the tests); move them to their own step, then use the smates action for the tests"
 			case others > 0:
-				// Keep the other commands: drop only the test line of the run: block.
+				// Keep the commands before it: drop only the test line of the run: block.
 				b := ts.Blocks["run"]
 				for j := b[0] + 1; j <= b[1]; j++ {
 					if strings.TrimSpace(lines[j-1]) == cmd {

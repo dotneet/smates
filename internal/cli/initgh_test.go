@@ -569,9 +569,9 @@ func TestWorkflowPatchCases(t *testing.T) {
 		{name: "if on the dash line",
 			steps: "      - if: always()\n        run: go test ./...\n",
 			want:  []string{"      - name: 'tests (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n"}},
-		{name: "other commands stay in the original step",
-			steps:   "      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          go test -race ./...\n          echo done\n      - run: echo after\n",
-			want:    []string{"      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          echo done\n      - name: 'checks (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n", "      - run: echo after\n"},
+		{name: "commands before the tests stay in the original step",
+			steps:   "      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          echo start\n          go test -race ./...\n      - run: echo after\n",
+			want:    []string{"      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          echo start\n      - name: 'checks (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n", "      - run: echo after\n"},
 			notWant: []string{"go test", "        id: checks\n        if: always()\n        uses"},
 			note:    `only "go test -race ./..." moves`},
 		{name: "working-directory without its own smates.yml is a note",
@@ -591,6 +591,8 @@ func TestWorkflowPatchCases(t *testing.T) {
 			steps: "      - run: npm run test:e2e\n", noPatch: true, skipWant: `"npm run test:e2e" is not the plain unit-test command`},
 		{name: "make test-integration is reported, not patched",
 			steps: "      - run: make test-integration\n", noPatch: true, skipWant: "not the plain unit-test command"},
+		{name: "commands after the tests are reported, not patched",
+			steps: "      - run: |\n          go test -coverprofile=cover.out ./...\n          go tool cover -func=cover.out\n", noPatch: true, skipWant: "commands after the test line use its output"},
 		{name: "chained command is reported, not patched",
 			steps: "      - run: cd web && pnpm test\n", noPatch: true, skipWant: "chained with other commands"},
 	}
@@ -625,6 +627,29 @@ func TestWorkflowPatchCases(t *testing.T) {
 				t.Errorf("notes %q, want %q", joined, c.note)
 			}
 		})
+	}
+}
+
+func TestInitGitHubTestsOutsideSuites(t *testing.T) {
+	g := newGitRepo(t)
+	writeTree(t, g.dir, map[string]string{
+		".github/workflows/ci.yml": "on: push\njobs:\n  misc:\n    steps:\n      - run: pytest scripts/\n      - run: npm test\n",
+		"go.mod":                   "module example.com/x\n\ngo 1.22\n",
+		"x_test.go":                "package x\n",
+	})
+	g.git("add", ".")
+	g.commit("files")
+	var out, errb bytes.Buffer
+	if code := Main([]string{"init", "--github", "-C", g.dir}, &out, &errb); code != 0 {
+		t.Fatalf("init: %d %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(g.dir, ".github/workflows/smates.yml")); err != nil {
+		t.Errorf("tests outside every suite blocked the smates workflow:\n%s", errb.String())
+	}
+	for _, s := range []string{"not writing", "--- a/", "replace those steps"} {
+		if strings.Contains(errb.String(), s) {
+			t.Errorf("stderr has %q:\n%s", s, errb.String())
+		}
 	}
 }
 

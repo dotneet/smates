@@ -335,8 +335,10 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 			fmt.Fprintf(stderr, "  %s: job %q, step %q: %s\n", st.File, st.Job, st.Step, st.Command)
 			if st.Skip != "" {
 				fmt.Fprintf(stderr, "    not patched: %s\n", st.Skip)
+			} else if len(stepSuites(st, suites)) == 0 {
+				fmt.Fprintln(stderr, "    not patched: it runs tests of no suite smates detected")
 			}
-			duplicate = duplicate || !st.Other
+			duplicate = duplicate || (!st.Other && len(stepSuites(st, suites)) > 0)
 		}
 		patch, notes := workflowPatch(repo.Root, steps, suites)
 		for _, n := range notes {
