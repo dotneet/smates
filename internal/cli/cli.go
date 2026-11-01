@@ -53,8 +53,9 @@ Exit codes:
   2  usage error (invalid command line)
   3  configuration error (invalid smates.yml, unknown runner, a suite or test it does not define)
   4  environment problem (git missing, not a git repository, a suite command that cannot start,
-     an npx/bunx tool missing from node_modules, or a runner exiting 126/127 before any test
-     reported a result)
+     an npx/bunx tool missing from node_modules, or, in a recorded run, a runner exiting
+     126/127 although none of its tests reported a result they would have reported; with
+     --no-record or untraced custom tests such an exit is a test failure)
 
 For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
 of failing tests, then a short summary with the command that reruns just those tests.

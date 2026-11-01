@@ -224,7 +224,9 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			return c.worst, fmt.Errorf("writing report: %w", err)
 		}
 	}
-	return c.worst, nil
+	// A batch whose tests never started (notStarted) makes the run an environment
+	// error, reported after the usual failure handling and summary.
+	return c.worst, c.envErr
 }
 
 // cycle is one `smates run` over the selected suites.
@@ -255,13 +257,15 @@ type cycle struct {
 	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
 	// failedBatches are the batches that exited non-zero.
 	failedBatches []failedBatch
-	started       map[string][]string     // suite -> units started
-	notRun        map[string][]string     // --fail-fast: suite -> units not started after a failure
-	stopped       bool                    // --fail-fast stopped the run
-	results       map[string]*suiteResult // suite -> outcomes to record
-	escapes       []string                // shadow: failing tests the selection would have skipped
-	possible      []string                // shadow: skipped tests failed only by the run's exit code
-	flakes        []flakeReport
+	// envErr is set when a batch's tests never started (notStarted).
+	envErr   error
+	started  map[string][]string     // suite -> units started
+	notRun   map[string][]string     // --fail-fast: suite -> units not started after a failure
+	stopped  bool                    // --fail-fast stopped the run
+	results  map[string]*suiteResult // suite -> outcomes to record
+	escapes  []string                // shadow: failing tests the selection would have skipped
+	possible []string                // shadow: skipped tests failed only by the run's exit code
+	flakes   []flakeReport
 }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
@@ -404,13 +408,10 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		}
 	}
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
-	// executable or not installed: when no test reported or left a result, the tests
-	// never ran.
-	if notStarted(r) {
-		if buf != nil {
-			c.printFailedBatch(sr, b, buf, nil)
-		}
-		return 0, envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output above)", sr.Name, r.ExitCode)}
+	// executable or not installed: when tests that report results reported none, they
+	// never ran. The batch is still handled as a failure below.
+	if c.envErr == nil && c.notStarted(sr, b, r) {
+		c.envErr = envError{fmt.Errorf("%s: the runner exited with code %d before any test reported a result: a command it runs is probably not installed or not executable (see its output)", sr.Name, r.ExitCode)}
 	}
 	c.worst = max(c.worst, r.ExitCode)
 	for _, w := range r.Warnings {
@@ -637,10 +638,29 @@ func subsetOf(a, b []string) bool {
 	return true
 }
 
-// notStarted reports a run whose process exited 126 (not executable) or 127 (command
-// not found) without any test reporting or leaving a result.
-func notStarted(r *runner.RunResult) bool {
-	return (r.ExitCode == 126 || r.ExitCode == 127) && len(r.Observations) == 0
+// notStarted reports a batch whose process exited 126 (not executable) or 127
+// (command not found) although none of its tests reported or left a result, while
+// they would have: the run is recorded, and the runner reports per-test results
+// (every runner but custom), or a test of the batch left a traced result before. A
+// custom runner whose tests are not traced (bats, ruby), or a run with --no-record,
+// reports nothing even when its tests ran: its exit code is a test failure.
+func (c *cycle) notStarted(sr *selector.Suite, b *batch, r *runner.RunResult) bool {
+	if r.ExitCode != 126 && r.ExitCode != 127 || len(r.Observations) > 0 || !c.record {
+		return false
+	}
+	if sr.Suite.Runner != "custom" {
+		return true
+	}
+	st := c.p.state.Suites[sr.Name]
+	if st == nil {
+		return false
+	}
+	for _, u := range b.units {
+		if e := st.Tests[u]; e != nil && len(e.Deps) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // runError classifies an error of a runner that could not run a batch: a suite command

@@ -207,9 +207,10 @@ func TestExitCodes(t *testing.T) {
 		{"config: unparsable command", suite(`"sh -c 'exit 0"`), []string{"run", "--all"}, ExitConfig},
 		{"env: runner not installed", suite("smates-no-such-tool-x1"), []string{"run", "--all"}, ExitEnv},
 		{"env: npx tool not installed", suite("npx smates-no-such-tool-x2"), []string{"run", "--all"}, ExitEnv},
-		{"env: launcher exits 127", suite("sh -c 'smates-no-such-tool-x3'"), []string{"run", "--all"}, ExitEnv},
-		{"env: launcher exits 126", suite("sh -c 'exit 126'"), []string{"run", "--all"}, ExitEnv},
-		{"env: launcher exits 127, failures mode", suite("sh -c 'smates-no-such-tool-x4'"), []string{"run", "--all", "--output", "failures"}, ExitEnv},
+		// Untraced tests of a custom runner (and --no-record) report nothing even when they
+		// ran: 126/127 cannot be told from a test failure (see TestExit126And127).
+		{"tests: launcher exits 127 without results", suite("sh -c 'smates-no-such-tool-x3'"), []string{"run", "--all"}, ExitFailed},
+		{"tests: launcher exits 126 without results", suite("sh -c 'exit 126'"), []string{"run", "--all", "--output", "failures"}, ExitFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,14 +219,6 @@ func TestExitCodes(t *testing.T) {
 				t.Errorf("exit %d, want %d\n%s", code, tc.want, errs)
 			}
 		})
-	}
-
-	// The launcher's output (the shell's "not found") is printed in failures mode.
-	write("smates.yml", suite("sh -c 'smates-no-such-tool-x5'"))
-	var o, e bytes.Buffer
-	code := Main([]string{"run", "-C", g.dir, "--no-agent", "--all", "--output", "failures"}, &o, &e)
-	if code != ExitEnv || !strings.Contains(o.String(), "smates-no-such-tool-x5") || !strings.Contains(e.String(), "exited with code 127 before any test reported a result") {
-		t.Errorf("launcher 127: exit %d\n%s\n--- stderr\n%s", code, o.String(), e.String())
 	}
 
 	// Not a git repository.
@@ -332,20 +325,37 @@ func TestPrintFailedBatch(t *testing.T) {
 	}
 }
 
-// TestExit127AfterResults: a run that exits 127 after its tests reported results is a
-// test failure, not an environment problem.
-func TestExit127AfterResults(t *testing.T) {
-	dir, write, run := outputFixture(t)
-	_ = dir
-	write("smates.yml", `version: 1
-orphans: ignore
-suites:
-  - name: good
-    runner: custom
-    tests: ["good/*_check.py"]
-    command: sh -c 'for f; do python3 "$f"; done; exit 127' sh
-`)
+// TestExit126And127: a recorded run whose runner exits 126/127 although its tests,
+// which report results, reported none is an environment problem; with results, or with
+// --no-record, it is a test failure.
+func TestExit126And127(t *testing.T) {
+	_, write, run := outputFixture(t) // records traced results for good/a_check.py
+	cfg := func(command string) string {
+		return "version: 1\norphans: ignore\nsuites:\n  - name: good\n    runner: custom\n    tests: [\"good/*_check.py\"]\n    command: " + command + "\n"
+	}
+
+	// The tests run and report results, then the command exits 127.
+	write("smates.yml", cfg(`sh -c 'for f; do python3 "$f"; done; exit 127' sh`))
 	if code, _, errs := run("run", "--all"); code != ExitFailed {
-		t.Errorf("exit %d, want %d\n%s", code, ExitFailed, errs)
+		t.Errorf("results then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
+		t.Errorf("--no-record, tests ran then 127: exit %d, want %d\n%s", code, ExitFailed, errs)
+	}
+
+	// The tool is missing: no test ran.
+	write("smates.yml", cfg("sh -c 'smates-no-such-tool-x5'"))
+	code, out, errs := run("run", "--all", "--output", "failures")
+	if code != ExitEnv || !strings.Contains(out, "smates-no-such-tool-x5") ||
+		!strings.Contains(errs, "exited with code 127 before any test reported a result") || !strings.Contains(errs, "smates: FAILED") {
+		t.Errorf("missing tool: exit %d\n%s\n--- stderr\n%s", code, out, errs)
+	}
+	write("smates.yml", cfg("sh -c 'exit 126'"))
+	if code, _, errs := run("run", "--all"); code != ExitEnv || !strings.Contains(errs, "done in") {
+		t.Errorf("126: exit %d\n%s", code, errs)
+	}
+	// Without recording nothing tells the cases apart: a test failure.
+	if code, _, errs := run("run", "--all", "--no-record"); code != ExitFailed {
+		t.Errorf("--no-record 126: exit %d\n%s", code, errs)
 	}
 }
