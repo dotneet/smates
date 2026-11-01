@@ -21,11 +21,12 @@ import (
 
 // recordRun records one run of unit observing files, hashed after the run (run is
 // called between the start of the run and recording, like the tests writing files).
+// The hasher has the ignore globs, as in `smates run` and selection.
 func (f *fixture) recordRun(st *state.State, unit string, files []string, run func()) {
 	f.t.Helper()
 	res := f.sel(st, func(in *Input) { in.Repo, in.All = &gitx.Repo{Root: f.dir}, true })
 	sr := res.Suites[0]
-	h := NewHasher(f.snap()).WithRoot(f.dir).WithConfig(f.cfg)
+	h := NewHasher(f.snap(), IgnoreGlobs(f.cfg)...).WithRoot(f.dir).WithConfig(f.cfg)
 	h.PinBefore(st, []string{sr.Name}, time.Now())
 	if run != nil {
 		run()
@@ -66,6 +67,27 @@ func TestListingOfIgnoredDir(t *testing.T) {
 	}
 }
 
+// A test lists a git-ignored directory of markdown fixtures (a spec suite downloaded
+// into the tree) and renders each file: adding one selects it, although the ignore
+// globs (DefaultIgnore's **/*.md) match it. Listing the directory is the read.
+func TestListingOfIgnoredDirIgnoreGlobs(t *testing.T) {
+	f := webFixture(t)
+	const unit = "web/src/c.test.ts"
+	f.writeUntracked("web/spec/one.md", "# one")
+	st := f.record(nil, nil)
+	f.recordRun(st, unit, []string{"web/spec/", "web/spec/one.md"}, nil)
+	sel := func() string {
+		return decisions(f.sel(st, func(in *Input) { in.Repo = &gitx.Repo{Root: f.dir} }))[unit]
+	}
+	if d := sel(); d != "-unaffected" {
+		t.Fatalf("nothing changed: %s", d)
+	}
+	f.writeUntracked("web/spec/two.md", "# two")
+	if d := sel(); d != ReasonChanged {
+		t.Errorf("markdown fixture added to a listed ignored directory: %s (want changed)", d)
+	}
+}
+
 // A test that writes a new timestamped file into the ignored directory it lists, every
 // run: the listing is recorded as the run left it, so the test settles after one run.
 func TestListingWrittenByRunSettles(t *testing.T) {
@@ -87,8 +109,8 @@ func TestListingWrittenByRunSettles(t *testing.T) {
 // The listing of a directory the snapshot lists is the snapshot's alone, as an older
 // smates recorded it: entries git ignores inside it (logs, test binaries, editor and
 // Finder files, an ignored subdirectory) are not part of it. A directory the snapshot
-// has no file below is listed from disk, without vendored entries and those the ignore
-// globs match.
+// has no file below is listed from disk, without vendored entries (the ignore globs do
+// not apply).
 func TestListingTrackedDir(t *testing.T) {
 	f := webFixture(t)
 	h := func(key string) string {
@@ -118,10 +140,15 @@ func TestListingTrackedDir(t *testing.T) {
 		t.Fatal("ignored directory: no listing")
 	}
 	f.writeUntracked("web/src/gen/node_modules/x.js", "")
-	f.writeUntracked("web/src/gen/NOTES.md", "") // ignored by default (**/*.md)
 	if got := h("web/src/gen/"); got != gen {
-		t.Errorf("vendored and ignored entries listed: %s, want %s", got, gen)
+		t.Errorf("vendored entry listed: %s, want %s", got, gen)
 	}
+	// The ignore globs do not apply to a listing from disk: listing is the read.
+	f.writeUntracked("web/src/gen/NOTES.md", "") // ignored by default (**/*.md)
+	if got := h("web/src/gen/"); got == gen {
+		t.Errorf("file the ignore globs match added to an ignored directory: listing unchanged")
+	}
+	gen = h("web/src/gen/")
 	f.writeUntracked("web/src/gen/y.ts", "")
 	if got := h("web/src/gen/"); got == gen {
 		t.Errorf("file added to an ignored directory: listing unchanged")
@@ -230,6 +257,15 @@ func TestTreeOfIgnoredDir(t *testing.T) {
 	if d := sel(); d != ReasonChanged {
 		t.Errorf("file added: %s", d)
 	}
+	os.Remove(filepath.Join(f.dir, "web/build/extra.js"))
+	if d := sel(); d != "-unaffected" {
+		t.Fatalf("back as recorded: %s", d)
+	}
+	f.writeUntracked("web/build/NOTES.md", "") // the ignore globs (**/*.md) do not apply
+	if d := sel(); d != ReasonChanged {
+		t.Errorf("file the ignore globs match added: %s", d)
+	}
+	os.Remove(filepath.Join(f.dir, "web/build/NOTES.md"))
 	tree := func(dir string) string { return NewHasher(f.snap()).WithRoot(f.dir).Hash(depkey.Tree(dir)) }
 	f.writeUntracked("web/src/gen/x.ts", "")
 	if got, want := tree("web/src"), NewHasher(f.snap()).Hash(depkey.Tree("web/src")); got != want {

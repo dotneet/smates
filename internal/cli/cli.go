@@ -353,6 +353,9 @@ type selectOptions struct {
 	// the tests the caller adds (--add).
 	orphans string
 	adds    []string
+	// sharded: --shard splits the run, so the agent is not asked (a cached decision
+	// is still used): each shard would ask on its own and could get another answer.
+	sharded bool
 }
 
 // selection runs deterministic selection and the orphan policy.

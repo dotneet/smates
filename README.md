@@ -551,7 +551,7 @@ nothing where `smates` is not installed.
 | 1 | tests failed (whatever code the runner exited with; `--report` has it in `exit_code`) |
 | 2 | usage error: invalid command line |
 | 3 | configuration error: invalid `smates.yml`, unknown runner, a suite command that cannot be parsed, a suite or test named on the command line (`--suite`, `--only`) that the configuration does not define, no suites at all |
-| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4 (1 when tests of another suite failed); a state that cannot be saved (e.g. the shared state's lock is held by another worktree's run), reported after the summary, or 1 when tests failed |
+| 4 | environment problem: git missing or not a git repository; a suite command that cannot be started (not on `PATH`, not executable); a tool that `npx`/`bunx` would have to download (not in `node_modules/.bin`); in a recorded run of any runner but `custom`, a runner process that exits 126 or 127 (the shell's "not executable" / "command not found", also through `npm test`, `yarn`, `pnpm exec` or `sh -c`) without any test reporting a result. With `--no-record` or the `custom` runner, which may report nothing even when the tests ran, such an exit is a test failure (1). The failure is still reported (output, summary) before smates exits with 4 (1 when tests of another suite failed), and the other suites still run and are recorded; `--report`'s `exit_code` is then 4 too; a state that cannot be saved (e.g. the shared state's lock is held by another worktree's run), reported after the summary, or 1 when tests failed |
 
 **Shadow mode** (`smates run --shadow`) runs every test but evaluates the selection and
 reports any failing test it would have skipped. Use it for a while before trusting the
@@ -701,6 +701,11 @@ ok  	example.com/shop/internal/store	0.170s
 - Bounded by turns, a wall-clock timeout and a token budget; answers are validated
   against the real test inventory and cached per change. Any failure falls back to
   running the affected suites in full.
+- Sharded runs (`--shard I/N`) do not ask the agent: each shard would ask on its own,
+  and a test only one shard's answer picked could be owned by another shard and run
+  nowhere. A shard uses a decision cached in the state it restored (from an unsharded
+  `smates select` or `smates run` on the same change); otherwise it falls back to the
+  orphan policy.
 - An external agent (`agent.command`) gets the prompt on stdin and prints its answer on
   stdout. Without a controlling terminal (CI) it runs in a process group of its own,
   killed as a whole on the timeout or when smates is stopped (Ctrl-C, SIGTERM, SIGHUP).
