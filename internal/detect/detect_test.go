@@ -126,7 +126,7 @@ func TestDetectLayouts(t *testing.T) {
 		{
 			name: "pytest projects",
 			files: map[string]string{
-				"pyproject.toml": "[project]", "tests/test_a.py": "",
+				"pyproject.toml": "[project]\ndependencies = [\"pytest\"]", "tests/test_a.py": "",
 				"libs/inner/pyproject.toml": "", "libs/inner/tests/test_b.py": "",
 			},
 			want: []got{{"pytest", ".", "pytest"}},
@@ -134,18 +134,29 @@ func TestDetectLayouts(t *testing.T) {
 		{
 			name: "sibling python projects",
 			files: map[string]string{
-				"svc1/pyproject.toml": "", "svc1/test_x.py": "",
-				"svc2/setup.cfg": "", "svc2/pkg/x_test.py": "",
+				"svc1/pyproject.toml": "[tool.pytest.ini_options]", "svc1/test_x.py": "",
+				"svc2/setup.cfg": "[tool:pytest]", "svc2/pkg/x_test.py": "",
 				"svc3/pytest.ini": "", // no tests
 			},
 			want: []got{{"pytest:svc1", "svc1", "pytest"}, {"pytest:svc2", "svc2", "pytest"}},
+		},
+		{
+			name: "unittest projects (no sign of pytest)",
+			files: map[string]string{
+				"svc/pyproject.toml": "[project]\nname = \"svc\"", "svc/tests/__init__.py": "", "svc/tests/test_a.py": "",
+				"tox/setup.py": "", "tox/tox.ini": "[testenv]\ncommands = pytest", "tox/tests/test_b.py": "",
+				"conf/setup.cfg": "", "conf/tests/conftest.py": "", "conf/tests/test_c.py": "",
+				"plain/setup.py": "", "plain/testing_utils.py": "", "plain/test_d.py": "",
+				"none/pyproject.toml": "", "none/x_test.py": "", // unittest's pattern is test*.py
+			},
+			want: []got{{"pytest:conf", "conf", "pytest"}, {"unittest:plain", "plain", "unittest"}, {"unittest:svc", "svc", "unittest"}, {"pytest:tox", "tox", "pytest"}},
 		},
 		{
 			name: "polyglot",
 			files: map[string]string{
 				"go.mod": "module m", "cmd/main_test.go": "",
 				"web/package.json": vitestPkg, "web/src/app.test.tsx": "",
-				"api/pyproject.toml": "", "api/tests/test_api.py": "",
+				"api/pyproject.toml": "", "api/requirements-dev.txt": "pytest==8.0", "api/tests/test_api.py": "",
 				"README.md": "",
 			},
 			want: []got{{"go", ".", "go"}, {"vitest", "web", "vitest"}, {"pytest", "api", "pytest"}},
@@ -180,7 +191,7 @@ func TestDetectPolyglotRootGoAndRootPytest(t *testing.T) {
 	// A Go module and a Python project sharing the repository root get distinct names.
 	g, suites := detect(t, map[string]string{
 		"go.mod": "module m", "x_test.go": "",
-		"pyproject.toml": "", "tests/test_x.py": "",
+		"pyproject.toml": "", "tests/conftest.py": "", "tests/test_x.py": "",
 	})
 	want := []got{{"go", ".", "go"}, {"pytest", ".", "pytest"}}
 	if !reflect.DeepEqual(g, want) {

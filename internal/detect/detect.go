@@ -115,7 +115,9 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		out = append(out, config.Suite{Root: d, Runner: r})
 	}
 
-	// Python: one suite per project with pytest configuration or tests.
+	// Python: one suite per project with pytest configuration or tests. Projects that
+	// show no sign of pytest (no dependency, configuration or conftest.py) use the
+	// standard library's unittest.
 	for _, d := range dirs {
 		isProject := has(d, "pyproject.toml") || has(d, "pytest.ini") || has(d, "setup.cfg") || has(d, "setup.py")
 		if !isProject {
@@ -123,13 +125,18 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 		nested := false
 		for _, s := range out {
-			if s.Runner == "pytest" && pathutil.Under(d, s.Root) {
+			if (s.Runner == "pytest" || s.Runner == "unittest") && pathutil.Under(d, s.Root) {
 				nested = true
 			}
 		}
-		if !nested {
-			out = append(out, config.Suite{Root: d, Runner: "pytest"})
+		if nested {
+			continue
 		}
+		r := "unittest"
+		if usesPytest(repo, d, dirFiles) {
+			r = "pytest"
+		}
+		out = append(out, config.Suite{Root: d, Runner: r})
 	}
 
 	// Keep suites that have tests; give them unique names.
@@ -167,6 +174,35 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		}
 	}
 	return kept
+}
+
+// pytestMarkers are files whose mention of pytest means the project uses it.
+var pytestMarkers = regexp.MustCompile(`^(pyproject\.toml|setup\.cfg|setup\.py|tox\.ini|Pipfile|requirements.*\.(txt|in))$`)
+
+// usesPytest reports whether the Python project at dir uses pytest: a pytest.ini or
+// conftest.py in the project, or pytest named in its manifests and configuration
+// (dependencies, [tool.pytest.ini_options], [tool:pytest], tox commands).
+func usesPytest(repo *gitx.Repo, dir string, dirFiles map[string][]string) bool {
+	for d, names := range dirFiles {
+		if !pathutil.Under(d, dir) {
+			continue
+		}
+		for _, n := range names {
+			if n == "pytest.ini" || n == "conftest.py" {
+				return true
+			}
+		}
+	}
+	for _, n := range dirFiles[dir] {
+		if !pytestMarkers.MatchString(n) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(dir), n))
+		if err == nil && strings.Contains(string(data), "pytest") {
+			return true
+		}
+	}
+	return false
 }
 
 // rootOwnsWorkspace reports whether a package directory configures the runner for

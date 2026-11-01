@@ -2,7 +2,7 @@
 
 smates ("smart test selection") selects the tests a change can actually affect, for
 TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go and
-Python (pytest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
+Python (pytest, unittest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
 with no runtime dependencies; language shims (a Node preload, a Python `sitecustomize` and
 pytest plugin, reporters for vitest and jest) are embedded and extracted at run time.
 
@@ -194,6 +194,7 @@ can alter test results.
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process | preload fs + `Bun.file`/`Bun.Glob` hooks | one process per file while recording; shim prepended to bunfig preloads |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy` |
+| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class; `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
 
 Processes are linked to their test even through untraced intermediaries: every traced

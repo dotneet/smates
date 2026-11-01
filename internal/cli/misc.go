@@ -625,7 +625,7 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 			ok("%s", v)
 		}
 	}
-	if runners["pytest"] {
+	if runners["pytest"] || runners["unittest"] {
 		py := tool("python3", "-c", "import sys;print('%d.%d'%sys.version_info[:2])")
 		if py == "" {
 			warn("python3 not found on PATH (fine if the suite command provides Python, e.g. uv)")

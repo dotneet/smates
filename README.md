@@ -1,7 +1,7 @@
 # smates
 
 **Run only the tests your change can affect** — for TypeScript/JavaScript (vitest, jest,
-`node --test`, bun), Go and Python (pytest, uv), in CI and locally.
+`node --test`, bun), Go and Python (pytest, unittest, uv), in CI and locally.
 
 smates learns what every test *actually uses* by tracing real test runs (executed code,
 files read, directories listed, child processes), adds a static import graph as a safety
@@ -112,6 +112,7 @@ dependencies it only knows the static graph and overstates the orphans.
 | `node` (`node --test`) | test file | V8 coverage per test process + fs hooks | process exit code |
 | `bun` | test file | per-file `bun test --coverage` + module cache, preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` (while recording) | process exit code |
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
+| `unittest` (`python -m unittest`) | test module | same Python tracing; every selected module runs in one process through a `unittest` wrapper with contexts per module (import, `setUpModule`/`setUpClass`, tests) | wrapper result class |
 | `go` | package | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code |
 
@@ -120,6 +121,18 @@ when started through a shell), and shell scripts, `grep`, `cat` and other comman
 analyzed from their command line and script contents. A command smates cannot see into
 (`make`, a compiled binary) makes the test depend on everything below the directory it
 runs in.
+
+Python projects use `pytest` when anything mentions it (a dependency, `[tool.pytest…]`,
+`pytest.ini`, a `conftest.py`, tox) and `unittest` otherwise. The `unittest` runner's
+test files follow discovery: `test*.py` below the suite root by default, or the
+`-s`/`-p`/`-t` (start directory, pattern, top-level directory) of a
+`python -m unittest discover …` command. smates always passes the selected files as
+dotted module names relative to the top-level directory (also for a full run, so a
+directory without `__init__.py` is not skipped); files whose path is not a module name
+are not tests. While recording, the selected modules run in one process through
+`python -m smates_unittest` (shipped with the Python shims), which also turns an
+exception raised while importing a module into a failure of that module instead of the
+end of the run. `isolate: true` runs one process per module instead.
 
 Package managers: npm, pnpm, yarn, bun (local `node_modules/.bin` binaries are used
 directly), uv / virtualenvs for Python. Monorepos with several suites, workspaces
@@ -236,7 +249,7 @@ suites:
       - tests: ["src/db/**"]
         deps: ["migrations/**"]
     env: { TZ: UTC }
-    isolate: true                    # jest/bun: one process per file while recording
+    isolate: true                    # jest/bun/unittest: one process per file while recording
     junit: reports/junit.xml          # per-file status from a JUnit report you produce
   - name: api
     runner: go
@@ -253,6 +266,10 @@ suites:
   - name: tools
     runner: pytest
     root: tools
+  - name: legacy
+    runner: unittest                 # python -m unittest (no pytest needed)
+    root: legacy
+    command: "python3 -m unittest discover -s tests -p '*_check.py'"  # -s/-p/-t pick the test files
 
 orphans: agent        # agent | all | ignore
 ignore: ["design/**"] # added to the built-in docs/editor/lint defaults

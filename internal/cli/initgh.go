@@ -228,7 +228,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 		switch s.Runner {
 		case "go":
 			tool("go", "go:"+root, "      - uses: "+actSetupGo, "        with:", "          go-version-file: "+joinRel(root, "go.mod"))
-		case "pytest":
+		case "pytest", "unittest":
 			if f := pythonVersionFile(repo.Root, root); f != "" {
 				tool("python", "python:"+f, "      - uses: "+actSetupPython, "        with:", "          python-version-file: "+f)
 			} else if mise["python"] {
