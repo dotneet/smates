@@ -103,6 +103,24 @@ func TestAttributeSingleUnitWorkers(t *testing.T) {
 	}
 }
 
+// With one runner per test file (isolate), a runner whose test process left no trace
+// (a jest worker force-killed before writing its coverage) is still a runner: the tree
+// its crawl or watchman probe stands for is not a read of the other tests.
+func TestAttributeRunnerWithoutTracedTest(t *testing.T) {
+	a := attr(Options{},
+		mkProc(10, 1, 0).code("jest.config.js").read("./**"),
+		mkProc(11, 10, 0).code("a.test.ts", "src/a.ts").exit(0),
+		mkProc(20, 1, 0).code("jest.config.js").read("./**"),
+		mkProc(21, 20, 0), // the worker of b.test.ts, killed: no coverage
+	)
+	if got := unitFiles(a, "a.test.ts"); !reflect.DeepEqual(got, []string{"a.test.ts", "src/a.ts"}) {
+		t.Errorf("a: %v", got)
+	}
+	if got := keys(a.Global); !reflect.DeepEqual(got, []string{"jest.config.js"}) {
+		t.Errorf("global: %v, want the runners' code only", got)
+	}
+}
+
 func TestAttributeSharedProcess(t *testing.T) {
 	a := attr(Options{},
 		mkProc(10, 1, 0),

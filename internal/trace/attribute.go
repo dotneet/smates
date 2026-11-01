@@ -105,8 +105,17 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	}
 	owner := func(p *Proc) bool { return len(own[p]) > 0 || p.HasContexts() }
 
-	// Processes that are ancestors of a unit-owning process are runner infrastructure.
+	// Processes that are ancestors of a unit-owning process are runner infrastructure,
+	// and so is a process smates started itself (no traced parent) that owns nothing:
+	// a runner whose test process left no trace (a jest worker force-killed before it
+	// wrote its coverage, with isolate one runner per test file). Its crawls and its
+	// probes (jest's find, watchman: the whole tree) are not reads of every test.
 	infra := map[*Proc]bool{}
+	for _, p := range procs {
+		if !owner(p) && parent(p) == nil {
+			infra[p] = true
+		}
+	}
 	for _, p := range procs {
 		if !owner(p) {
 			continue
