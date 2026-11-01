@@ -32,7 +32,7 @@ func (custom) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			return nil, err
 		}
 		base := suiteEnv(rc.Suite)
-		env = append(trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base), trace.PythonEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)[2:]...)
+		env = trace.PytestEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), base)
 	}
 	start := time.Now()
 	code, err := runBatches(ctx, rc, nil, rc.RelArgs(""), env)

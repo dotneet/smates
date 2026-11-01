@@ -344,8 +344,8 @@ can alter test results.
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run, else its existence (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy`; results keyed by each item's file (node ids of files outside the rootdir are relative to the arguments); a file some of whose collected tests did not run (`-x`, `--maxfail`, `pytest.exit()`, an interrupt; with pytest-xdist counted by the controller) is `unknown` |
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
-| go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates` | one binary per package; build failures parsed from output |
-| go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
+| go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output |
+| go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process and of re-executions of the binary; other children as for a package | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
 
 Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
 the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
@@ -396,9 +396,13 @@ test loop is over, before pytest-cov reads every `--cov` module for its report. 
 `-coverpkg` builds the named packages into every test binary of the invocation, so their
 source files (`go list -find`) are added to every package's dependencies.
 
-**Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries) are
-analyzed from their command line when the child starts (`child_process.*` in Node,
-`subprocess.Popen`/`os.system` audit events in Python):
+**Subprocesses smates cannot trace** (shell scripts, grep, make, compiled binaries, and
+Node, Bun or Python children that do not load the shims: their environment lacks the
+runtime's shim, as the exec event's `rt` says, or Python runs with `-I`, `-E` or `-S`)
+are analyzed from their command line when the child starts (`child_process.*` in Node,
+`subprocess.Popen`/`os.system` audit events in Python). Every recording runner exports
+the tracing environment of all three runtimes, so a pytest test's `node` child traces
+itself like a Node test's `python3` child:
 
 - read-only commands (`cat`, `grep`, `jq`, ...) depend on the paths and shell globs they name
   (and the files of `sed` `r` commands; `diff` of directories on their trees; `find -exec`
@@ -406,12 +410,41 @@ analyzed from their command line when the child starts (`child_process.*` in Nod
 - shell scripts are read and analyzed the same way, following `cd`, `pushd`/`popd`,
   `source`, variables, for-loops, brace expansion, `case`, input redirections, the bodies
   of the functions they call (where they are called, once per state; a function no call
-  reaches, such as a trap handler, where it is defined), `$(dirname "$0")` and the commands
-  of command substitutions (`$(<file)` reads the file);
+  reaches, such as a trap handler, where it is defined), `$(dirname "$0")`, the commands
+  of command substitutions (`$(<file)` reads the file) and the script's positional
+  parameters (`$1`, `"$@"`; a function's body sees its call's arguments; not followed in
+  a script or function that uses `shift`, `getopts` or `set --`); an unresolved input
+  redirection (`< "$X"`) is opaque;
 - anything else may read anything below its working directory: the test depends on
   `cwd/**` (commands running outside the repository only on the paths they name), and on
-  the program itself when it is named by path (`../bin/tool`); so does a command line the
-  shims cut short (beyond 256 Ki characters).
+  the program itself when it is named by path (`../bin/tool`) and the paths in its option
+  values and response files (`--config=cfg/app.ini`, `-Dk=v`, `@args.txt`); so does a
+  command line the shims cut short (beyond 256 Ki characters).
+
+Go has no hook on process creation, but a test log shows every program a test starts:
+`os.StartProcess` logs it as an `open` of the program, followed by a `stat` of `cmd.Dir`
+when the command has one (and no `SysProcAttr`). An `open` of an executable file
+(`trace.GoTestLogs`; on Windows `.exe`, `.com`, `.bat`, `.cmd`) is taken for a start: one
+opened only to be read counts too (more dependencies, never fewer), and a program removed
+before the test ends (built into `t.TempDir()`) is not seen. The command line is not in
+the log, so such a child is analyzed as the last case above without the paths it names:
+
+- Node, Bun and Python (by name, or a `#!` script running on them) trace themselves;
+- a re-execution of the test binary run as a test binary (the helper-process pattern)
+  runs the package's own test code and keeps a test log of its own, read like the
+  parent's (see "Test logs of re-executions" below). When it is cut short, what that
+  child read is unknown, and the test depends on the tree of its Go module (the
+  repository's when the module encloses it, through symlinks too): the test code may
+  read anything there, `../../testdata` included, as the parent's own log would show;
+- anything else (`sh -c`, `git`, a compiled tool, the binary run with arguments of its
+  own) depends on the tree of the test's working directory (the package directory, or
+  where a `chdir` took it) and of the `stat`ed `cmd.Dir` when one follows (a `stat` the
+  test makes itself right after starting a program looks the same; both trees are kept),
+  and on the program when it is in the repository. Only the line right after the `open`
+  is read: in a parallel test another goroutine's line can come between, and a `cmd.Dir`
+  elsewhere is then missed, as it is with `SysProcAttr` set. Paths on its command line
+  outside those trees (`sh -c "cat ../../testdata/x"`) are not seen: declare them
+  (`depends_on`, rules).
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
@@ -497,6 +530,35 @@ becomes a content dependency (otherwise a failing run would record less than the
 the child ran, and the run fixing it would look like a flake). A child given an
 environment of its own (`cmd.Env` without `os.Environ()`) or started from a copy of the
 binary is not seen; neither is a child of a binary built without coverage.
+
+*Test logs of re-executions* (either granularity). A test log is per process too, and a
+re-execution's arguments lack `-test.testlogfile`. The same test file (which package
+recording adds to every package with test files it runs, through `GOFLAGS`, named by
+`go/build` with the suite's `GOOS`/`GOARCH`/`CGO_ENABLED` and `-tags`) acts in every
+process of the binary whose command line has no `-test.testlogfile` (the process smates
+started has one). A process run as a test binary (no arguments, or a `-test.` flag
+first: the helper-process pattern) gets `test.testlogfile` set to
+`$SMATES_GOTESTLOGDIR/<pid>.testlog` and writes its working directory to `<pid>.test`;
+the test depends on what that log records, resolved against that directory, and on what
+the programs the child started may read (see "Subprocesses smates cannot trace").
+testing writes the log when the tests end, 4096 bytes at a time: a child that exits
+earlier (`os.Exit`, as the classic `TestHelperProcess` does; a panic, a kill, a
+`TestMain` that never calls `m.Run`) leaves it empty or cut at a multiple of 4096 bytes
+(a complete log of exactly such a size counts as cut), and a cut log makes the test
+depend on its Go module's tree. A process run with arguments of its own (a `TestMain`
+dispatching to the program's command line; the binary used as an `-exec` wrapper by a
+`go test` the test runs) writes only its directory, to `<pid>.cmd`, and counts as any
+other program: the tree of that directory. So do opens of the binary that no marker
+accounts for (a test reading its own binary with `debug/buildinfo`; a child given an
+environment of its own, a `-test.testlogfile` of its own, or of a package without the
+file: one `go/build` cannot name, a user `-overlay` on the command line replacing ours)
+and a child started from a copy of the binary.
+
+smates sets `PWD` to the directory of every command it runs (`exec.Cmd` does so only
+for an inherited environment): the go command trusts `$PWD` when it names its
+directory, and the user's (through a symlink, `/tmp` on macOS) would make the absolute
+paths of the overlays, smates' and the user's, made against the resolved repository
+root, match nothing.
 
 *Compile checks.* A function's dependencies are the bodies it executed and the
 declarations around them, which is what its outcome depends on once the package builds.

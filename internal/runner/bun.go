@@ -54,7 +54,7 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// BUN_OPTIONS (bun, also preloading it into bun test itself: loaded once) and
 	// NODE_OPTIONS (node), both set by NodeEnv.
 	shim := rc.Shims().Node
-	env := trace.NodeEnv(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	env := trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 		return nil, err
 	}

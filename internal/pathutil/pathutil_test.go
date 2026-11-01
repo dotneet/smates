@@ -41,6 +41,11 @@ func TestRel(t *testing.T) {
 		{filepath.Join(root, "..", "elsewhere"), "", false},
 		{"relative/path", "", false},
 		{"file://%zz", "", false},
+		// Module ids, not files: a node: builtin joined to a directory, a virtual module.
+		{filepath.Join(root, "packages", "shared", "node:internal", "process", "task_queues"), "", false},
+		{"node:internal/process/task_queues", "", false},
+		{filepath.Join(root, "packages", "web", "\x00vite", "dynamic-import-helper.js"), "", false},
+		{fileURL(filepath.Join(root, "packages", "web")) + "/%00vite/dynamic-import-helper.js", "", false},
 	}
 	for _, c := range cases {
 		got, ok := Rel(root, c.in)
