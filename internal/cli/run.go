@@ -502,8 +502,27 @@ func (p *project) recordSeen(f, h string) {
 		for _, s := range p.suites {
 			names = append(names, s.Name)
 		}
-		p.state.Files[f] = selector.MarkSeen(v, h, names)
+		m := selector.MarkSeen(v, h, names)
+		if _, seen, _ := selector.ParseMarker(m); subsetOf(selector.Owners(f, all), seen) {
+			// Every suite that owns f has now seen this content: a plain entry.
+			if h == "" {
+				delete(p.state.Files, f)
+			} else {
+				p.state.Files[f] = h
+			}
+			return
+		}
+		p.state.Files[f] = m
 	}
+}
+
+func subsetOf(a, b []string) bool {
+	for _, x := range a {
+		if !slices.Contains(b, x) {
+			return false
+		}
+	}
+	return true
 }
 
 // logOutcome logs how the run went.

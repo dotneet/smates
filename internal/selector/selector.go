@@ -665,6 +665,19 @@ func MarkSeen(v, hash string, suites []string) string {
 	return Marker(hash, suites)
 }
 
+// Owners returns the names of the suites of all the orphan policy would run for f.
+func Owners(f string, all []*runner.Suite) []string {
+	roots := make([]string, len(all))
+	for i, s := range all {
+		roots[i] = s.Root
+	}
+	var out []string
+	for _, i := range orphanOwners(f, roots) {
+		out = append(out, all[i].Name)
+	}
+	return out
+}
+
 // OwnedOnly reports whether every suite the orphan policy would run for f (see Owned)
 // is one of the first n suites of all.
 func OwnedOnly(f string, all []*runner.Suite, n int) bool {

@@ -431,6 +431,14 @@ suites:
 		t.Errorf("b's pending changes are lost: %v %s", err, out.String())
 	}
 
+	// Once b has seen Dockerfile too, it is a plain entry again: no orphan anywhere.
+	if code := Main([]string{"run", "-C", g.dir, "--no-agent", "--suite", "b", "--all"}, &out, &errb); code != 0 {
+		t.Fatalf("run --suite b --all: %d %s", code, errb.String())
+	}
+	if st, err := state.Load(filepath.Join(g.dir, ".smates", "state.json.gz")); err != nil || st.Files["Dockerfile"] == "" || strings.HasPrefix(st.Files["Dockerfile"], selector.Unrecorded) {
+		t.Errorf("Dockerfile after both suites ran: %v %q", err, st.Files["Dockerfile"])
+	}
+
 	// With a recorded snapshot, a file added under b's root that a's test names still
 	// selects that test in a's job.
 	write("b/fixtures/users.json", "[]")
