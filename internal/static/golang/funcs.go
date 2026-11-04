@@ -11,6 +11,8 @@ import (
 	"go/token"
 	"go/types"
 	"hash"
+	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,6 +85,7 @@ func withoutBodies(fset *token.FileSet, f *ast.File, src []byte) ([]byte, bool) 
 // types, the signatures of methods and of functions that run for every test, and the
 // variables and constants among those.
 func testShape(fset *token.FileSet, f *ast.File, src []byte) ([]byte, bool) {
+	imports := fileImports(f)
 	var kept []byte
 	add := func(from, to token.Pos) bool {
 		start, end := offset(fset, from), offset(fset, to)
@@ -127,7 +130,7 @@ func testShape(fset *token.FileSet, f *ast.File, src []byte) ([]byte, bool) {
 				}
 			default:
 				for _, s := range d.Specs {
-					if vs, ok := s.(*ast.ValueSpec); ok && specRunsForEveryTest(d.Tok, vs) {
+					if vs, ok := s.(*ast.ValueSpec); ok && specRunsForEveryTest(d.Tok, vs, imports) {
 						kept = append(kept, d.Tok.String()...)
 						kept = append(kept, ' ')
 						if !add(vs.Pos(), vs.End()) {
@@ -142,20 +145,41 @@ func testShape(fset *token.FileSet, f *ast.File, src []byte) ([]byte, bool) {
 }
 
 // DeclHashes hashes each top-level declaration of a Go source file by its key (see
-// DeclKey): a function or method with its signature and body, a variable, constant or
-// type with the whole declaration it is part of (a parenthesized group: the values of
-// constants depend on their position in it). Declarations sharing a key (init
-// functions, blank identifiers) hash together. Comments do not count except directives
-// and, in examples, the output comment (and every comment of a file using cgo).
-// ok is false when the file does not parse.
-func DeclHashes(src []byte) (map[string]string, bool) {
+// DeclKeys): full, a function or method with its signature and body, a variable,
+// constant or type with the whole declaration it is part of (a parenthesized group:
+// the values of constants depend on their position in it); sig, the same without the
+// bodies of functions and methods. Both include the file's imports, which decide what
+// the names a declaration mentions refer to. Declarations sharing a key (init
+// functions, blank identifiers) hash together. Comments do not count except
+// directives and, in examples, the output comment (and every comment of a file using
+// cgo). ok is false when the file does not parse.
+func DeclHashes(src []byte) (full, sig map[string]string, ok bool) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil || f == nil {
-		return nil, false
+		return nil, nil, false
 	}
 	cgo := usesCgo(f)
-	hs := map[string]hash.Hash{}
+	var imports []byte
+	for _, d := range f.Decls {
+		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
+			start, end := offset(fset, gd.Pos()), offset(fset, gd.End())
+			if start < 0 || end > len(src) || end < start {
+				return nil, nil, false
+			}
+			imports = append(append(imports, src[start:end]...), '\n')
+		}
+	}
+	fullH, sigH := map[string]hash.Hash{}, map[string]hash.Hash{}
+	get := func(m map[string]hash.Hash, k string) hash.Hash {
+		h := m[k]
+		if h == nil {
+			h = sha1.New()
+			hashTokens(h, imports, false)
+			m[k] = h
+		}
+		return h
+	}
 	for _, d := range f.Decls {
 		keys := DeclKeys(d)
 		if len(keys) == 0 {
@@ -163,25 +187,135 @@ func DeclHashes(src []byte) (map[string]string, bool) {
 		}
 		start, end := offset(fset, declStart(d)), offset(fset, d.End())
 		if start < 0 || end > len(src) || end < start {
-			return nil, false
+			return nil, nil, false
 		}
+		sigEnd := end
 		fd, _ := d.(*ast.FuncDecl)
+		if fd != nil && fd.Body != nil {
+			sigEnd = offset(fset, fd.Body.Lbrace)
+		}
 		comments := cgo || fd != nil && fd.Recv == nil && hasTestPrefix(fd.Name.Name, "Example")
 		for _, k := range keys {
-			h := hs[k]
-			if h == nil {
-				h = sha1.New()
-				hs[k] = h
-			}
+			h := get(fullH, k)
 			hashTokens(h, src[start:end], comments)
+			h.Write([]byte{1})
+			h = get(sigH, k)
+			hashTokens(h, src[start:sigEnd], cgo)
 			h.Write([]byte{1})
 		}
 	}
-	out := make(map[string]string, len(hs))
-	for k, h := range hs {
-		out[k] = "decl:" + hex.EncodeToString(h.Sum(nil))
+	full, sig = make(map[string]string, len(fullH)), make(map[string]string, len(sigH))
+	for k, h := range fullH {
+		full[k] = "decl:" + hex.EncodeToString(h.Sum(nil))
 	}
-	return out, true
+	for k, h := range sigH {
+		sig[k] = "sig:" + hex.EncodeToString(h.Sum(nil))
+	}
+	return full, sig, true
+}
+
+// PackageParts returns what a Go file contributes to its package beyond the
+// declarations other code names (see DeclHashes): shape, a hash of what can change
+// every test of the package's binary, and methods, by receiver type, the signature of
+// each method the file declares (a type's method set decides which interfaces it
+// satisfies). The shape covers the package clause, build constraints, blank imports
+// (their packages' init runs), init functions and TestMain (their presence: their
+// bodies count where they run), package-level variables whose initializer calls code
+// (coverage does not see initializers), and declarations shadowing a predeclared name;
+// a file using cgo is its whole content. An ordinary function, type, constant or
+// variable is not part of it: adding one changes nothing until something names it.
+// shape is "" for a file with none of these (its package clause and build constraints
+// then change nothing either). ok is false when the file does not parse.
+func PackageParts(src []byte) (shape string, methods map[string][]string, ok bool) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", src, parser.ParseComments)
+	if err != nil || f == nil {
+		return "", nil, false
+	}
+	imports := fileImports(f)
+	h := sha1.New()
+	if usesCgo(f) {
+		hashTokens(h, src, true)
+		return "shape:" + hex.EncodeToString(h.Sum(nil)), nil, true
+	}
+	significant := false // the file contributes something beyond its package clause
+	add := func(from, to token.Pos) bool {
+		start, end := offset(fset, from), offset(fset, to)
+		if start < 0 || end > len(src) || end < start {
+			return false
+		}
+		significant = true
+		hashTokens(h, src[start:end], false)
+		h.Write([]byte{1})
+		return true
+	}
+	for _, cg := range f.Comments {
+		if cg.Pos() < f.Package {
+			for _, c := range cg.List {
+				if directive(c.Text) {
+					h.Write([]byte(c.Text + "\n"))
+				}
+			}
+		}
+	}
+	h.Write([]byte("package " + f.Name.Name + "\n"))
+	for _, imp := range f.Imports {
+		if imp.Name != nil && imp.Name.Name == "_" {
+			h.Write([]byte("import _ " + imp.Path.Value + "\n"))
+			significant = true
+		}
+	}
+	for _, d := range f.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			to := d.End()
+			if d.Body != nil {
+				to = d.Body.Lbrace
+			}
+			if r := recvType(d); r != "" {
+				start, end := offset(fset, d.Pos()), offset(fset, to)
+				if start < 0 || end > len(src) || end < start {
+					return "", nil, false
+				}
+				sh := sha1.New()
+				hashTokens(sh, src[start:end], false)
+				if methods == nil {
+					methods = map[string][]string{}
+				}
+				methods[r] = append(methods[r], d.Name.Name+":"+hex.EncodeToString(sh.Sum(nil)))
+				continue
+			}
+			if runsForEveryTest(d) && !add(d.Pos(), to) {
+				return "", nil, false
+			}
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				continue
+			}
+			for _, sp := range d.Specs {
+				switch sp := sp.(type) {
+				case *ast.ValueSpec:
+					if specRunsForEveryTest(d.Tok, sp, imports) {
+						h.Write([]byte(d.Tok.String() + " "))
+						if !add(sp.Pos(), sp.End()) {
+							return "", nil, false
+						}
+					}
+				case *ast.TypeSpec:
+					if types.Universe.Lookup(sp.Name.Name) != nil {
+						h.Write([]byte("type "))
+						if !add(sp.Pos(), sp.End()) {
+							return "", nil, false
+						}
+					}
+				}
+			}
+		}
+	}
+	if !significant {
+		return "", methods, true
+	}
+	return "shape:" + hex.EncodeToString(h.Sum(nil)), methods, true
 }
 
 // DeclKeys returns the keys of a top-level declaration: the name of a function, "T.M"
@@ -312,6 +446,9 @@ type Decl struct {
 	// (pkg.Name): in an external test package (pkg_test), the names it may use of the
 	// package under test, its test files included.
 	Qualified []string
+	// BodyRefs and BodyQualified are those of a function's or method's body (Refs and
+	// Qualified are those of its signature): what it names when it runs.
+	BodyRefs, BodyQualified []string
 	// Recv is the type of a method's receiver.
 	Recv string
 	// Type is set for a type declaration (its methods come with it).
@@ -323,12 +460,14 @@ type Decl struct {
 	Init bool
 }
 
-// ParseTestFile analyzes a _test.go file.
+// ParseTestFile analyzes a _test.go file (or any Go file: Tests and Silent are then
+// usually empty).
 func ParseTestFile(src []byte) (*TestFile, error) {
 	f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}
+	imports := fileImports(f)
 	tf := &TestFile{Package: f.Name.Name, Decls: map[string]*Decl{}}
 	decl := func(key string) *Decl {
 		d := tf.Decls[key]
@@ -354,7 +493,10 @@ func ParseTestFile(src []byte) (*TestFile, error) {
 				tf.Tests = append(tf.Tests, key)
 			}
 			// Not the name: a method's is not declared in the file scope.
-			refs(f, dd, d.Recv, d.Type, d.Body)
+			r, q := refs(f, d.Recv, d.Type)
+			dd.Refs, dd.Qualified = append(dd.Refs, r...), append(dd.Qualified, q...)
+			r, q = refs(f, d.Body)
+			dd.BodyRefs, dd.BodyQualified = append(dd.BodyRefs, r...), append(dd.BodyQualified, q...)
 		case *ast.GenDecl:
 			if d.Tok == token.IMPORT {
 				continue
@@ -362,21 +504,24 @@ func ParseTestFile(src []byte) (*TestFile, error) {
 			// Every key of a group gets the refs of the whole group, as DeclHashes hashes it.
 			group := &Decl{}
 			for _, s := range d.Specs {
+				var nodes []ast.Node
 				switch s := s.(type) {
 				case *ast.ValueSpec:
-					refs(f, group, s.Type)
+					nodes = append(nodes, s.Type)
 					for _, v := range s.Values {
-						refs(f, group, v)
+						nodes = append(nodes, v)
 					}
 				case *ast.TypeSpec:
-					refs(f, group, s.TypeParams, s.Type)
+					nodes = append(nodes, s.TypeParams, s.Type)
 				}
+				r, q := refs(f, nodes...)
+				group.Refs, group.Qualified = append(group.Refs, r...), append(group.Qualified, q...)
 			}
 			for _, s := range d.Specs {
 				var dd *Decl
 				switch s := s.(type) {
 				case *ast.ValueSpec:
-					init := specRunsForEveryTest(d.Tok, s)
+					init := specRunsForEveryTest(d.Tok, s, imports)
 					for _, n := range s.Names {
 						dd = decl(n.Name)
 						dd.Init = dd.Init || init
@@ -397,27 +542,29 @@ func ParseTestFile(src []byte) (*TestFile, error) {
 	}
 	for _, d := range tf.Decls {
 		d.Refs, d.Qualified = sortedUnique(d.Refs), sortedUnique(d.Qualified)
+		d.BodyRefs, d.BodyQualified = sortedUnique(d.BodyRefs), sortedUnique(d.BodyQualified)
 	}
 	return tf, nil
 }
 
-// refs adds to d the names nodes mention that may be package-level declarations (see
-// Decl.Refs), using the parser's resolution: an identifier is one when the file does
-// not resolve it (another file's declaration, a predeclared or imported name) or
+// refs returns the names nodes mention that may be package-level declarations (see
+// Decl.Refs) and the names they select on an identifier the file does not declare
+// (Decl.Qualified), using the parser's resolution: an identifier is one when the file
+// does not resolve it (another file's declaration, a predeclared or imported name) or
 // resolves it to one of its own top-level declarations.
-func refs(f *ast.File, d *Decl, nodes ...ast.Node) {
+func refs(f *ast.File, nodes ...ast.Node) (names, qualified []string) {
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.SelectorExpr:
 			if id, ok := n.X.(*ast.Ident); ok && id.Obj == nil {
-				d.Qualified = append(d.Qualified, n.Sel.Name)
+				qualified = append(qualified, n.Sel.Name)
 			}
 			ast.Inspect(n.X, visit)
 			return false
 		case *ast.Ident:
 			if n.Name != "_" && (n.Obj == nil || f.Scope.Lookup(n.Name) == n.Obj) {
-				d.Refs = append(d.Refs, n.Name)
+				names = append(names, n.Name)
 			}
 		}
 		return true
@@ -427,6 +574,7 @@ func refs(f *ast.File, d *Decl, nodes ...ast.Node) {
 			ast.Inspect(n, visit)
 		}
 	}
+	return names, qualified
 }
 
 // isNilNode reports whether n is a typed nil (an absent optional node of a spec).
@@ -450,8 +598,8 @@ func runsForEveryTest(fd *ast.FuncDecl) bool {
 
 // specRunsForEveryTest reports whether a package-level variable or constant specification
 // runs code for every test of the binary (its initializer calls a function) or shadows
-// a predeclared identifier.
-func specRunsForEveryTest(tok token.Token, s *ast.ValueSpec) bool {
+// a predeclared identifier. imports maps the file's import names to their paths.
+func specRunsForEveryTest(tok token.Token, s *ast.ValueSpec, imports map[string]string) bool {
 	for _, n := range s.Names {
 		if types.Universe.Lookup(n.Name) != nil {
 			return true
@@ -461,7 +609,7 @@ func specRunsForEveryTest(tok token.Token, s *ast.ValueSpec) bool {
 		return false
 	}
 	for _, v := range s.Values {
-		if callsAtInit(v) {
+		if callsAtInit(v, imports) {
 			return true
 		}
 	}
@@ -470,21 +618,82 @@ func specRunsForEveryTest(tok token.Token, s *ast.ValueSpec) bool {
 
 // callsAtInit reports whether evaluating e calls a function. Function literals are not
 // evaluated; conversions and builtins that run no code of the program are not calls
-// (see conversion).
-func callsAtInit(e ast.Expr) bool {
+// (see conversion), nor are the standard library functions that cannot panic or
+// have side effects (see pureCall).
+func callsAtInit(e ast.Expr, imports map[string]string) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.FuncLit:
 			return false
 		case *ast.CallExpr:
-			if !conversion(n) {
+			if !conversion(n) && !pureCall(n, imports) {
 				found = true
 			}
 		}
 		return !found
 	})
 	return found
+}
+
+// pureCalls are standard library functions that only return a value made from their
+// arguments, with no side effect and no panic.
+var pureCalls = map[string]bool{"errors.New": true, "fmt.Errorf": true, "time.FixedZone": true}
+
+// pureCall reports whether c calls a function in pureCalls, through the import of its
+// package, or compiles a constant regular expression that compiles
+// (regexp.MustCompile("..."): it cannot panic). Its arguments are checked on their own.
+func pureCall(c *ast.CallExpr, imports map[string]string) bool {
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || id.Obj != nil {
+		return false
+	}
+	fn := imports[id.Name] + "." + sel.Sel.Name
+	if pureCalls[fn] {
+		return true
+	}
+	if fn != "regexp.MustCompile" && fn != "regexp.MustCompilePOSIX" || len(c.Args) != 1 {
+		return false
+	}
+	lit, ok := c.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	pattern, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return false
+	}
+	if fn == "regexp.MustCompilePOSIX" {
+		_, err = regexp.CompilePOSIX(pattern)
+	} else {
+		_, err = regexp.Compile(pattern)
+	}
+	return err == nil
+}
+
+// fileImports maps the names a file imports packages as to their paths (the last path
+// element when unnamed: the package name of the standard library packages pureCall
+// knows). Blank and dot imports are left out.
+func fileImports(f *ast.File) map[string]string {
+	m := map[string]string{}
+	for _, imp := range f.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		name := path.Base(p)
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		if name != "_" && name != "." {
+			m[name] = p
+		}
+	}
+	return m
 }
 
 // pureBuiltins are the predeclared functions that run no code of the program.

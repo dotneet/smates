@@ -269,10 +269,11 @@ func TestFuncUnitsAndMapStatic(t *testing.T) {
 	}
 	closure := []string{"go.mod", "p/a.go", "p/a_test.go", "p/b_test.go", "p/deep_test.go", "p/ext_test.go", "p/helper_test.go", "p/main_test.go", "p/other_test.go", "p/static/x.txt", "r/r.go"}
 	got := a.MapStatic(s, "p#TestA", closure)
-	// Every Go file's declarations; in the test files, the declarations TestA reaches:
-	// itself, helper and what it calls, TestMain (it runs for every test).
-	want := []string{"go.mod", "p/a.go#decls", "p/a_test.go#decls", "p/b_test.go#decls", "p/deep_test.go#decls", "p/ext_test.go#decls", "p/helper_test.go#decls", "p/main_test.go#decls", "p/other_test.go#decls", "p/static/x.txt", "r/r.go#decls",
-		"p/a_test.go#decl:TestA", "p/deep_test.go#decl:deep", "p/helper_test.go#decl:helper", "p/main_test.go#decl:TestMain", "p/"}
+	// The declarations of the other packages' Go files; in its own package, its shape
+	// and the declarations TestA reaches: itself, helper and what it calls, TestMain (it
+	// runs for every test). p/a.go is listed but missing: it counts whole.
+	want := []string{"go.mod", "p/static/x.txt", "r/r.go#decls",
+		"p/#shape", "p/a.go", "p/a_test.go#decl:TestA", "p/deep_test.go#decl:deep", "p/helper_test.go#decl:helper", "p/main_test.go#decl:TestMain"}
 	if !slices.Equal(got, want) {
 		t.Errorf("MapStatic\n got %v\nwant %v", got, want)
 	}
@@ -296,7 +297,7 @@ func TestAddCoverage(t *testing.T) {
 	os.WriteFile(profile, []byte("mode: set\nex.com/m/calc/add.go:3.24,3.40 1 0\nex.com/m/calc/mul.go:7.24,7.58 1 1\nex.com/m/util/util.go:3.20,3.32 1 1\n"+
 		"ex.com/m/gen/parser.y:10.1,12.2 2 1\nexample.org/dep/x.go:1.1,2.2 1 1\n"), 0o644)
 	o := &Observation{}
-	if !addCoverage(o, repo.Root, gp, profile) {
+	if !addCoverage(o, repo.Root, gp, profile, "") {
 		t.Fatal("profile not read")
 	}
 	var got []string
@@ -309,7 +310,7 @@ func TestAddCoverage(t *testing.T) {
 	if want := []string{"m/calc/mul.go", "m/gen/gen.go", "m/gen/other.go", "m/util/util.go"}; !slices.Equal(got, want) {
 		t.Errorf("coverage deps %v, want %v", got, want)
 	}
-	if addCoverage(&Observation{}, repo.Root, gp, filepath.Join(t.TempDir(), "missing")) {
+	if addCoverage(&Observation{}, repo.Root, gp, filepath.Join(t.TempDir(), "missing"), "") {
 		t.Error("a missing profile is not certain")
 	}
 }
@@ -342,7 +343,7 @@ func TestTestFileDeps(t *testing.T) {
 		"p/fake_test.go":      "package p\ntype fake struct{ cfg config }\nfunc newFake() *fake { return &fake{} }\nfunc (f *fake) Render() { f.cfg.load() }\n",
 		"p/cfg_test.go":       "package p\ntype config struct{}\nfunc (config) load() {}\n",
 		"p/name_test.go":      "package p\nfunc name() {}\nfunc run() {}\nfunc (u unrelated) Render() {}\ntype unrelated int\n",
-		"p/init_test.go":      "package p\nimport \"regexp\"\nvar re = regexp.MustCompile(\"x\")\nvar raw = []byte(\"x\")\nvar _ = (*fake)(nil)\nfunc TestInit(t *testing.T) { _ = raw }\n",
+		"p/init_test.go":      "package p\nimport \"regexp\"\nvar re = regexp.MustCompile(pattern)\nvar raw = []byte(\"x\")\nvar _ = (*fake)(nil)\nfunc TestInit(t *testing.T) { _ = raw }\n",
 		"p/srv_test.go":       "package p\nfunc (s *Server) testOnly() {}\n",
 		"p/export_test.go":    "package p\nfunc Exported() { run() }\n",
 		"p/x_test.go":         "package p_test\nimport (\"testing\"; \"example.com/m/p\")\nfunc TestX(t *testing.T) { p.Exported() }\n",
@@ -356,10 +357,13 @@ func TestTestFileDeps(t *testing.T) {
 		all = append(all, f)
 	}
 	slices.Sort(all)
-	every := []string{"p/bad_test.go", "p/init_test.go#decl:re", "p/srv_test.go#decl:Server.testOnly"}
+	// What every test depends on: the package's shape, a file that does not parse, what
+	// runs for every test (re, the method a test file adds to Server) and what it names.
+	every := []string{"p/#shape", "p/bad_test.go", "p/init_test.go#decl:re", "p/srv_test.go#decl:Server.testOnly", "p/p.go#sig:Server", "p/#methods:Server"}
 	for name, want := range map[string][]string{
 		// Not name (a local), unrelated.Render (a method of another type), run.
-		"TestA":  {"p/a_test.go#decl:TestA", "p/cfg_test.go#decl:config", "p/cfg_test.go#decl:config.load", "p/fake_test.go#decl:fake", "p/fake_test.go#decl:fake.Render", "p/fake_test.go#decl:newFake"},
+		"TestA": {"p/a_test.go#decl:TestA", "p/cfg_test.go#decl:config", "p/cfg_test.go#decl:config.load", "p/fake_test.go#decl:fake", "p/fake_test.go#decl:fake.Render", "p/fake_test.go#decl:newFake",
+			"p/#methods:config", "p/#methods:fake"},
 		"TestA2": {"p/a_test.go#decl:TestA2", "p/name_test.go#decl:run"},
 		// raw is a conversion, not initialization code: only the test using it depends on it.
 		"TestInit": {"p/init_test.go#decl:TestInit", "p/init_test.go#decl:raw"},
@@ -369,8 +373,43 @@ func TestTestFileDeps(t *testing.T) {
 	} {
 		want = append(want, every...)
 		slices.Sort(want)
-		if got := testFileDeps(repo.Root, "p", name, all); !slices.Equal(got, want) {
+		if got := funcDeps(repo.Root, "p", name, all, nil); !slices.Equal(got, want) {
 			t.Errorf("%s:\n got %v\nwant %v", name, got, want)
+		}
+	}
+}
+
+// In the test's own package, the declarations of non-test files it reaches by name
+// count without their bodies (a body it did not run cannot matter), and those it
+// executed with them, following what they name; the method set of every type it
+// reaches counts.
+func TestFuncDepsNonTestFiles(t *testing.T) {
+	repo := tempRepo(t)
+	files := map[string]string{
+		"p/p.go": "package p\n\nconst Limit = 10\n\ntype Order struct{ Items []Item }\n\ntype Item struct{ N int }\n\n" +
+			"func Total(o Order) int { return sum(o.Items) }\n\nfunc sum(is []Item) int { return Limit }\n\nfunc Unused() {}\n\nvar registry = load(defaults)\n\nvar defaults = []string{\"a\"}\n\nfunc load([]string) int { return 0 }\n",
+		"p/p_test.go": "package p\nimport \"testing\"\nfunc TestTotal(t *testing.T) { _ = Total(Order{}) }\nfunc TestLimit(t *testing.T) { _ = Limit }\n",
+	}
+	writeFiles(t, repo.Root, files)
+	all := []string{"p/p.go", "p/p_test.go"}
+	// What every test reaches: the variable initialized by a call, and what it names.
+	every := []string{"p/#shape", "p/p.go#sig:registry", "p/p.go#sig:load", "p/p.go#sig:defaults"}
+	for _, c := range []struct {
+		name     string
+		executed []string
+		want     []string
+	}{
+		// Statically: Total's signature and the types it names, not sum (Total's body).
+		{"TestTotal", nil, []string{"p/p_test.go#decl:TestTotal", "p/p.go#sig:Total", "p/p.go#sig:Order", "p/p.go#sig:Item", "p/#methods:Order", "p/#methods:Item"}},
+		{"TestLimit", nil, []string{"p/p_test.go#decl:TestLimit", "p/p.go#sig:Limit"}},
+		// Recorded: the bodies it ran, and what they name (sum names Limit).
+		{"TestTotal", []string{"p/p.go#decl:Total", "p/p.go#decl:sum"}, []string{"p/p_test.go#decl:TestTotal", "p/p.go#decl:Total", "p/p.go#decl:sum", "p/p.go#sig:Order", "p/p.go#sig:Item",
+			"p/p.go#sig:Limit", "p/#methods:Order", "p/#methods:Item"}},
+	} {
+		want := append(slices.Clone(c.want), every...)
+		slices.Sort(want)
+		if got := funcDeps(repo.Root, "p", c.name, all, c.executed); !slices.Equal(got, want) {
+			t.Errorf("%s (executed %v):\n got %v\nwant %v", c.name, c.executed, got, want)
 		}
 	}
 }

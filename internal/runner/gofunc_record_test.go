@@ -69,7 +69,7 @@ func TestFuncUnitsBuildConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record: %v\n%s%s", err, &out, &errb)
 	}
-	if o := res.Observations["p#TestA"]; o == nil || o.Status != state.Pass || !o.Files["p/p.go#decl:F"] || !o.Files["p/p.go#decls"] {
+	if o := res.Observations["p#TestA"]; o == nil || o.Status != state.Pass || !o.Files["p/p.go#decl:F"] || !o.Files["p/#shape"] || !o.Files["p/p_test.go#decl:TestA"] {
 		t.Errorf("TestA: %+v\n%s", o, &out)
 	}
 	if o := res.Observations["p#ExampleF"]; o == nil || o.Status != state.Pass {

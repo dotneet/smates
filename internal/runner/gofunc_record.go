@@ -340,7 +340,32 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 		}
 	}
 	// A re-execution of the binary that wrote no counters ran code no profile shows.
-	certain := addCoverage(o, rc.Repo.Root, gp, profile) && childrenCovered(covDir)
+	certain := addCoverage(o, rc.Repo.Root, gp, profile, dir) && childrenCovered(covDir)
+	// In its own package, the declarations the bodies it executed reach; every Go file
+	// of it when coverage cannot tell which bodies ran.
+	var ownFiles, executed []string
+	if entries, err := os.ReadDir(pkgDir); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".go") && !e.IsDir() {
+				ownFiles = append(ownFiles, path.Join(dir, e.Name()))
+			}
+		}
+	}
+	for k := range o.Files {
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecl && path.Dir(f) == dir {
+			executed = append(executed, k)
+		}
+	}
+	for _, k := range funcDeps(rc.Repo.Root, dir, name, ownFiles, executed) {
+		o.AddFile(k)
+	}
+	if !certain {
+		for _, f := range ownFiles {
+			if !strings.HasSuffix(f, "_test.go") {
+				o.AddFile(f)
+			}
+		}
+	}
 	var known []string
 	if rc.Known != nil {
 		known = rc.Known(unit)
@@ -362,11 +387,12 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 // addCoverage adds what a coverage profile counts an executed block in: the function
 // or method whose body holds it (depkey.Decl, with the declarations of its file), the
 // declarations of its file for a block outside any function body (a function literal
-// initializing a package-level variable, which they include), and the whole file when
+// initializing a package-level variable, which they include; in the test's own package
+// directory own, that declaration: funcDeps adds the rest), and the whole file when
 // the block cannot be placed in it (it does not parse, //line directives). It returns
 // false when the profile is missing or unreadable (nothing is known then); a block in
 // a file it cannot find makes the whole package of that file a dependency.
-func addCoverage(o *Observation, root string, gp *goPackage, profile string) bool {
+func addCoverage(o *Observation, root string, gp *goPackage, profile, own string) bool {
 	f, err := os.Open(profile)
 	if err != nil {
 		return false
@@ -444,22 +470,22 @@ func addCoverage(o *Observation, root string, gp *goPackage, profile string) boo
 			o.AddFile(gf.rel)
 			continue
 		}
-		key, found := "", false
-		for _, sp := range gf.spans {
-			if sp.Contains(line0, col0) {
-				if sp.Func {
-					key = sp.Key
-				}
-				found = true
+		var span *golang.Span
+		for i := range gf.spans {
+			if gf.spans[i].Contains(line0, col0) {
+				span = &gf.spans[i]
 				break
 			}
 		}
 		switch {
-		case !found:
+		case span == nil:
 			gf.whole = true
 			o.AddFile(gf.rel)
-		case key != "":
-			o.AddFile(depkey.Decl(gf.rel, key))
+		case path.Dir(gf.rel) == own:
+			// The test's own package: what else it depends on there, funcDeps finds.
+			o.AddFile(depkey.Decl(gf.rel, span.Key))
+		case span.Func:
+			o.AddFile(depkey.Decl(gf.rel, span.Key))
 			o.AddFile(depkey.Decls(gf.rel))
 		default:
 			o.AddFile(depkey.Decls(gf.rel))

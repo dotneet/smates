@@ -1054,17 +1054,20 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	}
 	// Its own test file by declaration, not as a whole: the other functions of the file
 	// are not its dependencies.
-	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go#decl:TestA") || !contains(known, "p/a_test.go#decls") || contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
+	// In its own package: its own declaration and the signatures of what it names, the
+	// package's shape; not the other functions of its file, nor other files.
+	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#sig:A") || !contains(known, "p/a_test.go#decl:TestA") || !contains(known, "p/#shape") ||
+		contains(known, "p/a_test.go") || contains(known, "p/a.go#decls") || contains(known, "p/b_test.go#decls") || contains(known, "p/b.go#sig:B") {
 		t.Errorf("known %v", known)
 	}
 	if files := res.Suites[0].Files["p#TestA"]; !reflect.DeepEqual(files, []string{"p/a_test.go"}) {
 		t.Errorf("files %v", files)
 	}
-	// What recording observes: the bodies executed (coverage), with their files' declarations.
-	executed := map[string][2]string{"p#TestA": {"p/a.go", "A"}, "p#TestB": {"p/b.go", "B"}}
-	obs := map[string]*runner.Observation{}
-	for u, f := range executed {
-		obs[u] = &runner.Observation{Files: map[string]bool{depkey.Decl(f[0], f[1]): true, depkey.Decls(f[0]): true}, Status: state.Pass}
+	// What recording observes: the bodies executed (coverage) and the declarations they
+	// name (A names K).
+	obs := map[string]*runner.Observation{
+		"p#TestA": {Files: map[string]bool{depkey.Decl("p/a.go", "A"): true, depkey.Sig("p/a.go", "K"): true}, Status: state.Pass},
+		"p#TestB": {Files: map[string]bool{depkey.Decl("p/b.go", "B"): true}, Status: state.Pass},
 	}
 	obs["p#(build)"] = &runner.Observation{Status: state.Pass}
 	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
@@ -1104,20 +1107,27 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	f.write("p/b_test.go", "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n")
 	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n")
 	res = sel(st, false)
-	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#(build)": ReasonChanged}) {
+	// A constant only TestA's code names: TestA, not TestB.
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected", "p#(build)": ReasonChanged}) {
 		t.Errorf("declarations: %v", got)
 	}
 	for _, tt := range res.Suites[0].Tests {
-		if tt.ID == "p#TestB" && (!reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) || tt.Via["p/a.go#decls"] != ViaImport) {
-			t.Errorf("TestB changed %v via %v", tt.Changed, tt.Via)
+		if tt.ID == "p#TestA" && !reflect.DeepEqual(tt.Changed, []string{"p/a.go#sig:K"}) {
+			t.Errorf("TestA changed %v via %v", tt.Changed, tt.Via)
 		}
 	}
 	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n")
 
-	// A new test file in the package selects every function (and its own as new).
+	// A new file of ordinary declarations selects only its own new tests (and the
+	// compile check); one that runs code for every test selects every function.
 	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")
+	f.write("p/c.go", "package p\n\nfunc C() int { return 3 }\n")
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected", "p#TestC": ReasonNew, "p#(build)": ReasonChanged}) {
+		t.Errorf("new files: %v", got)
+	}
+	f.write("p/c.go", "package p\n\nfunc C() int { return 3 }\n\nfunc init() { C() }\n")
 	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#TestC": ReasonNew, "p#(build)": ReasonChanged}) {
-		t.Errorf("new file: %v", got)
+		t.Errorf("new file with init: %v", got)
 	}
 }
 

@@ -7,6 +7,7 @@ package summary
 import (
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -447,10 +448,22 @@ func commonVia(hs []hit) string {
 func (v *view) expand(key string) []string {
 	kind, p := depkey.Parse(key)
 	switch kind {
-	case depkey.KindExistence, depkey.KindDecls, depkey.KindDecl:
+	case depkey.KindExistence, depkey.KindDecls, depkey.KindDecl, depkey.KindSig:
 		return []string{p}
 	case depkey.KindContent, depkey.KindConfig, depkey.KindListing, depkey.KindEnv:
 		return []string{key}
+	case depkey.KindShape, depkey.KindMethods:
+		// The changed Go files of the package.
+		var out []string
+		for _, f := range v.res.Changed {
+			if path.Dir(f) == p && strings.HasSuffix(f, ".go") {
+				out = append(out, f)
+			}
+		}
+		if len(out) == 0 {
+			return []string{key}
+		}
+		return out
 	}
 	prefix := p + "/"
 	var out []string
@@ -484,6 +497,14 @@ func viaLabel(via, key, service string) string {
 	case depkey.KindDecl:
 		_, name, _ := depkey.DeclName(key)
 		return code(name) + " changed"
+	case depkey.KindSig:
+		_, name, _ := depkey.DeclName(key)
+		return "the declaration of " + code(name) + " changed"
+	case depkey.KindShape:
+		return "what every test of " + code(p+"/") + " runs changed"
+	case depkey.KindMethods:
+		_, typ, _ := depkey.MethodsType(key)
+		return "the method set of " + code(typ) + " changed"
 	}
 	switch via {
 	case selector.ViaTest:

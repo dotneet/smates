@@ -113,3 +113,41 @@ func TestCovers(t *testing.T) {
 		t.Errorf("root listing = %q", got)
 	}
 }
+
+func TestGoDeclarationKeys(t *testing.T) {
+	for key, want := range map[string]struct {
+		kind Kind
+		p    string
+	}{
+		Decl("p/a.go", "T.M"):  {KindDecl, "p/a.go"},
+		Sig("p/a.go", "F"):     {KindSig, "p/a.go"},
+		Shape("p"):             {KindShape, "p"},
+		Shape("."):             {KindShape, "."},
+		Methods("p", "Server"): {KindMethods, "p"},
+		Methods(".", "Server"): {KindMethods, "."},
+		Decls("p/a.go"):        {KindDecls, "p/a.go"},
+	} {
+		if k, p := Parse(key); k != want.kind || p != want.p {
+			t.Errorf("Parse(%q) = %v %q, want %v %q", key, k, p, want.kind, want.p)
+		}
+		if !IsPseudo(key) {
+			t.Errorf("%q is not a file's content", key)
+		}
+	}
+	if f, n, ok := DeclName(Sig("p/a.go", "F")); !ok || f != "p/a.go" || n != "F" {
+		t.Errorf("DeclName(sig) = %q %q %v", f, n, ok)
+	}
+	if d, typ, ok := MethodsType(Methods("p", "T")); !ok || d != "p" || typ != "T" {
+		t.Errorf("MethodsType = %q %q %v", d, typ, ok)
+	}
+	deps := map[string]bool{Shape("p"): true}
+	if got := Covers(deps, "p/new.go", true); got != CoverDecls {
+		t.Errorf("a Go file of a package with a shape dependency: %q", got)
+	}
+	if got := Covers(deps, "p/data.txt", true); got != CoverNone {
+		t.Errorf("a data file of that package: %q", got)
+	}
+	if got := Covers(map[string]bool{Sig("p/a.go", "F"): true}, "p/a.go", false); got != CoverDecls {
+		t.Errorf("a signature dependency: %q", got)
+	}
+}

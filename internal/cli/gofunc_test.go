@@ -168,12 +168,14 @@ func TestGoFuncSelection(t *testing.T) {
 	// declarations of the rest of what it imports; in the test files, on the
 	// declarations it reaches.
 	for key, want := range map[string]bool{"calc/add.go#decl:Add": true, "calc/add.go": false, "util/util.go": false, "util/util.go#decls": true, "calc/testdata/add.txt": true,
-		"calc/add_test.go#decl:TestAdd": true, "calc/add_test.go": false, "calc/mul_test.go": false, "calc/mul_test.go#decls": true, "calc/helper_test.go#decl:check": false, "calc/": true} {
+		"calc/add_test.go#decl:TestAdd": true, "calc/add_test.go": false, "calc/mul_test.go": false, "calc/mul_test.go#decls": false, "calc/helper_test.go#decl:check": false,
+		"calc/#shape": true, "calc/": false, "calc/mul.go#sig:Mul": false} {
 		if _, ok := add.Deps[key]; ok != want {
 			t.Errorf("TestAdd depends on %s: %v, want %v", key, ok, want)
 		}
 	}
-	for key, want := range map[string]bool{"calc/mul.go#decl:Mul": true, "util/util.go#decl:Id": true, "calc/add.go#decl:Add": false, "calc/add.go#decls": true, "calc/helper_test.go#decl:check": true, "calc/helper_test.go": false, "calc/testdata/add.txt": false} {
+	for key, want := range map[string]bool{"calc/mul.go#decl:Mul": true, "util/util.go#decl:Id": true, "calc/add.go#decl:Add": false, "calc/add.go#decls": false, "calc/add.go#sig:Add": false,
+		"calc/helper_test.go#decl:check": true, "calc/helper_test.go": false, "calc/testdata/add.txt": false} {
 		if _, ok := mul.Deps[key]; ok != want {
 			t.Errorf("TestMul depends on %s: %v, want %v", key, ok, want)
 		}
@@ -212,16 +214,17 @@ func TestGoFuncSelection(t *testing.T) {
 		t.Fatalf("run: %d %v\n%s", code, res, out)
 	}
 	step("after recording")
-	// Another body of a file a test executed: not that test.
+	// A new function no test names: only the compile check; another body of a file a
+	// test executed: not that test.
 	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n\nfunc Sub(a, b int) int { return a - b }\n")
-	step("new function", "calc#(build)", "calc#TestAdd", "calc#TestMul")
-	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
+	step("new function", "calc#(build)")
+	if code, res, out := r.runReport(); code != 0 || len(res) != 1 {
 		t.Fatalf("run: %d %v\n%s", code, res, out)
 	}
 	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n\nfunc Sub(a, b int) int { return b - a }\n")
 	step("unexecuted body", "calc#(build)")
 	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n")
-	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
+	if code, res, out := r.runReport(); code != 0 || len(res) != 1 {
 		t.Fatalf("run: %d %v\n%s", code, res, out)
 	}
 	// Data only TestAdd reads is no input of the compile check.
@@ -231,10 +234,14 @@ func TestGoFuncSelection(t *testing.T) {
 		t.Fatalf("run: %d %v\n%s", code, res, out)
 	}
 
-	// Declarations count for every function of the importing packages.
+	// In its own package, a new declaration no test names selects none; the declarations
+	// of another package count for every function importing it.
 	r.write("calc/add.go", "package calc\n\nconst Two = 2\n\nfunc Add(a, b int) int { return b + a }\n")
-	step("add declarations", "calc#(build)", "calc#TestAdd", "calc#TestMul")
+	step("add declarations", "calc#(build)")
 	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n")
+	r.write("util/util.go", "package util\n\nconst Two = 2\n\nfunc Id(x int) int { return x + 0 }\n")
+	step("other package's declarations", "calc#(build)", "calc#TestAdd", "calc#TestMul")
+	r.write("util/util.go", "package util\n\nfunc Id(x int) int { return x + 0 }\n")
 	step("reverted")
 
 	// A new test function has no entry (it is selected as new, or locally by a diff
@@ -267,10 +274,13 @@ func TestGoFuncSelection(t *testing.T) {
 		t.Errorf("dry run: %s", out)
 	}
 
-	// A file added to the package directory selects every function of the package (the
-	// compile check is selected for util.go, which no recorded run saw as it is now).
+	// A data file added to the package directory selects nothing it did not (the compile
+	// check and TestMul for util.go, which no recorded run saw as it is now); assembly
+	// compiled into the package selects every function of it.
 	r.write("calc/notes.txt", "x\n")
-	step("new file", "calc#(build)", "calc#TestAdd", "calc#TestMul", "calc#TestSub")
+	step("new file", "calc#(build)", "calc#TestMul")
+	r.write("calc/stub_amd64.s", "#include \"textflag.h\"\n")
+	step("new assembly", "calc#(build)", "calc#TestAdd", "calc#TestMul", "calc#TestSub")
 }
 
 // A body no test executes still has to compile: an edit that breaks it selects the
@@ -346,18 +356,18 @@ func TestGoFuncCompileCheck(t *testing.T) {
 		}
 	}
 
-	// A test helper importing a package it does not use (imports are declarations: the
-	// package's functions run too), and fail.
+	// A test helper importing a package it does not use (imports decide what the file's
+	// declarations mean: the tests reaching them run too), and fail.
 	orig := mustRead(t, filepath.Join(r.g.dir, "calc/helper_test.go"))
 	r.write("calc/helper_test.go", strings.Replace(orig, `import "testing"`, "import (\n\t\"strings\"\n\t\"testing\"\n)", 1))
-	if got := r.selected(); !slices.Equal(keys(got), []string{"calc#(build)", "calc#TestAdd", "calc#TestMul"}) {
+	if got := r.selected(); !slices.Equal(keys(got), []string{"calc#(build)", "calc#TestMul"}) {
 		t.Errorf("unused import: selected %v", got)
 	}
 	if code, res, out := r.runReport(); code != 1 || res["calc#(build)"] != state.Fail || res["calc#TestMul"] != state.Fail || !strings.Contains(out, `"strings" imported and not used`) {
 		t.Errorf("unused import: run %d %v\n%s", code, res, out)
 	}
 	r.write("calc/helper_test.go", orig)
-	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
+	if code, res, out := r.runReport(); code != 0 || len(res) != 2 {
 		t.Errorf("unused import fixed: %d %v\n%s", code, res, out)
 	}
 	if got := r.selected(); len(got) != 0 {

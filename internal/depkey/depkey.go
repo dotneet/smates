@@ -11,6 +11,12 @@
 //	f.go#decl:N one top-level declaration of a Go file, body included: function or
 //	          variable N, method T.N, type N (Go per-function selection: the bodies a
 //	          test executed, the test-file declarations it reaches)
+//	f.go#sig:N the same declaration without function bodies (Go per-function
+//	          selection: a declaration of the package a test may reach by name)
+//	dir/#shape what the Go files of a package directory contribute to every test of
+//	          the package (init functions, initializers that call code, build
+//	          constraints, blank imports: golang.PackageParts)
+//	dir/#methods:T the method set of type T in a package directory
 //	@set:ID   a set of files declared in smates.yml (depends_on/serves), hashed as one
 //	f#suite   the settings of a suite in the configuration file f (smates.yml): what in
 //	          it can change how the suite's tests run, not its whole content
@@ -46,9 +52,12 @@ const (
 	KindSet                   // @set:ID
 	KindConfig                // smates.yml#suite
 	KindDecl                  // file.go#decl:Name
+	KindSig                   // file.go#sig:Name
+	KindShape                 // dir/#shape
+	KindMethods               // dir/#methods:Type
 )
 
-var kindNames = [...]string{"content", "listing", "existence", "tree", "env", "decls", "set", "config", "decl"}
+var kindNames = [...]string{"content", "listing", "existence", "tree", "env", "decls", "set", "config", "decl", "sig", "shape", "methods"}
 
 func (k Kind) String() string {
 	if k >= 0 && int(k) < len(kindNames) {
@@ -69,6 +78,9 @@ const (
 	envPrefix       = "$"
 	declsSuffix     = "#decls"
 	declInfix       = "#decl:"
+	sigInfix        = "#sig:"
+	shapeSuffix     = "/#shape"
+	methodsInfix    = "/#methods:"
 	setPrefix       = "@set:"
 	configSuffix    = "#suite"
 )
@@ -80,20 +92,43 @@ func Decls(p string) string { return p + declsSuffix }
 // of type T).
 func Decl(p, name string) string { return p + declInfix + name }
 
-// DeclName splits a declaration key (Decl) into its file and declaration name.
+// DeclName splits a declaration key (Decl or Sig) into its file and declaration name.
 func DeclName(key string) (file, name string, ok bool) {
-	i := strings.LastIndex(key, declInfix)
+	for _, infix := range []string{declInfix, sigInfix} {
+		if i := strings.LastIndex(key, infix); i >= 0 {
+			return key[:i], key[i+len(infix):], true
+		}
+	}
+	return "", "", false
+}
+
+// Sig is the key of the top-level declaration name of Go file p without the bodies of
+// its functions.
+func Sig(p, name string) string { return p + sigInfix + name }
+
+// Shape is the key of what the Go files of package directory dir contribute to every
+// test of the package.
+func Shape(dir string) string { return Listing(dir) + "#shape" }
+
+// Methods is the key of the method set of type typ in package directory dir.
+func Methods(dir, typ string) string {
+	return strings.TrimSuffix(Listing(dir), "/") + methodsInfix + typ
+}
+
+// MethodsType splits a method set key (Methods) into its directory and type.
+func MethodsType(key string) (dir, typ string, ok bool) {
+	i := strings.LastIndex(key, methodsInfix)
 	if i < 0 {
 		return "", "", false
 	}
-	return key[:i], key[i+len(declInfix):], true
+	return key[:i], key[i+len(methodsInfix):], true
 }
 
 // File returns the file a content or declarations key names, and false for any other
 // kind of key.
 func File(key string) (string, bool) {
 	switch k, p := Parse(key); k {
-	case KindContent, KindDecls, KindDecl:
+	case KindContent, KindDecls, KindDecl, KindSig:
 		return p, true
 	}
 	return "", false
@@ -165,8 +200,17 @@ func Parse(key string) (Kind, string) {
 	if p, ok := strings.CutSuffix(key, declsSuffix); ok {
 		return KindDecls, p
 	}
-	if p, _, ok := DeclName(key); ok {
-		return KindDecl, p
+	if dir, ok := strings.CutSuffix(key, shapeSuffix); ok {
+		return KindShape, dir
+	}
+	if dir, _, ok := MethodsType(key); ok {
+		return KindMethods, dir
+	}
+	if i := strings.LastIndex(key, declInfix); i >= 0 {
+		return KindDecl, key[:i]
+	}
+	if i := strings.LastIndex(key, sigInfix); i >= 0 {
+		return KindSig, key[:i]
 	}
 	if p, ok := strings.CutSuffix(key, configSuffix); ok {
 		return KindConfig, p
@@ -217,7 +261,7 @@ func (k Kind) Cover() CoverKind {
 	switch k {
 	case KindContent, KindConfig:
 		return CoverContent
-	case KindDecls, KindDecl:
+	case KindDecls, KindDecl, KindSig, KindShape, KindMethods:
 		return CoverDecls
 	case KindListing:
 		return CoverListing
@@ -246,10 +290,13 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
 			return k.Cover()
 		}
 	}
-	prefix, decl := f+"/", f+declInfix
+	if strings.HasSuffix(f, ".go") && deps[Shape(path.Dir(f))] {
+		return CoverDecls // a Go file of a package whose shape the test depends on
+	}
+	prefix, decl, sig := f+"/", f+declInfix, f+sigInfix
 	below := false
 	for d := range deps {
-		if strings.HasPrefix(d, decl) {
+		if strings.HasPrefix(d, decl) || strings.HasPrefix(d, sig) {
 			return CoverDecls
 		}
 		below = below || strings.HasPrefix(d, prefix)

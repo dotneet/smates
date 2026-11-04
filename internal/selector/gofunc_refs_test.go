@@ -8,15 +8,15 @@ import (
 	"github.com/dotneet/smates/internal/runner"
 )
 
-// An orphan named only in a Go file a test function depends on through its
-// declarations (a constant path in a file whose functions it does not run) is found by
-// the reference scan, which reads the file behind the declarations key. The package's
+// An orphan named only in a Go file a test function depends on through a declaration
+// (a constant path it names, in a file whose functions it does not run) is found by the
+// reference scan, which reads the file behind the declaration key. The package's
 // compile check reads no data and is not pulled in.
 func TestReferencesThroughDeclarations(t *testing.T) {
 	f := newFixture(t, map[string]string{
 		"go.mod":                     "module example.com/m\n\ngo 1.22\n",
 		"p/paths.go":                 "package p\n\nconst SeedPath = \"migrations/users_seed.sql\"\n\nfunc Seed() string { return SeedPath }\n",
-		"p/a_test.go":                "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"p/a_test.go":                "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { _ = SeedPath }\n",
 		"migrations/users_seed.sql":  "insert into users values (1)",
 		"migrations/other_table.sql": "create table other()",
 	})
@@ -24,7 +24,7 @@ func TestReferencesThroughDeclarations(t *testing.T) {
 	s.RepoRoot = f.dir
 	f.suites = []*runner.Suite{s}
 	st := f.record(nil, nil)
-	if deps := f.sel(st, nil).Suites[0].Deps["p#TestA"]; !contains(deps, "p/paths.go#decls") || contains(deps, "p/paths.go") {
+	if deps := f.sel(st, nil).Suites[0].Deps["p#TestA"]; !contains(deps, "p/paths.go#sig:SeedPath") || contains(deps, "p/paths.go") {
 		t.Fatalf("deps %v", deps)
 	}
 
