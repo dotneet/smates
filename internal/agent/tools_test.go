@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/testutil"
 )
 
@@ -224,5 +226,29 @@ func TestTruncateRuneBoundary(t *testing.T) {
 	}
 	if truncate("short", 10) != "short" {
 		t.Fatal("short strings must be unchanged")
+	}
+}
+
+// A Go file of a package matches the Go test functions that depend on the package's
+// shape, as depkey.Covers has it: a file holding only an init function or the methods
+// of a type they reach is no declaration they name.
+func TestTestsForFileGoPackage(t *testing.T) {
+	sel := &selector.Result{Suites: []*selector.Suite{{
+		Name:  "go",
+		Tests: []*selector.Test{{ID: "pkg#TestA"}, {ID: "other#TestB"}},
+		Deps: map[string][]string{
+			"pkg#TestA":   {depkey.Shape("pkg"), depkey.Decl("pkg/a_test.go", "TestA")},
+			"other#TestB": {depkey.Shape("other")},
+		},
+	}}}
+	tb := &toolbox{root: t.TempDir(), sel: sel}
+	for p, want := range map[string]bool{"pkg/setup.go": true, "pkg/data.txt": false, "pkg/": true, "other/x.go": false} {
+		out, err := tb.testsForFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out, "pkg#TestA"); got != want {
+			t.Errorf("%s: %q", p, out)
+		}
 	}
 }

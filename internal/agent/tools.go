@@ -686,6 +686,10 @@ func (tb *toolbox) testsForFile(p string) (string, error) {
 			return true
 		case dir:
 			return strings.HasPrefix(dep, rel)
+		case strings.HasSuffix(rel, ".go") && dep == depkey.Shape(path.Dir(rel)):
+			// A Go test function depends on every Go file of its package through the
+			// package's shape (init functions, methods it adds), as depkey.Covers has it.
+			return true
 		case depkey.KindOf(dep) == depkey.KindListing: // a directory dependency covers its files
 			return strings.HasPrefix(rel, dep)
 		}
