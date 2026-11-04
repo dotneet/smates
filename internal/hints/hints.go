@@ -186,8 +186,8 @@ func Compute(in Input) *Hint {
 		if !ok {
 			continue
 		}
-		if kind, f := depkey.Parse(k); kind == depkey.KindDecls {
-			// The declarations of a Go file stand for the file.
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl {
+			// The declarations of a Go file, or one of them, stand for the file.
 			if keys[f] {
 				if _, ok := changed(in, f); ok {
 					continue

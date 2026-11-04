@@ -357,6 +357,8 @@ func (h *Hasher) Hash(key string) string {
 		return h.file(key)
 	case depkey.KindDecls:
 		return h.decls(p)
+	case depkey.KindDecl:
+		return h.decl(key)
 	}
 	return h.listing(key)
 }
@@ -463,6 +465,37 @@ func (h *Hasher) decls(p string) string {
 	}
 	declsCache.Store(blob, v)
 	return v
+}
+
+// declCache maps a Go file's blob hash to the hashes of its declarations.
+var declCache sync.Map
+
+// decl hashes one top-level declaration of a Go file (see golang.DeclHashes): ""
+// when the file or the declaration is absent, the file's content hash when the
+// declarations cannot be told apart (as for decls).
+func (h *Hasher) decl(key string) string {
+	p, name, _ := depkey.DeclName(key)
+	blob := h.file(p)
+	if blob == "" || h.root == "" {
+		return blob
+	}
+	if v, ok := declCache.Load(blob); ok {
+		if v == nil {
+			return blob
+		}
+		return v.(map[string]string)[name]
+	}
+	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
+	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
+		return blob
+	}
+	hs, ok := golang.DeclHashes(src)
+	if !ok {
+		declCache.Store(blob, nil)
+		return blob
+	}
+	declCache.Store(blob, hs)
+	return hs[name]
 }
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
@@ -832,8 +865,8 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		if depkey.IsEnv(k) {
 			return false // no recorded environment to compare a newly read variable with
 		}
-		if kind, f := depkey.Parse(k); kind == depkey.KindDecls {
-			// The declarations of a Go file: unchanged if the file is.
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl {
+			// The declarations of a Go file, or one of them: unchanged if the file is.
 			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, h.Hash(f))) {
 				return false
 			}

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/testutil"
 	"github.com/dotneet/smates/internal/trace"
@@ -332,14 +333,15 @@ func TestPlain(t *testing.T) { Other() }
 		if o == nil || o.Status != state.Pass {
 			t.Fatalf("%s: %+v\n%s", unit, o, rc.Stdout)
 		}
+		// The files whose bodies it executed (or that it depends on whole).
 		var out []string
-		for f := range o.Files {
-			if strings.HasSuffix(f, ".go") {
+		for k := range o.Files {
+			if kind, f := depkey.Parse(k); strings.HasSuffix(f, ".go") && (kind == depkey.KindContent || kind == depkey.KindDecl) {
 				out = append(out, f)
 			}
 		}
 		slices.Sort(out)
-		return out
+		return slices.Compact(out)
 	}
 	for unit, want := range map[string][]string{
 		"p#TestCrasher":  {"p/crash.go"},

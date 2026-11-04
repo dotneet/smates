@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static/golang"
 	"github.com/dotneet/smates/internal/trace"
 )
 
@@ -130,6 +132,15 @@ func (fr *funcRecorder) listPackages(ctx context.Context, pkg string) (*goPackag
 	return gp, ""
 }
 
+// lastLine is the last non-empty line of s, shortened.
+func lastLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		s = s[i+1:]
+	}
+	return firstLine(s)
+}
+
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
@@ -178,39 +189,30 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	if _, err := os.Stat(bin); err != nil {
 		return "go test -c wrote no test binary", nil
 	}
-	covDir := filepath.Join(work, "covdata")
-	if err := os.MkdirAll(covDir, 0o755); err != nil {
-		return "", err
-	}
-	out.Reset()
-	listArgv := append(append(slices.Clone(fr.flags.exec), bin, "-test.list", ".*"), fr.flags.tail...)
-	code, err = rc.ExecIn(ctx, pkgDir, listArgv, []string{"GOCOVERDIR=" + covDir}, &out, &out)
-	if err != nil || code != 0 {
-		return "listing the tests failed: " + firstLine(out.String()), nil
-	}
-	listed := map[string]bool{}
-	for _, l := range strings.Split(out.String(), "\n") {
-		listed[strings.TrimSpace(l)] = true
+	// Which functions go test runs, from the test files this configuration compiles:
+	// listing them with the binary (-test.list) would run TestMain, which may do
+	// suite-wide work or fail when no test ran.
+	runs, known := fr.builtFuncs(ctx, pkg, dir)
+	if !known {
+		var why string
+		if runs, why = fr.listFuncs(ctx, work, bin, pkgDir); why != "" {
+			return why, nil
+		}
 	}
 
-	var built map[string]bool // the functions of the test files this configuration compiles
-	builtKnown := false
 	sem := make(chan struct{}, fr.jobs)
 	var wg sync.WaitGroup
 	var firstErr error
 	var errMu sync.Mutex
 	for j, name := range names {
 		unit := FuncUnit(dir, name)
-		if !listed[name] {
-			if built == nil {
-				built, builtKnown = fr.builtFuncs(ctx, pkg, dir)
-			}
+		if run, built := runs[name]; !run {
 			// Compiled but never run (an example without output, on every platform), or
-			// go list cannot tell: a pass. A function of a file this configuration does
-			// not compile is not a unit of the suite (excludedTestFiles); one that still
-			// gets here (build flags passed only to this run) ran nothing and is not
-			// recorded.
-			if built[name] || !builtKnown {
+			// not listed by a binary whose test files go list could not tell: a pass. A
+			// function of a file this configuration does not compile is not a unit of the
+			// suite (excludedTestFiles); one that still gets here (build flags passed only
+			// to this run) ran nothing and is not recorded.
+			if built || !known {
 				fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
 			}
 			continue
@@ -238,29 +240,54 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 }
 
 // builtFuncs returns the test functions declared by the test files of package pkg
-// (repo-relative directory dir) that go list says this configuration compiles; ok is
-// false when it cannot tell.
-func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) (built map[string]bool, ok bool) {
+// (repo-relative directory dir) that go list says this configuration compiles, each
+// with whether go test runs it (examples without output are only compiled); ok is
+// false when it cannot tell (go list fails, a test file does not parse).
+func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) (runs map[string]bool, ok bool) {
 	rc := fr.rc
 	argv := append(append([]string{"go", "list", "-f", `{{range .TestGoFiles}}{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{.}}{{"\n"}}{{end}}`}, fr.flags.build...), pkg)
 	var out, errb bytes.Buffer
-	built = map[string]bool{}
 	if code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &errb); err != nil || code != 0 {
-		return built, false
+		return nil, false
 	}
+	runs = map[string]bool{}
 	for _, f := range strings.Split(out.String(), "\n") {
 		if f = strings.TrimSpace(f); f == "" {
 			continue
 		}
 		tf, err := readTestFile(rc.Repo.Root, path.Join(dir, f))
 		if err != nil {
-			continue
+			return nil, false
 		}
 		for _, n := range tf.Tests {
-			built[n] = true
+			runs[n] = runs[n] || !slices.Contains(tf.Silent, n)
 		}
 	}
-	return built, true
+	return runs, true
+}
+
+// listFuncs lists the functions the test binary bin runs (-test.list), for when the
+// test files cannot tell. A non-empty result says why the package must be recorded as
+// a whole instead.
+func (fr *funcRecorder) listFuncs(ctx context.Context, work, bin, pkgDir string) (map[string]bool, string) {
+	covDir := filepath.Join(work, "covdata")
+	if err := os.MkdirAll(covDir, 0o755); err != nil {
+		return nil, err.Error()
+	}
+	var out bytes.Buffer
+	argv := append(append(slices.Clone(fr.flags.exec), bin, "-test.list", ".*"), fr.flags.tail...)
+	code, err := fr.rc.ExecIn(ctx, pkgDir, argv, []string{"GOCOVERDIR=" + covDir}, &out, &out)
+	if err != nil || code != 0 {
+		// The last line: the names come first, an error (of TestMain) last.
+		return nil, fmt.Sprintf("listing the tests failed (exit %d): %s", code, lastLine(out.String()))
+	}
+	listed := map[string]bool{}
+	for _, l := range strings.Split(out.String(), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			listed[l] = true
+		}
+	}
+	return listed, ""
 }
 
 func (fr *funcRecorder) add(unit string, o *Observation) {
@@ -332,9 +359,13 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	return o, nil
 }
 
-// addCoverage adds the files in which a coverage profile counts an executed block. It
-// returns false when the profile is missing or unreadable (nothing is known then); a
-// block in a file it cannot place makes the whole package of that file a dependency.
+// addCoverage adds what a coverage profile counts an executed block in: the function
+// or method whose body holds it (depkey.Decl, with the declarations of its file), the
+// declarations of its file for a block outside any function body (a function literal
+// initializing a package-level variable, which they include), and the whole file when
+// the block cannot be placed in it (it does not parse, //line directives). It returns
+// false when the profile is missing or unreadable (nothing is known then); a block in
+// a file it cannot find makes the whole package of that file a dependency.
 func addCoverage(o *Observation, root string, gp *goPackage, profile string) bool {
 	f, err := os.Open(profile)
 	if err != nil {
@@ -343,7 +374,12 @@ func addCoverage(o *Observation, root string, gp *goPackage, profile string) boo
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	seen := map[string]bool{}
+	type goFile struct {
+		rel   string // "" when not a repository file
+		spans []golang.Span
+		whole bool // depends on the whole file (or package)
+	}
+	files := map[string]*goFile{}
 	header := false
 	for sc.Scan() {
 		line := sc.Text()
@@ -360,38 +396,88 @@ func addCoverage(o *Observation, root string, gp *goPackage, profile string) boo
 			continue
 		}
 		file := line[:i]
-		if j := strings.LastIndexByte(file, ':'); j >= 0 {
-			file = file[:j]
-		}
-		if seen[file] {
+		j := strings.LastIndexByte(file, ':')
+		if j < 0 {
 			continue
 		}
-		seen[file] = true
-		ip, base := path.Split(file)
-		ip = strings.TrimSuffix(ip, "/")
-		dir, ok := gp.dirs[ip]
-		if !ok {
-			continue // not a repository package
-		}
-		abs := filepath.Join(dir, base)
-		rel, ok := pathutil.Rel(root, abs)
-		if _, err := os.Stat(abs); err == nil && ok {
-			if !pathutil.IsVendored(rel) {
-				o.AddFile(rel)
+		file, pos := file[:j], file[j+1:]
+		gf := files[file]
+		if gf == nil {
+			gf = &goFile{}
+			files[file] = gf
+			ip, base := path.Split(file)
+			ip = strings.TrimSuffix(ip, "/")
+			dir, ok := gp.dirs[ip]
+			if !ok {
+				continue // not a repository package
 			}
-			continue
-		}
-		// A //line directive names another file: depend on all of the package's Go files.
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			if n := e.Name(); strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
-				if rel, ok := pathutil.Rel(root, filepath.Join(dir, n)); ok {
+			abs := filepath.Join(dir, base)
+			rel, ok := pathutil.Rel(root, abs)
+			if _, err := os.Stat(abs); err == nil && ok {
+				if pathutil.IsVendored(rel) {
+					continue
+				}
+				gf.rel = rel
+				gf.spans, ok = readSpans(abs)
+				if gf.whole = !ok; gf.whole {
 					o.AddFile(rel)
+				}
+			} else {
+				// A //line directive names another file: depend on all of the package's Go files.
+				gf.whole = true
+				entries, _ := os.ReadDir(dir)
+				for _, e := range entries {
+					if n := e.Name(); strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+						if rel, ok := pathutil.Rel(root, filepath.Join(dir, n)); ok {
+							o.AddFile(rel)
+						}
+					}
 				}
 			}
 		}
+		if gf.rel == "" || gf.whole {
+			continue
+		}
+		line0, col0, ok := blockStart(pos)
+		if !ok {
+			gf.whole = true
+			o.AddFile(gf.rel)
+			continue
+		}
+		key, found := "", false
+		for _, sp := range gf.spans {
+			if sp.Contains(line0, col0) {
+				if sp.Func {
+					key = sp.Key
+				}
+				found = true
+				break
+			}
+		}
+		switch {
+		case !found:
+			gf.whole = true
+			o.AddFile(gf.rel)
+		case key != "":
+			o.AddFile(depkey.Decl(gf.rel, key))
+			o.AddFile(depkey.Decls(gf.rel))
+		default:
+			o.AddFile(depkey.Decls(gf.rel))
+		}
 	}
 	return header && sc.Err() == nil
+}
+
+// blockStart parses the start of a coverage block, "line.col,line.col".
+func blockStart(pos string) (line, col int, ok bool) {
+	start, _, _ := strings.Cut(pos, ",")
+	l, c, found := strings.Cut(start, ".")
+	if !found {
+		return 0, 0, false
+	}
+	line, err1 := strconv.Atoi(l)
+	col, err2 := strconv.Atoi(c)
+	return line, col, err1 == nil && err2 == nil
 }
 
 // recordWhole records the packages that could not be recorded per function: go test

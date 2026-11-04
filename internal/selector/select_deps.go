@@ -3,8 +3,10 @@ package selector
 import (
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
@@ -25,7 +27,11 @@ type suiteSel struct {
 	// changed and baseChanged are the selection's changed files plus the keys of the
 	// declarations with changed files, so that diff mode sees a set key change.
 	changed, baseChanged map[string]bool
-	units                []*unitSel
+	// eraseTypes is set when the suite's runner erases TypeScript types without
+	// checking them (runner.ErasesTypes): its static closures leave type-only imports
+	// out (see knownDeps).
+	eraseTypes bool
+	units      []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -103,10 +109,23 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		in.Graph.Warm(starts)
 	}
 	mapper, _ := su.Adapter.(runner.StaticMapper)
+	// A runner that erases types without checking them never loads what tests reach
+	// only through type-only imports (see runner.TypeEraser).
+	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, runner.Sources{
+		Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure,
+	})
 	st := in.State.Suites[su.Name]
 
 	for _, u := range units {
-		via := s.knownDeps(ss, u, inputs, static, mapper)
+		via, typeOnly := s.knownDeps(ss, u, inputs, static, mapper)
+		// Files reached only through type-only imports are no dependency, but a change
+		// to them is explained (not an orphan): it cannot affect the tests.
+		for _, f := range typeOnly {
+			s.res.Covered[f] = true
+			if s.knownCovered != nil {
+				s.knownCovered[f] = true
+			}
+		}
 		deps := make(map[string]bool, len(via))
 		known := make([]string, 0, len(via))
 		for f := range via {
@@ -149,11 +168,13 @@ func (s *selection) unitDeps(ss *suiteSel) {
 // inputs, the suite's rules and the unit's own test files. A declaration a unit
 // depends on is declared (see declare). A Go compile check (runner.IsBuildCheck)
 // depends on what the compiler reads, not on what the tests do at run time: neither
-// declarations nor rules apply to it.
-func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bool, mapper runner.StaticMapper) map[string]string {
+// declarations nor rules apply to it. With suiteSel.eraseTypes the static closure is
+// the one at run time (static.Graph.RuntimeClosure), and typeOnly returns the files
+// the full closure adds to it.
+func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bool, mapper runner.StaticMapper) (via map[string]string, typeOnly []string) {
 	sr, su := ss.sr, ss.sr.Suite
 	files := sr.Files[u]
-	via := map[string]string{}
+	via = map[string]string{}
 	check := runner.IsBuildCheck(u)
 	for _, d := range sr.Services {
 		if !check && d.applies(su, u, files) {
@@ -163,6 +184,13 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 	}
 	if static {
 		closure := s.in.Graph.Closure(files...)
+		if ss.eraseTypes {
+			full := closure
+			closure = s.in.Graph.RuntimeClosure(files...)
+			if len(closure) != len(full) {
+				typeOnly = sortedMinus(full, closure)
+			}
+		}
 		if mapper != nil {
 			closure = mapper.MapStatic(su, u, closure)
 		}
@@ -178,8 +206,22 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 			via[f] = ViaInput
 		}
 	}
+	// The unit's own test files, unless the mapper keyed them by declaration (a Go
+	// test function depends on its own declaration and what it reaches, not on the
+	// other functions of its file): those keys are the test itself then.
 	for _, f := range files {
-		via[f] = ViaTest
+		own := false
+		if static && mapper != nil {
+			prefix := depkey.Decl(f, "")
+			for k := range via {
+				if strings.HasPrefix(k, prefix) {
+					via[k], own = ViaTest, true
+				}
+			}
+		}
+		if !own {
+			via[f] = ViaTest
+		}
 	}
 	// Record never writes vendored paths (a committed node_modules file an input glob
 	// matches): as known deps they would count as unrecorded, and changed, forever.
@@ -188,7 +230,18 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 			delete(via, f)
 		}
 	}
-	return via
+	return via, typeOnly
+}
+
+// sortedMinus returns the elements of the sorted list a that the sorted list b lacks.
+func sortedMinus(a, b []string) []string {
+	var out []string
+	for _, x := range a {
+		if _, found := slices.BinarySearch(b, x); !found {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // declare records that some test depends on declaration d (Result.declared) and

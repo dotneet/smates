@@ -682,7 +682,7 @@ func (tb *toolbox) testsForFile(p string) (string, error) {
 	}
 	matches := func(dep string) bool {
 		switch {
-		case dep == rel, dep == depkey.Decls(rel):
+		case dep == rel, dep == depkey.Decls(rel), strings.HasPrefix(dep, depkey.Decl(rel, "")):
 			return true
 		case dir:
 			return strings.HasPrefix(dep, rel)

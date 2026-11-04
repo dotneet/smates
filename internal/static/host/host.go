@@ -23,3 +23,12 @@ type Analyzer interface {
 	// for concurrent use.
 	Deps(path string, src []byte) []string
 }
+
+// TypeAnalyzer is implemented by analyzers of languages whose type-only imports are
+// erased before the code runs (TypeScript).
+type TypeAnalyzer interface {
+	Analyzer
+	// SplitDeps returns Deps(path, src) and the subset of them that path still
+	// depends on at run time, once its type-only imports are erased.
+	SplitDeps(path string, src []byte) (all, runtime []string)
+}

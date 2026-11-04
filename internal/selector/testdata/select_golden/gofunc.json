@@ -22,17 +22,22 @@
     "p/a.go",
     "p/a.go#decls",
     "p/a_test.go",
+    "p/a_test.go#decl:TestA",
     "p/a_test.go#decls",
     "p/b.go",
     "p/b.go#decls",
     "p/b_test.go",
+    "p/b_test.go#decl:TestB",
+    "p/b_test.go#decl:TestB2",
     "p/b_test.go#decls",
     "q/",
     "q/q.go",
     "q/q.go#decls",
     "q/q_extra_test.go",
+    "q/q_extra_test.go#decl:TestQ2",
     "q/q_extra_test.go#decls",
     "q/q_test.go",
+    "q/q_test.go#decl:TestQ",
     "q/q_test.go#decls"
   ],
   "declared": [
@@ -60,12 +65,16 @@
           "changed": [
             "docker-compose.yml",
             "p/a.go#decls",
+            "p/a_test.go#decl:TestA",
+            "p/a_test.go#decls",
             "p/b.go#decls",
             "p/b_test.go#decls"
           ],
           "via": {
             "docker-compose.yml": "service",
             "p/a.go#decls": "import",
+            "p/a_test.go#decl:TestA": "test",
+            "p/a_test.go#decls": "import",
             "p/b.go#decls": "import",
             "p/b_test.go#decls": "import"
           },
@@ -82,13 +91,17 @@
             "p/a.go#decls",
             "p/a_test.go#decls",
             "p/b.go",
-            "p/b.go#decls"
+            "p/b.go#decls",
+            "p/b_test.go#decl:TestB",
+            "p/b_test.go#decls"
           ],
           "via": {
             "p/a.go#decls": "import",
             "p/a_test.go#decls": "import",
             "p/b.go": "traced",
-            "p/b.go#decls": "import"
+            "p/b.go#decls": "import",
+            "p/b_test.go#decl:TestB": "test",
+            "p/b_test.go#decls": "import"
           },
           "duration_ms": 10
         },
@@ -99,12 +112,16 @@
           "changed": [
             "p/a.go#decls",
             "p/a_test.go#decls",
-            "p/b.go#decls"
+            "p/b.go#decls",
+            "p/b_test.go#decl:TestB2",
+            "p/b_test.go#decls"
           ],
           "via": {
             "p/a.go#decls": "import",
             "p/a_test.go#decls": "import",
-            "p/b.go#decls": "import"
+            "p/b.go#decls": "import",
+            "p/b_test.go#decl:TestB2": "test",
+            "p/b_test.go#decls": "import"
           },
           "duration_ms": 10
         },
@@ -124,7 +141,9 @@
             "p/b.go#decls",
             "q/",
             "q/q.go#decls",
-            "q/q_extra_test.go#decls"
+            "q/q_extra_test.go#decls",
+            "q/q_test.go#decl:TestQ",
+            "q/q_test.go#decls"
           ],
           "via": {
             "migrations/002.sql": "input",
@@ -132,7 +151,9 @@
             "p/b.go#decls": "import",
             "q/": "import",
             "q/q.go#decls": "import",
-            "q/q_extra_test.go#decls": "import"
+            "q/q_extra_test.go#decls": "import",
+            "q/q_test.go#decl:TestQ": "test",
+            "q/q_test.go#decls": "import"
           },
           "duration_ms": 10
         },
@@ -177,7 +198,8 @@
           "p/",
           "p/a.go",
           "p/a.go#decls",
-          "p/a_test.go",
+          "p/a_test.go#decl:TestA",
+          "p/a_test.go#decls",
           "p/b.go#decls",
           "p/b_test.go#decls"
         ],
@@ -189,7 +211,8 @@
           "p/a_test.go#decls",
           "p/b.go",
           "p/b.go#decls",
-          "p/b_test.go"
+          "p/b_test.go#decl:TestB",
+          "p/b_test.go#decls"
         ],
         "p#TestB2": [
           "backend/server/server.x",
@@ -198,7 +221,8 @@
           "p/a.go#decls",
           "p/a_test.go#decls",
           "p/b.go#decls",
-          "p/b_test.go"
+          "p/b_test.go#decl:TestB2",
+          "p/b_test.go#decls"
         ],
         "q#(build)": [
           "go.mod",
@@ -217,7 +241,8 @@
           "q/",
           "q/q.go#decls",
           "q/q_extra_test.go#decls",
-          "q/q_test.go"
+          "q/q_test.go#decl:TestQ",
+          "q/q_test.go#decls"
         ],
         "q#TestQ2": [
           "go.mod",
@@ -227,7 +252,8 @@
           "p/b.go#decls",
           "q/",
           "q/q.go#decls",
-          "q/q_extra_test.go",
+          "q/q_extra_test.go#decl:TestQ2",
+          "q/q_extra_test.go#decls",
           "q/q_test.go#decls"
         ]
       },
@@ -244,7 +270,8 @@
           "go.mod",
           "p/",
           "p/a.go#decls",
-          "p/a_test.go",
+          "p/a_test.go#decl:TestA",
+          "p/a_test.go#decls",
           "p/b.go#decls",
           "p/b_test.go#decls"
         ],
@@ -255,7 +282,8 @@
           "p/a.go#decls",
           "p/a_test.go#decls",
           "p/b.go#decls",
-          "p/b_test.go"
+          "p/b_test.go#decl:TestB",
+          "p/b_test.go#decls"
         ],
         "p#TestB2": [
           "backend/server/server.x",
@@ -264,7 +292,8 @@
           "p/a.go#decls",
           "p/a_test.go#decls",
           "p/b.go#decls",
-          "p/b_test.go"
+          "p/b_test.go#decl:TestB2",
+          "p/b_test.go#decls"
         ],
         "q#(build)": [
           "go.mod",
@@ -283,7 +312,8 @@
           "q/",
           "q/q.go#decls",
           "q/q_extra_test.go#decls",
-          "q/q_test.go"
+          "q/q_test.go#decl:TestQ",
+          "q/q_test.go#decls"
         ],
         "q#TestQ2": [
           "go.mod",
@@ -293,7 +323,8 @@
           "p/b.go#decls",
           "q/",
           "q/q.go#decls",
-          "q/q_extra_test.go",
+          "q/q_extra_test.go#decl:TestQ2",
+          "q/q_extra_test.go#decls",
           "q/q_test.go#decls"
         ]
       },

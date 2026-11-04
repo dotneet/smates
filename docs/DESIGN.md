@@ -122,7 +122,8 @@ Dependency keys:
 | `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: paths and sizes on disk) | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
-| `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies (the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
+| `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies, comments other than directives left out (of a test file: its imports, types, method signatures and what runs for every test; the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
+| `f.go#decl:N` | `decl:` + SHA-1 of the tokens of top-level declaration `N` (function `N`, method `T.N`, a variable, constant or type with its whole group), comments other than directives and example output left out (`""` = absent; the blob when the file does not parse) | Go test functions: a function body it executed, a test-file declaration it reaches |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 The hashes are those of the snapshot taken before the run. Paths git does not list
@@ -389,6 +390,16 @@ every runner invocation gets its own `v8`, `v8-1`, … directory. A `NODE_V8_COV
 user set is replaced while recording and the files are copied there afterwards (never
 overwriting); one inherited from an outer smates run is not the user's. The preload lives
 under `shims/node_modules/` so coverage reports (which skip `node_modules`) never list it.
+
+**Reading V8 coverage.** A recorded Node run leaves one coverage file per process dump,
+mostly function range data. `trace.Collect` scans them in parallel (GOMAXPROCS workers, at
+most twice that many files scanned ahead of the in-order merge, so the output is the same
+whatever the scheduling) with a streaming scanner (`v8Scanner`, bounded buffer, no
+decoding of ranges) that validates the document as `json.Valid` does and collects the
+`"url"` string values the earlier whole-file byte scan found (fuzzed against it). A file
+that is not one complete JSON value (cut short by a killed process) is skipped, as
+before. The number and timing of dumps are not touched: fewer dumps lose data (vitest
+kills its workers shortly after asking them to stop).
 Python: smates takes a `sys.monitoring` tool id of its own (3, 4, 2, 5; coverage.py's
 sysmon core takes 1 and moves up), or chains to an existing `sys.setprofile` function;
 the pytest plugin switches to a `session:end` context (attributed to nothing) once the
@@ -467,8 +478,11 @@ depends on the outer value of a variable it sets: more runs, never fewer).
 `TestXxx(*testing.T)`, `FuzzXxx(*testing.F)` and `ExampleXxx()` found by parsing the
 package's `_test.go` files (a file that does not parse makes the package itself a unit).
 Recording builds the package's test binary once with `-cover -coverpkg=` set to the
-main-module packages it links (`go list -deps -test`), lists its tests (`-test.list`),
-and runs each selected function in its own process (`-test.run '^Name$'`, a coverage
+main-module packages it links (`go list -deps -test`), lists its tests from the test
+files `go list` says it compiles (`TestGoFiles`, `XTestGoFiles`; examples without an
+output comment are compiled, never run, by go/doc's rule as go test applies it; only
+when that fails does it ask the binary, `-test.list`, which runs `TestMain`), and runs
+each selected function in its own process (`-test.run '^Name$'`, a coverage
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
 and by `-p` packages at once (command or `GOFLAGS`, default GOMAXPROCS, like `go test`). A
@@ -477,23 +491,35 @@ constraints: a `//go:build linux` file on darwin, a tag neither `GOFLAGS` nor th
 passes; `go list -find` over the packages of the test files that may be constrained by
 name or a build line, cached by file stat) is not a unit there: go test would run nothing
 for it, and a pass would hide it from a configuration that compiles it. A selected
-function `-test.list` does not list runs nothing: an example without output (compiled,
-never run anywhere) passes, as does any when `go list` fails; one go list says is not
-compiled (build flags passed to this run only) is not recorded.
+function go test does not run (an example without output) passes; one go list says is
+not compiled (build flags passed to this run only) is not recorded.
 Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of the
-binary, `GOFLAGS` first so the command's win. Its dependencies are the files with an executed block
-(blocks placed by `//line` in a file that is not there: every Go file of the package);
+binary, `GOFLAGS` first so the command's win. Its dependencies are the functions and
+methods whose body holds an executed block (`f.go#decl:N`, found by mapping the block's
+start to the declarations of the file as it is on disk; a block outside any body, in a
+function literal initializing a package-level variable, is part of `f.go#decls`; a
+block in a file that does not parse or has `//line` directives makes the whole file a
+dependency, and one placed by `//line` in a file that is not there every Go file of the
+package);
 the declarations (`f.go#decls`) of every Go file of the static closure, which is what
 makes this sound: coverage only sees statements inside function bodies, so constants,
 variable initializers, types, signatures and method sets are hashed separately (as
 tokens, so formatting does not count) and a change to them selects every function that
 could see them, while an edit inside a body selects only the functions that executed
 it; the content of Go files of packages the binary does not link (a test that runs
-`go run ../cmd/tool`); the content of its own test file, of test files declaring a name
-its file mentions (transitively) and of test files with `TestMain`, `init` or
-package-level variables initialized by a call, and the declarations of the package's
-other test files (without their test functions, so adding a test does not select its
-neighbours); the listing of the package directory (a new file selects every function
+`go run ../cmd/tool`); in the package's test files, which coverage does not instrument,
+the declarations (`f.go#decl:N`) it reaches: from its own and from those that run for
+every test of the binary (`TestMain`, `init`, package-level variables whose initializer
+calls something other than a conversion or a pure builtin, declarations shadowing a
+predeclared name, methods the test files add to a type they do not declare), following
+the identifiers each one mentions that the parser leaves unresolved or resolves to a
+top-level declaration (not locals, parameters, fields, nor the name a selector
+selects), and from a type to its methods, within the package clause (an external test
+package also follows the names it uses unqualified, as with a dot import, and those it
+selects on an identifier it does not declare, `p.Name`, into the package's own test files); the declarations of every test file of the package
+(`f.go#decls` of a test file: imports, types and method signatures, and what runs for
+every test, so that adding such a declaration selects every function while adding a
+helper or a test selects none); the listing of the package directory (a new file selects every function
 of the package); and everything the package unit has besides (test log reads and
 environment variables, non-Go files of the closure, `go.mod`/`go.sum`, children). A
 missing profile makes every file of the closure a content dependency. When per-function
@@ -614,6 +640,36 @@ back to the whole package when unresolvable). Python imports including relative,
 with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
 on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
 package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
+
+**Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
+into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript
+erases (`typeOnlyDecl`): `import type` / `export type … from` always (`import type from
+"m"` and `import type, { a } from "m"` import a default named `type`: values), and a
+specifier list whose specifiers all carry `type` (`import { type A } from`, following
+TypeScript's reading of `type as as B`) unless the file's compiler options keep it as a
+side-effect import. Those options (`verbatimModuleSyntax`, `preserveValueImports`,
+`importsNotUsedAsValues`) are looked up in every config `dirConfigs` returns for every
+config directory at or above the file (sibling `tsconfig.*.json` and references
+included), through extends chains (installed configs read from `node_modules`); an
+unreadable config, or one extending a config that cannot be found while leaving an option
+unset, counts as keeping it. `typeof import("x")` and `import("x").T` cannot be told from
+value expressions at token level and stay. The analyzer returns both edge sets
+(`host.TypeAnalyzer`), and the graph serves `Closure` and `RuntimeClosure`. Selection uses
+the runtime closure only for a suite whose runner is known to erase types without checking
+them (`runner.TypeEraser`): vitest run directly by the suite command, with no mention of
+type checking (typecheck, tsc, tsd, ts-node, the options above, `tsconfigRaw`) in the
+command, the arguments passed through or the suite env, nor in a vitest/vite config at or
+below the suite root or above it or anything those import, no workspace file, no config
+naming other configs by path (`projects:`, `workspace:`, `extends:`), no import of a package
+other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
+`vite-tsconfig-paths`) and Node's builtins (a preset, or a plugin whose config hook may
+return test settings), and no `*.test-d.*` / `*.spec-d.*` file in the suite; or
+`bun test` itself. The rule is deliberately coarse: any
+mention keeps the type edges, which costs precision, never correctness (a type-only change
+can fail a type-checking run: vitest typecheck, ts-jest, ts-node). jest, node and custom
+suites always keep them. The files only the full closure reaches are added to `Covered`
+(a change to them is explained, not an orphan) but not to D(T) or `Known`, so recording
+does not write them either.
 
 ## 3. Status and shadow mode
 

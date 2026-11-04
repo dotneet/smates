@@ -447,7 +447,7 @@ func commonVia(hs []hit) string {
 func (v *view) expand(key string) []string {
 	kind, p := depkey.Parse(key)
 	switch kind {
-	case depkey.KindExistence, depkey.KindDecls:
+	case depkey.KindExistence, depkey.KindDecls, depkey.KindDecl:
 		return []string{p}
 	case depkey.KindContent, depkey.KindConfig, depkey.KindListing, depkey.KindEnv:
 		return []string{key}
@@ -481,6 +481,9 @@ func viaLabel(via, key, service string) string {
 		return "checks whether it exists"
 	case depkey.KindDecls:
 		return "its declarations changed (static dependency)"
+	case depkey.KindDecl:
+		_, name, _ := depkey.DeclName(key)
+		return code(name) + " changed"
 	}
 	switch via {
 	case selector.ViaTest:

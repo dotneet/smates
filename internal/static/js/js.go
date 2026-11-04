@@ -44,6 +44,9 @@ type Analyzer struct {
 	wsSpecs   memo[wsResult]    // bare specifier -> workspace resolution
 	pkgFiles  memo[[]string]    // package dir -> its source files
 	mocks     memo[[]string]    // dir -> root __mocks__ dirs that apply there
+	tsPaths   memo[[]string]    // config dir -> config files that apply there
+	typeOpts  memo[typeImportOpts]
+	elides    memo[bool] // dir -> elidesTypeImports
 }
 
 // Options configure the analyzer.
@@ -88,6 +91,22 @@ func (a *Analyzer) Handles(p string) bool { return handledExts[path.Ext(p)] }
 
 // Deps implements host.Analyzer.
 func (a *Analyzer) Deps(p string, src []byte) []string {
+	all, _ := a.SplitDeps(p, src)
+	return all
+}
+
+// typeScriptExts are the extensions of TypeScript sources, whose type-only imports
+// are erased before they run.
+var typeScriptExts = map[string]bool{".ts": true, ".tsx": true, ".mts": true, ".cts": true}
+
+// SplitDeps implements host.TypeAnalyzer: Deps, and those of them a TypeScript source
+// still imports once its types are erased. References only type-only declarations
+// make (see typeOnlyDecl) are left out of runtime: import type and export type always,
+// a specifier list whose specifiers all carry the type modifier only when no tsconfig
+// that may govern the file keeps it as a side-effect import (see elidesTypeImports).
+// A file a value reference also resolves to stays. Other sources have no types:
+// runtime is all.
+func (a *Analyzer) SplitDeps(p string, src []byte) (all, runtime []string) {
 	var refs []ref
 	switch path.Ext(p) {
 	case ".vue", ".svelte":
@@ -98,23 +117,43 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 		refs = scanSource(src)
 	}
 	if len(refs) == 0 {
-		return nil
+		return nil, nil
 	}
 	dir := path.Dir(p)
-	seen := map[string]bool{p: true}
-	var out []string
+	ts := typeScriptExts[path.Ext(p)]
+	// value says, for each file found, whether a reference that stays at run time
+	// resolves to it.
+	value := map[string]bool{p: true}
+	var cur bool
 	add := func(f string) {
-		if seen[f] || outside(f) || hasSegment(f, "node_modules") || !a.h.Has(f) {
+		if v, ok := value[f]; ok {
+			if cur && !v {
+				value[f] = true
+			}
 			return
 		}
-		seen[f] = true
-		out = append(out, f)
+		if outside(f) || hasSegment(f, "node_modules") || !a.h.Has(f) {
+			return
+		}
+		value[f] = cur
+		all = append(all, f)
 	}
+	erased := false
 	for _, r := range refs {
+		cur = !ts || r.erase == eraseNever || r.erase == eraseElided && !a.elidesTypeImports(dir)
+		erased = erased || !cur
 		a.resolveRef(dir, r, add)
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(all)
+	if !erased {
+		return all, all
+	}
+	for _, f := range all {
+		if value[f] {
+			runtime = append(runtime, f)
+		}
+	}
+	return all, runtime
 }
 
 // resolveRef resolves one reference made from a file in dir.
