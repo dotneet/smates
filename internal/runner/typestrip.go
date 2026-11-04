@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"path"
 	"regexp"
 	"slices"
@@ -75,6 +76,44 @@ func runsDirectly(s *Suite, bin func(words []string, i int) bool) bool {
 	return false
 }
 
+// runsScript reports whether words[i] names a package.json script rather than a
+// program: after `run` / `run-script` (npm run vitest), or after a package manager
+// that runs a script of that name when there is one (yarn vitest, pnpm vitest, bun
+// vitest) and the package.json nearest the suite root has one or cannot be read.
+func runsScript(words []string, i int, root string, src Sources) bool {
+	if i == 0 {
+		return false
+	}
+	switch prev := words[i-1]; {
+	case prev == "run" || prev == "run-script":
+		return true
+	case slices.Contains([]string{"yarn", "pnpm", "bun"}, binName(prev)):
+		return hasScript(root, words[i], src)
+	}
+	return false
+}
+
+// hasScript reports whether the package.json nearest dir (at or above it) declares a
+// script named name, or cannot be read as one.
+func hasScript(dir, name string, src Sources) bool {
+	for d := dir; ; d = path.Dir(d) {
+		f := path.Join(d, "package.json")
+		if b := src.Read(f); b != nil {
+			var pkg struct {
+				Scripts map[string]json.RawMessage `json:"scripts"`
+			}
+			if json.Unmarshal(b, &pkg) != nil {
+				return true
+			}
+			_, ok := pkg.Scripts[name]
+			return ok
+		}
+		if d == "." || d == "/" || d == "" {
+			return false
+		}
+	}
+}
+
 // binName returns the program name of a command word: its base name without a
 // script extension (./node_modules/.bin/vitest, vitest.mjs -> vitest).
 func binName(w string) string {
@@ -105,10 +144,10 @@ func aboveRoot(root, d string) bool {
 // has no type test files (*.test-d.* / *.spec-d.*), which only typecheck mode runs.
 // This is deliberately coarse: a mention anywhere keeps type-only imports.
 func (vitest) ErasesTypes(s *Suite, src Sources) bool {
-	if !runsDirectly(s, func(w []string, i int) bool { return binName(w[i]) == "vitest" }) {
+	root := path.Clean(s.Root)
+	if !runsDirectly(s, func(w []string, i int) bool { return binName(w[i]) == "vitest" && !runsScript(w, i, root, src) }) {
 		return false
 	}
-	root := path.Clean(s.Root)
 	var configs []string
 	if c, ok := commandFlag(s, "--config", "-c"); ok {
 		f, inRepo := repoRel(root, c)
