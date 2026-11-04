@@ -76,21 +76,29 @@ func runsDirectly(s *Suite, bin func(words []string, i int) bool) bool {
 	return false
 }
 
-// runsScript reports whether words[i] names a package.json script rather than a
-// program: after `run` / `run-script` (npm run vitest), or after a package manager
-// that runs a script of that name when there is one (yarn vitest, pnpm vitest, bun
-// vitest) and the package.json nearest the suite root has one or cannot be read.
+// runsScript reports whether words[i] may name a package.json script rather than a
+// program. After a package manager (npm, yarn, pnpm, bun) the word is the program
+// only right after `exec`, `dlx` or `x`, or right after the manager itself when the
+// package.json nearest the suite root has no script of that name (yarn vitest, pnpm
+// vitest and bun vitest run such a script first); any other word in between (run,
+// --filter web, workspace web, -C web, --cwd web) may select a script, possibly of
+// another package. Without a package manager, a word after run / run-script is one.
 func runsScript(words []string, i int, root string, src Sources) bool {
-	if i == 0 {
-		return false
+	for m := 0; m < i; m++ {
+		mgr := binName(words[m])
+		if !slices.Contains([]string{"npm", "yarn", "pnpm", "bun"}, mgr) {
+			continue
+		}
+		switch between := words[m+1 : i]; {
+		case len(between) == 0:
+			return mgr == "npm" || hasScript(root, words[i], src)
+		case len(between) == 1 && slices.Contains([]string{"exec", "dlx", "x"}, between[0]):
+			return false
+		default:
+			return true
+		}
 	}
-	switch prev := words[i-1]; {
-	case prev == "run" || prev == "run-script":
-		return true
-	case slices.Contains([]string{"yarn", "pnpm", "bun"}, binName(prev)):
-		return hasScript(root, words[i], src)
-	}
-	return false
+	return i > 0 && (words[i-1] == "run" || words[i-1] == "run-script")
 }
 
 // hasScript reports whether the package.json nearest dir (at or above it) declares a
