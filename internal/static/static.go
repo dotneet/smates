@@ -1,4 +1,4 @@
-// Package static builds an import graph over JS/TS, Python and Go sources without
+// Package static builds an import graph over JS/TS, Python, Go and Java sources without
 // invoking any toolchain. It is a safety net under the runtime traces: it sees imports
 // that a run did not execute, imports added since the last run, and works with no state.
 package static
@@ -11,6 +11,7 @@ import (
 
 	"github.com/dotneet/smates/internal/static/golang"
 	"github.com/dotneet/smates/internal/static/host"
+	"github.com/dotneet/smates/internal/static/java"
 	"github.com/dotneet/smates/internal/static/js"
 	"github.com/dotneet/smates/internal/static/python"
 )
@@ -46,6 +47,7 @@ func New(root string, files []string, opts Options) *Graph {
 		js.New(g, js.Options{}),
 		python.New(g, python.Options{Roots: opts.PythonRoots}),
 		golang.New(g, golang.Options{}),
+		java.New(g, java.Options{}),
 	}
 	return g
 }

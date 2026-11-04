@@ -10,9 +10,11 @@ edit_uri: edit/main/docs/
 docs_dir: docs
 copyright: MIT License
 
-# docs/ also holds the Go package that embeds AGENTS.md (`smates guide`).
+# docs/ also holds the Go package that embeds AGENTS.md (`smates guide`), and design
+# proposals that are not part of the site.
 exclude_docs: |
   *.go
+  proposals/
 
 theme:
   name: material
