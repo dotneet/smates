@@ -181,18 +181,20 @@ func Compute(in Input) *Hint {
 		}
 	}
 	var cands []Candidate
+	goFiles := map[string]bool{} // Go files already standing for their declaration keys
 	for k := range keys {
 		c, ok := changed(in, k)
 		if !ok {
 			continue
 		}
-		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl {
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl || kind == depkey.KindSig {
 			// The declarations of a Go file, or one of them, stand for the file.
-			if keys[f] {
-				if _, ok := changed(in, f); ok {
+			if keys[f] || goFiles[f] {
+				if _, ok := changed(in, f); ok || goFiles[f] {
 					continue
 				}
 			}
+			goFiles[f] = true
 			c.Path, c.New, c.Old = f, in.Hash(f), ""
 			if in.Entry != nil {
 				c.Old = in.Entry.Deps[f]

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,10 +47,11 @@ type Hasher struct {
 
 // hashCache is shared by the hashers derived from one with ForSuite.
 type hashCache struct {
-	disk  map[string]string   // memoized hashes of files outside the snapshot
-	exist map[string]string   // memoized existence checks of paths outside the snapshot
-	dirs  map[string][]string // the snapshot's directories and their entries
-	lists map[string]string   // memoized listing hashes (see listing)
+	disk  map[string]string         // memoized hashes of files outside the snapshot
+	exist map[string]string         // memoized existence checks of paths outside the snapshot
+	dirs  map[string][]string       // the snapshot's directories and their entries
+	lists map[string]string         // memoized listing hashes (see listing)
+	pkgs  map[string]*goPackageHash // memoized Go package hashes (see goPackage)
 	trees map[string]string
 	setv  map[*ServiceDeps]string // memoized hashes of sets
 	// legacy and legacySets memoize tree and set hashes without the executable marker
@@ -357,8 +359,13 @@ func (h *Hasher) Hash(key string) string {
 		return h.file(key)
 	case depkey.KindDecls:
 		return h.decls(p)
-	case depkey.KindDecl:
+	case depkey.KindDecl, depkey.KindSig:
 		return h.decl(key)
+	case depkey.KindShape:
+		return h.goPackage(p).shape
+	case depkey.KindMethods:
+		_, typ, _ := depkey.MethodsType(key)
+		return h.goPackage(p).methodsOf(typ)
 	}
 	return h.listing(key)
 }
@@ -467,35 +474,159 @@ func (h *Hasher) decls(p string) string {
 	return v
 }
 
-// declCache maps a Go file's blob hash to the hashes of its declarations.
+// declCache maps a Go file's blob hash to its declHashes (nil: it does not parse).
 var declCache sync.Map
 
-// decl hashes one top-level declaration of a Go file (see golang.DeclHashes): ""
-// when the file or the declaration is absent, the file's content hash when the
-// declarations cannot be told apart (as for decls).
+// declHashes are the full and signature hashes of the declarations of a Go file (see
+// golang.DeclHashes).
+type declHashes struct{ full, sig map[string]string }
+
+// readGoIn is readGo, false without a repository root.
+func (h *Hasher) readGoIn(p, blob string) ([]byte, bool) {
+	if h.root == "" {
+		return nil, false
+	}
+	return h.readGo(p, blob)
+}
+
+// readGo returns the content of Go file p as the snapshot has it (blob), or false when
+// it cannot be read so (absent, or changed on disk since the snapshot).
+func (h *Hasher) readGo(p, blob string) ([]byte, bool) {
+	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
+	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
+		return nil, false
+	}
+	return src, true
+}
+
+// decl hashes one top-level declaration of a Go file, with its function bodies
+// (depkey.Decl) or without (depkey.Sig): "" when the file or the declaration is
+// absent, the file's content hash when the declarations cannot be told apart (as for
+// decls).
 func (h *Hasher) decl(key string) string {
+	kind, _ := depkey.Parse(key)
 	p, name, _ := depkey.DeclName(key)
 	blob := h.file(p)
 	if blob == "" || h.root == "" {
 		return blob
 	}
-	if v, ok := declCache.Load(blob); ok {
-		if v == nil {
-			return blob
+	v, cached := declCache.Load(blob)
+	if !cached {
+		src, readable := h.readGo(p, blob)
+		if !readable {
+			return blob // not on disk as the snapshot has it
 		}
-		return v.(map[string]string)[name]
+		var dh *declHashes
+		if full, sig, ok := golang.DeclHashes(src); ok {
+			dh = &declHashes{full, sig}
+		}
+		declCache.Store(blob, dh)
+		v = dh
 	}
-	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
-	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
+	dh := v.(*declHashes)
+	switch {
+	case dh == nil:
 		return blob
+	case kind == depkey.KindSig:
+		return dh.sig[name]
 	}
-	hs, ok := golang.DeclHashes(src)
+	return dh.full[name]
+}
+
+// partsCache maps a Go file's blob hash to its fileParts.
+var partsCache sync.Map
+
+// fileParts is what a Go file contributes to its package (see golang.PackageParts);
+// unknown when it does not parse.
+type fileParts struct {
+	shape   string
+	methods map[string][]string
+	unknown bool
+}
+
+// goPackage hashes the shape and the method sets of the Go package in directory dir
+// (depkey.Shape, depkey.Methods) from the Go files the snapshot lists there; the
+// non-Go files go build compiles into the package count whole in the shape. A Go file
+// that cannot be read as the snapshot has it or does not parse counts with its blob
+// in the shape and in every method set, so that any change to it counts.
+func (h *Hasher) goPackage(dir string) *goPackageHash {
+	if v, ok := h.pkgs[dir]; ok {
+		return v
+	}
+	ph := &goPackageHash{methods: map[string][]string{}}
+	if h.pkgs == nil {
+		h.pkgs = map[string]*goPackageHash{}
+	}
+	h.pkgs[dir] = ph
+	names, ok := h.snapEntries(depkey.Listing(dir))
 	if !ok {
-		declCache.Store(blob, nil)
-		return blob
+		ph.shape = "shape:none" // no file of the snapshot there: nothing to hash
+		return ph
 	}
-	declCache.Store(blob, hs)
-	return hs[name]
+	var shapes []string
+	for _, n := range names {
+		if goCompiled[path.Ext(n)] {
+			// Assembly, C and the like are compiled into the package: they count whole.
+			f := path.Join(dir, n)
+			shapes = append(shapes, n+"\x00"+h.file(f))
+			continue
+		}
+		if !strings.HasSuffix(n, ".go") {
+			continue
+		}
+		f := n
+		if dir != "." {
+			f = dir + "/" + n
+		}
+		blob := h.file(f)
+		var fp *fileParts
+		if v, ok := partsCache.Load(blob); ok {
+			fp = v.(*fileParts)
+		} else if src, ok := h.readGoIn(f, blob); ok {
+			fp = &fileParts{unknown: true}
+			if shape, methods, ok := golang.PackageParts(src); ok {
+				fp = &fileParts{shape: shape, methods: methods}
+			}
+			partsCache.Store(blob, fp)
+		} else {
+			fp = &fileParts{unknown: true}
+		}
+		switch {
+		case fp.unknown:
+			ph.unknown = append(ph.unknown, n+"\x00"+blob)
+			shapes = append(shapes, n+"\x00"+blob)
+		case fp.shape != "":
+			shapes = append(shapes, n+"\x00"+fp.shape)
+		}
+		for t, sigs := range fp.methods {
+			ph.methods[t] = append(ph.methods[t], sigs...)
+		}
+	}
+	sum := sha1.Sum([]byte(strings.Join(shapes, "\n")))
+	ph.shape = "shape:" + hex.EncodeToString(sum[:])
+	return ph
+}
+
+// goCompiled are the extensions of the non-Go files go build compiles or links into a
+// package (cgo sources and headers, assembly, SWIG, system objects).
+var goCompiled = map[string]bool{".c": true, ".h": true, ".s": true, ".S": true, ".sx": true, ".cc": true, ".cpp": true,
+	".cxx": true, ".hh": true, ".hpp": true, ".hxx": true, ".m": true, ".f": true, ".F": true, ".for": true, ".f90": true,
+	".swig": true, ".swigcxx": true, ".syso": true}
+
+// goPackageHash is the hash of a Go package's shape and what its method sets hash
+// from (see goPackage).
+type goPackageHash struct {
+	shape   string
+	methods map[string][]string // type -> method signatures
+	unknown []string            // files that count in every method set
+}
+
+// methodsOf hashes the method set of type typ.
+func (ph *goPackageHash) methodsOf(typ string) string {
+	sigs := append(slices.Clone(ph.methods[typ]), ph.unknown...)
+	sort.Strings(sigs)
+	sum := sha1.Sum([]byte(strings.Join(sigs, "\n")))
+	return "methods:" + hex.EncodeToString(sum[:])
 }
 
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
@@ -865,7 +996,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		if depkey.IsEnv(k) {
 			return false // no recorded environment to compare a newly read variable with
 		}
-		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl {
+		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl || kind == depkey.KindSig {
 			// The declarations of a Go file, or one of them: unchanged if the file is.
 			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, h.Hash(f))) {
 				return false

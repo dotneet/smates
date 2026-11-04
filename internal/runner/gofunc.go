@@ -9,21 +9,21 @@ package runner
 // own process with -test.run '^Name$', a coverage profile and a test log. A function
 // then depends on:
 //
-//   - the bodies of the functions and methods it executed (depkey.Decl, from the
-//     coverage profile: the function whose body holds each executed block) and the
-//     declarations of their files;
-//   - the declarations (depkey.Decls: the file without function bodies) of every Go
-//     file of the package's import closure, so that constants, variables, types,
+//   - in its own package (see funcDeps): the bodies of the functions and methods it
+//     executed (depkey.Decl, from the coverage profile: the function whose body holds
+//     each executed block); the test-file declarations it reaches, whole (coverage
+//     does not instrument test files); the other declarations it names, without their
+//     bodies (depkey.Sig: a type, constant, variable or signature); the method set of
+//     every type it reaches (depkey.Methods); and the package's shape (depkey.Shape:
+//     init functions, initializers that call code, blank imports, files compiled into
+//     the package that are not Go), so that a new declaration nothing names selects
+//     nothing while one that runs for every test selects every function;
+//   - for the other packages it imports: the bodies it executed with the declarations of
+//     their files (depkey.Decls: the file without function bodies) and the declarations
+//     of every other Go file of the closure, so that constants, variables, types,
 //     signatures and method sets, which coverage cannot see, still count;
 //   - the content of Go files of packages the binary does not link (packages a test
 //     builds or runs as a subprocess);
-//   - in the package's test files, which coverage does not instrument: the
-//     declarations it reaches (depkey.Decl) from its own and from those that run for
-//     every test (TestMain, init, package-level variables initialized by calls),
-//     following the names they mention; and the declarations hash of every test file
-//     (imports, types and method sets, what runs for every test; see
-//     golang.DeclsHash), which a new declaration of that kind changes;
-//   - the listing of the package directory (a file added to it selects every function);
 //   - non-Go files of the static closure (go.mod, go.sum, embedded files), what its test
 //     log recorded (files read, directories listed, environment variables), and what
 //     processes it started read — as for a package.

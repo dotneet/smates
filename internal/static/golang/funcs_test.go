@@ -1,6 +1,7 @@
 package golang
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -84,9 +85,16 @@ func TestDeclsHash(t *testing.T) {
 func TestDeclHashes(t *testing.T) {
 	hashes := func(src string) map[string]string {
 		t.Helper()
-		h, ok := DeclHashes([]byte(src))
+		full, sig, ok := DeclHashes([]byte(src))
 		if !ok {
 			t.Fatalf("DeclHashes(%q) failed", src)
+		}
+		h := map[string]string{}
+		for k, v := range full {
+			h[k] = v
+		}
+		for k, v := range sig {
+			h[k+"#sig"] = v
 		}
 		return h
 	}
@@ -104,12 +112,18 @@ func TestDeclHashes(t *testing.T) {
 		name, src string
 		changed   []string
 	}{
+		// A body changes the declaration, not its signature.
 		{"function body", strings.Replace(base, "return v", "return v + 1", 1), []string{"F"}},
+		{"signature", strings.Replace(base, "func F() int", "func F() int64", 1), []string{"F", "F#sig"}},
 		{"comment", strings.Replace(base, "func F() int { return v }", "// F returns v.\nfunc F() int { return v /* v */ }", 1), nil},
-		{"constant inserted", strings.Replace(base, "\tA = iota\n", "\tZ = iota\n\tA\n", 1), []string{"A", "B"}},
+		{"constant inserted", strings.Replace(base, "\tA = iota\n", "\tZ = iota\n\tA\n", 1), []string{"A", "A#sig", "B", "B#sig"}},
 		{"second init", strings.Replace(base, "{ F() }", "{ F(); F() }", 1), []string{"init"}},
 		{"method", strings.Replace(base, "M() {}", "M() { println() }", 1), []string{"T.M"}},
 		{"example output", strings.Replace(base, "Output: 1", "Output: 2", 1), []string{"ExampleF"}},
+		// The imports decide what names mean: every declaration of the file.
+		{"import", strings.Replace(base, "package p\n", "package p\n\nimport \"fmt\"\n", 1), slices.Sorted(maps.Keys(b))},
+		// A new declaration changes none of the others.
+		{"new function", base + "\nfunc G() {}\n", nil},
 	}
 	for _, c := range cases {
 		h := hashes(c.src)
@@ -125,8 +139,66 @@ func TestDeclHashes(t *testing.T) {
 			t.Errorf("%s: changed %v, want %v", c.name, changed, c.changed)
 		}
 	}
-	if _, ok := DeclHashes([]byte("package p\nfunc {")); ok {
+	if _, _, ok := DeclHashes([]byte("package p\nfunc {")); ok {
 		t.Error("a file that does not parse has no declaration hashes")
+	}
+}
+
+func TestPackageParts(t *testing.T) {
+	parts := func(src string) (string, map[string][]string) {
+		t.Helper()
+		shape, methods, ok := PackageParts([]byte(src))
+		if !ok {
+			t.Fatalf("PackageParts(%q) failed", src)
+		}
+		return shape, methods
+	}
+	const base = "package p\n\nimport \"strings\"\n\nvar table = []int{1}\n\nvar re = compile(\"x\")\n\nfunc init() { setup() }\n\ntype T struct{}\n\nfunc (t *T) M(s string) string { return strings.ToUpper(s) }\n\nfunc F() {}\n"
+	shape, methods := parts(base)
+	if len(methods["T"]) != 1 {
+		t.Fatalf("methods %v", methods)
+	}
+	for name, src := range map[string]string{
+		"new function":  base + "func G() {}\n",
+		"new type":      base + "type U int\n",
+		"new constant":  base + "const K = 1\n",
+		"table":         strings.Replace(base, "[]int{1}", "[]int{1, 2}", 1),
+		"init body":     strings.Replace(base, "{ setup() }", "{ setup(); setup() }", 1),
+		"function body": strings.Replace(base, "func F() {}", "func F() { println() }", 1),
+		"import":        strings.Replace(base, "import \"strings\"", "import (\"strings\"; \"fmt\")", 1),
+		"method body":   strings.Replace(base, "strings.ToUpper(s)", "strings.ToLower(s)", 1),
+		"new method":    base + "func (T) N() {}\n",
+	} {
+		if got, _ := parts(src); got != shape {
+			t.Errorf("%s changed the shape", name)
+		}
+	}
+	for name, src := range map[string]string{
+		"initializer":      strings.Replace(base, "compile(\"x\")", "compile(\"y\")", 1),
+		"new init":         base + "func init() {}\n",
+		"new call var":     base + "var conn = dial()\n",
+		"blank import":     strings.Replace(base, "import \"strings\"", "import (\"strings\"; _ \"embed\")", 1),
+		"build constraint": "//go:build linux\n\n" + base,
+		"shadow":           base + "func len(s string) int { return 0 }\n",
+	} {
+		if got, _ := parts(src); got == shape {
+			t.Errorf("%s did not change the shape", name)
+		}
+	}
+	if _, m := parts(base + "func (T) N() {}\n"); len(m["T"]) != 2 {
+		t.Errorf("a new method is not in the method set: %v", m)
+	}
+	if _, m := parts(strings.Replace(base, "M(s string) string", "M(s string, n int) string", 1)); slices.Equal(m["T"], methods["T"]) {
+		t.Error("a changed method signature did not change the method set")
+	}
+	if _, m := parts(strings.Replace(base, "strings.ToUpper(s)", "s", 1)); !slices.Equal(m["T"], methods["T"]) {
+		t.Error("a method body changed the method set")
+	}
+	if got, _ := parts("//go:build linux\n\npackage p\n\nimport \"strings\"\n\nfunc F() string { return strings.ToUpper(\"x\") }\n"); got != "" {
+		t.Errorf("a file of ordinary declarations has a shape: %q", got)
+	}
+	if _, _, ok := PackageParts([]byte("package p\nfunc {")); ok {
+		t.Error("a file that does not parse has no parts")
 	}
 }
 
@@ -232,15 +304,19 @@ func helper(t *testing.T) {
 		}
 	}
 	h := tf.Decls["helper"]
-	// Not the local name (nor the struct key resolving to it), the parameter t, nor the
-	// selected names x.open, t.Run, testing.T.
-	if want := []string{"fixture", "p", "second", "testing"}; !slices.Equal(h.Refs, want) {
+	// The signature's names apart from the body's. Not the local name (nor the struct
+	// key resolving to it), the parameter t, nor the selected names x.open, t.Run,
+	// testing.T.
+	if want := []string{"testing"}; !slices.Equal(h.Refs, want) {
 		t.Errorf("helper refs %v, want %v", h.Refs, want)
 	}
-	if !slices.Contains(h.Qualified, "Exported") || slices.Contains(h.Qualified, "open") {
-		t.Errorf("helper qualified %v", h.Qualified)
+	if want := []string{"fixture", "p", "second", "testing"}; !slices.Equal(h.BodyRefs, want) {
+		t.Errorf("helper body refs %v, want %v", h.BodyRefs, want)
 	}
-	if d := tf.Decls["fixture.open"]; d.Recv != "fixture" || slices.Contains(d.Refs, "name") {
+	if !slices.Contains(h.BodyQualified, "Exported") || slices.Contains(h.BodyQualified, "open") || !slices.Equal(h.Qualified, []string{"T"}) {
+		t.Errorf("helper qualified %v, body %v", h.Qualified, h.BodyQualified)
+	}
+	if d := tf.Decls["fixture.open"]; d.Recv != "fixture" || slices.Contains(d.BodyRefs, "name") || !slices.Contains(d.Refs, "fixture") {
 		t.Errorf("method: %+v", d)
 	}
 	if !tf.Decls["fixture"].Type || tf.Decls["second"].Refs == nil {
@@ -252,18 +328,26 @@ func helper(t *testing.T) {
 
 	// Only calls of the program evaluated at initialization run for every test.
 	for src, init := range map[string]bool{
-		"package p\nvar table = []int{1}\nvar f = func() { run() }\n": false,
-		"package p\nvar x = run()\n":                                  true,
-		"package p\nvar x = []byte(\"a\")\n":                          false,
-		"package p\nvar x = string(rune(1))\n":                        false,
-		"package p\nvar x = make([]int, len(\"ab\"))\n":               false,
-		"package p\ntype T int\nvar x = T(1)\n":                       false,
-		"package p\nvar x = U(1)\n":                                   true, // another file's type, or a function
-		"package p\nvar x = (*T)(nil)\n":                              false,
-		"package p\nvar x = (*f)(1)\n":                                true,
-		"package p\nvar x = []byte(load())\n":                         true,
-		"package p\nvar x = func() int { return 1 }()\n":              true,
-		"package p\nconst x = len(\"ab\")\n":                          false,
+		"package p\nvar table = []int{1}\nvar f = func() { run() }\n":                      false,
+		"package p\nvar x = run()\n":                                                       true,
+		"package p\nvar x = []byte(\"a\")\n":                                               false,
+		"package p\nvar x = string(rune(1))\n":                                             false,
+		"package p\nvar x = make([]int, len(\"ab\"))\n":                                    false,
+		"package p\ntype T int\nvar x = T(1)\n":                                            false,
+		"package p\nvar x = U(1)\n":                                                        true, // another file's type, or a function
+		"package p\nvar x = (*T)(nil)\n":                                                   false,
+		"package p\nvar x = (*f)(1)\n":                                                     true,
+		"package p\nvar x = []byte(load())\n":                                              true,
+		"package p\nvar x = func() int { return 1 }()\n":                                   true,
+		"package p\nconst x = len(\"ab\")\n":                                               false,
+		"package p\nimport \"errors\"\nvar x = errors.New(\"e\")\n":                        false,
+		"package p\nimport \"fmt\"\nvar x = fmt.Errorf(\"e: %w\", base)\n":                 false,
+		"package p\nimport \"regexp\"\nvar x = regexp.MustCompile(`^a+$`)\n":               false,
+		"package p\nimport \"regexp\"\nvar x = regexp.MustCompile(`(`)\n":                  true, // panics at init
+		"package p\nimport \"regexp\"\nvar x = regexp.MustCompile(pattern)\n":              true,
+		"package p\nimport errors \"example.com/m/registry\"\nvar x = errors.New(\"e\")\n": true, // another package of that name
+		"package p\nvar x = errors.New(\"e\")\n":                                           true, // no such import: a variable of the package
+		"package p\nimport \"errors\"\nvar x = errors.New(load())\n":                       true,
 	} {
 		tf, err := ParseTestFile([]byte(src))
 		if err != nil {

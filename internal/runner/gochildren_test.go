@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/testutil"
 	"github.com/dotneet/smates/internal/trace"
@@ -98,7 +99,7 @@ func nonGo(t *testing.T, o *Observation, out string) []string {
 	}
 	var deps []string
 	for f := range o.Files {
-		if !strings.Contains(f, ".go") && f != "p/" && f != "go.mod" {
+		if !strings.Contains(f, ".go") && f != "p/" && f != "go.mod" && depkey.KindOf(f) != depkey.KindShape && depkey.KindOf(f) != depkey.KindMethods {
 			deps = append(deps, f)
 		}
 	}

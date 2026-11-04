@@ -18,27 +18,24 @@
     "go.mod",
     "migrations/001.sql",
     "migrations/002.sql",
-    "p/",
+    "p/#shape",
     "p/a.go",
     "p/a.go#decls",
+    "p/a.go#sig:A",
     "p/a_test.go",
     "p/a_test.go#decl:TestA",
-    "p/a_test.go#decls",
     "p/b.go",
     "p/b.go#decls",
+    "p/b.go#sig:B",
     "p/b_test.go",
     "p/b_test.go#decl:TestB",
     "p/b_test.go#decl:TestB2",
-    "p/b_test.go#decls",
-    "q/",
+    "q/#shape",
     "q/q.go",
-    "q/q.go#decls",
     "q/q_extra_test.go",
     "q/q_extra_test.go#decl:TestQ2",
-    "q/q_extra_test.go#decls",
     "q/q_test.go",
-    "q/q_test.go#decl:TestQ",
-    "q/q_test.go#decls"
+    "q/q_test.go#decl:TestQ"
   ],
   "declared": [
     {
@@ -64,19 +61,15 @@
           "reason": "changed",
           "changed": [
             "docker-compose.yml",
-            "p/a.go#decls",
-            "p/a_test.go#decl:TestA",
-            "p/a_test.go#decls",
-            "p/b.go#decls",
-            "p/b_test.go#decls"
+            "p/#shape",
+            "p/a.go#sig:A",
+            "p/a_test.go#decl:TestA"
           ],
           "via": {
             "docker-compose.yml": "service",
-            "p/a.go#decls": "import",
-            "p/a_test.go#decl:TestA": "test",
-            "p/a_test.go#decls": "import",
-            "p/b.go#decls": "import",
-            "p/b_test.go#decls": "import"
+            "p/#shape": "import",
+            "p/a.go#sig:A": "import",
+            "p/a_test.go#decl:TestA": "test"
           },
           "service": {
             "docker-compose.yml": "depends_on docker-compose.yml"
@@ -88,20 +81,16 @@
           "selected": true,
           "reason": "changed",
           "changed": [
-            "p/a.go#decls",
-            "p/a_test.go#decls",
+            "p/#shape",
             "p/b.go",
-            "p/b.go#decls",
-            "p/b_test.go#decl:TestB",
-            "p/b_test.go#decls"
+            "p/b.go#sig:B",
+            "p/b_test.go#decl:TestB"
           ],
           "via": {
-            "p/a.go#decls": "import",
-            "p/a_test.go#decls": "import",
+            "p/#shape": "import",
             "p/b.go": "traced",
-            "p/b.go#decls": "import",
-            "p/b_test.go#decl:TestB": "test",
-            "p/b_test.go#decls": "import"
+            "p/b.go#sig:B": "import",
+            "p/b_test.go#decl:TestB": "test"
           },
           "duration_ms": 10
         },
@@ -110,18 +99,12 @@
           "selected": true,
           "reason": "changed",
           "changed": [
-            "p/a.go#decls",
-            "p/a_test.go#decls",
-            "p/b.go#decls",
-            "p/b_test.go#decl:TestB2",
-            "p/b_test.go#decls"
+            "p/#shape",
+            "p/b_test.go#decl:TestB2"
           ],
           "via": {
-            "p/a.go#decls": "import",
-            "p/a_test.go#decls": "import",
-            "p/b.go#decls": "import",
-            "p/b_test.go#decl:TestB2": "test",
-            "p/b_test.go#decls": "import"
+            "p/#shape": "import",
+            "p/b_test.go#decl:TestB2": "test"
           },
           "duration_ms": 10
         },
@@ -139,21 +122,15 @@
             "migrations/002.sql",
             "p/a.go#decls",
             "p/b.go#decls",
-            "q/",
-            "q/q.go#decls",
-            "q/q_extra_test.go#decls",
-            "q/q_test.go#decl:TestQ",
-            "q/q_test.go#decls"
+            "q/#shape",
+            "q/q_test.go#decl:TestQ"
           ],
           "via": {
             "migrations/002.sql": "input",
             "p/a.go#decls": "import",
             "p/b.go#decls": "import",
-            "q/": "import",
-            "q/q.go#decls": "import",
-            "q/q_extra_test.go#decls": "import",
-            "q/q_test.go#decl:TestQ": "test",
-            "q/q_test.go#decls": "import"
+            "q/#shape": "import",
+            "q/q_test.go#decl:TestQ": "test"
           },
           "duration_ms": 10
         },
@@ -195,34 +172,24 @@
         "p#TestA": [
           "@set:paths:docker-compose.yml",
           "go.mod",
-          "p/",
+          "p/#shape",
           "p/a.go",
-          "p/a.go#decls",
-          "p/a_test.go#decl:TestA",
-          "p/a_test.go#decls",
-          "p/b.go#decls",
-          "p/b_test.go#decls"
+          "p/a.go#sig:A",
+          "p/a_test.go#decl:TestA"
         ],
         "p#TestB": [
           "backend/server/server.x",
           "go.mod",
-          "p/",
-          "p/a.go#decls",
-          "p/a_test.go#decls",
+          "p/#shape",
           "p/b.go",
-          "p/b.go#decls",
-          "p/b_test.go#decl:TestB",
-          "p/b_test.go#decls"
+          "p/b.go#sig:B",
+          "p/b_test.go#decl:TestB"
         ],
         "p#TestB2": [
           "backend/server/server.x",
           "go.mod",
-          "p/",
-          "p/a.go#decls",
-          "p/a_test.go#decls",
-          "p/b.go#decls",
-          "p/b_test.go#decl:TestB2",
-          "p/b_test.go#decls"
+          "p/#shape",
+          "p/b_test.go#decl:TestB2"
         ],
         "q#(build)": [
           "go.mod",
@@ -238,11 +205,8 @@
           "migrations/002.sql",
           "p/a.go#decls",
           "p/b.go#decls",
-          "q/",
-          "q/q.go#decls",
-          "q/q_extra_test.go#decls",
-          "q/q_test.go#decl:TestQ",
-          "q/q_test.go#decls"
+          "q/#shape",
+          "q/q_test.go#decl:TestQ"
         ],
         "q#TestQ2": [
           "go.mod",
@@ -250,11 +214,8 @@
           "migrations/002.sql",
           "p/a.go#decls",
           "p/b.go#decls",
-          "q/",
-          "q/q.go#decls",
-          "q/q_extra_test.go#decl:TestQ2",
-          "q/q_extra_test.go#decls",
-          "q/q_test.go#decls"
+          "q/#shape",
+          "q/q_extra_test.go#decl:TestQ2"
         ]
       },
       "known": {
@@ -268,32 +229,22 @@
         "p#TestA": [
           "@set:paths:docker-compose.yml",
           "go.mod",
-          "p/",
-          "p/a.go#decls",
-          "p/a_test.go#decl:TestA",
-          "p/a_test.go#decls",
-          "p/b.go#decls",
-          "p/b_test.go#decls"
+          "p/#shape",
+          "p/a.go#sig:A",
+          "p/a_test.go#decl:TestA"
         ],
         "p#TestB": [
           "backend/server/server.x",
           "go.mod",
-          "p/",
-          "p/a.go#decls",
-          "p/a_test.go#decls",
-          "p/b.go#decls",
-          "p/b_test.go#decl:TestB",
-          "p/b_test.go#decls"
+          "p/#shape",
+          "p/b.go#sig:B",
+          "p/b_test.go#decl:TestB"
         ],
         "p#TestB2": [
           "backend/server/server.x",
           "go.mod",
-          "p/",
-          "p/a.go#decls",
-          "p/a_test.go#decls",
-          "p/b.go#decls",
-          "p/b_test.go#decl:TestB2",
-          "p/b_test.go#decls"
+          "p/#shape",
+          "p/b_test.go#decl:TestB2"
         ],
         "q#(build)": [
           "go.mod",
@@ -309,11 +260,8 @@
           "migrations/002.sql",
           "p/a.go#decls",
           "p/b.go#decls",
-          "q/",
-          "q/q.go#decls",
-          "q/q_extra_test.go#decls",
-          "q/q_test.go#decl:TestQ",
-          "q/q_test.go#decls"
+          "q/#shape",
+          "q/q_test.go#decl:TestQ"
         ],
         "q#TestQ2": [
           "go.mod",
@@ -321,11 +269,8 @@
           "migrations/002.sql",
           "p/a.go#decls",
           "p/b.go#decls",
-          "q/",
-          "q/q.go#decls",
-          "q/q_extra_test.go#decl:TestQ2",
-          "q/q_extra_test.go#decls",
-          "q/q_test.go#decls"
+          "q/#shape",
+          "q/q_extra_test.go#decl:TestQ2"
         ]
       },
       "inputs": [

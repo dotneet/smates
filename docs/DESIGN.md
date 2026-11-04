@@ -123,7 +123,10 @@ Dependency keys:
 | `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: paths and sizes on disk) | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies, comments other than directives left out (of a test file: its imports, types, method signatures and what runs for every test; the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
-| `f.go#decl:N` | `decl:` + SHA-1 of the tokens of top-level declaration `N` (function `N`, method `T.N`, a variable, constant or type with its whole group), comments other than directives and example output left out (`""` = absent; the blob when the file does not parse) | Go test functions: a function body it executed, a test-file declaration it reaches |
+| `f.go#decl:N` | `decl:` + SHA-1 of the tokens of top-level declaration `N` (function `N`, method `T.N`, a variable, constant or type with its whole group), with the imports of its file, comments other than directives and example output left out (`""` = absent; the blob when the file does not parse) | Go test functions: a function body it executed, a test-file declaration it reaches |
+| `f.go#sig:N` | `sig:` + SHA-1 of the same declaration without function bodies, with the file's imports | Go test functions: a declaration of its own package it names (from its code, the test-file declarations it reaches, the bodies it executed) |
+| `dir/#shape` | `shape:` + SHA-1 over the Go files of the package directory that contribute what runs for every test (`init`/`TestMain`, initializers that call code, blank imports, shadowed predeclared names, with their build constraints; a file that does not parse or a cgo file whole) and the non-Go files compiled into the package (`golang.PackageParts`) | Go test functions: every function of the package |
+| `dir/#methods:T` | `methods:` + SHA-1 of the sorted method signatures of type `T` across the package's Go files | Go test functions: a type of its package it reaches |
 | `@set:ID` | `set:` + SHA-1 over the paths and blobs of the set's files | the test's suite declares `depends_on`/`serves` (above) |
 
 The hashes are those of the snapshot taken before the run. Paths git does not list
@@ -497,30 +500,36 @@ Test flags of `GOFLAGS` and of the command are translated to `-test.*` flags of 
 binary, `GOFLAGS` first so the command's win. Its dependencies are the functions and
 methods whose body holds an executed block (`f.go#decl:N`, found by mapping the block's
 start to the declarations of the file as it is on disk; a block outside any body, in a
-function literal initializing a package-level variable, is part of `f.go#decls`; a
-block in a file that does not parse or has `//line` directives makes the whole file a
-dependency, and one placed by `//line` in a file that is not there every Go file of the
-package);
-the declarations (`f.go#decls`) of every Go file of the static closure, which is what
-makes this sound: coverage only sees statements inside function bodies, so constants,
-variable initializers, types, signatures and method sets are hashed separately (as
-tokens, so formatting does not count) and a change to them selects every function that
-could see them, while an edit inside a body selects only the functions that executed
-it; the content of Go files of packages the binary does not link (a test that runs
-`go run ../cmd/tool`); in the package's test files, which coverage does not instrument,
-the declarations (`f.go#decl:N`) it reaches: from its own and from those that run for
-every test of the binary (`TestMain`, `init`, package-level variables whose initializer
-calls something other than a conversion or a pure builtin, declarations shadowing a
-predeclared name, methods the test files add to a type they do not declare), following
-the identifiers each one mentions that the parser leaves unresolved or resolves to a
-top-level declaration (not locals, parameters, fields, nor the name a selector
-selects), and from a type to its methods, within the package clause (an external test
-package also follows the names it uses unqualified, as with a dot import, and those it
-selects on an identifier it does not declare, `p.Name`, into the package's own test files); the declarations of every test file of the package
-(`f.go#decls` of a test file: imports, types and method signatures, and what runs for
-every test, so that adding such a declaration selects every function while adding a
-helper or a test selects none); the listing of the package directory (a new file selects every function
-of the package); and everything the package unit has besides (test log reads and
+function literal initializing a package-level variable, is part of that variable's
+declaration, or of `f.go#decls` in another package; a block in a file that does not
+parse or has `//line` directives makes the whole file a dependency, and one placed by
+`//line` in a file that is not there every Go file of the package); for the other
+packages of the static closure, the declarations (`f.go#decls`) of every Go file, which
+is what makes this sound there: coverage only sees statements inside function bodies,
+so constants, variable initializers, types, signatures and method sets are hashed
+separately (as tokens, so formatting does not count) and a change to them selects every
+function that could see them, while an edit inside a body selects only the functions
+that executed it; the content of Go files of packages the binary does not link (a test
+that runs `go run ../cmd/tool`); and, in its own package (`funcDeps`), what it reaches
+by name, starting from its own declaration, from what runs for every test of the binary
+(`TestMain`, `init`, package-level variables whose initializer calls something other
+than a conversion, a pure builtin, `errors.New`, `fmt.Errorf`, `time.FixedZone` or
+`regexp.MustCompile` of a literal that compiles (no side effect, no panic), declarations
+shadowing a predeclared name, methods
+the test files add to a type they do not declare) and from the bodies it executed, and
+following the identifiers each declaration mentions that the parser leaves unresolved or
+resolves to a top-level declaration (not locals, parameters, fields, nor the name a
+selector selects), within the package clause (an external test package also follows the
+names it uses unqualified, as with a dot import, and those it selects on an identifier
+it does not declare, `p.Name`, into the package): test-file declarations count whole
+(`f.go#decl:N`, all their names followed: coverage does not instrument test files), the
+others without their bodies (`f.go#sig:N`, only the names outside bodies followed,
+except for bodies it executed); every type it reaches brings its method set
+(`dir/#methods:T`) and the methods test files declare for it; and the package's shape
+(`dir/#shape`), so that adding what runs for every test selects every function while
+adding a function, type, constant, test or data file nothing names selects none (the
+package listing is no dependency: a test that lists the directory records it); and
+everything the package unit has besides (test log reads and
 environment variables, non-Go files of the closure, `go.mod`/`go.sum`, children). A
 missing profile makes every file of the closure a content dependency. When per-function
 recording is impossible (the binary does not build with coverage, `go list` fails, the

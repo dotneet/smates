@@ -98,14 +98,19 @@ module.
   another test of its package left behind behaves differently than under `go test`.
 - Code that matters without running (an unexecuted method that satisfies an interface)
   is covered through declarations. Code executed through reflection alone is not.
-- Test files are followed by name, without type information. A key in a composite
-  literal (`{name: ...}`) counts as a use of a test-file declaration of that name (it
-  may be a constant used as a map key): more runs, never fewer. A call in a
-  package-level variable's initializer that may run code (anything but a conversion to
-  a type literal, a predeclared type or a type of the same file, `(*T)(nil)`, or a
-  builtin such as `len`) makes the variable a dependency of every test.
-- A helper every test calls is a dependency of every test: an edit inside it selects
-  them all.
+- Declarations of the test's own package are followed by name, without type
+  information. A key in a composite literal (`{name: ...}`) counts as a use of a
+  declaration of that name (it may be a constant used as a map key): more runs, never
+  fewer. A call in a package-level variable's initializer that may run code (anything
+  but a conversion to a type literal, a predeclared type or a type of the same file,
+  `(*T)(nil)`, a builtin such as `len`, `errors.New`, `fmt.Errorf`, `time.FixedZone`,
+  or `regexp.MustCompile` of a literal pattern that compiles) makes the variable a
+  dependency of every test.
+- A helper every test calls, or a type every test reaches (a server struct), is a
+  dependency of every test: an edit inside the helper, or to the type's fields or
+  method set, selects them all.
+- Declarations of other packages count per file: a changed constant, type or signature
+  in an imported package selects every function of the packages importing it.
 
 See [Go test functions](../guides/go-test-functions.md).
 

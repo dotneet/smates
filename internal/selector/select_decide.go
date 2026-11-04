@@ -2,8 +2,10 @@ package selector
 
 import (
 	"fmt"
+	"path"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
@@ -137,9 +139,10 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		return
 	case ModeDiff:
 		for _, d := range deps {
-			// Without a recording, a Go file's declarations change when the file does.
+			// Without a recording, a Go file's declarations change when the file does,
+			// and a Go package's shape and method sets when one of its Go files does.
 			f, isFile := depkey.File(d)
-			if changed[d] || (isFile && changed[f]) {
+			if changed[d] || (isFile && changed[f]) || goPackageChanged(d, changed) {
 				t.Changed = append(t.Changed, d)
 			}
 		}
@@ -221,4 +224,19 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 	}
 	sort.Strings(changed)
 	t.Changed = changed
+}
+
+// goPackageChanged reports whether d is the shape or a method set of a Go package
+// (depkey.Shape, depkey.Methods) one of whose Go files is among the changed files.
+func goPackageChanged(d string, changed map[string]bool) bool {
+	kind, dir := depkey.Parse(d)
+	if kind != depkey.KindShape && kind != depkey.KindMethods {
+		return false
+	}
+	for f := range changed {
+		if strings.HasSuffix(f, ".go") && path.Dir(f) == dir {
+			return true
+		}
+	}
+	return false
 }

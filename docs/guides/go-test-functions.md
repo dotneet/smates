@@ -46,13 +46,14 @@ own process (`-test.run '^TestX$'`, with a coverage profile and a test log). A f
 depends on:
 
 - **Function bodies it executed.** Every function or method in which any of its
-  blocks ran, with the declarations of its file. Package initialization runs in every
-  process, so the `init` functions and package-level variable initializers it runs
-  count for every function.
-- **Declarations it may reach.** For every other Go file of the import closure, the
-  file without its function bodies. A changed constant, variable initializer, type,
-  signature or method selects every function that could see it. An edit inside a body
-  selects only the functions that executed it.
+  blocks ran. Package initialization runs in every process, so the `init` functions it
+  runs count for every function.
+- **Declarations of its package it names.** From its own code, the test-file
+  declarations it reaches and the bodies it executed, smates follows names to the
+  types, constants, variables and function signatures of the package, without their
+  bodies (a body it did not run cannot matter), and from a type to its fields' types.
+  A changed constant, struct field or signature selects the functions that name it,
+  directly or through what they reach; a new declaration nothing names selects none.
 - **Test-file declarations it reaches.** Coverage does not instrument test files, so
   smates follows names instead: from the test function's own declaration, and from
   those that run for every test (`TestMain`, `init`, package-level variables
@@ -60,37 +61,48 @@ depends on:
   mention, and from a type to its methods. Names are resolved as Go resolves them: a
   local variable, a parameter, a field or a method called `x.Name` does not reach a
   helper that happens to be called `Name`. An external test package (`pkg_test`)
-  reaches the package's own test helpers it uses as `pkg.Helper` (or as `Helper`,
+  reaches the package's own declarations it uses as `pkg.Helper` (or as `Helper`,
   with a dot import of the package). Methods that test files add to a type of the
   package itself count for every function (they may change its method set).
-- **The shape of every test file of the package.** Its imports, types and method
-  signatures, and what runs for every test. Adding such a declaration (an `init`, a
-  method) selects every function; adding a helper or a test selects none until
-  something uses it (the [compile check](#compile-checks) still runs).
+- **The method set of every type it reaches.** Adding, removing or changing the
+  signature of a method of such a type selects it (the type may satisfy an interface,
+  or a `String` method change what is printed), wherever the method is declared.
+- **The package's shape.** What runs for every test of the binary or changes what the
+  package means: `init` functions and `TestMain` (that there are), package-level
+  variables whose initializer calls code, blank imports, declarations that shadow a
+  predeclared name, and files compiled into the package that are not Go (assembly,
+  cgo sources). Adding such a declaration or file selects every function; adding an
+  ordinary function, type, constant, test or data file selects none until something
+  uses it (the [compile check](#compile-checks) still runs).
+- **Declarations of the other packages it imports.** For every Go file of the import
+  closure outside its package, the file without its function bodies: a changed
+  constant, type or signature there selects every function of the importing packages.
+  An edit inside a body selects only the functions that executed it.
 - **Everything a package unit has.** Files and directories its test log recorded,
   environment variables it read, embedded and other non-Go files, `go.mod`/`go.sum`, and
   what its child processes used. Go packages it builds or runs as a subprocess
   (`go run ../cmd/tool`) count in full.
-- **The package directory listing.** A file added to the package selects every
-  function of the package.
 
 The unit of attribution is the top-level declaration: a function that executed one
 line of `PlaceOrder` depends on the body of `PlaceOrder`, not on the other functions of
-`order.go`. Declarations are compared as tokens: reformatting does not count, and
-neither do comments, except directives (`//go:embed`, `//go:build`, ...), the output
-comment of an example and every comment of a file that uses cgo.
+`order.go`. Declarations are compared as tokens, with the imports of their file (they
+decide what the names mean): reformatting does not count, and neither do comments,
+except directives (`//go:embed`, `//go:build`, ...), the output comment of an example
+and every comment of a file that uses cgo.
 
 ```text
 $ smates deps 'internal/api#TestPlaceOrder'
 go.mod	static,recorded
-internal/api/	static,recorded
+internal/api/#methods:Order	static,recorded
+internal/api/#methods:Server	static,recorded
+internal/api/#shape	static,recorded
 internal/api/helpers_test.go#decl:newServer	static,recorded
-internal/api/helpers_test.go#decls	static,recorded
 internal/api/order.go#decl:PlaceOrder	recorded
-internal/api/order.go#decls	static,recorded
+internal/api/order.go#sig:MaxItems	recorded
+internal/api/order.go#sig:Order	static,recorded
 internal/api/order_test.go#decl:TestPlaceOrder	static,recorded
-internal/api/order_test.go#decls	static,recorded
-internal/api/user.go#decls	static,recorded
+internal/api/server.go#sig:Server	static,recorded
+internal/store/store.go#decls	static,recorded
 smates.yml	static,recorded
 ```
 
