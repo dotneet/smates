@@ -64,12 +64,24 @@ class A {
     Object a = com.example.b.Store.open();
     java.util.function.Supplier<String> s = com.example.c.Util::name;
     int n = 1.5e-3 > 0x1Fp+2 ? 1_000 : 0;
+    int m = 0xFE+Config.MASK + 0xCAFE-Limits.MAX + 1e+Other.X;
 }`))
 	got := append([]string{}, u.names...)
 	sort.Strings(got)
-	want := []string{"com.example.b.Store.open", "com.example.c.Util", "java.util.function.Supplier"}
+	want := []string{
+		"Config.MASK", "Limits.MAX", "Other.X",
+		"com.example.b.Store.open", "com.example.c.Util", "java.util.function.Supplier",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("names = %q, want %q", got, want)
+	}
+}
+
+func TestScanCROnlyLineEndings(t *testing.T) {
+	// Old Mac line endings: a line comment or an unterminated literal ends at the CR.
+	u := scan([]byte("package com.example.a;\r// note\rimport com.example.b.Store;\rclass A { String s = \"x\r; Store st; }\r"))
+	if u.pkg != "com.example.a" || len(u.imports) != 1 || !u.idents["Store"] || !u.idents["st"] {
+		t.Errorf("scan with CR line endings = pkg %q, imports %+v, idents %v", u.pkg, u.imports, u.idents)
 	}
 }
 

@@ -59,7 +59,8 @@ func lex(s string) []token {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f':
 			i++
 		case strings.HasPrefix(s[i:], "//"):
-			if k := strings.IndexByte(s[i:], '\n'); k >= 0 {
+			// A lone CR ends a line too (JLS 3.4).
+			if k := strings.IndexAny(s[i:], "\r\n"); k >= 0 {
 				i += k
 			} else {
 				i = len(s)
@@ -113,7 +114,8 @@ func isIdentRune(r rune) bool {
 }
 
 // skipQuoted returns the index after a string or character literal whose content starts
-// at i. A literal cannot span lines, so an unterminated one ends at the newline.
+// at i. A literal cannot span lines, so an unterminated one ends at the line terminator
+// (LF, CR or both).
 func skipQuoted(s string, i int, quote byte) int {
 	for i < len(s) {
 		switch s[i] {
@@ -121,7 +123,7 @@ func skipQuoted(s string, i int, quote byte) int {
 			i += 2
 		case quote:
 			return i + 1
-		case '\n':
+		case '\n', '\r':
 			return i
 		default:
 			i++
@@ -148,20 +150,31 @@ func skipTextBlock(s string, i int) int {
 // skipNumber returns the index after a numeric literal starting at i (1_000L, 0x1Fp-3,
 // 1.5e+10f).
 func skipNumber(s string, i int) int {
+	start := i
+	hex := strings.HasPrefix(s[i:], "0x") || strings.HasPrefix(s[i:], "0X")
 	for i < len(s) {
 		c := s[i]
 		switch {
 		case isIdentByte(c) || c == '.':
 			i++
-		case (c == '+' || c == '-') && strings.ContainsRune("eEpP", rune(s[i-1])):
-			// An exponent's sign (in a hexadecimal literal, 0x1E+2 is an addition: the
-			// literal then swallows "+2", which holds no name either).
+		case (c == '+' || c == '-') && i > start && isExponent(s[i-1], hex) && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9':
+			// An exponent's sign. In 0xFE+Config.MASK, E is a hexadecimal digit and
+			// the sign starts an addition: the literal must not swallow the name.
 			i++
 		default:
 			return i
 		}
 	}
 	return i
+}
+
+// isExponent reports whether c marks the exponent of a decimal (e) or hexadecimal (p)
+// floating-point literal.
+func isExponent(c byte, hex bool) bool {
+	if hex {
+		return c == 'p' || c == 'P'
+	}
+	return c == 'e' || c == 'E'
 }
 
 // unescapeUnicode translates the \uXXXX escapes Java applies before lexing (JLS 3.3),
