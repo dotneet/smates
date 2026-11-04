@@ -31,24 +31,30 @@ smates: selected 2 of 3 test unit(s) across 1 suite(s) (33% skipped)
 
 記録中、smates は各パッケージのテストバイナリを、リンクされるリポジトリ内のパッケージを対象にしたカバレッジ付きで 1 回だけビルドします（`go test -c -cover -coverpkg=...`。`-tags` や `-race` などスイートのコマンドのビルドフラグも使います）。そのうえで、各関数を専用のプロセスで実行します（`-test.run '^TestX$'`、カバレッジプロファイルとテストログ付き）。関数が依存するのは次のものです。
 
-- **実行したファイル。** 関数のブロックが 1 つでも実行された Go のファイルすべて。パッケージの初期化はどのプロセスでも実行されるので、すべての関数の依存になります。
+- **実行した関数本体。** 関数のブロックが 1 つでも実行された関数・メソッドのすべてと、それを含むファイルの宣言。パッケージの初期化はどのプロセスでも実行されるので、そこで動く `init` 関数とパッケージレベル変数の初期化式は、すべての関数の依存になります。
 - **到達しうる宣言。** import の閉包にある他のすべての Go ファイルについて、関数本体を除いた部分。定数、変数の初期化式、型、シグネチャ、メソッドを変更すると、それが見える可能性のあるすべての関数が選択されます。本体の中だけの編集なら、それを実行した関数だけが選択されます。
-- **テストファイル。** 自分の `_test.go` ファイル、自分が名前で参照するヘルパーを宣言したテストファイル、`TestMain` や `init`、関数呼び出しで初期化されるパッケージレベル変数を含むテストファイル。
+- **到達するテストファイルの宣言。** カバレッジはテストファイルを計測しないので、smates は名前をたどります。テスト関数自身の宣言と、すべてのテストで動く宣言（`TestMain`、`init`、関数呼び出しで初期化されるパッケージレベル変数）から始めて、そこで使われるヘルパー・変数・定数・型へ、型からはそのメソッドへとたどります。名前は Go と同じように解決します。ローカル変数、引数、フィールド、`x.Name` と呼ぶメソッドは、たまたま `Name` という名前のヘルパーには届きません。外部テストパッケージ（`pkg_test`）は、`pkg.Helper` として（パッケージを dot import していれば `Helper` として）使うパッケージ自身のテスト用ヘルパーに届きます。テストファイルがパッケージ自身の型に足したメソッドは、すべての関数の依存になります（メソッドセットを変えうるため）。
+- **パッケージのすべてのテストファイルの形。** import、型とメソッドのシグネチャ、すべてのテストで動く宣言。そうした宣言（`init` やメソッド）を足すとすべての関数が選択されます。ヘルパーやテストを足しただけなら、何かがそれを使うまでは何も選択されません（[コンパイルチェック](#compile-checks)は実行されます）。
 - **パッケージ単位のユニットが持つものすべて。** テストログに記録されたファイルとディレクトリ、読み取った環境変数、埋め込みファイルなど Go 以外のファイル、`go.mod`/`go.sum`、子プロセスが使ったもの。サブプロセスとしてビルド・実行する Go のパッケージ（`go run ../cmd/tool`）は内容全体が依存になります。
 - **パッケージディレクトリの一覧。** パッケージにファイルを追加すると、そのパッケージのすべての関数が選択されます。
 
-帰属の単位はファイルです。`user.go` の 1 行を実行した関数は `user.go` 全体に依存します。宣言はトークンとして比較するので、整形だけの変更は数えません。
+帰属の単位はトップレベルの宣言です。`PlaceOrder` の 1 行を実行した関数は `PlaceOrder` の本体に依存し、`order.go` の他の関数には依存しません。宣言はトークンとして比較します。整形は数えず、コメントも数えません。ただし、ディレクティブ（`//go:embed`、`//go:build` など）、Example の出力コメント、cgo を使うファイルのコメントは数えます。
 
 ```text
 $ smates deps 'internal/api#TestPlaceOrder'
 go.mod	static,recorded
 internal/api/	static,recorded
-internal/api/order.go	recorded
+internal/api/helpers_test.go#decl:newServer	static,recorded
+internal/api/helpers_test.go#decls	static,recorded
+internal/api/order.go#decl:PlaceOrder	recorded
 internal/api/order.go#decls	static,recorded
+internal/api/order_test.go#decl:TestPlaceOrder	static,recorded
+internal/api/order_test.go#decls	static,recorded
 internal/api/user.go#decls	static,recorded
-internal/api/user_test.go	static,recorded
 smates.yml	static,recorded
 ```
+
+テストファイルでもそれ以外でも、関数の依存は「必要なもの」ではなく「到達できるもの」です。すべてのテストが呼ぶヘルパー（共通のサーバーやフィクスチャの生成）はすべてのテストの依存になり、その中を編集するとすべてのテストが選択されます。
 
 ## テストバイナリの再実行 { #re-executions-of-the-test-binary }
 
@@ -103,6 +109,8 @@ go test -run '^(TestA|TestB)$' ./internal/api ./internal/store
 - スイートのコマンドが素の `go test` ではない
 - コマンド（または `GOFLAGS`、`smates run --` の後の引数）が `-run`、`-skip`、`-bench`、`-fuzz`、`-list`、`-c`、`-o` を渡している
 
+関数の一覧を作るときに、テストバイナリは実行しません。`go list` がその設定でコンパイルすると答えたテストファイルから読み取るので、スイート全体を対象に何かをする `TestMain` も、一覧のためには動きません（それができないときだけバイナリに `-test.list` で問い合わせます。そこで終了コードが 0 以外ならフォールバックし、メッセージにはバイナリの出力の最後の行が入ります）。
+
 このようなパッケージは全体として記録され、その旨が表示されます。
 
 ```text
@@ -119,6 +127,18 @@ smates: api: internal/api: recorded at package granularity (the suite command pa
 - パッケージは `-p`（コマンドか `GOFLAGS` で指定。既定は GOMAXPROCS）が許す数だけ同時に実行します。パッケージ同士がデータベースを共有するために `go test -p 1` で実行しているスイートは、記録中も同じく分けて実行されます。
 
 記録中、関数同士はプロセスを共有しません。同じパッケージの別のテストがメモリ上に残した状態に頼るテストは、`go test` のときとは異なる振る舞いになります。
+
+`TestMain` は関数ごとのプロセスで、`-test.run` 付きで動きます。選択した関数を実行するときは、それらのために 1 回動きます。`m.Run()` の後でスイート全体について何かを確かめる `TestMain`（すべてのルートが使われたか、使われないゴールデンファイルがないか）は、`-test.run` や `-test.skip` で実行が絞られているときはその確認を飛ばしてください。
+
+```go
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if f := flag.Lookup("test.run"); code == 0 && f != nil && f.Value.String() == "" {
+		code = auditWholeSuite()
+	}
+	os.Exit(code)
+}
+```
 
 ## テストフラグ { #test-flags }
 

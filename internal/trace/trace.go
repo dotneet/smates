@@ -374,12 +374,13 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 	}
 
+	var v8 []*v8Job
 	for _, dir := range v8Dirs(traceDir) {
-		v8, err := os.ReadDir(dir)
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		for _, e := range v8 {
+		for _, e := range entries {
 			m := v8FileRe.FindStringSubmatch(e.Name())
 			if m == nil {
 				continue
@@ -392,17 +393,20 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 			if ts > p.End {
 				p.End = ts
 			}
-			urls, err := v8URLs(filepath.Join(dir, e.Name()))
-			if err != nil {
-				continue // a truncated file from a killed process: skip it
-			}
-			for _, u := range urls {
-				if r, ok := rel(u); ok {
-					p.add("", "code", r)
-				}
-			}
+			v8 = append(v8, &v8Job{path: filepath.Join(dir, e.Name()), p: p, done: make(chan struct{})})
 		}
 	}
+	// Files are scanned in parallel and merged in directory order.
+	scanV8Files(v8, func(f *v8Job) {
+		if f.err != nil {
+			return // a truncated file from a killed process: skip it
+		}
+		for _, u := range f.urls {
+			if r, ok := rel(u); ok {
+				f.p.add("", "code", r)
+			}
+		}
+	})
 
 	out := make([]*Proc, 0, len(procs))
 	for _, p := range procs {
@@ -642,52 +646,6 @@ func relCtx(id string, rel func(string) (string, bool)) string {
 		}
 	}
 	return id
-}
-
-var urlKey = []byte(`"url":"`)
-
-// v8URLs extracts script URLs from a V8 coverage JSON file without decoding the
-// (large) function range data.
-func v8URLs(file string) ([]string, error) {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	// A file cut short anywhere (even right after a range object) is incomplete: the
-	// scripts after the cut would be missing.
-	if !json.Valid(data) {
-		return nil, fmt.Errorf("truncated coverage file")
-	}
-	var urls []string
-	for {
-		i := bytes.Index(data, urlKey)
-		if i < 0 {
-			break
-		}
-		data = data[i+len(urlKey):]
-		j := 0
-		for j < len(data) && data[j] != '"' {
-			if data[j] == '\\' {
-				j++
-			}
-			j++
-		}
-		if j > len(data) {
-			break
-		}
-		raw := data[:j]
-		data = data[j:]
-		s := string(raw)
-		if bytes.IndexByte(raw, '\\') >= 0 {
-			if u, err := strconv.Unquote(`"` + s + `"`); err == nil {
-				s = u
-			}
-		}
-		if strings.HasPrefix(s, "file://") || strings.HasPrefix(s, "/") || (len(s) > 2 && s[1] == ':') {
-			urls = append(urls, s)
-		}
-	}
-	return urls, nil
 }
 
 // isRoot reports whether p names the repository root itself (also through a symlink).

@@ -29,12 +29,16 @@ type Graph struct {
 
 	mu     sync.Mutex
 	direct map[string][]string
-	langs  []host.Analyzer
+	// runtime holds, for files whose analyzer is a host.TypeAnalyzer and that import
+	// something only for its types, their direct dependencies left once type-only
+	// imports are erased (absent: direct).
+	runtime map[string][]string
+	langs   []host.Analyzer
 }
 
 // New creates a graph over the given set of repo files.
 func New(root string, files []string, opts Options) *Graph {
-	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}}
+	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}, runtime: map[string][]string{}}
 	for _, f := range files {
 		g.files[f] = true
 	}
@@ -71,27 +75,72 @@ func (g *Graph) Read(p string) []byte {
 
 // Direct returns the direct repo-relative dependencies of a file.
 func (g *Graph) Direct(p string) []string {
+	d, _ := g.deps(p)
+	return d
+}
+
+// RuntimeDirect returns the direct repo-relative dependencies of a file that remain
+// once its type-only imports are erased (TypeScript's import type, see
+// host.TypeAnalyzer): what loading the file loads.
+func (g *Graph) RuntimeDirect(p string) []string {
+	_, r := g.deps(p)
+	return r
+}
+
+// deps returns Direct(p) and RuntimeDirect(p), resolving them once.
+func (g *Graph) deps(p string) (direct, runtime []string) {
 	g.mu.Lock()
 	d, ok := g.direct[p]
+	r, typed := g.runtime[p]
 	g.mu.Unlock()
 	if ok {
-		return d
-	}
-	for _, l := range g.langs {
-		if l.Handles(p) {
-			d = l.Deps(p, g.Read(p))
-			break
+		if !typed {
+			r = d
 		}
+		return d, r
+	}
+	typed = false
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if ta, ok := l.(host.TypeAnalyzer); ok {
+			d, r = ta.SplitDeps(p, g.Read(p))
+			typed = true
+		} else {
+			d = l.Deps(p, g.Read(p))
+		}
+		break
 	}
 	d = dedupe(d, p)
+	r = dedupe(r, p)
+	typed = typed && len(r) != len(d)
+	if !typed {
+		r = d
+	}
 	g.mu.Lock()
 	g.direct[p] = d
+	if typed {
+		g.runtime[p] = r
+	}
 	g.mu.Unlock()
-	return d
+	return d, r
 }
 
 // Closure returns the transitive dependencies of the start files, including them.
 func (g *Graph) Closure(start ...string) []string {
+	return g.closure(g.Direct, start)
+}
+
+// RuntimeClosure returns the transitive dependencies of the start files through the
+// imports that remain once type-only imports are erased (see RuntimeDirect),
+// including the start files: what running them loads, for a runner that strips
+// types without checking them.
+func (g *Graph) RuntimeClosure(start ...string) []string {
+	return g.closure(g.RuntimeDirect, start)
+}
+
+func (g *Graph) closure(direct func(string) []string, start []string) []string {
 	seen := map[string]bool{}
 	stack := append([]string{}, start...)
 	for len(stack) > 0 {
@@ -101,7 +150,7 @@ func (g *Graph) Closure(start ...string) []string {
 			continue
 		}
 		seen[p] = true
-		for _, d := range g.Direct(p) {
+		for _, d := range direct(p) {
 			if !seen[d] {
 				stack = append(stack, d)
 			}

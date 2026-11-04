@@ -269,7 +269,10 @@ func TestFuncUnitsAndMapStatic(t *testing.T) {
 	}
 	closure := []string{"go.mod", "p/a.go", "p/a_test.go", "p/b_test.go", "p/deep_test.go", "p/ext_test.go", "p/helper_test.go", "p/main_test.go", "p/other_test.go", "p/static/x.txt", "r/r.go"}
 	got := a.MapStatic(s, "p#TestA", closure)
-	want := []string{"go.mod", "p/a.go#decls", "p/a_test.go", "p/b_test.go#decls", "p/deep_test.go", "p/ext_test.go#decls", "p/helper_test.go", "p/main_test.go", "p/other_test.go#decls", "p/static/x.txt", "r/r.go#decls", "p/"}
+	// Every Go file's declarations; in the test files, the declarations TestA reaches:
+	// itself, helper and what it calls, TestMain (it runs for every test).
+	want := []string{"go.mod", "p/a.go#decls", "p/a_test.go#decls", "p/b_test.go#decls", "p/deep_test.go#decls", "p/ext_test.go#decls", "p/helper_test.go#decls", "p/main_test.go#decls", "p/other_test.go#decls", "p/static/x.txt", "r/r.go#decls",
+		"p/a_test.go#decl:TestA", "p/deep_test.go#decl:deep", "p/helper_test.go#decl:helper", "p/main_test.go#decl:TestMain", "p/"}
 	if !slices.Equal(got, want) {
 		t.Errorf("MapStatic\n got %v\nwant %v", got, want)
 	}
@@ -324,5 +327,50 @@ func TestGoFuncCommandsNarrowed(t *testing.T) {
 	cmds, err = goTest{}.Commands(rc)
 	if err != nil || len(cmds) != 1 || slices.Contains(cmds[0], "./...") || !slices.Contains(cmds[0], "^(TestA|TestB)$") || !slices.Contains(cmds[0], "./a") {
 		t.Errorf("narrowed: %q %v", cmds, err)
+	}
+}
+
+// The test-file declarations a test function reaches: names resolved within the
+// package, not by text (a selector, a local or a method of the same name does not
+// count), types with their methods, what runs for every test, and in an external test
+// package the declarations of the package's own test files it selects (p.Name).
+func TestTestFileDeps(t *testing.T) {
+	repo := tempRepo(t)
+	files := map[string]string{
+		"p/p.go":              "package p\ntype Server struct{}\nfunc (s *Server) Render() {}\n",
+		"p/a_test.go":         "package p\nimport \"testing\"\nfunc TestA(t *testing.T) { name := 1; _ = name; f := newFake(); f.Render() }\nfunc TestA2(t *testing.T) { run() }\n",
+		"p/fake_test.go":      "package p\ntype fake struct{ cfg config }\nfunc newFake() *fake { return &fake{} }\nfunc (f *fake) Render() { f.cfg.load() }\n",
+		"p/cfg_test.go":       "package p\ntype config struct{}\nfunc (config) load() {}\n",
+		"p/name_test.go":      "package p\nfunc name() {}\nfunc run() {}\nfunc (u unrelated) Render() {}\ntype unrelated int\n",
+		"p/init_test.go":      "package p\nimport \"regexp\"\nvar re = regexp.MustCompile(\"x\")\nvar raw = []byte(\"x\")\nvar _ = (*fake)(nil)\nfunc TestInit(t *testing.T) { _ = raw }\n",
+		"p/srv_test.go":       "package p\nfunc (s *Server) testOnly() {}\n",
+		"p/export_test.go":    "package p\nfunc Exported() { run() }\n",
+		"p/x_test.go":         "package p_test\nimport (\"testing\"; \"example.com/m/p\")\nfunc TestX(t *testing.T) { p.Exported() }\n",
+		"p/dot_test.go":       "package p_test\nimport (\"testing\"; . \"example.com/m/p\")\nfunc TestDot(t *testing.T) { DotHelper() }\n",
+		"p/dothelper_test.go": "package p\nfunc DotHelper() { name() }\n",
+		"p/bad_test.go":       "package p\nfunc {",
+	}
+	writeFiles(t, repo.Root, files)
+	var all []string
+	for f := range files {
+		all = append(all, f)
+	}
+	slices.Sort(all)
+	every := []string{"p/bad_test.go", "p/init_test.go#decl:re", "p/srv_test.go#decl:Server.testOnly"}
+	for name, want := range map[string][]string{
+		// Not name (a local), unrelated.Render (a method of another type), run.
+		"TestA":  {"p/a_test.go#decl:TestA", "p/cfg_test.go#decl:config", "p/cfg_test.go#decl:config.load", "p/fake_test.go#decl:fake", "p/fake_test.go#decl:fake.Render", "p/fake_test.go#decl:newFake"},
+		"TestA2": {"p/a_test.go#decl:TestA2", "p/name_test.go#decl:run"},
+		// raw is a conversion, not initialization code: only the test using it depends on it.
+		"TestInit": {"p/init_test.go#decl:TestInit", "p/init_test.go#decl:raw"},
+		"TestX":    {"p/export_test.go#decl:Exported", "p/name_test.go#decl:run", "p/x_test.go#decl:TestX"},
+		// A dot import of the package: its test helpers by their bare names.
+		"TestDot": {"p/dot_test.go#decl:TestDot", "p/dothelper_test.go#decl:DotHelper", "p/name_test.go#decl:name"},
+	} {
+		want = append(want, every...)
+		slices.Sort(want)
+		if got := testFileDeps(repo.Root, "p", name, all); !slices.Equal(got, want) {
+			t.Errorf("%s:\n got %v\nwant %v", name, got, want)
+		}
 	}
 }

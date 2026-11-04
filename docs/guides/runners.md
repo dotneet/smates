@@ -76,6 +76,25 @@ usual (per-file status then needs a JUnit report).
   analyzer, so imports between packages of a monorepo are followed.
 - Lockfiles, `package.json`, `tsconfig*.json`, `.npmrc`, `.nvmrc` and similar files, in
   the suite directory and every directory above it, are inputs of every test.
+- In vitest and bun suites, imports used only for types (`import type`) are not
+  dependencies; see [Limitations](../reference/limitations.md#what-tracing-reaches).
+
+### The cost of recording
+
+Recording makes a Node run slower than the same run without smates. V8 collects precise
+coverage of every script each process runs and writes it out as JSON whenever a process
+ends (and, for vitest, before a worker is stopped), the `fs` hooks see every file access,
+and smates reads all those coverage files after the run. jest also restarts a worker after
+every file, and bun runs one process per file. How much slower depends on how much code
+the tests load and on how many worker processes start.
+
+`smates run --no-record` runs the selected tests without tracing, at the runner's own
+speed. Selection is the same, but the state is left as it was: the tests that ran are not
+recorded (neither their new dependencies nor their results), so the next recorded run
+selects them again, and tests that have never been recorded stay new. Use it for quick
+local iterations, and let a recorded run (CI, or a plain `smates run`) bring the state up
+to date. Runners that report per-file status without tracing (vitest, jest) still report
+which files failed.
 
 ## Python
 

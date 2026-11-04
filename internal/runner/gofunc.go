@@ -9,16 +9,20 @@ package runner
 // own process with -test.run '^Name$', a coverage profile and a test log. A function
 // then depends on:
 //
-//   - the content of every non-test Go file in which it executed a block (coverage);
+//   - the bodies of the functions and methods it executed (depkey.Decl, from the
+//     coverage profile: the function whose body holds each executed block) and the
+//     declarations of their files;
 //   - the declarations (depkey.Decls: the file without function bodies) of every Go
 //     file of the package's import closure, so that constants, variables, types,
 //     signatures and method sets, which coverage cannot see, still count;
 //   - the content of Go files of packages the binary does not link (packages a test
 //     builds or runs as a subprocess);
-//   - the content of its own _test.go file, of the package's test files it references
-//     by name (helpers), and of test files that run code for every test (TestMain,
-//     init, package-level variables initialized by calls); the declarations of the
-//     other test files of the package;
+//   - in the package's test files, which coverage does not instrument: the
+//     declarations it reaches (depkey.Decl) from its own and from those that run for
+//     every test (TestMain, init, package-level variables initialized by calls),
+//     following the names they mention; and the declarations hash of every test file
+//     (imports, types and method sets, what runs for every test; see
+//     golang.DeclsHash), which a new declaration of that kind changes;
 //   - the listing of the package directory (a file added to it selects every function);
 //   - non-Go files of the static closure (go.mod, go.sum, embedded files), what its test
 //     log recorded (files read, directories listed, environment variables), and what

@@ -1035,7 +1035,7 @@ func TestExistenceProbe(t *testing.T) {
 func TestSelectGoFuncUnits(t *testing.T) {
 	f := newFixture(t, map[string]string{
 		"go.mod":      "module example.com/m\n\ngo 1.22\n",
-		"p/a.go":      "package p\n\nconst K = 1\n\nfunc A() int { return K }\n",
+		"p/a.go":      "package p\n\nconst K = 1\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n",
 		"p/b.go":      "package p\n\nfunc B() int { return 2 }\n",
 		"p/a_test.go": "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) { A() }\n",
 		"p/b_test.go": "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n",
@@ -1052,16 +1052,19 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	if got := res.Suites[0].Selected(); !reflect.DeepEqual(got, []string{"p#TestA", "p#TestB", "p#(build)"}) {
 		t.Fatalf("units %v", got)
 	}
-	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
+	// Its own test file by declaration, not as a whole: the other functions of the file
+	// are not its dependencies.
+	if known := res.Suites[0].Known["p#TestA"]; !contains(known, "p/a.go#decls") || !contains(known, "p/a_test.go#decl:TestA") || !contains(known, "p/a_test.go#decls") || contains(known, "p/a_test.go") || !contains(known, "p/b_test.go#decls") || contains(known, "p/b_test.go") || !contains(known, "p/") {
 		t.Errorf("known %v", known)
 	}
 	if files := res.Suites[0].Files["p#TestA"]; !reflect.DeepEqual(files, []string{"p/a_test.go"}) {
 		t.Errorf("files %v", files)
 	}
-	executed := map[string]string{"p#TestA": "p/a.go", "p#TestB": "p/b.go"}
+	// What recording observes: the bodies executed (coverage), with their files' declarations.
+	executed := map[string][2]string{"p#TestA": {"p/a.go", "A"}, "p#TestB": {"p/b.go", "B"}}
 	obs := map[string]*runner.Observation{}
 	for u, f := range executed {
-		obs[u] = &runner.Observation{Files: map[string]bool{f: true}, Status: state.Pass}
+		obs[u] = &runner.Observation{Files: map[string]bool{depkey.Decl(f[0], f[1]): true, depkey.Decls(f[0]): true}, Status: state.Pass}
 	}
 	obs["p#(build)"] = &runner.Observation{Status: state.Pass}
 	Record(st, res.Suites[0], obs, NewHasher(f.snap()).WithRoot(f.dir), RecordOptions{Now: time.Unix(1, 0), Full: true})
@@ -1075,7 +1078,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	}
 
 	// A body only TestA executed: TestA and the compile check.
-	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n")
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K + 0 }\n\nfunc A2() int { return 3 }\n")
 	res = sel(st, false)
 	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": "-unaffected", "p#(build)": ReasonChanged}) {
 		t.Errorf("body: %v", got)
@@ -1083,7 +1086,23 @@ func TestSelectGoFuncUnits(t *testing.T) {
 	if len(res.Orphans) != 0 {
 		t.Errorf("orphans %v", res.Orphans)
 	}
-	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n")
+	// A body of the same file no test executed: only the compile check.
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 + 0 }\n")
+	res = sel(st, false)
+	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": "-unaffected", "p#(build)": ReasonChanged}) {
+		t.Errorf("unexecuted body: %v", got)
+	}
+	if len(res.Orphans) != 0 {
+		t.Errorf("orphans %v", res.Orphans)
+	}
+	// A test body: that test only.
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n")
+	f.write("p/b_test.go", "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B(); B() }\n")
+	if got := decisions(sel(st, false)); !reflect.DeepEqual(got, map[string]string{"p#TestA": "-unaffected", "p#TestB": ReasonChanged, "p#(build)": ReasonChanged}) {
+		t.Errorf("test body: %v", got)
+	}
+	f.write("p/b_test.go", "package p\n\nimport \"testing\"\n\nfunc TestB(t *testing.T) { B() }\n")
+	f.write("p/a.go", "package p\n\nconst K = 2\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n")
 	res = sel(st, false)
 	if got := decisions(res); !reflect.DeepEqual(got, map[string]string{"p#TestA": ReasonChanged, "p#TestB": ReasonChanged, "p#(build)": ReasonChanged}) {
 		t.Errorf("declarations: %v", got)
@@ -1093,7 +1112,7 @@ func TestSelectGoFuncUnits(t *testing.T) {
 			t.Errorf("TestB changed %v via %v", tt.Changed, tt.Via)
 		}
 	}
-	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n")
+	f.write("p/a.go", "package p\n\nconst K = 1\n\nfunc A() int { return K }\n\nfunc A2() int { return 3 }\n")
 
 	// A new test file in the package selects every function (and its own as new).
 	f.write("p/c_test.go", "package p\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n")

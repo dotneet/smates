@@ -14,6 +14,12 @@ type rawTSConfig struct {
 	CompilerOptions struct {
 		BaseURL *string             `json:"baseUrl"`
 		Paths   map[string][]string `json:"paths"`
+		// The options that keep an import whose specifiers are all types as a
+		// side-effect import (see typeImportOpts). Raw, so that an unexpected value
+		// does not make the whole file unreadable.
+		VerbatimModuleSyntax   json.RawMessage `json:"verbatimModuleSyntax"`
+		PreserveValueImports   json.RawMessage `json:"preserveValueImports"`
+		ImportsNotUsedAsValues json.RawMessage `json:"importsNotUsedAsValues"`
 	} `json:"compilerOptions"`
 	References []struct {
 		Path string `json:"path"`
@@ -117,6 +123,19 @@ func (a *Analyzer) configDirs(dir string) []string {
 // and project references, transitively.
 func (a *Analyzer) dirConfigs(dir string) []*tsConfig {
 	return a.tsConfigs.get(dir, func() []*tsConfig {
+		var out []*tsConfig
+		for _, p := range a.dirConfigFiles(dir) {
+			if c := a.tsconfig(p); c != nil {
+				out = append(out, c)
+			}
+		}
+		return out
+	})
+}
+
+// dirConfigFiles returns the files of dirConfigs(dir), readable or not.
+func (a *Analyzer) dirConfigFiles(dir string) []string {
+	return a.tsPaths.get(dir, func() []string {
 		var paths []string
 		seen := map[string]bool{}
 		var visit func(p string)
@@ -149,13 +168,7 @@ func (a *Analyzer) dirConfigs(dir string) []*tsConfig {
 				visit(f)
 			}
 		}
-		var out []*tsConfig
-		for _, p := range paths {
-			if c := a.tsconfig(p); c != nil {
-				out = append(out, c)
-			}
-		}
-		return out
+		return paths
 	})
 }
 
@@ -292,4 +305,128 @@ func compilePaths(m map[string][]string) []pathRule {
 		return ri.prefix+"*"+ri.suffix < rj.prefix+"*"+rj.suffix
 	})
 	return rules
+}
+
+// typeImportOpts are the settings of the options that keep an import declaration whose
+// specifiers are all types (import { type A } from "./x") as a side-effect import
+// (import {} from "./x"), which loads the module: verbatimModuleSyntax,
+// preserveValueImports and importsNotUsedAsValues, in that order.
+type typeImportOpts struct {
+	set  [3]bool // the option is set in the config or a config it extends
+	keep [3]bool // ... to a value that keeps the import
+	// known is false when the config cannot be read, or extends one that cannot be
+	// while it leaves some option unset.
+	known bool
+}
+
+// keeps reports whether the options keep such imports, or may (unknown).
+func (o typeImportOpts) keeps() bool {
+	return !o.known || o.keep[0] || o.keep[1] || o.keep[2]
+}
+
+// elidesTypeImports reports whether TypeScript compilers remove an import or export
+// declaration whose specifiers all carry the type modifier from the files in dir: no
+// tsconfig.json or jsconfig.json that may govern them (every config of every config
+// directory at or above dir, see configDirs and dirConfigs) keeps it or may, which
+// includes a config that cannot be read. Compilers and type strippers (tsc, esbuild,
+// Bun, swc) without such a config remove it.
+func (a *Analyzer) elidesTypeImports(dir string) bool {
+	return a.elides.get(dir, func() bool {
+		for _, cd := range a.configDirs(dir) {
+			for _, p := range a.dirConfigFiles(cd) {
+				if a.typeImportOptions(p).keeps() {
+					return false
+				}
+			}
+		}
+		return true
+	})
+}
+
+// typeImportOptions returns the type import options of the config at p with its
+// extends chain applied.
+func (a *Analyzer) typeImportOptions(p string) typeImportOpts {
+	return a.typeOpts.get(p, func() typeImportOpts {
+		return a.loadTypeImportOpts(p, map[string]bool{p: true})
+	})
+}
+
+// loadTypeImportOpts applies the extends chain of the config at p (later entries
+// override earlier ones, the config itself all of them). Configs extended from
+// installed packages (node_modules) are read too: they are not part of the working
+// tree, but some set verbatimModuleSyntax. visited guards against cycles.
+func (a *Analyzer) loadTypeImportOpts(p string, visited map[string]bool) typeImportOpts {
+	raw := a.rawConfig(p)
+	if raw == nil {
+		return typeImportOpts{}
+	}
+	dir := path.Dir(p)
+	out := typeImportOpts{known: true}
+	unknownParent := false
+	for _, ext := range extendsList(raw.Extends) {
+		ep := a.extendsFile(dir, ext)
+		if ep == "" {
+			unknownParent = true
+			continue
+		}
+		if visited[ep] {
+			continue
+		}
+		visited[ep] = true
+		parent := a.loadTypeImportOpts(ep, visited)
+		if !parent.known {
+			unknownParent = true
+			continue
+		}
+		for i := range parent.set {
+			if parent.set[i] {
+				out.set[i], out.keep[i] = true, parent.keep[i]
+			}
+		}
+	}
+	co := raw.CompilerOptions
+	for i, v := range []json.RawMessage{co.VerbatimModuleSyntax, co.PreserveValueImports, co.ImportsNotUsedAsValues} {
+		if len(v) == 0 {
+			continue
+		}
+		// Only false (and "remove", importsNotUsedAsValues' default) is known not to
+		// keep the import; null resets the option to its default.
+		s := strings.TrimSpace(string(v))
+		out.set[i], out.keep[i] = true, s != "false" && s != "null" && s != `"remove"`
+	}
+	if unknownParent && (!out.set[0] || !out.set[1] || !out.set[2]) {
+		out.known = false
+	}
+	return out
+}
+
+// extendsFile resolves an "extends" entry of a config in dir to a readable file: a
+// repo file (resolveExtends), else a file under a node_modules directory at or above
+// dir, or one relative to a config that is itself installed. "" when none is found.
+func (a *Analyzer) extendsFile(dir, ext string) string {
+	if p := a.resolveExtends(dir, ext); p != "" {
+		return p
+	}
+	try := func(p string) string {
+		for _, c := range []string{p, p + ".json", path.Join(p, "tsconfig.json")} {
+			if !outside(c) && a.h.Read(c) != nil {
+				return c
+			}
+		}
+		return ""
+	}
+	if isRelative(ext) {
+		return try(path.Join(dir, ext))
+	}
+	if ext == "" || strings.HasPrefix(ext, "/") {
+		return ""
+	}
+	for d := dir; ; d = parentDir(d) {
+		if p := try(path.Join(d, "node_modules", ext)); p != "" {
+			return p
+		}
+		if d == "." || d == "" || d == "/" {
+			return ""
+		}
+	}
 }

@@ -8,6 +8,9 @@
 //	f.go#decls the declarations of a Go file: its source without the bodies of its
 //	          functions and methods (Go per-function selection: a test depends on the
 //	          bodies it executed and on the declarations of everything it could reach)
+//	f.go#decl:N one top-level declaration of a Go file, body included: function or
+//	          variable N, method T.N, type N (Go per-function selection: the bodies a
+//	          test executed, the test-file declarations it reaches)
 //	@set:ID   a set of files declared in smates.yml (depends_on/serves), hashed as one
 //	f#suite   the settings of a suite in the configuration file f (smates.yml): what in
 //	          it can change how the suite's tests run, not its whole content
@@ -42,9 +45,10 @@ const (
 	KindDecls                 // file.go#decls
 	KindSet                   // @set:ID
 	KindConfig                // smates.yml#suite
+	KindDecl                  // file.go#decl:Name
 )
 
-var kindNames = [...]string{"content", "listing", "existence", "tree", "env", "decls", "set", "config"}
+var kindNames = [...]string{"content", "listing", "existence", "tree", "env", "decls", "set", "config", "decl"}
 
 func (k Kind) String() string {
 	if k >= 0 && int(k) < len(kindNames) {
@@ -64,6 +68,7 @@ const (
 	treeSuffix      = "/**"
 	envPrefix       = "$"
 	declsSuffix     = "#decls"
+	declInfix       = "#decl:"
 	setPrefix       = "@set:"
 	configSuffix    = "#suite"
 )
@@ -71,11 +76,24 @@ const (
 // Decls is the key of the declarations of a Go file.
 func Decls(p string) string { return p + declsSuffix }
 
+// Decl is the key of the top-level declaration name of Go file p ("T.M" for method M
+// of type T).
+func Decl(p, name string) string { return p + declInfix + name }
+
+// DeclName splits a declaration key (Decl) into its file and declaration name.
+func DeclName(key string) (file, name string, ok bool) {
+	i := strings.LastIndex(key, declInfix)
+	if i < 0 {
+		return "", "", false
+	}
+	return key[:i], key[i+len(declInfix):], true
+}
+
 // File returns the file a content or declarations key names, and false for any other
 // kind of key.
 func File(key string) (string, bool) {
 	switch k, p := Parse(key); k {
-	case KindContent, KindDecls:
+	case KindContent, KindDecls, KindDecl:
 		return p, true
 	}
 	return "", false
@@ -147,6 +165,9 @@ func Parse(key string) (Kind, string) {
 	if p, ok := strings.CutSuffix(key, declsSuffix); ok {
 		return KindDecls, p
 	}
+	if p, _, ok := DeclName(key); ok {
+		return KindDecl, p
+	}
 	if p, ok := strings.CutSuffix(key, configSuffix); ok {
 		return KindConfig, p
 	}
@@ -170,7 +191,7 @@ func KindOf(key string) Kind {
 
 // IsPseudo reports whether a key stands for something other than a file's content (a
 // listing, an existence check, a tree, an environment variable, a declared set or a
-// Go file's declarations); see Kind.ContentLike.
+// Go file's declarations or one of them); see Kind.ContentLike.
 func IsPseudo(key string) bool { return !KindOf(key).ContentLike() }
 
 // IsEnv reports whether a key is an environment variable.
@@ -183,7 +204,7 @@ type CoverKind string
 const (
 	CoverNone      CoverKind = ""
 	CoverContent   CoverKind = "content"      // the file itself (or its suite settings)
-	CoverDecls     CoverKind = "declarations" // the declarations of a Go file
+	CoverDecls     CoverKind = "declarations" // the declarations of a Go file, or one of them
 	CoverListing   CoverKind = "listing"      // the listing of the file's directory
 	CoverExistence CoverKind = "existence"    // a check whether the file exists
 	CoverTree      CoverKind = "tree"         // every file below one of its directories
@@ -196,7 +217,7 @@ func (k Kind) Cover() CoverKind {
 	switch k {
 	case KindContent, KindConfig:
 		return CoverContent
-	case KindDecls:
+	case KindDecls, KindDecl:
 		return CoverDecls
 	case KindListing:
 		return CoverListing
@@ -210,26 +231,35 @@ func (k Kind) Cover() CoverKind {
 
 // Covers reports how a dependency set explains a change to file f (CoverNone when it
 // does not), trying the keys about f strongest first: its content or its suite
-// settings; the declarations of Go file f (edits inside function bodies the test did
-// not execute do not select it); a listing of its directory or an existence check,
-// only when existenceChanged (they explain f appearing or disappearing but not edits:
-// an edited file only listed or probed may still be read by something tracing cannot
-// see); a tree (a command smates cannot see into ran below a directory containing f;
-// a tree at the repository root explains nothing: it would hide every change from the
-// orphan check). A key below f counts as content: a submodule, recorded as one entry
-// for its commit, is explained by tests that read files inside it.
+// settings; the declarations of Go file f or one of them (edits inside function
+// bodies the test did not execute do not select it); a listing of its directory or an
+// existence check, only when existenceChanged (they explain f appearing or
+// disappearing but not edits: an edited file only listed or probed may still be read
+// by something tracing cannot see); a tree (a command smates cannot see into ran below
+// a directory containing f; a tree at the repository root explains nothing: it would
+// hide every change from the orphan check). A key below f counts as content: a
+// submodule, recorded as one entry for its commit, is explained by tests that read
+// files inside it.
 func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
-	kinds := []Kind{KindContent, KindConfig, KindDecls}
-	if existenceChanged {
-		kinds = append(kinds, KindListing, KindExistence)
-	}
-	for _, k := range kinds {
-		p := f
-		if k == KindListing {
-			p = path.Dir(f)
-		}
-		if deps[Make(k, p)] {
+	for _, k := range []Kind{KindContent, KindConfig, KindDecls} {
+		if deps[Make(k, f)] {
 			return k.Cover()
+		}
+	}
+	prefix, decl := f+"/", f+declInfix
+	below := false
+	for d := range deps {
+		if strings.HasPrefix(d, decl) {
+			return CoverDecls
+		}
+		below = below || strings.HasPrefix(d, prefix)
+	}
+	if existenceChanged {
+		if deps[Listing(path.Dir(f))] {
+			return CoverListing
+		}
+		if deps[Existence(f)] {
+			return CoverExistence
 		}
 	}
 	for d := path.Dir(f); d != "." && d != "/"; d = path.Dir(d) {
@@ -237,11 +267,8 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
 			return CoverTree
 		}
 	}
-	prefix := f + "/"
-	for d := range deps {
-		if strings.HasPrefix(d, prefix) {
-			return CoverContent
-		}
+	if below {
+		return CoverContent
 	}
 	return CoverNone
 }

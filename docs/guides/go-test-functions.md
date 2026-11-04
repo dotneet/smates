@@ -45,15 +45,28 @@ of the suite command such as `-tags` and `-race`). It then runs every function i
 own process (`-test.run '^TestX$'`, with a coverage profile and a test log). A function
 depends on:
 
-- **Files it executed.** Every Go file in which any of its blocks ran. Package
-  initialization runs in every process, so it counts for every function.
+- **Function bodies it executed.** Every function or method in which any of its
+  blocks ran, with the declarations of its file. Package initialization runs in every
+  process, so the `init` functions and package-level variable initializers it runs
+  count for every function.
 - **Declarations it may reach.** For every other Go file of the import closure, the
   file without its function bodies. A changed constant, variable initializer, type,
   signature or method selects every function that could see it. An edit inside a body
   selects only the functions that executed it.
-- **Test files.** Its own `_test.go` file, the test files declaring helpers it names,
-  and test files with `TestMain`, `init` or package-level variables initialized by
-  calls.
+- **Test-file declarations it reaches.** Coverage does not instrument test files, so
+  smates follows names instead: from the test function's own declaration, and from
+  those that run for every test (`TestMain`, `init`, package-level variables
+  initialized by a function call), to the helpers, variables, constants and types they
+  mention, and from a type to its methods. Names are resolved as Go resolves them: a
+  local variable, a parameter, a field or a method called `x.Name` does not reach a
+  helper that happens to be called `Name`. An external test package (`pkg_test`)
+  reaches the package's own test helpers it uses as `pkg.Helper` (or as `Helper`,
+  with a dot import of the package). Methods that test files add to a type of the
+  package itself count for every function (they may change its method set).
+- **The shape of every test file of the package.** Its imports, types and method
+  signatures, and what runs for every test. Adding such a declaration (an `init`, a
+  method) selects every function; adding a helper or a test selects none until
+  something uses it (the [compile check](#compile-checks) still runs).
 - **Everything a package unit has.** Files and directories its test log recorded,
   environment variables it read, embedded and other non-Go files, `go.mod`/`go.sum`, and
   what its child processes used. Go packages it builds or runs as a subprocess
@@ -61,20 +74,29 @@ depends on:
 - **The package directory listing.** A file added to the package selects every
   function of the package.
 
-The unit of attribution is the file: a function that executed one line of `user.go`
-depends on all of `user.go`. Declarations are compared as tokens, so reformatting does
-not count.
+The unit of attribution is the top-level declaration: a function that executed one
+line of `PlaceOrder` depends on the body of `PlaceOrder`, not on the other functions of
+`order.go`. Declarations are compared as tokens: reformatting does not count, and
+neither do comments, except directives (`//go:embed`, `//go:build`, ...), the output
+comment of an example and every comment of a file that uses cgo.
 
 ```text
 $ smates deps 'internal/api#TestPlaceOrder'
 go.mod	static,recorded
 internal/api/	static,recorded
-internal/api/order.go	recorded
+internal/api/helpers_test.go#decl:newServer	static,recorded
+internal/api/helpers_test.go#decls	static,recorded
+internal/api/order.go#decl:PlaceOrder	recorded
 internal/api/order.go#decls	static,recorded
+internal/api/order_test.go#decl:TestPlaceOrder	static,recorded
+internal/api/order_test.go#decls	static,recorded
 internal/api/user.go#decls	static,recorded
-internal/api/user_test.go	static,recorded
 smates.yml	static,recorded
 ```
+
+A function's dependencies, in the test files as elsewhere, are what it can reach, not
+what it needs: a helper every test calls (a shared server or fixture constructor) is a
+dependency of every test, and an edit inside it selects them all.
 
 ## Re-executions of the test binary
 
@@ -153,6 +175,12 @@ Some packages cannot be recorded per function:
 - the command (or `GOFLAGS`, or arguments after `smates run --`) passes `-run`, `-skip`,
   `-bench`, `-fuzz`, `-list`, `-c` or `-o`.
 
+Listing the functions does not run the test binary: smates reads them from the test
+files `go list` says the configuration compiles, so a `TestMain` that does work for the
+whole suite does not run for it. (Only when that fails does smates ask the binary,
+`-test.list`; a non-zero exit there falls back too, with the binary's last line of
+output in the message.)
+
 Such a package is recorded as a whole and says so:
 
 ```text
@@ -176,6 +204,21 @@ functions.
 
 Functions share no process while recording. A test that relies on state another test
 of its package left behind in memory behaves differently than under `go test`.
+
+`TestMain` runs in every function's process, and with `-test.run` set: when selected
+functions run, it runs once for them. A `TestMain` that checks something about the
+whole suite after `m.Run()` (that every route was exercised, that no golden file went
+unused) should skip that check when `-test.run` or `-test.skip` restricts the run:
+
+```go
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if f := flag.Lookup("test.run"); code == 0 && f != nil && f.Value.String() == "" {
+		code = auditWholeSuite()
+	}
+	os.Exit(code)
+}
+```
 
 ## Test flags
 

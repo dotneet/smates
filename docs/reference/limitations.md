@@ -30,8 +30,31 @@ before it ends (built into `t.TempDir()`) is not detected, and an executable fil
 test only reads counts as a program start (extra dependencies, never fewer). See
 [Child processes](../guides/runners.md#child-processes).
 
-**Type-only changes** are handled like any change. Type checking is not a test run:
-keep `tsc` (or your type checker) in CI.
+**Type-only imports.** In vitest and bun suites, an import TypeScript erases before the
+code runs does not make a test depend on the module it names, so a change to a module
+the tests only use for its types (`src/types.ts`) selects none of them, and is not an
+orphan either. Erased imports are:
+
+- `import type …` and `export type … from` declarations, always;
+- `import { type A, type B } from` and `export { type A } from` (every specifier marked
+  `type`), unless a `tsconfig.json` that may apply to the file sets
+  `verbatimModuleSyntax`, `preserveValueImports` or `importsNotUsedAsValues`, extends a
+  config smates cannot read, or cannot be read itself: those keep the import as
+  `import {} from`, which loads the module.
+
+`typeof import("./x")`, `import("./x").T`, a list mixing `type A` with a value, and
+everything in `.js`, `.vue` and the like stay dependencies. smates keeps type-only
+imports too whenever the run may check types: a suite command that does not run
+`vitest` (or `bun test`) directly (`npm test`, a `&&` chain), any mention of
+`typecheck`, `tsc` and similar in the command, the arguments after `--` or the suite
+`env`, a `typecheck` setting (or those compiler options) in a vitest/vite config of the
+suite or a file it imports, a vitest config smates cannot fully see (a workspace file,
+`projects:`, `workspace:` or `extends:` naming other configs by path, an import of a
+package other than vitest, vite, their official plugins and Node's builtins, such as a
+shared preset), and `*.test-d.*` / `*.spec-d.*` files in the suite. jest
+(ts-jest reports type errors), `node --test` and custom suites always keep them. Tests
+recorded by an earlier smates version keep the dependency until they are recorded again.
+Type checking is not a test run: keep `tsc` (or your type checker) in CI.
 
 ## Environment variables
 
@@ -75,6 +98,14 @@ module.
   another test of its package left behind behaves differently than under `go test`.
 - Code that matters without running (an unexecuted method that satisfies an interface)
   is covered through declarations. Code executed through reflection alone is not.
+- Test files are followed by name, without type information. A key in a composite
+  literal (`{name: ...}`) counts as a use of a test-file declaration of that name (it
+  may be a constant used as a map key): more runs, never fewer. A call in a
+  package-level variable's initializer that may run code (anything but a conversion to
+  a type literal, a predeclared type or a type of the same file, `(*T)(nil)`, or a
+  builtin such as `len`) makes the variable a dependency of every test.
+- A helper every test calls is a dependency of every test: an edit inside it selects
+  them all.
 
 See [Go test functions](../guides/go-test-functions.md).
 

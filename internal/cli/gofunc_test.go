@@ -165,13 +165,15 @@ func TestGoFuncSelection(t *testing.T) {
 		t.Fatalf("entries %v", slices.Sorted(maps.Keys(tests)))
 	}
 	// Coverage: each function depends on the bodies it executed, and on the
-	// declarations of the rest of what it imports.
-	for key, want := range map[string]bool{"calc/add.go": true, "util/util.go": false, "util/util.go#decls": true, "calc/testdata/add.txt": true, "calc/add_test.go": true, "calc/mul_test.go": false, "calc/mul_test.go#decls": true, "calc/": true} {
+	// declarations of the rest of what it imports; in the test files, on the
+	// declarations it reaches.
+	for key, want := range map[string]bool{"calc/add.go#decl:Add": true, "calc/add.go": false, "util/util.go": false, "util/util.go#decls": true, "calc/testdata/add.txt": true,
+		"calc/add_test.go#decl:TestAdd": true, "calc/add_test.go": false, "calc/mul_test.go": false, "calc/mul_test.go#decls": true, "calc/helper_test.go#decl:check": false, "calc/": true} {
 		if _, ok := add.Deps[key]; ok != want {
 			t.Errorf("TestAdd depends on %s: %v, want %v", key, ok, want)
 		}
 	}
-	for key, want := range map[string]bool{"calc/mul.go": true, "util/util.go": true, "calc/add.go": false, "calc/add.go#decls": true, "calc/helper_test.go": true, "calc/testdata/add.txt": false} {
+	for key, want := range map[string]bool{"calc/mul.go#decl:Mul": true, "util/util.go#decl:Id": true, "calc/add.go#decl:Add": false, "calc/add.go#decls": true, "calc/helper_test.go#decl:check": true, "calc/helper_test.go": false, "calc/testdata/add.txt": false} {
 		if _, ok := mul.Deps[key]; ok != want {
 			t.Errorf("TestMul depends on %s: %v, want %v", key, ok, want)
 		}
@@ -205,11 +207,23 @@ func TestGoFuncSelection(t *testing.T) {
 	r.write("calc/testdata/add.txt", "3 \n")
 	step("add data", "calc#(build)", "calc#TestAdd")
 	r.write("calc/helper_test.go", "package calc\n\nimport \"testing\"\n\nfunc check(t *testing.T, got, want int) {\n\tt.Helper()\n\tif got != want {\n\t\tt.Fatalf(\"got %d, want %d\", got, want)\n\t}\n}\n")
-	step("helper", "calc#(build)", "calc#TestAdd", "calc#TestMul")
+	step("helper", "calc#(build)", "calc#TestAdd", "calc#TestMul") // TestAdd: the edits above
 	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
 		t.Fatalf("run: %d %v\n%s", code, res, out)
 	}
 	step("after recording")
+	// Another body of a file a test executed: not that test.
+	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n\nfunc Sub(a, b int) int { return a - b }\n")
+	step("new function", "calc#(build)", "calc#TestAdd", "calc#TestMul")
+	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
+		t.Fatalf("run: %d %v\n%s", code, res, out)
+	}
+	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n\nfunc Sub(a, b int) int { return b - a }\n")
+	step("unexecuted body", "calc#(build)")
+	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n")
+	if code, res, out := r.runReport(); code != 0 || len(res) != 3 {
+		t.Fatalf("run: %d %v\n%s", code, res, out)
+	}
 	// Data only TestAdd reads is no input of the compile check.
 	r.write("calc/testdata/add.txt", "3\n")
 	step("add data", "calc#TestAdd")
@@ -223,18 +237,18 @@ func TestGoFuncSelection(t *testing.T) {
 	r.write("calc/add.go", "package calc\n\nfunc Add(a, b int) int { return b + a }\n")
 	step("reverted")
 
-	// A changed test file selects its functions; a new function has no entry (it is
-	// selected as new, or locally by a diff against the default branch).
+	// A new test function has no entry (it is selected as new, or locally by a diff
+	// against the default branch); the other functions of its file are not selected.
 	r.write("calc/add_test.go", strings.Replace(mustRead(t, filepath.Join(r.g.dir, "calc/add_test.go")), "func TestAdd", "func TestSub(t *testing.T) {\n\tif Add(1, -1) != 0 {\n\t\tt.Fatal(\"sub\")\n\t}\n}\n\nfunc TestAdd", 1))
 	got := r.selected()
-	if !slices.Equal(keys(got), []string{"calc#(build)", "calc#TestAdd", "calc#TestSub"}) || got["calc#TestSub"] == "changed" {
+	if !slices.Equal(keys(got), []string{"calc#(build)", "calc#TestSub"}) || got["calc#TestSub"] == "changed" {
 		t.Errorf("new function: %v", got)
 	}
 
 	// A failing function: only it fails, the others are not run.
 	r.write("util/util.go", "package util\n\nfunc Id(x int) int { return x + 1 }\n")
 	code, res, out = r.runReport()
-	if code == 0 || res["calc#TestMul"] != state.Fail || res["calc#TestAdd"] != state.Pass || res["calc#TestSub"] != state.Pass {
+	if code == 0 || res["calc#TestMul"] != state.Fail || res["calc#TestAdd"] != "" || res["calc#TestSub"] != state.Pass {
 		t.Errorf("failing run: %d %v\n%s", code, res, out)
 	}
 	step("after a failure", "calc#TestMul")
@@ -379,7 +393,7 @@ func TestCrasher(t *testing.T) {
 	if code, res, out := r.runReport("--all"); code != 0 || res["calc#TestCrasher"] != state.Pass {
 		t.Fatalf("baseline: %d %v\n%s", code, res, out)
 	}
-	if e := r.state().Suites["go"].Tests["calc#TestCrasher"]; e == nil || e.Deps["calc/crash.go"] == "" {
+	if e := r.state().Suites["go"].Tests["calc#TestCrasher"]; e == nil || e.Deps["calc/crash.go#decl:Crash"] == "" {
 		t.Fatalf("TestCrasher does not depend on crash.go: %+v", e)
 	}
 	r.write("calc/crash.go", "package calc\n\nimport \"fmt\"\n\n// Crash runs in a child process of its test.\nfunc Crash() { fmt.Println(\"fine\"); panic(\"boom\") }\n")

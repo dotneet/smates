@@ -7,7 +7,8 @@ import (
 )
 
 // refStrings renders refs compactly: m:spec, f:spec, t:prefix|suffix, g:pattern,
-// c:dir|r (recursive) or c:dir|n.
+// c:dir|r (recursive) or c:dir|n, followed by " (type)" for eraseAlways and
+// " (type?)" for eraseElided.
 func refStrings(refs []ref) []string {
 	out := []string{}
 	for _, r := range refs {
@@ -27,6 +28,12 @@ func refStrings(refs []ref) []string {
 			}
 			out = append(out, "c:"+r.spec+"|"+flag)
 		}
+		switch r.erase {
+		case eraseAlways:
+			out[len(out)-1] += " (type)"
+		case eraseElided:
+			out[len(out)-1] += " (type?)"
+		}
 	}
 	return out
 }
@@ -41,10 +48,10 @@ func TestScanSource(t *testing.T) {
 		{"named and namespace imports", "import { a, b as c } from './a';\nimport * as ns from './b'", []string{"m:./a", "m:./b"}},
 		{"multi-line import", "import {\n  a,\n  b,\n} from\n  './a'", []string{"m:./a"}},
 		{"side-effect import", `import "./polyfill"; import './styles.css'`, []string{"m:./polyfill", "m:./styles.css"}},
-		{"type import", `import type { T } from "./types"; import { type U } from "./u"`, []string{"m:./types", "m:./u"}},
+		{"type import", `import type { T } from "./types"; import { type U } from "./u"`, []string{"m:./types (type)", "m:./u (type?)"}},
 		{"import attributes", `import data from "./d.json" with { type: "json" }`, []string{"m:./d.json"}},
 		{"export from", `export { a } from "./a"; export * from './b'; export * as c from "./c"; export type { T } from "./t"`,
-			[]string{"m:./a", "m:./b", "m:./c", "m:./t"}},
+			[]string{"m:./a", "m:./b", "m:./c", "m:./t (type)"}},
 		{"minified export star", `export*from"./a";import{x}from"./b"`, []string{"m:./a", "m:./b"}},
 		{"dynamic import", `const m = await import("./lazy"); import('./other').then(f)`, []string{"m:./lazy", "m:./other"}},
 		{"dynamic import with options", `import("./x.json", { with: { type: "json" } })`, []string{"m:./x.json"}},
@@ -120,6 +127,55 @@ func TestScanSource(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("scanSource(%q)\n got: %q\nwant: %q", tt.src, got, want)
+			}
+		})
+	}
+}
+
+func TestScanSourceTypeOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		// Always erased.
+		{"import type default", `import type T from "./a"`, []string{"m:./a (type)"}},
+		{"import type named", "import type {\n  A,\n  B as C,\n} from './a'", []string{"m:./a (type)"}},
+		{"import type namespace", `import type * as N from "./a"`, []string{"m:./a (type)"}},
+		{"import type default named from", `import type from from "./a"`, []string{"m:./a (type)"}},
+		{"import type equals require", `import type A = require("./a")`, []string{"m:./a (type)"}},
+		{"export type named", `export type { A, B } from "./a"`, []string{"m:./a (type)"}},
+		{"export type star", `export type * from "./a"; export type * as N from "./b"`, []string{"m:./a (type)", "m:./b (type)"}},
+		{"minified", `import type{A}from"./a";export type*from"./b"`, []string{"m:./a (type)", "m:./b (type)"}},
+		{"with attributes", `import type { A } from "./a" with { "resolution-mode": "import" }`, []string{"m:./a (type)"}},
+
+		// Erased unless verbatimModuleSyntax (or the like) keeps them.
+		{"inline type specifiers", `import { type A, type B as C } from "./a"`, []string{"m:./a (type?)"}},
+		{"inline type export", `export { type A } from "./a"`, []string{"m:./a (type?)"}},
+		{"inline type trailing comma", `import { type A, } from "./a"`, []string{"m:./a (type?)"}},
+		{"type-only import named as", `import { type as } from "./a"; import { type as as X } from "./b"`, []string{"m:./a (type?)", "m:./b (type?)"}},
+		{"string name", `export { type "a-b" as C } from "./a"`, []string{"m:./a (type?)"}},
+
+		// Values.
+		{"default import named type", `import type from "./a"`, []string{"m:./a"}},
+		{"default import named type with named", `import type, { a } from "./a"`, []string{"m:./a"}},
+		{"mixed specifiers", `import { type A, b } from "./a"; export { a, type B } from "./b"`, []string{"m:./a", "m:./b"}},
+		{"binding named type", `import { type } from "./a"; import { type as T } from "./b"; import { type as as } from "./c"`,
+			[]string{"m:./a", "m:./b", "m:./c"}},
+		{"default beside inline types", `import D, { type A } from "./a"`, []string{"m:./a"}},
+		{"empty list", `import {} from "./a"; export {} from "./b"`, []string{"m:./a", "m:./b"}},
+		{"export type alias is no import", `export type A = string; import a from "./a"`, []string{"m:./a"}},
+		{"export type without from", `export type { A }; import "./a"`, []string{"m:./a"}},
+		{"typeof import stays", `type M = typeof import("./a"); let x: import("./b").T`, []string{"m:./a", "m:./b"}},
+		{"import equals require", `import A = require("./a")`, []string{"m:./a"}},
+		{"type-only then value of the same module", `import type { A } from "./a"; import { b } from "./a"`, []string{"m:./a (type)", "m:./a"}},
+		{"property named type", `obj.import; import { a } from "./a"; x.export; type.from`, []string{"m:./a"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := refStrings(scanSource([]byte(tt.src)))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("scanSource(%q)\n got: %q\nwant: %q", tt.src, got, tt.want)
 			}
 		})
 	}

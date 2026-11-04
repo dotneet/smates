@@ -377,7 +377,17 @@ func cmdWhy(args []string, stdout, stderr io.Writer) error {
 					}
 				}
 			case depkey.CoverDecls:
-				how = append(how, "static: its declarations (edits inside function bodies count only where the test executed them)")
+				how = append(how, "static: its declarations (edits inside function bodies count only where the test executed or reaches them)")
+				var names []string
+				for d := range deps {
+					if f, name, ok := depkey.DeclName(d); ok && f == target {
+						names = append(names, name)
+					}
+				}
+				if len(names) > 0 {
+					slices.Sort(names)
+					how = append(how, "bodies: "+strings.Join(names, ", "))
+				}
 				if st != nil && st.Tests[t.ID] != nil {
 					if _, ok := st.Tests[t.ID].Deps[target]; ok {
 						how = append(how, "executed")

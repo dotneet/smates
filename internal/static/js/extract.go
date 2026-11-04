@@ -35,7 +35,28 @@ type ref struct {
 	// mock is whether a refModule is mocked (jest.mock("./x")), so a manual mock in
 	// an adjacent __mocks__ directory may be loaded instead of (or besides) it.
 	mock bool
+	// erase says whether TypeScript removes the reference before the code runs.
+	erase eraseKind
 }
+
+// eraseKind says whether compiling TypeScript to JavaScript removes an import or
+// export declaration, so that the module it names is never loaded at run time. It
+// only means something in TypeScript sources (see Analyzer.SplitDeps).
+type eraseKind uint8
+
+const (
+	// eraseNever: the declaration stays (a value import, or one the token-level scan
+	// cannot tell from one, such as typeof import("./x")).
+	eraseNever eraseKind = iota
+	// eraseAlways: a type-only declaration (import type ..., export type ...), which
+	// every TypeScript compiler and type stripper removes.
+	eraseAlways
+	// eraseElided: a declaration whose specifiers all carry an inline type modifier
+	// (import { type A } from "./x"), which is removed unless verbatimModuleSyntax,
+	// preserveValueImports or importsNotUsedAsValues keep it as a side-effect import
+	// (import {} from "./x"), which loads the module.
+	eraseElided
+)
 
 // mockFns are the methods of vi / jest / vitest that take a module specifier, mapped
 // to whether they may load a manual mock from __mocks__.
@@ -50,14 +71,42 @@ func scanSource(src []byte) []ref {
 	l := lex(src)
 	p := parser{src: src, toks: l.toks}
 	refs := l.refs
+	// erase holds, by the index of its specifier token, the declarations TypeScript
+	// may remove (see typeOnlyDecl); the import or export keyword comes first.
+	var erase map[int]eraseKind
+	// appendErasable appends the specifier at token i like appendArg, marked with the
+	// declaration's eraseKind.
+	appendErasable := func(refs []ref, i int) []ref {
+		n := len(refs)
+		refs = p.appendArg(refs, i)
+		if k := erase[i]; k != eraseNever && len(refs) > n {
+			refs[n].erase = k
+		}
+		return refs
+	}
 	for i, t := range p.toks {
 		if t.kind != tIdent {
 			continue
 		}
 		switch string(src[t.s:t.e]) {
+		case "export":
+			if !p.punct(i-1, '.') {
+				if lit, k := p.typeOnlyDecl(i, false); k != eraseNever {
+					if erase == nil {
+						erase = map[int]eraseKind{}
+					}
+					erase[lit] = k
+				}
+			}
 		case "import":
 			if p.punct(i-1, '.') {
 				continue // obj.import(...)
+			}
+			if lit, k := p.typeOnlyDecl(i, true); k != eraseNever {
+				if erase == nil {
+					erase = map[int]eraseKind{}
+				}
+				erase[lit] = k
 			}
 			switch {
 			case p.punct(i+1, '('): // import("x"), typeof import("x")
@@ -81,12 +130,12 @@ func scanSource(src []byte) []ref {
 			// `from` directly followed by a string literal only occurs in import and
 			// export declarations, so no statement-level parsing is needed.
 			if !p.punct(i-1, '.') && p.literal(i+1) {
-				refs = p.appendArg(refs, i+1)
+				refs = appendErasable(refs, i+1)
 			}
 		case "require":
 			switch {
 			case p.punct(i+1, '('):
-				refs = p.appendArg(refs, i+2)
+				refs = appendErasable(refs, i+2) // import type X = require("./x")
 			case p.punct(i+1, '.') && p.ident(i+2, "resolve") && p.punct(i+3, '('):
 				refs = p.appendArg(refs, i+4)
 			case p.punct(i+1, '.') && p.ident(i+2, "context") && p.punct(i+3, '(') && p.literal(i+4):
@@ -115,6 +164,106 @@ func scanSource(src []byte) []ref {
 		}
 	}
 	return refs
+}
+
+// typeOnlyDecl inspects the import (isImport) or export declaration whose keyword is
+// token i. For a declaration TypeScript may remove it returns the index of its
+// specifier token and how it is removed; -1 and eraseNever otherwise:
+//
+//	import type X from "m"           import type { A } from "m"    -> eraseAlways
+//	import type * as N from "m"      import type X = require("m")  -> eraseAlways
+//	export type { A } from "m"       export type * (as N) from "m" -> eraseAlways
+//	import { type A, type B as C } from "m"                         -> eraseElided
+//	export { type A } from "m"                                      -> eraseElided
+//
+// `import type from "m"` and `import type, { a } from "m"` import a default export
+// named type, and are values. So are a specifier list with any specifier lacking the
+// type modifier, an empty one (import {} from "m" loads the module), and default or
+// namespace imports beside a list.
+func (p *parser) typeOnlyDecl(i int, isImport bool) (int, eraseKind) {
+	j := i + 1
+	if !p.ident(j, "type") {
+		if p.punct(j, '{') {
+			if k, all, ok := p.specifiers(j); ok && all {
+				if lit := p.fromLiteral(k); lit >= 0 {
+					return lit, eraseElided
+				}
+			}
+		}
+		return -1, eraseNever
+	}
+	j++
+	lit := -1
+	switch {
+	case p.punct(j, '{'):
+		if k, _, ok := p.specifiers(j); ok {
+			lit = p.fromLiteral(k)
+		}
+	case p.punct(j, '*'):
+		k := j + 1
+		if p.ident(k, "as") {
+			k += 2
+		}
+		lit = p.fromLiteral(k)
+	case isImport && p.at(j).kind == tIdent:
+		// The binding may itself be named from: import type from from "m".
+		switch {
+		case p.ident(j+1, "from") && p.literal(j+2):
+			lit = j + 2
+		case p.punct(j+1, '=') && p.ident(j+2, "require") && p.punct(j+3, '(') && p.literal(j+4):
+			lit = j + 4
+		}
+	}
+	if lit < 0 {
+		return -1, eraseNever
+	}
+	return lit, eraseAlways
+}
+
+// specifiers reads the import or export specifier list whose '{' is token j. It
+// returns the index after the closing '}', whether the list has specifiers and all of
+// them carry an inline type modifier, and false if the tokens are not a specifier list.
+func (p *parser) specifiers(j int) (int, bool, bool) {
+	all, n := true, 0
+	start := j + 1
+	for k := start; k < len(p.toks) && k < j+4096; k++ {
+		t := p.toks[k]
+		if t.kind != tPunct {
+			if t.kind != tIdent && t.kind != tString {
+				return j, false, false
+			}
+			continue
+		}
+		if t.c != ',' && t.c != '}' {
+			return j, false, false
+		}
+		if k > start { // not the empty entry after a trailing comma
+			n++
+			all = all && p.typeSpecifier(start, k-start)
+		}
+		if t.c == '}' {
+			return k + 1, all && n > 0, true
+		}
+		start = k + 1
+	}
+	return j, false, false
+}
+
+// typeSpecifier reports whether the n tokens from start are a specifier with an
+// inline type modifier, as TypeScript parses them: `type A`, `type A as B`, `type as`
+// and `type as as B` are; `type`, `type as B` and `type as as` (a binding named type,
+// renamed) are not.
+func (p *parser) typeSpecifier(start, n int) bool {
+	return p.ident(start, "type") && (n == 2 || n == 4 && p.ident(start+2, "as"))
+}
+
+// fromLiteral returns the index of the specifier when token k is `from` followed by a
+// literal, else -1.
+func (p *parser) fromLiteral(k int) int {
+	if p.ident(k, "from") && p.literal(k+1) {
+		return k + 1
+	}
+	return -1
 }
 
 // parser gives indexed, bounds-checked access to a token stream.
