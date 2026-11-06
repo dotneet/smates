@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"path"
 	"regexp"
 	"slices"
@@ -28,6 +29,10 @@ type RunnerConfig struct {
 	// Browser is set when a configuration may run tests in a browser (Vitest's browser
 	// mode, Storybook's Vitest plugin), where no trace sees what they load.
 	Browser bool
+	// Unsure says why the files the runner loads for every test may be more than
+	// Files ("" when they are not): a configuration smates cannot read (a JSON file
+	// that does not parse, a bunfig preload or --preload it cannot read).
+	Unsure string
 }
 
 // ConfigOf returns the runner configuration of suite s (zero for adapters that do not
@@ -50,12 +55,112 @@ var jestConfigFile = regexp.MustCompile(`^jest\.config(?:\.[\w-]+)?\.(?:[cm]?[jt
 
 // RunnerConfig implements ConfigLoader.
 func (vitest) RunnerConfig(s *Suite, src Sources) RunnerConfig {
-	return scanRunnerConfig(s, src, vitestConfigFile, false)
+	return scanRunnerConfig(s, src, vitestConfigFile, false, "")
 }
 
-// RunnerConfig implements ConfigLoader.
+// RunnerConfig implements ConfigLoader. Jest also reads its configuration from the
+// "jest" key of the package.json at the suite root.
 func (jest) RunnerConfig(s *Suite, src Sources) RunnerConfig {
-	return scanRunnerConfig(s, src, jestConfigFile, true)
+	return scanRunnerConfig(s, src, jestConfigFile, true, "jest")
+}
+
+// RunnerConfig implements ConfigLoader: bun test loads the preload files of
+// bunfig.toml ([test] preload, in the suite root or the file --config names) and of
+// --preload (-r) in the command, and what they import, before every test file.
+func (bun) RunnerConfig(s *Suite, src Sources) RunnerConfig {
+	root := path.Clean(s.Root)
+	var rc RunnerConfig
+	has := func(p string) bool {
+		_, found := slices.BinarySearch(src.Files, p)
+		return found
+	}
+	cfg := path.Join(root, "bunfig.toml")
+	if c, ok := commandFlag(s, "--config", "-c"); ok {
+		f, inRepo := repoRel(root, c)
+		switch {
+		case strings.ContainsAny(c, "$`") || c == "":
+			rc.Unsure = "its --config " + c + " is not a path smates can read"
+		case inRepo:
+			cfg = f
+		default:
+			cfg = ""
+		}
+	}
+	var starts []string
+	if cfg != "" && has(cfg) {
+		starts = append(starts, cfg)
+		paths, ok := bunfigPreloads(string(src.Read(cfg)))
+		if !ok {
+			rc.Unsure = cfg + " has a preload smates cannot read"
+		}
+		for _, p := range paths {
+			if f, ok := literalFile(path.Dir(cfg), p, false, has); ok {
+				starts = append(starts, f)
+			}
+		}
+	}
+	for _, p := range append(commandFlags(s, "--preload"), commandFlags(s, "-r")...) {
+		if strings.ContainsAny(p, "$`") {
+			rc.Unsure = "its --preload " + p + " is not a path smates can read"
+			continue
+		}
+		if f, ok := literalFile(root, p, false, has); ok {
+			starts = append(starts, f)
+		}
+	}
+	if len(starts) == 0 {
+		return rc
+	}
+	rc.Files = slices.Clone(src.Closure(starts...))
+	slices.Sort(rc.Files)
+	rc.Files = slices.Compact(rc.Files)
+	return rc
+}
+
+// bunfigPreloads returns the preload paths of a bunfig.toml: the [test] table's
+// preload, a top-level preload, test.preload as a dotted key, or preload in an inline
+// test table. ok is false when a preload value holds no string smates can read.
+func bunfigPreloads(text string) (paths []string, ok bool) {
+	ok = true
+	add := func(value string) {
+		got := tomlStrings(value)
+		v := value
+		if i := strings.IndexByte(v, '#'); i >= 0 {
+			v = v[:i] // no string in it: a comment
+		}
+		if len(got) == 0 && strings.Trim(strings.Join(strings.Fields(v), ""), "[]") != "" {
+			ok = false // not a string or an array of strings
+		}
+		paths = append(paths, got...)
+	}
+	text = strings.TrimPrefix(text, "\ufeff")
+	var table []string // the current table's key (nil: the top level)
+	for _, st := range tomlStatements(text) {
+		if st.header {
+			table = st.key
+			if st.array {
+				table = []string{"\x00"} // an array of tables: no preload of bun's
+			}
+			continue
+		}
+		if st.key == nil {
+			continue
+		}
+		key := append(slices.Clone(table), st.key...)
+		value := text[st.value:st.end]
+		switch {
+		case slices.Equal(key, []string{"preload"}), slices.Equal(key, []string{"test", "preload"}):
+			add(value)
+		case slices.Equal(key, []string{"test"}):
+			for _, kv := range tomlInlineTable(value) {
+				k, v, _ := strings.Cut(kv, "=")
+				if strings.Trim(strings.TrimSpace(k), `"'`) == "preload" {
+					add(v)
+				}
+			}
+		}
+	}
+	return paths, ok
 }
 
 // scanRunnerConfig finds the configuration files of suite s: the suite command's
@@ -64,7 +169,11 @@ func (jest) RunnerConfig(s *Suite, src Sources) RunnerConfig {
 // literal in them, and in what they import, that names a repository file (relative to
 // the file's directory, after a leading <rootDir>/ with rootDir) adds that file and its
 // closure, until nothing new is found.
-func scanRunnerConfig(s *Suite, src Sources, name *regexp.Regexp, rootDir bool) RunnerConfig {
+//
+// A JSON configuration (jest.config.json) is read for its string values too, and so is
+// the pkgKey key of the package.json at the suite root ("" for none); one that does not
+// parse makes the result unsure.
+func scanRunnerConfig(s *Suite, src Sources, name *regexp.Regexp, rootDir bool, pkgKey string) RunnerConfig {
 	root := path.Clean(s.Root)
 	var configs []string
 	if c, ok := commandFlag(s, "--config", "-c"); ok {
@@ -86,25 +195,55 @@ func scanRunnerConfig(s *Suite, src Sources, name *regexp.Regexp, rootDir bool) 
 			rc.Browser = true
 		}
 	}
-	if len(configs) == 0 {
-		return rc
-	}
 	has := func(p string) bool {
 		_, found := slices.BinarySearch(src.Files, p)
 		return found
 	}
+	// The package.json key is read for its literals; the file itself is no
+	// configuration file of the runner's.
+	var pkgLits []string
+	if pkg := path.Join(root, "package.json"); pkgKey != "" && has(pkg) {
+		var doc map[string]json.RawMessage
+		if err := json.Unmarshal(src.Read(pkg), &doc); err != nil {
+			rc.Unsure = pkg + " does not parse"
+		} else if raw, ok := doc[pkgKey]; ok {
+			pkgLits, _ = jsonStrings(raw)
+		}
+	}
+	if len(configs) == 0 && len(pkgLits) == 0 {
+		return rc
+	}
 	seen := map[string]bool{}
 	scanned := map[string]bool{}
+	literals := func(f string) []string {
+		switch {
+		case isJSSource(f):
+			return js.StringLiterals(src.Read(f))
+		case path.Ext(f) == ".json" && path.Base(f) != "package.json" && slices.Contains(configs, f):
+			lits, ok := jsonStrings(src.Read(f))
+			if !ok {
+				rc.Unsure = f + " does not parse"
+			}
+			return lits
+		}
+		return nil
+	}
 	starts := configs
+	for _, lit := range pkgLits {
+		if p, ok := literalFile(root, lit, rootDir, has); ok && !seen[p] {
+			seen[p] = true
+			starts = append(starts, p)
+		}
+	}
 	for len(starts) > 0 {
 		var next []string
 		for _, f := range src.Closure(starts...) {
 			seen[f] = true
-			if scanned[f] || !isJSSource(f) {
+			if scanned[f] {
 				continue
 			}
 			scanned[f] = true
-			for _, lit := range js.StringLiterals(src.Read(f)) {
+			for _, lit := range literals(f) {
 				if p, ok := literalFile(path.Dir(f), lit, rootDir, has); ok && !seen[p] {
 					seen[p] = true
 					next = append(next, p)
@@ -118,6 +257,32 @@ func scanRunnerConfig(s *Suite, src Sources, name *regexp.Regexp, rootDir bool) 
 	}
 	slices.Sort(rc.Files)
 	return rc
+}
+
+// jsonStrings returns every string value of a JSON document (in objects and arrays,
+// not keys); ok is false when it does not parse.
+func jsonStrings(data []byte) (out []string, ok bool) {
+	var v any
+	if json.Unmarshal(data, &v) != nil {
+		return nil, false
+	}
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			out = append(out, x)
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return out, true
 }
 
 // literalFile returns the repository file a string literal of a file in dir names, if

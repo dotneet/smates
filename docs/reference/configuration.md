@@ -159,18 +159,26 @@ rules:
 
 `reaches` follows the file-level closure, including what other helpers and the other
 test files of a Go package import, and the files the runner loads for every test through
-its configuration (Vitest `setupFiles` and `globalSetup`, Jest `setupFilesAfterEnv`, and
-what they import); for `granularity: func` it matches at the package level. A glob
-without a wildcard that names a directory (`pkg/shared/testkit`) matches what is below
-it. A `$NAME` entry also matches a test whose closure's source names such a variable
-(`os.Getenv("APP_DB_DSN")`): Go records no read made before `m.Run` (in `TestMain`,
-`init` or a package-level initializer), nor a scan of `os.Environ`. When smates cannot
+its configuration (Vitest `setupFiles` and `globalSetup`, Jest `setupFilesAfterEnv` in
+`jest.config.*`, JSON included, or the `jest` key of `package.json`, bun's `preload` in
+`bunfig.toml` or `--preload`, and what they import); for `granularity: func` it matches
+at the package level. A glob without a wildcard that names a directory
+(`pkg/shared/testkit`) matches what is below it. A `$NAME` entry also matches a test
+whose closure's source names such a variable (`os.Getenv("APP_DB_DSN")`), or names a
+prefix of it in a string literal (`envconfig.Process("APP", &cfg)`,
+`viper.SetEnvPrefix("app")`, `env_prefix="APP_"`): Go records no read made before
+`m.Run` (in `TestMain`, `init` or a package-level initializer), nor a scan of
+`os.Environ`; shell, Bun and in-browser reads are not traced; settings loaders that
+scan the environment are not counted as reads. A loader that builds the name another
+way leaves no trace in the source: name such tests with `tests:`. When smates cannot
 tell, the rule applies: static analysis is off (`static: false`), no analyzer reads the
 test's files, the closure (or a setup file the runner loads) has a JavaScript or
 TypeScript import smates cannot resolve (a bundler alias, a virtual module, a missing
-file), or, for a `$NAME` entry, the test has no recorded run yet, the pattern may name
-a variable `env_ignore` (or the default ignore list) keeps out of every recorded run,
-or a Go test's source cannot be read (static analysis off). Imports in Python, Go and
+file), the runner's configuration cannot be read (a JSON file that does not parse, a
+bun preload that is no string, a `--preload` from a variable), or, for a `$NAME` entry,
+the test has no recorded run yet, the pattern may name a variable `env_ignore` (or the
+default ignore list) keeps out of every recorded run, or the test's source cannot be
+read (static analysis off, or no analyzer for its files), whatever its runner. Imports in Python, Go and
 Java that smates cannot resolve are dropped from the closure without a trace: a Python
 test that reaches a helper through `sys.path` (`from dbkit import reset`, with
 `support/` added to the path) does not reach `support/dbkit.py` as far as the rule can

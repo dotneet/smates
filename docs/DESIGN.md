@@ -128,9 +128,11 @@ its configuration (`runner.ConfigOf`: setup files and their closure), holds a fi
 glob matches (memoized per suite, as a file is in many closures; a glob without a
 wildcard naming a directory also matches `dir/**`), or, for a `$NAME` pattern, the
 unit's recorded entry holds an environment key it matches or a file of its closure
-names such a variable (a word of its source: Go's test log starts in `m.Run`, so reads
-in `TestMain`, `init` and package initializers, and `os.Environ` scans, never reach the
-entry). Files are never matched against the entry: it records
+names such a variable (a word of its source, or a prefix of it in a string literal, as
+settings loaders given a prefix take it: `mentionsEnv`; Go's test log starts in
+`m.Run`, so reads in `TestMain`, `init` and package initializers, and `os.Environ`
+scans, never reach the entry, and shell, Bun and in-browser reads and environment scans
+of settings loaders are not recorded either). Files are never matched against the entry: it records
 the rule's own deps, so a rule reaching them would keep applying to every unit it ever
 applied to. A rule cannot only add here: once one unit has the deps, a change to them
 is covered and no longer an orphan, so a unit the rule misses is skipped on such a
@@ -141,8 +143,13 @@ file the runner loads for every test has an import `static.Graph.Unresolved` rep
 Python, Go or Java import goes unnoticed), or, for a `$NAME` pattern, the unit has no
 entry yet (it then records the deps once and drops them on its next recording), the
 pattern may match a variable `env_ignore` or the default list drops before recording
-(`envBlind`), or no source can be read (static analysis off, or no graph) while the
-runner's entries can miss reads made before the test starts (Go, `entryMissesEnv`). `smates doctor` counts the units each rule
+(`envBlind`), or no source can be read (static analysis off, no graph, or no analyzer
+for the unit's files), whatever the runner: every runner's entries can miss reads. For
+a file glob it also applies when the runner's configuration cannot be read
+(`runner.RunnerConfig.Unsure`: a JSON configuration that does not parse, a bunfig
+preload or `--preload` smates cannot read); Jest's JSON configurations and the `jest`
+key of `package.json` are read for their string values, and bun's preloads
+(`bunfig.toml`, `--preload`) are its runner configuration. `smates doctor` counts the units each rule
 with `reaches:` applies to (`selector.RuleReach`), warns about a rule that applies to
 none, and about each glob that matches no file (`selector.UnmatchedReaches`).
 

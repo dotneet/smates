@@ -185,12 +185,18 @@ That last part is why the list must be complete. A test that connects some other
 deps, and once the migration is covered it is not run for it either. Name every helper,
 and add the variables the connection reads: a test that reads them is kept even when it
 imports nothing the globs match (also when it reads them in `TestMain` or `init`, which
-Go does not record: the variable's name in its source is enough). A setup file the
-runner loads for every test (Vitest `setupFiles`) counts as imported by every test. When
-smates cannot tell, the rule applies to the test: static analysis is off, no analyzer
-reads the test's files, the test or a setup file imports something smates cannot
-resolve in JavaScript or TypeScript (a bundler alias), or, for a `$NAME` entry, the
-test has never run or the variable is in `env_ignore`. An import smates cannot resolve
+Go does not record, or through a settings loader: the variable's name in its source is
+enough, and so is a prefix of it in a string literal, as `envconfig.Process("APP", ...)`
+or `env_prefix="APP_"` take it). A loader that builds the name any other way is not
+seen: name such tests with `tests:`. A setup file the runner loads for every test
+(Vitest `setupFiles`, Jest `setupFilesAfterEnv` in `jest.config.*` or the `jest` key of
+`package.json`, bun's `preload` in `bunfig.toml` or `--preload`) counts as imported by
+every test. When smates cannot tell, the rule applies to the test: static analysis is
+off, no analyzer reads the test's files (a shell test), the test or a setup file
+imports something smates cannot resolve in JavaScript or TypeScript (a bundler alias),
+the runner's configuration cannot be read (a JSON file that does not parse), or, for a
+`$NAME` entry, the test has never run, the variable is in `env_ignore`, or no source of
+the test can be read, whatever its runner. An import smates cannot resolve
 in Python, Go or Java is not noticed: a Python test that finds a helper through
 `sys.path` does not count as reaching it, so name such tests with `tests:`. `smates doctor` prints how many test units each such rule applies to and
 warns when a rule applies to none, or when one of its globs matches no file (a typo, an

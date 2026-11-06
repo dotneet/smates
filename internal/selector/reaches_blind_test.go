@@ -107,6 +107,7 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		runner  string
+		command string // the suite's command ("" = the runner's name)
 		files   map[string]string
 		reaches []string
 		want    []string
@@ -132,6 +133,48 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 			"web/jest.config.js": `module.exports = { setupFilesAfterEnv: ["<rootDir>/test/setup.ts"] }`,
 			"web/test/setup.ts":  `import { reset } from "../src/testkit/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		// Must keep: setup files a JSON configuration or package.json names, and the
+		// preloads of bun test (bunfig.toml, --preload).
+		{name: "jest.config.json setupFilesAfterEnv", runner: "jest", reaches: kit, files: map[string]string{
+			"web/jest.config.json": `{"setupFilesAfterEnv": ["<rootDir>/test/setup.ts"]}`,
+			"web/test/setup.ts":    `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "package.json jest setupFiles", runner: "jest", reaches: kit, files: map[string]string{
+			"web/package.json":  `{"name":"web","jest":{"setupFiles":["<rootDir>/test/setup.ts"]}}`,
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "bunfig.toml [test] preload", runner: "bun", reaches: kit, files: map[string]string{
+			"web/bunfig.toml":   "[test]\npreload = [\"./test/setup.ts\"]\n",
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "bunfig.toml test.preload dotted key", runner: "bun", reaches: kit, files: map[string]string{
+			"web/bunfig.toml":   "test.preload = \"./test/setup.ts\"\n",
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "bunfig.toml inline test table", runner: "bun", reaches: kit, files: map[string]string{
+			"web/bunfig.toml":   "test = { preload = [\"./test/setup.ts\"] }\n",
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "bun test --preload", runner: "bun", command: "bun test --preload ./test/setup.ts", reaches: kit, files: map[string]string{
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "bun test --preload=", runner: "bun", command: "bun test --preload=./test/setup.ts", reaches: kit, files: map[string]string{
+			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		// Must keep: a configuration smates cannot read may load the helper too.
+		{name: "a jest.config.json that does not parse", runner: "jest", reaches: kit, files: map[string]string{
+			"web/jest.config.json": `{"setupFiles": [`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "a bunfig preload that is no string", runner: "bun", reaches: kit, files: map[string]string{
+			"web/bunfig.toml": "[test]\npreload = 3\n",
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "a --preload from a variable", runner: "bun", command: "bun test --preload $SETUP", reaches: kit, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		// Narrowing still: a preload that does not reach the helper.
+		{name: "bunfig preload not reaching the helper", runner: "bun", reaches: kit, files: map[string]string{
+			"web/bunfig.toml":   "[test]\npreload = [\"./test/setup.ts\"]\n",
+			"web/test/setup.ts": `import { repo } from "../src/repo"`,
+		}, want: []string{"web/src/b.test.ts"}},
+		{name: "no bunfig", runner: "bun", reaches: kit, want: []string{"web/src/b.test.ts"}},
 		// Narrowing still: no setup file, every import resolved.
 		{name: "no setup file", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: {} }`,
@@ -189,7 +232,11 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 				files[p] = src
 			}
 			f := newFixture(t, files)
-			s, err := runner.NewSuite(&gitx.Repo{Root: f.dir}, config.Suite{Name: "web", Root: "web", Runner: c.runner, Command: c.runner,
+			command := c.command
+			if command == "" {
+				command = c.runner
+			}
+			s, err := runner.NewSuite(&gitx.Repo{Root: f.dir}, config.Suite{Name: "web", Root: "web", Runner: c.runner, Command: command,
 				Rules: []config.Rule{{Reaches: c.reaches, Deps: deps}}})
 			if err != nil {
 				t.Fatal(err)

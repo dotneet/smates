@@ -42,7 +42,9 @@ type suiteSel struct {
 	reachFiles bool
 	// loaded are the files the suite's runner loads through its configuration
 	// (runner.RunnerConfig): type-only imports of them are kept (see knownDeps).
-	loaded map[string]bool
+	// loadedUnsure: it may load more, from a configuration smates cannot read.
+	loaded       map[string]bool
+	loadedUnsure bool
 	// browserDeps caches, by their globs and starts, the files browser projects add to
 	// their tests (see browserDeps).
 	browserDeps map[string][]string
@@ -209,6 +211,7 @@ func (s *selection) unitDeps(ss *suiteSel) {
 func (s *selection) runnerConfig(ss *suiteSel, src runner.Sources) {
 	rc := runner.ConfigOf(ss.sr.Suite, src)
 	ss.sr.Browser = rc.Browser || slices.ContainsFunc(ss.sr.Suite.Discovered, func(m runner.Matcher) bool { return m.Browser })
+	ss.loadedUnsure = rc.Unsure != ""
 	if len(rc.Files) == 0 {
 		return
 	}
@@ -313,7 +316,7 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			s.declare(d)
 		}
 	}
-	reach := unitReach{entry: entry, graph: s.in.Graph, loaded: ss.loaded, missesEnv: entryMissesEnv(su)}
+	reach := unitReach{entry: entry, graph: s.in.Graph, loaded: ss.loaded, loadedUnsure: ss.loadedUnsure}
 	switch {
 	case static && bulk && mapper == nil && !ss.selecting:
 		k.bulk = true // only the coverage needs it
@@ -620,18 +623,10 @@ type unitReach struct {
 	// graph reads the closure's files and tells their unresolved imports (nil: none).
 	graph *static.Graph
 	// loaded are the files the suite's runner loads through its configuration for
-	// every test (setup files, global setup and what they import).
-	loaded map[string]bool
-	// missesEnv: the runner's recorded entries can miss variables read before a test
-	// starts (Go: the test log starts in m.Run, after TestMain, init and package
-	// initializers), so only the source can tell about those.
-	missesEnv bool
-}
-
-// entryMissesEnv reports whether the recorded entries of suite su can miss variables
-// its tests read (see unitReach.missesEnv).
-func entryMissesEnv(su *runner.Suite) bool {
-	return su != nil && su.Runner == "go"
+	// every test (setup files, global setup and what they import); loadedUnsure is set
+	// when it may load more (a configuration smates cannot read).
+	loaded       map[string]bool
+	loadedUnsure bool
 }
 
 // applies reports whether the rule gives its deps to unit (with test files files):
@@ -647,20 +642,24 @@ func (r *suiteRule) applies(su *runner.Suite, unit string, files []string, reach
 // reaches reports whether a unit reaches what the rule's reaches names: its static
 // closure, or a file its runner loads through its configuration for every test (a
 // setup file), holds a file a file glob matches; or its recorded entry an environment
-// variable a "$NAME" pattern matches, or its closure's source names one (a read the
-// entry cannot hold: Go's test log starts in m.Run, after TestMain, init and package
-// initializers; syscall.Getenv; os.Environ). A rule adds dependencies, but it also
-// turns the files of its deps from orphans (which run the suites, or ask the agent)
-// into dependencies of the units it applies to only; so when it cannot tell, the rule
+// variable a "$NAME" pattern matches, or its closure's source names one, or names a
+// prefix of one in a string literal (mentionsEnv). The source covers reads the entry
+// cannot hold: Go's test log starts in m.Run, after TestMain, init and package
+// initializers; syscall.Getenv; os.Environ; shell, Bun and in-browser reads, which are
+// not traced; settings loaders that scan the environment for a prefix (APP_ with a
+// field DB_DSN reads APP_DB_DSN). A rule adds dependencies, but it also turns the
+// files of its deps from orphans (which run the suites, or ask the agent) into
+// dependencies of the units it applies to only; so when it cannot tell, the rule
 // applies: for a file glob, the unit's closure is unknown, or it or a file the runner
 // loads for every test has an import static analysis cannot follow (a bundler alias, a
 // virtual module, a missing file); for a variable pattern, the unit has no recorded
 // entry, the pattern may name a variable env_ignore keeps out of every entry, or no
-// source can be read while the entry can miss reads (missesEnv). The entry is not searched for files: it records
-// the deps the rule added, and a rule reaching those would keep itself applying.
+// source can be read (static analysis is off, or no analyzer reads the unit's files),
+// whatever the runner. The entry is not searched for files: it records the deps the
+// rule added, and a rule reaching those would keep itself applying.
 func (r *suiteRule) reaches(reach unitReach) bool {
 	if len(r.reachFiles) > 0 {
-		if !reach.known {
+		if !reach.known || reach.loadedUnsure {
 			return true
 		}
 		match := func(f string) bool {
@@ -710,14 +709,14 @@ func (r *suiteRule) reaches(reach unitReach) bool {
 			}
 		}
 		if !reach.known || reach.graph == nil {
-			// No source to read: an entry that can miss reads made before the test
-			// starts cannot tell.
-			return reach.missesEnv
+			// No source to read: every runner's entry can miss reads (before the
+			// test log starts, untraced shells and runtimes, environment scans).
+			return true
 		}
 		if slices.ContainsFunc(reach.closure, func(f string) bool {
 			m, ok := r.mentions[f]
 			if !ok {
-				m = slices.ContainsFunc(wordRe.FindAllString(string(reach.graph.Read(f)), -1), func(w string) bool { return matchName(r.reachEnv, w) })
+				m = mentionsEnv(r.reachEnv, reach.graph.Read(f))
 				r.mentions[f] = m
 			}
 			return m
@@ -731,6 +730,43 @@ func (r *suiteRule) reaches(reach unitReach) bool {
 // wordRe matches the identifiers and words of source, where a variable name a test
 // reads appears (os.Getenv("APP_DSN"), process.env.APP_DSN, os.environ["APP_DSN"]).
 var wordRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+// stringLitRe matches the string literals of source (double, single and back quoted).
+var stringLitRe = regexp.MustCompile(`"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|` + "`[^`]*`")
+
+// mentionsEnv reports whether source names a variable patterns match: as a word, or,
+// in a string literal and in any case, as a prefix of one followed by "_". A settings
+// loader given a prefix (envconfig.Process("APP", &cfg), viper.SetEnvPrefix("app"),
+// pydantic's env_prefix="APP_") reads APP_DB_DSN although no source spells it.
+func mentionsEnv(patterns []string, src []byte) bool {
+	if slices.ContainsFunc(wordRe.FindAll(src, -1), func(w []byte) bool { return matchName(patterns, string(w)) }) {
+		return true
+	}
+	var prefixes []string // the literal start of each pattern, upper-cased
+	for _, p := range patterns {
+		if i := strings.IndexAny(p, "*?[\\"); i >= 0 {
+			p = p[:i]
+		}
+		prefixes = append(prefixes, strings.ToUpper(p))
+	}
+	for _, lit := range stringLitRe.FindAll(src, -1) {
+		for _, w := range wordRe.FindAll(lit, -1) {
+			u := strings.ToUpper(string(w))
+			if matchName(patterns, u) {
+				return true
+			}
+			if !strings.HasSuffix(u, "_") {
+				u += "_"
+			}
+			for _, p := range prefixes {
+				if len(u) > 1 && strings.HasPrefix(p, u) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 // matchName reports whether an environment variable name matches one of the patterns
 // (path.Match globs).
@@ -789,8 +825,10 @@ func RuleReach(c *config.Config, su *runner.Suite, files []string, g *static.Gra
 		g.Warm(starts)
 	}
 	var loaded map[string]bool
+	unsure := false
 	if static {
 		rc := runner.ConfigOf(su, runner.Sources{Files: files, Read: g.Read, Closure: g.Closure, Resolve: g.Resolve})
+		unsure = rc.Unsure != ""
 		loaded = map[string]bool{}
 		for _, f := range rc.Files {
 			loaded[f] = true
@@ -800,10 +838,10 @@ func RuleReach(c *config.Config, su *runner.Suite, files []string, g *static.Gra
 		if runner.IsBuildCheck(u) {
 			continue
 		}
-		reach := unitReach{missesEnv: entryMissesEnv(su)}
+		var reach unitReach
 		if static {
 			reach.closure, reach.known = g.Closure(unitFiles[u]...), g.Analyzes(unitFiles[u]...)
-			reach.graph, reach.loaded = g, loaded
+			reach.graph, reach.loaded, reach.loadedUnsure = g, loaded, unsure
 		}
 		if st != nil {
 			reach.entry = st.Tests[u]

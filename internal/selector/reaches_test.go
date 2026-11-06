@@ -146,8 +146,12 @@ func TestRuleReaches(t *testing.T) {
 		{name: "file glob, func granularity", granularity: config.GranularityFunc, rule: config.Rule{Reaches: kit, Deps: deps}, static: true, want: funcs(append(db, sh)...)},
 		// Must keep: a unit that reads the variable without importing the helper.
 		{name: "file glob or variable", rule: config.Rule{Reaches: append(slices.Clone(kit), "$APP_DB_*"), Deps: deps}, static: true, want: plus(db, "pkg/app/envdb", sh)},
-		{name: "variable only", rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: true, want: []string{"pkg/app/envdb"}},
-		{name: "variable, func granularity", granularity: config.GranularityFunc, rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: true, want: funcs("pkg/app/envdb")},
+		// Must keep the shell test: no analyzer reads it, and shell reads are not traced.
+		{name: "variable only", rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: true, want: []string{"pkg/app/envdb", sh}},
+		{name: "variable, func granularity", granularity: config.GranularityFunc, rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: true, want: funcs("pkg/app/envdb", sh)},
+		{name: "variable, Go only", rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: true, goOnly: true, want: []string{"pkg/app/envdb"}},
+		// Must keep: no source to read, so every unit of every runner gets the deps.
+		{name: "variable, static off", rule: config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: deps}, static: false, want: every},
 		// Must keep: no closure to tell from, so every unit gets the deps.
 		{name: "static off", rule: config.Rule{Reaches: kit, Deps: deps}, static: false, want: every},
 		{name: "no graph", rule: config.Rule{Reaches: kit, Deps: deps}, static: true, noGraph: true, want: every},
@@ -200,6 +204,83 @@ func TestRuleReaches(t *testing.T) {
 			}
 			if orphan := slices.Contains(res.Orphans, migration); orphan != (len(c.want) == 0) {
 				t.Errorf("orphans %v (units with the deps: %v)", res.Orphans, c.want)
+			}
+		})
+	}
+}
+
+// A "$NAME" reaches cannot tell from a recorded entry alone, whatever the runner: shell,
+// Bun and in-browser reads are not traced, Go's test log starts in m.Run, and settings
+// loaders that scan the environment are not counted as reads. Without source to read
+// (static analysis off, no analyzer for the files) every unit gets the deps; with
+// source, a unit that names the variable, or a prefix of it in a string literal (a
+// loader given a prefix), does.
+func TestRuleReachesVariableSources(t *testing.T) {
+	files := map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		// Go: a TestMain loading settings by prefix before m.Run, a plain test.
+		"gopre/main_test.go":    "package gopre\n\nimport (\n\t\"os\"\n\t\"testing\"\n\n\t\"github.com/kelseyhightower/envconfig\"\n)\n\ntype cfg struct {\n\tDSN string `envconfig:\"DB_DSN\"`\n}\n\nfunc TestMain(m *testing.M) {\n\tvar c cfg\n\tenvconfig.MustProcess(\"APP\", &c)\n\tos.Exit(m.Run())\n}\n\nfunc TestPre(t *testing.T) {}\n",
+		"goplain/plain_test.go": "package goplain\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) {}\n",
+		// Bun reads through Bun.env (not traced).
+		"web/package.json":    `{"name":"web"}`,
+		"web/db.test.ts":      "import { test } from 'bun:test'\ntest('db', () => { Bun.env.APP_DB_DSN })\n",
+		"web/plain.test.ts":   "import { test } from 'bun:test'\ntest('plain', () => {})\n",
+		"py/test_settings.py": "from pydantic_settings import BaseSettings, SettingsConfigDict\n\nclass S(BaseSettings):\n    model_config = SettingsConfigDict(env_prefix='APP_')\n    db_dsn: str = ''\n\ndef test_settings():\n    S()\n",
+		"py/test_plain.py":    "def test_plain():\n    pass\n",
+		"node/scan.test.js":   "const test = require('node:test')\nconst env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('APP_DB_')))\ntest('scan', () => env)\n",
+		"node/plain.test.js":  "const test = require('node:test')\ntest('plain', () => {})\n",
+		"sh/smoke.test.sh":    "psql \"$APP_DB_DSN\" -c 'select 1'\n",
+		migration:             "create table t()",
+	}
+	rule := config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: []string{"database/migrations/**"}}
+	all := []string{"gopre", "goplain", "node/plain.test.js", "node/scan.test.js", "py/test_plain.py", "py/test_settings.py", "sh/smoke.test.sh", "web/db.test.ts", "web/plain.test.ts"}
+	slices.Sort(all)
+	for _, c := range []struct {
+		name    string
+		static  bool
+		noGraph bool
+		want    []string
+	}{
+		// Must keep: nothing to read from.
+		{name: "static off", static: false, want: all},
+		{name: "no graph", static: true, noGraph: true, want: all},
+		// Narrowing by the source; must keep the units naming the variable or a
+		// prefix of it, and the shell test no analyzer reads.
+		{name: "static on", static: true, want: []string{"gopre", "node/scan.test.js", "py/test_settings.py", "sh/smoke.test.sh", "web/db.test.ts"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, files)
+			mk := func(cs config.Suite) *runner.Suite {
+				cs.Rules, cs.Static = []config.Rule{rule}, &c.static
+				su := suite(t, cs)
+				su.RepoRoot = f.dir
+				return su
+			}
+			f.suites = []*runner.Suite{
+				mk(config.Suite{Name: "go", Runner: "go", Tests: []string{"**/*_test.go"}}),
+				mk(config.Suite{Name: "bun", Runner: "bun", Root: "web", Tests: []string{"**/*.test.ts"}}),
+				mk(config.Suite{Name: "py", Runner: "pytest", Root: "py", Tests: []string{"**/test_*.py"}}),
+				mk(config.Suite{Name: "node", Runner: "node", Root: "node", Tests: []string{"**/*.test.js"}}),
+				mk(config.Suite{Name: "sh", Runner: "custom", Root: "sh", Tests: []string{"*.test.sh"}, Command: "sh {tests}"}),
+			}
+			mut := func(in *Input) {
+				if c.noGraph {
+					in.Graph = nil
+				}
+			}
+			st := reachesRecord(f, mut)
+			res := f.sel(st, mut)
+			var got []string
+			for _, sr := range res.Suites {
+				for u, known := range sr.Known {
+					if slices.Contains(known, migration) {
+						got = append(got, u)
+					}
+				}
+			}
+			slices.Sort(got)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("units with the rule's deps: %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -258,5 +339,37 @@ func TestConfigHashReaches(t *testing.T) {
 	s.Rules[0].Reaches = []string{"pkg/shared/testkit/**"}
 	if ConfigHash(c, s) == before {
 		t.Error("reaches is not hashed")
+	}
+}
+
+// mentionsEnv: the variable's name as a word, or a prefix of it (any case) in a string
+// literal, as settings loaders given a prefix take it.
+func TestMentionsEnv(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		patterns []string
+		src      string
+		want     bool
+	}{
+		{"the name", []string{"APP_DB_DSN"}, `os.Getenv("APP_DB_DSN")`, true},
+		{"the name as an identifier", []string{"APP_DB_DSN"}, `process.env.APP_DB_DSN`, true},
+		{"a glob", []string{"APP_DB_*"}, `os.environ["APP_DB_HOST"]`, true},
+		// Must keep: a prefix the loader completes.
+		{"envconfig prefix", []string{"APP_DB_DSN"}, "envconfig.MustProcess(\"APP\", &c)", true},
+		{"viper prefix, lower case", []string{"APP_DB_DSN"}, `v.SetEnvPrefix("app")`, true},
+		{"pydantic env_prefix", []string{"APP_DB_DSN"}, `env_prefix='APP_'`, true},
+		{"a longer prefix", []string{"APP_DB_DSN"}, `scan("APP_DB")`, true},
+		{"a prefix of a glob", []string{"APP_DB_*"}, "k.startsWith(`APP`)", true},
+		// Not a mention.
+		{"another variable", []string{"APP_DB_DSN"}, `os.Getenv("APP_CACHE_URL")`, false},
+		{"a prefix outside a string literal", []string{"APP_DB_DSN"}, `app := newApp()`, false},
+		{"a word that is no prefix", []string{"APP_DB_DSN"}, `t.Run("application", f)`, false},
+		{"a pattern with no literal start", []string{"*_DSN"}, `prefix("APP")`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := mentionsEnv(c.patterns, []byte(c.src)); got != c.want {
+				t.Errorf("mentionsEnv(%v, %q) = %v, want %v", c.patterns, c.src, got, c.want)
+			}
+		})
 	}
 }
