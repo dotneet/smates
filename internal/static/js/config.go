@@ -543,3 +543,18 @@ func DecodeJSONObject(b []byte) (*Object, error) {
 	}
 	return o, nil
 }
+
+// StringLiterals returns the values of the string literals (and template literals
+// without substitutions) in JavaScript or TypeScript source, in order, comments left
+// out: the paths a configuration names (setupFiles: ["./test/setup.ts"]).
+func StringLiterals(src []byte) []string {
+	l := lex(src)
+	p := parser{src: src, toks: l.toks}
+	var out []string
+	for i := range p.toks {
+		if p.literal(i) {
+			out = append(out, p.text(i))
+		}
+	}
+	return out
+}

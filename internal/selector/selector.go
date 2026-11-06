@@ -118,6 +118,9 @@ type Suite struct {
 	Unrecorded bool `json:"-"`
 	// Services are the suite's depends_on/serves declarations, expanded at HEAD.
 	Services []*ServiceDeps `json:"-"`
+	// Browser is set when the suite's runner configuration may run tests in a browser
+	// (runner.RunnerConfig): what they load there is never traced.
+	Browser bool `json:"-"`
 }
 
 // ServiceDeps is one depends_on/serves declaration of a suite expanded to files: code
@@ -232,6 +235,9 @@ type Result struct {
 	// declared are the depends_on/serves declarations some test depends on (their
 	// files are in Covered; Explains also matches deleted ones).
 	declared []*ServiceDeps
+	// loaded are the files a suite's runner loads through its configuration
+	// (runner.RunnerConfig): never untested code.
+	loaded map[string]bool
 }
 
 // HandleOrphans records how orphans were handled; earlier records win.

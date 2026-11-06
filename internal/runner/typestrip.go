@@ -21,7 +21,7 @@ type TypeEraser interface {
 
 // Sources is the view of the repository a TypeEraser decides from.
 type Sources struct {
-	// Files are the repo-relative paths of the working tree.
+	// Files are the repo-relative paths of the working tree, sorted.
 	Files []string
 	// Read returns a file's content (nil if unreadable).
 	Read func(string) []byte

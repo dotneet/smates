@@ -90,6 +90,8 @@ type Suite struct {
 	TestsSource string
 	// DiscoveryWarning says why the runner configuration could not be read.
 	DiscoveryWarning string
+	// ConfigFiles are the runner configuration files discovery read (repo-relative).
+	ConfigFiles []string
 	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
 	// units are found in the test files' contents.
 	RepoRoot string
@@ -230,7 +232,7 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 		s.TestsSource = SourceDefaults
 		if dc, ok := a.(discoverer); ok && repo != nil {
 			disc := dc.Discover(repo, s)
-			s.DiscoveryWarning = disc.Warning
+			s.DiscoveryWarning, s.ConfigFiles = disc.Warning, disc.Files
 			if len(disc.Matchers) > 0 {
 				s.Discovered, s.TestsSource, s.Tests = disc.Matchers, disc.Source, nil
 				if disc.Exclude != nil {

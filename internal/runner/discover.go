@@ -119,6 +119,9 @@ type Discovery struct {
 	// Warning says why a configuration that exists could not be read (the defaults are
 	// used then).
 	Warning string
+	// Files are the configuration files read (repo-relative): a project's file may have
+	// any name.
+	Files []string
 }
 
 // discoverer is implemented by adapters that read their runner's configuration.

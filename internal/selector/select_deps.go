@@ -31,7 +31,10 @@ type suiteSel struct {
 	// checking them (runner.ErasesTypes): its static closures leave type-only imports
 	// out (see knownDeps).
 	eraseTypes bool
-	units      []*unitSel
+	// loaded are the files the suite's runner loads through its configuration
+	// (runner.RunnerConfig): type-only imports of them are kept (see knownDeps).
+	loaded map[string]bool
+	units  []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -111,9 +114,12 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	mapper, _ := su.Adapter.(runner.StaticMapper)
 	// A runner that erases types without checking them never loads what tests reach
 	// only through type-only imports (see runner.TypeEraser).
-	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, runner.Sources{
-		Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure,
-	})
+	var src runner.Sources
+	if in.Graph != nil {
+		src = runner.Sources{Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure}
+		s.runnerConfig(ss, src)
+	}
+	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, src)
 	st := in.State.Suites[su.Name]
 
 	for _, u := range units {
@@ -162,6 +168,25 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	}
 }
 
+// runnerConfig notes what the suite's runner loads through its configuration
+// (runner.ConfigOf): the files, which are never untested code (Result.loaded), and
+// whether it may run tests in a browser (Suite.Browser).
+func (s *selection) runnerConfig(ss *suiteSel, src runner.Sources) {
+	rc := runner.ConfigOf(ss.sr.Suite, src)
+	ss.sr.Browser = rc.Browser
+	if len(rc.Files) == 0 {
+		return
+	}
+	ss.loaded = make(map[string]bool, len(rc.Files))
+	if s.res.loaded == nil {
+		s.res.loaded = map[string]bool{}
+	}
+	for _, f := range rc.Files {
+		ss.loaded[f] = true
+		s.res.loaded[f] = true
+	}
+}
+
 // knownDeps returns the dependencies of unit u known without its recording, each with
 // how it reaches the test; later sources win: the sets of the depends_on/serves
 // declarations that apply to it, its static import closure (static), the suite's
@@ -169,8 +194,9 @@ func (s *selection) unitDeps(ss *suiteSel) {
 // depends on is declared (see declare). A Go compile check (runner.IsBuildCheck)
 // depends on what the compiler reads, not on what the tests do at run time: neither
 // declarations nor rules apply to it. With suiteSel.eraseTypes the static closure is
-// the one at run time (static.Graph.RuntimeClosure), and typeOnly returns the files
-// the full closure adds to it.
+// the one at run time (static.Graph.RuntimeClosure) plus the files of the full one
+// the runner loads through its configuration (a Vite plugin a test imports for its
+// types runs anyway), and typeOnly returns the files the full closure adds to it.
 func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bool, mapper runner.StaticMapper) (via map[string]string, typeOnly []string) {
 	sr, su := ss.sr, ss.sr.Suite
 	files := sr.Files[u]
@@ -189,6 +215,17 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 			closure = s.in.Graph.RuntimeClosure(files...)
 			if len(closure) != len(full) {
 				typeOnly = sortedMinus(full, closure)
+			}
+			if len(ss.loaded) > 0 && len(typeOnly) > 0 {
+				kept := typeOnly[:0:0]
+				for _, f := range typeOnly {
+					if ss.loaded[f] {
+						closure = append(closure, f)
+					} else {
+						kept = append(kept, f)
+					}
+				}
+				typeOnly = kept
 			}
 		}
 		if mapper != nil {

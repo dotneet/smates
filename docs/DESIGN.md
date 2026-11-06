@@ -293,10 +293,13 @@ Orphans go through, in order:
    test, directly or transitively (every test's import closure is in its `D(T)`), and
    was neither read nor executed by any test in its last run. No test can be affected,
    so it selects nothing and is reported as a change to untested code. Code configuring
-   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
-   directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
-   are left out, and so are files under the root of a suite with a test that has no
-recorded entry yet; so is everything without a recorded state, where `D(T)` holds only the
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), what a Vitest or
+   Jest configuration loads by name (`runner.RunnerConfig`: every repository file a
+   string literal in a configuration file names, such as setupFiles, plugins and alias
+   targets, plus the static closure of both), source under data directories
+   (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes are left
+   out, and so are files under the root of a suite with a test that has no recorded
+   entry yet or whose configuration may run tests in a browser (never traced); so is everything without a recorded state, where `D(T)` holds only the
    import closure and files tests read as data are not known yet. Code run by another
    process must be declared (rules), as for any dependency tracing
    cannot see.
@@ -678,7 +681,9 @@ mention keeps the type edges, which costs precision, never correctness (a type-o
 can fail a type-checking run: vitest typecheck, ts-jest, ts-node). jest, node and custom
 suites always keep them. The files only the full closure reaches are added to `Covered`
 (a change to them is explained, not an orphan) but not to D(T) or `Known`, so recording
-does not write them either.
+does not write them either. A file the runner loads through its configuration
+(`runner.RunnerConfig`, a Vite plugin serving a mock API that a test imports only for its
+types) stays in the closure: erasing the import does not stop the runner loading it.
 
 ## 3. Status and shadow mode
 

@@ -261,3 +261,21 @@ func TestConfigObjectTerminates(t *testing.T) {
 		t.Errorf("malformed object: got %#v, want Spread", v)
 	}
 }
+
+func TestStringLiterals(t *testing.T) {
+	cases := []struct {
+		src  string
+		want []string
+	}{
+		{`export default { test: { setupFiles: ["./a.ts", './b.ts'] } }`, []string{"./a.ts", "./b.ts"}},
+		{"const x = `./plain.ts`; const y = `./${n}.ts`", []string{"./plain.ts"}},
+		{"// setupFiles: [\"./commented.ts\"]\n/* \"./block.ts\" */ const s = \"./kept.ts\"", []string{"./kept.ts"}},
+		{`const s = "a\"b"`, []string{`a"b`}},
+		{`const r = /"not-a-string"/`, nil},
+	}
+	for _, c := range cases {
+		if got := StringLiterals([]byte(c.src)); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("StringLiterals(%q) = %q, want %q", c.src, got, c.want)
+		}
+	}
+}

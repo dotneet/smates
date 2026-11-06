@@ -39,6 +39,13 @@ smates adds a reporter next to yours for per-file results. When you configure
 `reporters` yourself, it does not add one, and a failing run then marks every recorded
 file failed.
 
+Vitest and Vite configuration files in the suite directory (`vitest.config.*`,
+`vite.config.*`, per-project files such as `vitest.browser.config.ts`, and
+`vitest.workspace.*`) are inputs of every test. The files a configuration loads by
+name, such as `setupFiles`, `globalSetup`, local Vite plugins and alias targets, and
+whatever they import, are never treated as untested code: a change to one goes to the
+[orphan policy](orphans.md) unless a test depends on it.
+
 ### jest
 
 Jest workers run many files each, which would merge their dependencies. While

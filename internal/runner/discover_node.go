@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -550,7 +551,13 @@ func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
 		}
 	}
 	if projects != nil {
-		return vitestProjects(repo, root, projFile, projKey, test, projects)
+		d, err := vitestProjects(repo, root, projFile, projKey, test, projects)
+		for _, f := range []string{file, projFile} {
+			if f != "" && !slices.Contains(d.Files, f) {
+				d.Files = append(d.Files, f)
+			}
+		}
+		return d, err
 	}
 	m, k, err := vitestMatcher(file, root, test)
 	if err != nil {
@@ -628,6 +635,7 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 		label += " " + key
 	}
 	var ms []Matcher
+	var files []string
 	var warn error
 	add := func(m Matcher, err error) {
 		if err != nil && warn == nil {
@@ -673,6 +681,7 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 					ms = append(ms, Matcher{Base: mt, Tests: vitestInclude})
 					continue
 				}
+				files = append(files, cfg)
 				add(vitestProjectFile(repo, cfg))
 			}
 		case *js.Object:
@@ -719,7 +728,7 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 	if len(ms) == 0 {
 		return Discovery{}, fmt.Errorf("%s: no project found", label)
 	}
-	return Discovery{Matchers: ms, Source: fmt.Sprintf("%s (%d projects)", label, len(ms))}, warn
+	return Discovery{Matchers: ms, Source: fmt.Sprintf("%s (%d projects)", label, len(ms)), Files: files}, warn
 }
 
 // vitestProjectFile reads the test options of a project config file; its root is the
