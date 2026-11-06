@@ -213,7 +213,11 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 		return
 	}
 	if c.worst == 0 {
-		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s\n", started, selected, total, elapsedText)
+		note := ""
+		if n := c.notStartedUnits(); n > 0 {
+			note = fmt.Sprintf("; %s left %d selected unit(s) not started (they stay selected)", c.notStartedBy(), n)
+		}
+		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s%s\n", started, selected, total, elapsedText, note)
 		return
 	}
 	if len(failed) == 0 && c.interrupted {
