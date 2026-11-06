@@ -280,7 +280,16 @@ file unchanged only when every suite it runs saw that content; a run of other su
 or of every suite, finds it changed (and, to the agent and failure hints, unrecorded),
 so a shared state (local runs, `state merge`, CI without a `cache-key` per job) never
 hides a change from the suites that have not compared it. Orphans a `--suite` run
-handles are recorded the same way.
+handles are recorded the same way. A suite with no recorded entry compares nothing with
+a marker: in state mode its tests are decided against the base revision by static
+analysis (locally, or in CI with `--base`) or run as new. So a marker every recorded
+suite of the run saw (and some suite saw) is no change for that run either
+(`selection.markerFilter`); otherwise one `--all --suite` recording would make every
+file of the tree an orphan of the next unscoped run. The files dropped this way that
+changed since the base revision, that no test explains and that a never-recorded suite
+owns are its orphans, as in diff mode (`neverRecordedOrphans`), and a note names those
+suites. In diff mode (no suite has an entry) the snapshot's changes decide every test,
+so markers keep their meaning there.
 
 Orphans go through, in order:
 
@@ -288,6 +297,8 @@ Orphans go through, in order:
    (fixtures, scripts, schemas referenced as strings) are selected. Files every test of a
    suite depends on (package.json, lockfiles, runner config) only count when no
    test-specific file mentions the orphan.
+   The names of all orphans are searched in one pass over each file (Aho-Corasick), so
+   the cost does not grow with their number.
 2. **Untested code** (`untested: skip`, the default): an orphan in a language a suite
    analyzes statically (Go, Python, JS/TS) under that suite's root is imported by no
    test, directly or transitively (every test's import closure is in its `D(T)`), and
@@ -663,7 +674,14 @@ included), through extends chains (installed configs read from `node_modules`); 
 unreadable config, or one extending a config that cannot be found while leaving an option
 unset, counts as keeping it. `typeof import("x")` and `import("x").T` cannot be told from
 value expressions at token level and stay. The analyzer returns both edge sets
-(`host.TypeAnalyzer`), and the graph serves `Closure` and `RuntimeClosure`. Selection uses
+(`host.TypeAnalyzer`), and the graph serves `Closure` and `RuntimeClosure`. Each condenses
+its edges into strongly connected components once per process (iterative Tarjan over the
+files reached so far; a type-only import can split a component, so the two have their own)
+and walks the component DAG, so a closure costs the components it reaches rather than
+every file edge (a Go file lists every sibling and every file of the packages it imports).
+`Warm` resolves every file the starts reach in parallel first. A suite's closures are
+covered as one union (`unitDeps`), and a suite `--suite` leaves out builds no `D(T)`:
+it only covers. Selection uses
 the runtime closure only for a suite whose runner is known to erase types without checking
 them (`runner.TypeEraser`): vitest run directly by the suite command, with no mention of
 type checking (typecheck, tsc, tsd, ts-node, the options above, `tsconfigRaw`) in the
