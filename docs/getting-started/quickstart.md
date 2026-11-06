@@ -127,12 +127,17 @@ api	runner=go	root=services/api	units=32	command=go test	tests=runner defaults
   code, and variables from `.env.example` that the code reads.
 - **An existing workflow** that already runs the tests is not duplicated: smates prints a
   patch that replaces those steps with the smates action (`--patch FILE` writes it for
-  `git apply`; `--force` writes a new workflow anyway).
+  `git apply`; `--force` writes a new workflow anyway). Steps it cannot stand in for
+  exactly, such as targeted runs or matrix legs, are reported and left alone, and a
+  workflow that runs only on pull requests also gets the triggers that record the state
+  (see [Switch existing workflows](../ci/github-actions.md#switch-existing-workflows)).
 - **An existing `smates.yml`** is left untouched; only the workflow (or patch) is
   generated from its suites. `--force` rewrites it.
 
 Flags and variables of a Makefile `test` target become commented `command:` / `env:`
-hints in `smates.yml`. `smates init --format json` reports all of this, including the
+hints in `smates.yml`, as does the `env:` of the workflow steps running the tests. The
+`go test` flags `-p`, `-tags`, `-race` and `-timeout` from either go into the suite's
+`command:` itself. `smates init --format json` reports all of this, including the
 items to review, for a script or a coding agent.
 
 ## Next steps

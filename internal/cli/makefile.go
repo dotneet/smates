@@ -4,6 +4,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path"
@@ -28,6 +29,13 @@ type makeHint struct {
 	Line    string // the recipe line
 	Command string // the runner invocation without positional package/path arguments
 	Env     [][2]string
+	// Exact is set when the recipe runs in the suite's root (not a fallback to the
+	// first suite of the runner).
+	Exact bool
+	// Carry are the go test flags of the command that the suite's command keeps.
+	Carry goCarry
+	// Picked is a command substitution choosing the packages ($(go list ./... | grep -v x)).
+	Picked string
 }
 
 var makeTargetRe = regexp.MustCompile(`^([A-Za-z0-9_.%/-]+(?:\s+[A-Za-z0-9_.%/-]+)*)\s*::?(?:[^=]|$)`)
@@ -115,28 +123,35 @@ func makeTestRecipes(mk string) map[string][]string {
 func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 	var env [][2]string
 	cd := dir
-	for _, seg := range shellSepRe.Split(line, -1) {
-		words := strings.Fields(seg)
-		if len(words) >= 2 && words[0] == "cd" {
-			cd = path.Clean(joinRel(dir, words[1]))
+	// make passes $$ to the shell as $; $(VAR) is make's own and stays one word.
+	words := shellWords(strings.ReplaceAll(line, "$$", "$"))
+	for len(words) > 0 {
+		end := slices.IndexFunc(words, shellControlOp)
+		if end < 0 {
+			end = len(words)
+		}
+		seg := slices.Clone(words[:end])
+		words = words[min(end+1, len(words)):]
+		if len(seg) >= 2 && seg[0] == "cd" {
+			cd = path.Clean(joinRel(dir, seg[1]))
 			continue
 		}
-		if len(words) > 0 && words[0] == "export" {
-			words = words[1:]
+		if len(seg) > 0 && seg[0] == "export" {
+			seg = seg[1:]
 		}
 		var local [][2]string
-		for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
-			k, v, _ := strings.Cut(words[0], "=")
+		for len(seg) > 0 && strings.Contains(seg[0], "=") && !strings.HasPrefix(seg[0], "-") {
+			k, v, _ := strings.Cut(seg[0], "=")
 			local = append(local, [2]string{k, strings.Trim(v, `"'`)})
-			words = words[1:]
+			seg = seg[1:]
 		}
 		runner, at := "", -1
-		for i, w := range words {
+		for i, w := range seg {
 			base := path.Base(w)
 			switch {
-			case (base == "go" || w == "$(GO)" || w == "${GO}") && i+1 < len(words) && words[i+1] == "test":
+			case (base == "go" || w == "$(GO)" || w == "${GO}") && i+1 < len(seg) && seg[i+1] == "test":
 				runner, at = "go", i+2
-			case base == "bun" && i+1 < len(words) && words[i+1] == "test":
+			case base == "bun" && i+1 < len(seg) && seg[i+1] == "test":
 				runner, at = "bun", i+2
 			case base == "vitest" || base == "jest" || base == "pytest":
 				runner, at = base, i+1
@@ -146,15 +161,23 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 			}
 		}
 		if runner == "" {
-			if len(words) == 0 { // only assignments: "export TZ=UTC" for the next commands
+			if len(seg) == 0 { // only assignments: "export TZ=UTC" for the next commands
 				env = append(env, local...)
 			}
 			continue
 		}
 		env = append(env, local...)
-		cmd := slices.Clone(words[:at])
-		flags := 0
-		for _, w := range words[at:] {
+		cmd := slices.Clone(seg[:at])
+		var args []string
+		flags, picked := 0, ""
+		for _, w := range seg[at:] {
+			if shellRedirect(w) {
+				break
+			}
+			if strings.HasPrefix(w, "$(") && strings.ContainsAny(w, " \t") || strings.HasPrefix(w, "`") {
+				picked = w // packages picked by a command: smates passes its own
+				continue
+			}
 			if strings.HasPrefix(w, "./") || strings.HasPrefix(w, "../") || strings.Contains(w, "...") || w == "." {
 				continue // packages / test paths: smates passes its own
 			}
@@ -162,6 +185,7 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 				flags++
 			}
 			cmd = append(cmd, w)
+			args = append(args, w)
 		}
 		if runner == "vitest" && len(cmd) == at && at == 1 {
 			cmd = append(cmd, "run")
@@ -169,10 +193,10 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 		if flags == 0 && len(env) == 0 {
 			return makeHint{}, false
 		}
-		suite := ""
+		suite, exact := "", false
 		for _, s := range suites {
 			if s.Runner == runner && s.Root == cd {
-				suite = s.Name
+				suite, exact = s.Name, true
 				break
 			}
 			if s.Runner == runner && suite == "" {
@@ -182,19 +206,32 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 		if suite == "" {
 			return makeHint{}, false
 		}
-		return makeHint{Suite: suite, Command: strings.Join(cmd, " "), Env: env}, true
+		h := makeHint{Suite: suite, Command: strings.Join(cmd, " "), Env: env, Exact: exact, Picked: picked}
+		if runner == "go" {
+			if c := checkGoTestArgs(args); !c.other {
+				h.Carry = c.carry
+			}
+		}
+		return h, true
 	}
 	return makeHint{}, false
 }
 
-// configHints renders the commented smates.yml lines for each Makefile hint, per suite.
-func configHints(hints []makeHint) map[string][]string {
+// configHints renders the commented smates.yml lines for each suite: the Makefile test
+// target smates found for it, and the env: the workflows running its tests set. carried
+// holds the go test flags the suite's command took from them (see carryGoFlags).
+func configHints(hints []makeHint, wf map[string]envHint, carried map[string]string) map[string][]string {
 	out := map[string][]string{}
 	for _, h := range hints {
-		lines := []string{
-			fmt.Sprintf("# %s target %q runs: %s", h.File, h.Target, h.Line),
-			"# smates runs the runner itself; to keep those flags/variables, uncomment:",
-			"# command: " + strconv.Quote(h.Command),
+		lines := []string{fmt.Sprintf("# %s target %q runs: %s", h.File, h.Target, h.Line)}
+		if c := carried[h.Suite]; c != "" {
+			lines = append(lines, "# smates runs the runner itself; command: above keeps "+c+"; to keep the other flags/variables too, replace it with:")
+		} else {
+			lines = append(lines, "# smates runs the runner itself; to keep those flags/variables, uncomment:")
+		}
+		lines = append(lines, "# command: "+strconv.Quote(h.Command))
+		if h.Picked != "" {
+			lines = append(lines, "# It picks the packages with "+h.Picked+": smates runs every package of the suite (add exclude: globs for any it must leave out).")
 		}
 		if len(h.Env) > 0 {
 			lines = append(lines, "# env:")
@@ -203,6 +240,127 @@ func configHints(hints []makeHint) map[string][]string {
 			}
 		}
 		out[h.Suite] = lines
+	}
+	for _, name := range slices.Sorted(maps.Keys(wf)) {
+		w := wf[name]
+		lines := out[name]
+		var env [][2]string
+		for _, kv := range w.Env {
+			if !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "#   "+kv[0]+":") }) {
+				env = append(env, kv)
+			}
+		}
+		if len(env) == 0 {
+			continue
+		}
+		if slices.Contains(lines, "# env:") {
+			lines = append(lines, "# "+w.From+" also sets (CI values: check them before adding them under env:):")
+		} else {
+			lines = append(lines, "# "+w.From+" sets env: for these tests (CI values: check them before uncommenting):", "# env:")
+		}
+		for _, kv := range env {
+			lines = append(lines, "#   "+kv[0]+": "+yamlStr(kv[1]))
+		}
+		out[name] = lines
+	}
+	return out
+}
+
+// envHint is the environment workflow steps set for a suite's tests.
+type envHint struct {
+	From string // the steps, for the comment
+	Env  [][2]string
+}
+
+// workflowEnvHints collects, per suite, the env: of the workflow steps that run its
+// unit tests (the workflow's, the job's and the step's own). smates.yml gets them only
+// as comments: CI values (ports, database names) need not hold locally, and the step's
+// env reaches the smates action in CI anyway.
+func workflowEnvHints(steps []testStep, suites []config.Suite) map[string]envHint {
+	out := map[string]envHint{}
+	for _, st := range steps {
+		if st.Other || len(st.Env) == 0 {
+			continue
+		}
+		names, _ := stepSuites(st, suites)
+		for _, n := range names {
+			h := out[n]
+			from := fmt.Sprintf("%s (job %q)", st.File, st.Job)
+			if h.From == "" {
+				h.From = from
+			} else if !strings.Contains(h.From, from) {
+				h.From += ", " + from
+			}
+			for _, kv := range st.Env {
+				if !slices.ContainsFunc(h.Env, func(e [2]string) bool { return e[0] == kv[0] }) {
+					h.Env = append(h.Env, kv)
+				}
+			}
+			out[n] = h
+		}
+	}
+	return out
+}
+
+// carryGoFlags moves the go test flags that change how a Go suite's tests run (-p,
+// -tags, -race, -timeout: see goCarry) from the workflow steps and the Makefile test
+// target running it into the suite's command, and returns the flags each suite got.
+// Sources that disagree combine toward the safer run (the lowest -p, -race, the longest
+// -timeout); -tags only when they all agree (a tag can also leave files out).
+func carryGoFlags(suites []config.Suite, mk []makeHint, steps []testStep, stderr io.Writer) map[string]string {
+	type source struct {
+		c    goCarry
+		from string
+	}
+	per := map[string][]source{}
+	for _, h := range mk {
+		// Only a target run in the suite's own directory: a Makefile elsewhere may
+		// test another module.
+		if h.Exact && !h.Carry.empty() {
+			per[h.Suite] = append(per[h.Suite], source{h.Carry, fmt.Sprintf("%s target %q", h.File, h.Target)})
+		}
+	}
+	for _, st := range steps {
+		if st.Other || !slices.Equal(st.Runners, []string{"go"}) {
+			continue
+		}
+		names, _ := stepSuites(st, suites)
+		for _, n := range names {
+			per[n] = append(per[n], source{st.Carry, fmt.Sprintf("%s (job %q)", st.File, st.Job)})
+		}
+	}
+	out := map[string]string{}
+	for i := range suites {
+		s := &suites[i]
+		srcs := per[s.Name]
+		if s.Runner != "go" || len(srcs) == 0 {
+			continue
+		}
+		merged, from := srcs[0].c, []string{srcs[0].from}
+		conflict := false
+		for _, src := range srcs[1:] {
+			var c bool
+			merged, c = merged.merge(src.c)
+			conflict = conflict || c
+			if !slices.Contains(from, src.from) {
+				from = append(from, src.from)
+			}
+		}
+		if conflict {
+			fmt.Fprintf(stderr, "smates: suite %s: %s run go test with different -tags; smates.yml has one command per suite, so its command sets none (add a suite per set of tags, or set command: yourself)\n", s.Name, strings.Join(from, ", "))
+		}
+		if merged.empty() {
+			continue
+		}
+		cmd, changed, ok := withGoCarry(s.Command, merged)
+		switch {
+		case !ok:
+			fmt.Fprintf(stderr, "smates: suite %s: %s run go test with %s, but its command is not go test: add them to it yourself\n", s.Name, strings.Join(from, ", "), merged)
+		case changed:
+			s.Command = cmd
+			out[s.Name] = merged.String()
+			fmt.Fprintf(stderr, "smates: suite %s: %s run go test with %s; its command in smates.yml keeps them: %s\n", s.Name, strings.Join(from, ", "), merged, cmd)
+		}
 	}
 	return out
 }

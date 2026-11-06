@@ -78,7 +78,11 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	for _, h := range mk {
 		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
 	}
-	doc := renderConfig(suites, configHints(mk))
+	// The workflows running the tests tell which go test flags a suite needs (-p 1 for a
+	// shared database) and what environment they set.
+	wfSteps := workflowTestSteps(repo.Root)
+	carried := carryGoFlags(suites, mk, wfSteps, stderr)
+	doc := renderConfig(suites, configHints(mk, workflowEnvHints(wfSteps, suites), carried))
 	// --force overwrites the config file smates reads, whichever of its names it has
 	// (a new smates.yml next to a .smates.yml would shadow it).
 	name := configFileName(repo.Root)
@@ -717,17 +721,19 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// stateRefs are the refs `smates state pull` tries: the branch's, then the default branch's.
+// stateRefs are the refs `smates state pull` tries: the branch's, then the base
+// branch's of a pull request, then the default branch's.
 func stateRefs(repo *gitx.Repo) []string {
 	ci := detectCI()
-	b := first(os.Getenv("SMATES_BRANCH"), ci.Branch, repo.CurrentBranch())
-	def := first(ci.DefaultBranch, repo.DefaultBranch())
+	return stateRefsFor(first(os.Getenv("SMATES_BRANCH"), ci.Branch, repo.CurrentBranch()), ci.BaseRef, first(ci.DefaultBranch, repo.DefaultBranch()))
+}
+
+func stateRefsFor(branch, base, def string) []string {
 	var refs []string
-	if b != "" {
-		refs = append(refs, stateRefPrefix+b)
-	}
-	if def != b {
-		refs = append(refs, stateRefPrefix+def)
+	for _, b := range []string{branch, base, def} {
+		if b != "" && !slices.Contains(refs, stateRefPrefix+b) {
+			refs = append(refs, stateRefPrefix+b)
+		}
 	}
 	return refs
 }

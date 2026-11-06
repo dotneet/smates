@@ -30,7 +30,8 @@ A complete, commented workflow is in
 [`.github/workflows/smates.yml`](https://github.com/dotneet/smates/blob/main/.github/workflows/smates.yml).
 `smates init --github` generates one for your project; when an existing workflow already
 runs the tests, it prints (or, with `--patch FILE`, writes) a patch that replaces those
-steps with the action instead of adding a second workflow.
+steps with the action instead of adding a second workflow (see
+[Switch existing workflows](#switch-existing-workflows)).
 
 ## What the action does
 
@@ -42,7 +43,9 @@ steps with the action instead of adding a second workflow.
    or when the download fails and Go is on `PATH`, it is built from the action's own
    checkout instead. A failed verification always fails the job; it never falls back.
 2. **Restore state** (`.smates/`) from the Actions cache: the newest state of this
-   branch, else the newest state of the default branch, else none (cold start).
+   branch, else (for a pull request into another branch than the default) of its base
+   branch, else of the default branch, else none (cold start; see
+   [Seed the state](#seed-the-state)).
 3. **Run** `smates <command> <args>` in `working-directory`. The step's exit code is
    the tests' exit code.
 4. **Comment** (with `comment: true`) the selection summary on the pull request.
@@ -87,7 +90,8 @@ state.
 | `github-token` | `github.token` | Token used for the comment and to look up attestations. |
 
 Cache key: `smates-state-<runner.os>-[<cache-key>-]<branch>-<run_id>-<run_attempt>`,
-restored by prefix `...-<branch>-`, then `...-<default branch>-`.
+restored by prefix `...-<branch>-`, then `...-<base branch>-` (pull requests into another
+branch than the default), then `...-<default branch>-`.
 
 ## Outputs
 
@@ -394,6 +398,45 @@ step would select for its suites:
 - `--suite <name> --all` on the default branch records the snapshot as a full run does,
   so pull requests only see what changed since.
 
+### Switch existing workflows { #switch-existing-workflows }
+
+`smates init --github` reads `.github/workflows/` and, when a workflow already runs the
+tests, proposes a patch (`--patch FILE` writes it) instead of adding a second workflow:
+
+- Each test step becomes `uses: dotneet/smates@v1` with `args: --suite <name>` for the
+  suites the step ran: those of its runner rooted at or below the directory it runs in
+  (its `working-directory`, else the job's or the workflow's
+  `defaults.run.working-directory`). The action's `working-directory` is not set:
+  smates reads `smates.yml` and keeps its state at the repository root.
+- When several steps are switched, each gets a `cache-key` named after its suites:
+  per-module jobs keep separate state, and steps running the same suites share it.
+- The step's `id`, `if`, `timeout-minutes`, `continue-on-error` and `env` are kept.
+
+It reports the steps it leaves alone, and why:
+
+| The step | Why it is left alone |
+|---|---|
+| runs in a directory inside a suite's root (`pkg/app/internal`) | it runs only part of that suite: add a suite rooted there |
+| names packages other than `./...` or `.`, or computes them (`$(go list ./... \| grep -v x)`, `"${packages[@]}"`) | smates selects among all of the suite's packages, which the job may not be set up for |
+| passes `-run`, `-list`, `-bench`, `-c` or `-skip` (single tests, compile-only checks) | it is not the plain unit run |
+| passes `-json` or `-coverprofile`, or pipes or redirects its output | another step may read the output |
+| uses `${{ matrix.* }}` in its command or working directory | smates cannot tell which suite each leg runs: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
+| runs `turbo run test` or `node --test` | found, so that no second workflow runs the same tests, but never replaced |
+| runs `go test` with `-p`, `-tags`, `-race` or `-timeout` that the suite's `command:` lacks | the action would run without them: add them to `smates.yml`, then rerun |
+
+Without an existing `smates.yml`, `smates init` writes those `go test` flags into the
+suite's `command:` itself, so that `-p 1` for tests sharing a database applies to local
+runs too. Flags from several steps or the Makefile combine toward the safer run (the
+lowest `-p`, `-race`, the longest `-timeout`); `-tags` is taken only when they all
+agree, since a tag can also leave files out. The environment the steps set goes into
+`smates.yml` only as a comment: CI values such as ports and database names may not hold
+locally, and in CI the step's `env:` reaches the action anyway. Nothing is added to
+`env_ignore`.
+
+A workflow that runs only on pull requests also gets `push: branches: [<default>]`
+(with the pull request's `paths:` filters) and a nightly `schedule:` in its `on:`; see
+[Seed the state](#seed-the-state).
+
 ### Shadow mode
 
 `args: --shadow` runs the full suite and reports what selection would have done, to
@@ -405,6 +448,50 @@ the shard owns, selected or not, and reports as escapes the failing tests of its
 share that the selection (of the whole run) would have skipped. Together the shards run
 every test once, and an escape is reported only by the shard that owns the test.
 `smates stats` adds up the escapes of the shards' records.
+
+### Seed the state { #seed-the-state }
+
+A pull request starts from the state of its branch, else of its base branch, else of
+the default branch. If no workflow runs smates on the default branch there is none: the
+first run of every pull request starts cold, which without full history
+(`fetch-depth: 0`) means running everything. `smates doctor` reports such workflows
+(`workflow-no-seed`).
+
+Run the same job on the default branch too. A nightly run with `--shadow` does two
+things at once: it runs every test and records the state, and it reports the failing
+tests a selection would have skipped (escapes), which `smates stats` counts:
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]       # optional: a full run per merge keeps the state current
+  schedule:
+    - cron: '23 3 * * *'   # nightly
+
+jobs:
+  test:
+    steps:
+      # ...
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --suite app ${{ github.event_name == 'schedule' && '--shadow' || '' }}
+          cache-key: app
+```
+
+- Add the triggers to the job that already runs the tests rather than copying it into a
+  separate seeding job: a copy has to repeat its services, setup and `env:`, and keep
+  them in step. The `cache-key` must be the one the pull request job uses.
+- On a push to the default branch `smates run` runs every test anyway. Drop `push:` if a
+  full run per merge costs too much; the state is then at most a day old, which is still
+  correct (a selection diffs against the state's own snapshot).
+- Jobs gated on pull request data (`github.event.pull_request`, `github.head_ref`)
+  skip or fail on push and schedule: check their `if:` conditions.
+- A pull request into another branch than the default restores that branch's state,
+  which exists only if that branch has runs of its own.
+- `smates stats --since 30d` on the state restored from the default branch shows the
+  shadow runs and escapes of the nightly runs. Pull request runs save their state in the
+  pull request's own cache scope, so their records never reach it.
 
 ### Pull request comment { #pull-request-comment }
 

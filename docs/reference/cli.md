@@ -249,6 +249,7 @@ fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`,
 | `state-skipped` | test units that skipped themselves in their last run (not proven: they run every time until they pass) |
 | `agent`, `ci` | the agent is available; the CI detected and whether it runs everything by default |
 | `workflow-test-step` | a GitHub workflow step that runs the tests without smates |
+| `workflow-no-seed` | a GitHub workflow that runs smates only on pull requests, with no workflow running it on the default branch under the same `cache-key`: nothing records the state pull requests start from |
 
 Flags: `--format text|json`, plus the [common flags](#common-flags).
 
@@ -323,13 +324,16 @@ smates init [flags]
 ```
 
 Detects the suites of the repository, writes `smates.yml` and adds `.smates/` to
-`.gitignore`. It refuses to overwrite an existing config unless `--force`; with
+`.gitignore`. The `go test` flags that change how a Go suite's tests run (`-p`,
+`-tags`, `-race`, `-timeout`) go into its `command:` when the workflow steps or the
+Makefile test target running it use them; the environment those steps set is written
+as a comment only. It refuses to overwrite an existing config unless `--force`; with
 `--github` or `--agents-md` over an existing config, only that part runs. See
 [Quick start](../getting-started/quickstart.md).
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
-| `--github` | | off | Also write `.github/workflows/smates.yml`. When an existing workflow already runs the tests, print a patch that switches its test steps to smates instead. |
+| `--github` | | off | Also write `.github/workflows/smates.yml`. When an existing workflow already runs the tests, print a patch that switches its test steps to smates instead ([what it patches](../ci/github-actions.md#switch-existing-workflows)). |
 | `--patch` | file | print it | With `--github`: write that patch to `file` (for `git apply`). |
 | `--agents-md` | | off | Add a short smates section to `AGENTS.md` (or `CLAUDE.md`) for coding agents. |
 | `--force` | | off | Overwrite an existing `smates.yml`. |

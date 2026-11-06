@@ -203,6 +203,7 @@ smates doctor [flags]
 | `state-skipped` | 前回の実行で自分をスキップしたテストユニット（未証明なので、成功するまで毎回実行される） |
 | `agent`、`ci` | エージェントが使えるか、検出した CI と、デフォルトで全件実行になるか |
 | `workflow-test-step` | smates を使わずにテストを実行している GitHub ワークフローのステップ |
+| `workflow-no-seed` | smates を pull request でしか実行せず、同じ `cache-key` でデフォルトブランチ上に実行するワークフローもない GitHub ワークフロー（pull request の出発点になるステートを誰も記録しない） |
 
 フラグ: `--format text|json` と [共通フラグ](#common-flags)。
 
@@ -269,11 +270,11 @@ smates orphans --apply [--dry-run]
 smates init [flags]
 ```
 
-リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
+リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。Go スイートのテストの実行のしかたを変える `go test` のフラグ（`-p`、`-tags`、`-race`、`-timeout`）は、そのスイートを実行するワークフローのステップや Makefile のテストターゲットが使っていれば、スイートの `command:` に入ります。それらのステップが設定する環境変数はコメントとしてだけ書き出します。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
-| `--github` | | オフ | `.github/workflows/smates.yml` も書き出します。既存のワークフローがすでにテストを実行している場合は、代わりにそのテストステップを smates に置き換えるパッチを表示します。 |
+| `--github` | | オフ | `.github/workflows/smates.yml` も書き出します。既存のワークフローがすでにテストを実行している場合は、代わりにそのテストステップを smates に置き換えるパッチを表示します（[パッチの内容](../ci/github-actions.md#switch-existing-workflows)）。 |
 | `--patch` | file | 表示する | `--github` と併用し、そのパッチを `file` に書き出します（`git apply` 用）。 |
 | `--agents-md` | | オフ | コーディングエージェント向けの短い smates の節を `AGENTS.md`（または `CLAUDE.md`）に追加します。 |
 | `--force` | | オフ | 既存の `smates.yml` を上書きします。 |
