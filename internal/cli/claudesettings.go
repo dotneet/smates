@@ -11,10 +11,11 @@ import (
 	"strings"
 )
 
-// Editing Claude Code's settings.json byte-carefully: smates splices its Stop hook
-// entry into the file's text and removes exactly that text again, so everything else
-// (key order, formatting, other hooks, keys smates does not know) stays as it was, byte
-// for byte. Install followed by uninstall restores the original file.
+// Editing Claude Code's settings.json (and Codex's hooks.json, which has the same
+// "hooks" object) byte-carefully: smates splices its Stop hook entry into the file's
+// text and removes exactly that text again, so everything else (key order, formatting,
+// other hooks, keys smates does not know) stays as it was, byte for byte. Install
+// followed by uninstall restores the original file.
 
 // jsonSpan locates a value in a JSON document: [start, end) are its bytes; keyStart is
 // where the member's key starts (objects) or start (arrays).
@@ -105,10 +106,11 @@ func marshalIndented(v any, prefix, unit string) []byte {
 	return bytes.TrimRight(b.Bytes(), "\n")
 }
 
-// claudeDoc is a settings.json being edited.
+// claudeDoc is a settings.json (or Codex hooks.json) being edited.
 type claudeDoc struct {
-	data []byte
-	unit string // indentation unit
+	data   []byte
+	unit   string // indentation unit
+	marker string // identifies smates' Stop hook entries (agentHook.marker)
 }
 
 // smatesEntry is a smates Stop hook entry with the spans needed to edit or remove it.
@@ -188,7 +190,7 @@ func (d *claudeDoc) entries() ([]smatesEntry, error) {
 			}
 			c, ok := findKey(em, "command")
 			var cmd string
-			if !ok || json.Unmarshal(d.data[c.start:c.end], &cmd) != nil || !strings.Contains(cmd, claudeHookMarker) {
+			if !ok || json.Unmarshal(d.data[c.start:c.end], &cmd) != nil || !strings.Contains(cmd, d.marker) {
 				continue
 			}
 			se := smatesEntry{command: cmd, cmdSpan: c, entry: e, group: g, entries: entries, groupArr: arr}
@@ -304,12 +306,12 @@ func rootBounds(data []byte) (int, int) {
 	return start, end
 }
 
-func readClaudeDoc(path string) (*claudeDoc, error) {
+func readClaudeDoc(path, marker string) (*claudeDoc, error) {
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	d := &claudeDoc{data: data, unit: "  "}
+	d := &claudeDoc{data: data, unit: "  ", marker: marker}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return d, nil
 	}
@@ -342,8 +344,8 @@ func (d *claudeDoc) write(path string) error {
 	return os.WriteFile(path, d.data, 0o644)
 }
 
-func installClaudeHook(path string, command string, stdout io.Writer) error {
-	d, err := readClaudeDoc(path)
+func installAgentHook(a agentHook, path string, command string, stdout io.Writer) error {
+	d, err := readClaudeDoc(path, a.marker)
 	if err != nil {
 		return err
 	}
@@ -353,7 +355,7 @@ func installClaudeHook(path string, command string, stdout io.Writer) error {
 	}
 	timeout := fmt.Sprint(claudeHookTimeout)
 	if len(entries) == 1 && entries[0].command == command && entries[0].timeout == timeout {
-		fmt.Fprintf(stdout, "smates Claude Code Stop hook already installed in %s\n", path)
+		fmt.Fprintf(stdout, "smates %s Stop hook already installed in %s\n", a.name, path)
 		return nil
 	}
 	entry := struct {
@@ -420,17 +422,17 @@ func installClaudeHook(path string, command string, stdout io.Writer) error {
 	if len(entries) > 0 {
 		verb = "updated"
 	}
-	fmt.Fprintf(stdout, "%s the smates Claude Code Stop hook in %s\n"+
-		"When Claude ends its turn, the tests its changes can affect run; failures make it continue and fix them.\n", verb, path)
+	fmt.Fprintf(stdout, "%s the smates %s Stop hook in %s\n"+
+		"When %s ends its turn, the tests its changes can affect run; failures make it continue and fix them.\n", verb, a.name, path, a.agent)
 	return nil
 }
 
-func uninstallClaudeHook(path string, stdout io.Writer) error {
+func uninstallAgentHook(a agentHook, path string, stdout io.Writer) error {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stdout, "no Claude Code settings at %s\n", path)
+		fmt.Fprintf(stdout, "no %s settings at %s\n", a.name, path)
 		return nil
 	}
-	d, err := readClaudeDoc(path)
+	d, err := readClaudeDoc(path, a.marker)
 	if err != nil {
 		return err
 	}
@@ -463,8 +465,8 @@ func uninstallClaudeHook(path string, stdout io.Writer) error {
 }
 
 // claudeHookInstalled reports whether the settings file has a smates Stop hook.
-func claudeHookInstalled(path string) (bool, error) {
-	d, err := readClaudeDoc(path)
+func agentHookInstalled(a agentHook, path string) (bool, error) {
+	d, err := readClaudeDoc(path, a.marker)
 	if err != nil {
 		return false, err
 	}

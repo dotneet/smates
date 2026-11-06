@@ -19,7 +19,7 @@ The guides explain when and why you use it.
 | [`smates config`](#smates-config) | Edit `smates.yml` safely |
 | [`smates guide`](#smates-guide) | Print the guide for coding agents |
 | [`smates state`](#smates-state) | Inspect, move and clear the recorded state |
-| [`smates hook`](#smates-hook) | Install a git pre-push/pre-commit hook or a Claude Code Stop hook |
+| [`smates hook`](#smates-hook) | Install a git pre-push/pre-commit hook, or a Claude Code or Codex Stop hook |
 | [`smates version`](#smates-version-and-help) | Print the version |
 
 Run `smates <command> -h` to print a command's flags (exit code 0); for `config`,
@@ -80,6 +80,7 @@ See [How smates decides](../getting-started/how-it-works.md).
 | `--markdown` | file | | Write the summary as Markdown to `file` (replaced), for a pull request comment. |
 | `--summary` | file | `$GITHUB_STEP_SUMMARY` on GitHub Actions | Append the Markdown summary to `file`. |
 | `--budget` | duration | `90s` | When the recorded durations of the selected tests add up to more than this, print how to split the run first. `0` turns it off. |
+| `--max-time` | duration | `0` (no limit) | Start no test batch that would end after this, by recorded durations. The tests left out stay selected for the next run. See [Time limit](#time-limit). |
 | `--dry-run` | | off | Print the runner commands instead of running them. |
 
 Plus the [common flags](#common-flags).
@@ -87,7 +88,7 @@ Plus the [common flags](#common-flags).
 Combinations that are rejected (exit code 2):
 
 - `--only` with `--all`, `--shadow`, `--add` or `--orphans`.
-- `--shadow` with `--shard` or `--fail-fast`.
+- `--shadow` with `--shard`, `--fail-fast` or `--max-time`.
 - `--dry-run` with `--report`, `--markdown` or `--summary` (use
   `smates select --format json|markdown` instead).
 
@@ -102,6 +103,33 @@ the suite's `command` instead.
     first 30 and the last 170). smates' progress lines are left out. After 30 s without
     output it prints `smates: still running <suite> (...)`; `SMATES_HEARTBEAT` changes
     the interval. See [Coding agents](../guides/coding-agents.md).
+
+#### Time limit { #time-limit }
+
+`--max-time 8m` keeps a run within about eight minutes:
+
+- smates cuts each suite's tests into batches of about a quarter of the limit, by the
+  durations recorded for them. A test with no recorded duration counts as the suite's
+  mean. A suite with no durations at all stays one batch, which starts only while less
+  than half the limit is used.
+- Batches start in the usual order, the likeliest to fail first. Before each one,
+  smates checks whether it would end after the limit. If so, it starts nothing more.
+- The first batch always starts, so every run makes progress. A batch that is running
+  is never stopped.
+- The tests left out are not run and not recorded. They stay selected, and come first
+  in the next run. The log, the summary (`Time limit`) and the report
+  (`max_time_reached`, `not_run`) list them.
+
+When everything that ran passed, the run exits 0. Do not use `--max-time` to gate a
+merge on CI: tests it left out did not run. The Claude Code and Codex Stop hooks use
+`--max-time 8m` by default (see [Git hooks](../guides/git-hooks.md#claude-code-stop-hook)).
+
+#### Suites with unmet requirements { #unmet-requires }
+
+Units of a suite whose [`requires`](configuration.md#requires) are not met do not
+start. They stay selected and are not recorded; the log names each failed check. The
+run exits 4 when no test failed, else 1. The report lists the checks under
+`unmet_requires` and the units under `not_run`.
 
 ### smates select
 
@@ -394,34 +422,39 @@ branch. On a detached HEAD without either, `push` needs `--ref`. See
 ```bash
 smates hook install [--hook pre-push|pre-commit] [--append] [--agent] [-- run flags]
 smates hook install --claude [--user] [--agent] [-- run flags]
-smates hook uninstall [--hook ...] | [--claude [--user]]
+smates hook install --codex [--agent] [-- run flags]
+smates hook uninstall [--hook ...] | [--claude [--user]] | [--codex]
 smates hook status
 ```
 
 `install` writes a git hook that runs `smates run --no-agent` (plus the run flags after
 `--`) and stops the push or commit when a selected test fails. With `--claude` it adds a
-Stop hook to `.claude/settings.json` instead. `uninstall` removes only what smates
-wrote. `status` shows the git hook and the Claude Code hook. See
-[Git hooks and Claude Code](../guides/git-hooks.md).
+Stop hook to `.claude/settings.json` instead, and with `--codex` to `.codex/hooks.json`.
+`uninstall` removes only what smates wrote. `status` shows the git hook and the Claude
+Code and Codex hooks. See [Git hooks and Claude Code](../guides/git-hooks.md).
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
-| `--hook` | `pre-push`, `pre-commit` | `pre-push` | Git hook to manage. Not with `--claude`. |
-| `--append` | | off | `install`: add smates to the end of an existing hook script. Not with `--claude`. |
+| `--hook` | `pre-push`, `pre-commit` | `pre-push` | Git hook to manage. Not with `--claude` or `--codex`. |
+| `--append` | | off | `install`: add smates to the end of an existing hook script. Not with `--claude` or `--codex`. |
 | `--agent` | | off | `install`: let the hook call the agent (otherwise it passes `--no-agent`). |
 | `--claude` | | off | A Claude Code Stop hook in `.claude/settings.json` instead of a git hook. |
+| `--codex` | | off | A Codex Stop hook in `.codex/hooks.json` instead of a git hook. Not with `--claude` or `--user`. |
 | `--user` | | off | With `--claude`: use `~/.claude/settings.json` (active in every project that has a `smates.yml`). |
 | `-C` | dir | current directory | Run as if started in `dir`. |
 
-The installed hooks call two internal subcommands, which you normally do not run
-yourself:
+The installed hooks call internal subcommands, which you normally do not run yourself:
 
 - `smates hook run pre-push|pre-commit [-- run flags]`: what the git hook runs.
-- `smates hook claude-stop [--require-config] [-- run flags]`: what the Claude Code
-  Stop hook runs (`--output failures` is implied). It exits 0 and prints
-  `{"decision": "block", ...}` when tests fail, or exits 1 on smates' own errors.
+- `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`: what the
+  Claude Code and Codex Stop hooks run (`--output failures --max-time 8m` is implied;
+  a `--max-time` in the run flags wins). It exits 0 and prints
+  `{"decision": "block", ...}` when tests fail, or exits 1 on smates' own errors. Tests
+  left out by the time limit or by unmet [`requires`](configuration.md#requires) do not
+  block: it prints one line about them to stderr and exits 0.
 
-Both do nothing when `SMATES_SKIP_HOOK` is set to a value other than `0` or `false`.
+All of them do nothing when `SMATES_SKIP_HOOK` is set to a value other than `0` or
+`false`.
 
 ## See also
 

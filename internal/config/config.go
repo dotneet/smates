@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,6 +119,10 @@ type Suite struct {
 	// changed (0: never). Neither it nor Volatile changes how the tests run, so they are
 	// left out of the settings hash (selector.ConfigHash).
 	MaxAge time.Duration `yaml:"max_age" json:"-"`
+	// Requires are preconditions of the environment (a database listening, a browser
+	// installed): when one is not met, `smates run` does not start the units it covers
+	// and leaves them selected.
+	Requires []Requirement `yaml:"requires"`
 }
 
 // Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
@@ -181,6 +188,153 @@ func checkRules(s *Suite) error {
 		if err := checkEnvPatterns(at+": reaches", env); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Requirement is one entry of Suite.Requires: something the environment must provide
+// for the suite's tests to run. Exactly one of TCP, Cmd, Env and File is set.
+type Requirement struct {
+	// TCP: "host:port" that must accept a TCP connection.
+	TCP string `yaml:"tcp"`
+	// Cmd: a shell command, run in the suite root with the suite's env, that must exit 0.
+	Cmd string `yaml:"cmd"`
+	// Env: an environment variable (or a key of the suite's env) that must be non-empty.
+	Env string `yaml:"env"`
+	// File: a path or glob, relative to the suite root or absolute, that must match an
+	// existing file or directory.
+	File string `yaml:"file"`
+	// Tests: globs relative to the suite root narrowing the units that need it
+	// (default: all).
+	Tests []string `yaml:"tests"`
+	// Timeout bounds a tcp or cmd check (default DefaultTCPTimeout, DefaultCmdTimeout).
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// Default timeouts of the requires checks.
+const (
+	DefaultTCPTimeout = 2 * time.Second
+	DefaultCmdTimeout = 10 * time.Second
+)
+
+// requirementKeys are the keys of a requires entry.
+var requirementKeys = []string{"tcp", "cmd", "env", "file", "tests", "timeout"}
+
+// UnmarshalYAML reports an unknown key of a requires entry with the keys it accepts.
+func (r *Requirement) UnmarshalYAML(n *yaml.Node) error {
+	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k := n.Content[i]; !slices.Contains(requirementKeys, k.Value) {
+				return fmt.Errorf("line %d: unknown key %q in requires entry (want one of tcp, cmd, env and file, with optional tests and timeout)", k.Line, k.Value)
+			}
+		}
+	}
+	type plain Requirement
+	return n.Decode((*plain)(r))
+}
+
+// Kind is the kind of check: "tcp", "cmd", "env" or "file" ("" when none is set).
+func (r Requirement) Kind() string {
+	kind, _ := r.kindValue()
+	return kind
+}
+
+func (r Requirement) kindValue() (string, string) {
+	switch {
+	case r.TCP != "":
+		return "tcp", r.TCP
+	case r.Cmd != "":
+		return "cmd", r.Cmd
+	case r.Env != "":
+		return "env", r.Env
+	case r.File != "":
+		return "file", r.File
+	}
+	return "", ""
+}
+
+// String describes the requirement in logs ("tcp 127.0.0.1:5432").
+func (r Requirement) String() string {
+	kind, v := r.kindValue()
+	return kind + " " + v
+}
+
+// TimeoutOrDefault is the time a tcp or cmd check may take.
+func (r Requirement) TimeoutOrDefault() time.Duration {
+	switch {
+	case r.Timeout > 0:
+		return r.Timeout
+	case r.Cmd != "":
+		return DefaultCmdTimeout
+	}
+	return DefaultTCPTimeout
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// checkRequires validates requires, and strips a leading "./" from its tests globs.
+func checkRequires(s *Suite) error {
+	for i := range s.Requires {
+		r := &s.Requires[i]
+		at := fmt.Sprintf("suite %q: requires[%d]", s.Name, i)
+		set := 0
+		for _, v := range []string{r.TCP, r.Cmd, r.Env, r.File} {
+			if v != "" {
+				set++
+			}
+		}
+		if set != 1 {
+			return fmt.Errorf("%s: set exactly one of tcp, cmd, env and file", at)
+		}
+		switch {
+		case strings.TrimSpace(r.TCP+r.Cmd+r.Env+r.File) == "":
+			return fmt.Errorf("%s: %s is empty", at, r.Kind())
+		case r.TCP != "":
+			if err := checkHostPort(r.TCP); err != nil {
+				return fmt.Errorf("%s: tcp %q: %v", at, r.TCP, err)
+			}
+		case r.Env != "":
+			if !envNameRe.MatchString(r.Env) {
+				return fmt.Errorf("%s: env %q is not a variable name", at, r.Env)
+			}
+		case r.File != "":
+			if strings.Contains(r.File, "\\") {
+				return fmt.Errorf("%s: file %q: use / as the path separator", at, r.File)
+			}
+			if !doublestar.ValidatePattern(r.File) {
+				return fmt.Errorf("%s: file: bad glob %q", at, r.File)
+			}
+		}
+		if r.Timeout < 0 {
+			return fmt.Errorf("%s: timeout must not be negative (got %s)", at, r.Timeout)
+		}
+		if r.Timeout > 0 && r.TCP == "" && r.Cmd == "" {
+			return fmt.Errorf("%s: timeout applies to tcp and cmd only", at)
+		}
+		trimDotSlash(r.Tests)
+		if err := checkGlobs(at+": tests", r.Tests); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkHostPort validates a "host:port" address; one with environment variables is
+// checked once they are expanded, at run time.
+func checkHostPort(addr string) error {
+	if strings.Contains(addr, "$") {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("want host:port")
+	}
+	if host == "" {
+		return errors.New("want host:port (the host is missing)")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("bad port %q", port)
 	}
 	return nil
 }
@@ -585,6 +739,9 @@ func (c *Config) Normalize() error {
 			return err
 		}
 		if err := checkRules(s); err != nil {
+			return err
+		}
+		if err := checkRequires(s); err != nil {
 			return err
 		}
 	}

@@ -47,7 +47,7 @@ Usage:
   smates config add-ignore|add-input <glob>... | set <key> <value> [--dry-run]  edit smates.yml safely
   smates state show [--format json]|path|pull|push|merge|clear
   smates hook install|uninstall|status  run the affected tests from a git pre-push hook
-                                        (--claude: from a Claude Code Stop hook)
+                                        (--claude, --codex: from a Claude Code or Codex Stop hook)
   smates guide                          how a coding agent should use smates
   smates doctor [--format json]         check setup
   smates version
@@ -60,7 +60,7 @@ Exit codes:
   4  environment problem (git missing, not a git repository, a suite command that cannot start,
      an npx/bunx tool missing from node_modules, or, in a recorded run of any runner but
      custom, a runner exiting 126/127 before any test reported a result; with --no-record
-     or the custom runner such an exit is a test failure)
+     or the custom runner such an exit is a test failure; a suite's requires not met)
 
 For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
 of failing tests, then a short summary with the command that reruns just those tests.

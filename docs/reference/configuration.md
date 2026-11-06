@@ -30,6 +30,10 @@ suites:
     root: services/api
     granularity: func                  # one unit per test function (default: package)
     record_jobs: 4                     # with func: functions recorded at once (default 1)
+    requires:                          # left for later where these are not met
+      - tcp: 127.0.0.1:5432            # something must accept connections here
+        tests: ["internal/store/**"]   # only these tests need it (default: all)
+      - env: DATABASE_URL              # must be set and non-empty
   - name: e2e
     runner: custom
     root: e2e
@@ -130,6 +134,7 @@ One entry of `suites:`.
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
 | `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
+| `requires` | list of [requirements](#requires) | `[]` | What the environment must provide for the tests to run (a database, a browser). Tests whose requirements are not met do not run and stay selected. |
 
 ### rules
 
@@ -171,7 +176,45 @@ Each entry has exactly one of `suite` and `paths`. A plain string is a suite nam
 | `tests` | list of globs (relative to the suite `root`) | Narrow the tests that get the dependency (default: all). |
 
 Globs everywhere use `/` as the separator (`**` matches any depth). A leading `./` is
-removed from `depends_on` and `serves` globs.
+removed from `depends_on`, `serves` and `requires` `tests` globs.
+
+### requires
+
+Preconditions of the environment: a database the tests connect to, a browser they
+start, a variable they read. `smates run` checks them before it starts the suite's
+tests. Where one is not met, the tests that need it do not run: they are not recorded
+(never as passed) and stay selected, so the next run where it is met (or CI) runs them.
+The rest of the run goes on. Each entry has exactly one of `tcp`, `cmd`, `env` and
+`file`.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `tcp` | `host:port` | Something must accept a TCP connection there. smates retries until `timeout`, so a server that is still starting can make it. |
+| `cmd` | shell command | Must exit 0 within `timeout`. It runs with `sh -c` (`cmd /C` on Windows) in the suite `root`, with the suite's `env`. Use it for checks a port cannot show, such as a database schema at the expected migration. |
+| `env` | variable name | Must be set to a non-empty value, in the environment or in the suite's `env`. |
+| `file` | path or glob | Must match an existing file or directory. Relative to the suite `root`, or absolute. |
+| `tests` | list of globs (relative to the suite `root`) | Only these tests need it (default: all of the suite). Matched like [`rules`](#rules). |
+| `timeout` | duration | For `tcp` (default `2s`) and `cmd` (default `10s`). |
+
+`tcp` and `file` values may use `$VAR` and `${VAR}`, expanded from the environment and
+the suite's `env`.
+
+```yaml
+requires:
+  - tcp: 127.0.0.1:5432
+    tests: ["internal/store/**", "internal/repo/**"]
+  - cmd: ./scripts/schema-is-current.sh
+    tests: ["internal/store/**"]
+    timeout: 30s
+  - file: ${HOME}/.cache/ms-playwright
+    tests: ["**/*.browser.test.ts"]
+```
+
+A check that cannot tell (a command that is not found or times out, an address that
+does not parse) counts as not met. Each check runs once per run (`--dry-run` runs none). When tests were left
+out and no test failed, `smates run` exits 4 (an environment problem); see
+[`smates run`](cli.md#unmet-requires). The Claude Code and Codex Stop
+hooks print one line about them instead of blocking.
 
 ## agent
 

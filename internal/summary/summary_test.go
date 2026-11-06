@@ -259,6 +259,10 @@ func TestRunInterrupted(t *testing.T) {
 	if md := Markdown(in); !strings.Contains(md, "**Fail fast:** 1 selected test unit not started") {
 		t.Errorf("fail-fast run:\n%s", md)
 	}
+	in.Run.ExitCode, in.Run.MaxTime = 0, 8*time.Minute
+	if md := Markdown(in); strings.Contains(md, "Fail fast") || !strings.Contains(md, "**Time limit:** 1 selected test unit not started within --max-time 8m0s (still selected next time):") {
+		t.Errorf("--max-time run:\n%s", md)
+	}
 }
 
 // Inline keeps text from others from mentioning people, linking, embedding images or

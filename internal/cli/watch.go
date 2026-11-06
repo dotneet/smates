@@ -554,7 +554,7 @@ func (c *watchCycles) runFlags(req cycleReq) *runFlags {
 }
 
 // footer prints the outcome of a cycle from the recorded statuses. notStarted counts
-// the selected units --fail-fast did not start.
+// the selected units the run did not start (--fail-fast, unmet requires).
 func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, code int, err error, took time.Duration) {
 	var failed, unknown []string
 	passed, skipped := 0, 0
@@ -602,7 +602,7 @@ func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, co
 		parts = append(parts, fmt.Sprintf("%d without a result: %s", len(unknown), strings.Join(limit(unknown, 4), ", ")))
 	}
 	if notStarted > 0 {
-		parts = append(parts, fmt.Sprintf("%d not started (--fail-fast)", notStarted))
+		parts = append(parts, fmt.Sprintf("%d not started (still selected)", notStarted))
 	}
 	parts = append(parts, took.Round(100*time.Millisecond).String())
 	fmt.Fprintf(c.stderr, "── %s\n", strings.Join(parts, " · "))

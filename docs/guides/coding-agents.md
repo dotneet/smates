@@ -79,6 +79,37 @@ Agent tools often have a timeout, and a silent run looks like a hang.
   `--budget` (default `90s`; `0` turns it off), `smates run` first prints how to split
   the run: one suite at a time (`--suite <name>`), or in the background with
   `--report smates-report.json` and the report read afterwards.
+- **Time limit.** `--max-time 5m` starts no test batch that would end after five
+  minutes, by recorded durations. The tests it leaves out stay selected and run first
+  next time. See [Time limit](../reference/cli.md#time-limit).
+
+## Tests the agent's environment cannot run
+
+An agent often works in a worktree or a sandbox without the database, the browser or
+the services some tests need. There, those tests fail for reasons that have nothing to
+do with the change. Declare what they need with
+[`requires`](../reference/configuration.md#requires):
+
+```yaml
+suites:
+  - name: api
+    runner: go
+    requires:
+      - tcp: 127.0.0.1:5432
+        tests: ["internal/store/**"]   # only these packages need the database
+```
+
+Where nothing listens on that port, `smates run` does not start those tests. The other
+tests of the suite run as usual. The tests left out are not recorded and stay selected,
+so a run where the database is up (or CI) runs them. The log names the check that
+failed, and the run exits 4 when no other test failed.
+
+## Stop hooks
+
+`smates hook install --claude` and `smates hook install --codex` add a Stop hook that
+runs the affected tests whenever the agent ends its turn, and keeps it going while some
+fail. Tests left out by `requires` or by the hook's time limit (8 minutes by default)
+do not block. See [Git hooks and Claude Code](git-hooks.md#claude-code-stop-hook).
 
 ## Exit codes
 
@@ -90,7 +121,7 @@ The exit code tells "fix the code" apart from "fix the setup":
 | 1 | tests failed | fix the code (or the test) |
 | 2 | usage error, including an `--add` that names no test | fix the command line |
 | 3 | configuration error | fix `smates.yml` (`smates config ...`), or the `--suite`/`--only` name (`smates list`) |
-| 4 | environment problem: a runner that cannot start, git missing, a state that cannot be saved | run `smates doctor --format json`; each failed check has a `fix` |
+| 4 | environment problem: a runner that cannot start, git missing, a state that cannot be saved, a suite's `requires` not met | run `smates doctor --format json`; each failed check has a `fix`. For `requires`, the tests stay selected for a run where they are met |
 
 Do not treat 3 or 4 as a test failure. Fix the setup, then run again. When tests also
 failed, the exit code is 1. See [Exit codes](../reference/exit-codes.md) for every case.
