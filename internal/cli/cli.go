@@ -378,6 +378,21 @@ type selection struct {
 	hint bool
 	// shards is the shard count `select --max-shards` sized for the selection.
 	shards *int
+	// diffUnrecorded: tests with no recorded entry were decided against the base
+	// revision (Input.DiffUnrecorded), not run as new.
+	diffUnrecorded bool
+}
+
+// checkBase checks that an explicit --base names a commit: a usage error when it does
+// not, an environment error when the clone is shallow (the base was not fetched).
+func checkBase(repo *gitx.Repo, base string) error {
+	if repo.RefExists(base) {
+		return nil
+	}
+	if out, err := repo.Git("rev-parse", "--is-shallow-repository"); err == nil && strings.TrimSpace(out) == "true" {
+		return envError{fmt.Errorf("--base %s: no such revision in this shallow clone; fetch it (actions/checkout with fetch-depth: 0, or git fetch origin <branch>)", base)}
+	}
+	return usageError{fmt.Errorf("--base %s: no such revision", base)}
 }
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {
@@ -391,6 +406,11 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	// unless --base names a revision to judge such tests against (suites being
 	// adopted one at a time).
 	diffUnrecorded := (p.ci.Name == "" || opt.base != "") && !opt.all
+	if opt.base != "" && !opt.all {
+		if err := checkBase(p.repo, opt.base); err != nil {
+			return nil, err
+		}
+	}
 	// Without a recorded snapshot, changed files (and so orphans) come from the base.
 	if base == "" && !opt.all && (p.state.Empty() || diffUnrecorded || len(p.state.Files) == 0) {
 		base = autoBase(p.ci, p.repo)
@@ -404,9 +424,14 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		NoOrphanPolicy: opt.orphans == orphansSkip || opt.orphans == "" && p.cfg.Orphans == config.OrphansIgnore,
 	})
 	if err != nil {
+		// git failing to diff or list the repository: never "tests failed".
+		var ce configError
+		if !errors.As(err, &ce) {
+			err = asEnvError(err)
+		}
 		return nil, err
 	}
-	sel := &selection{res: res}
+	sel := &selection{res: res, diffUnrecorded: diffUnrecorded && base != ""}
 	if !opt.noOrphans {
 		p.handleOrphans(ctx, sel, opt, base)
 	}

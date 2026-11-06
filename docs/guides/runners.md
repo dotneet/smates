@@ -40,7 +40,8 @@ smates adds a reporter next to yours for per-file results. When you configure
 file failed.
 
 Vitest and Vite configuration files in the suite directory (`vitest.config.*`,
-`vite.config.*`, per-project files such as `vitest.browser.config.ts`, and
+`vite.config.*`, per-project files such as `vitest.browser.config.ts` or
+`vite.storybook.config.ts`, and
 `vitest.workspace.*`) are inputs of every test. The files a configuration loads by
 name, such as `setupFiles`, `globalSetup`, local Vite plugins and alias targets, and
 whatever they import, are never treated as untested code: a change to one goes to the
@@ -55,7 +56,10 @@ with two differences.
 - **Stories are tests.** The plugin reads the stories of the Storybook configuration
   directory, and so does smates: the `configDir` option of the plugin (a literal, or
   `path.join` / `path.resolve` of `__dirname`, `import.meta.dirname` or `dirname`),
-  else `.storybook` next to the Vitest configuration, and the `stories` of its
+  else `.storybook`. Like Storybook, smates resolves a literal and the default against
+  the directory Vitest runs in (the suite root), and the `path.join` forms against the
+  file's directory; a project file elsewhere whose directory is resolved that way gets
+  stories that are never trusted (see below). It reads the `stories` of its
   `main.*` (strings, directories and `{ directory, files }` specifiers; MDX pages are
   not tests). This works when the Vitest configuration itself cannot be read
   (`mergeConfig(...)`), so a package whose only tests are stories gets a suite. When
@@ -66,10 +70,13 @@ with two differences.
   unknown, so it runs again next time. Set `trust_browser_passes: true` on the suite
   to record its passes instead, with what smates knows statically: the test's import
   closure, what the Vitest configuration loads (setup files, plugins, alias targets),
-  and for a story the configuration directory, the import closure of its `preview.*`
-  and the `staticDirs` of `main.*`. A change to any of them selects the test again.
-  A story whose known dependencies include an import smates cannot resolve (an alias
-  only Vite's configuration knows, a virtual module) is never trusted. Check the
+  and for a story the configuration directory, the import closures of its `preview.*`
+  and `main.*`, and the `staticDirs` of `main.*`. A change to any of them selects the
+  test again. A story is never trusted when its known dependencies include an import
+  smates cannot resolve (an alias only Vite's configuration knows, a virtual module), or
+  when `main.*` sets `viteFinal` or `previewAnnotations` or names a local addon or
+  preset, which may load files smates cannot follow. smates reports the stories it does
+  not trust, and why, when it records them. Check the
   setting with `smates run --shadow` before relying on it; see
   [Limitations](../reference/limitations.md#what-tracing-reaches).
 

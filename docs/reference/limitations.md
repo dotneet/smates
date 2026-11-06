@@ -26,11 +26,12 @@ plugin) leaves no trace, so after every run its outcome is unknown and it runs a
 next time, whatever changed. With `trust_browser_passes: true` on the suite, a pass the
 reporter gives is recorded instead, with the dependencies smates knows statically: the
 test's import closure, what the Vitest configuration loads (setup files, plugins, alias
-targets), and for a story the Storybook configuration directory, the import closure of
-`preview.*` and the `staticDirs`. What the browser loads beyond that (a module reached
-through an alias only Vite's configuration resolves, a fetched fixture, a CSS
-`@import`) is missed: a story whose known dependencies include an import smates cannot
-resolve is never trusted. Code a Playwright end-to-end test drives in a browser is
+targets), and for a story the Storybook configuration directory, the import closures of
+`preview.*` and `main.*`, and the `staticDirs`. What the browser loads beyond that (a
+module reached through an alias only Vite's configuration resolves, a fetched fixture, a
+CSS `@import`) is missed: a story whose known dependencies include an import smates
+cannot resolve, or whose `main.*` sets `viteFinal` or `previewAnnotations` or names a
+local addon, is never trusted. Code a Playwright end-to-end test drives in a browser is
 covered as [a server](../guides/servers.md).
 
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands
@@ -68,7 +69,9 @@ too: `test.projects` may list config files by literal path (no glob, no director
 inline projects with `extends: true`, but a workspace file, `workspace:`, any other
 `extends:`, or projects inside `mergeConfig(...)` are not seen. It may import vitest,
 vite, their official plugins, `@tailwindcss/vite`, Node's builtins, packages the static
-analysis resolves inside the repository (whose files are then checked too), and any
+analysis resolves to the source of the workspace package of that name (whose files are
+then checked too; a declaration file, a manual mock or a tsconfig path to another file
+does not count), and any
 package for its types only (`import type`), but not another package such as a shared
 preset. Storybook's Vitest plugin is seen when it is `@storybook/addon-vitest` 10 or
 later, its configuration directory can be told, and that directory's `main.*` sets no

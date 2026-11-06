@@ -484,6 +484,53 @@ export default { plugins: [storybookTest()] }`
 			name:  "package without a runner configuration needs no note",
 			files: map[string]string{"ui/package.json": vitestPkg, "ui/src/button.tsx": ""},
 		},
+		// A plain Vite app does not configure a test runner.
+		{
+			name: "Vite app without vitest",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `import { defineConfig } from "vite"; export default defineConfig({})`,
+				"app/src/main.ts":    "",
+			},
+		},
+		{
+			name: "vite.config.* importing vitest",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `/// <reference types="vitest" />` + "\n" + `import { defineConfig } from "vitest/config"; export default defineConfig({ test: { include: ["src/**/*.spec.ts"] } })`,
+				"app/src/main.ts":    "",
+			},
+			note: "app: no vitest suite",
+		},
+		{
+			name: "vite.config.* with a test key",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `export default { test: { include: ["src/**/*.spec.ts"] } }`,
+				"app/src/main.ts":    "",
+			},
+			note: "app: no vitest suite",
+		},
+		// Configured only by a per-project file: reported, never dropped silently.
+		{
+			name: "only a per-project vitest configuration",
+			files: map[string]string{
+				"ui/package.json":               `{"devDependencies":{"vitest":"^4"},"scripts":{"test":"vitest --config vitest.storybook.config.ts"}}`,
+				"ui/vitest.storybook.config.ts": sbConfig,
+				"ui/.storybook/main.ts":         `export default { stories: ["../src/**/*.stories.tsx"] }`,
+				"ui/src/button.stories.tsx":     "",
+			},
+			note: "vitest.storybook.config.ts configures vitest only when named",
+		},
+		{
+			name: "only a per-project vitest configuration, no dependency",
+			files: map[string]string{
+				"ui/package.json":               `{}`,
+				"ui/vitest.storybook.config.ts": sbConfig,
+				"ui/src/button.stories.tsx":     "",
+			},
+			note: "ui: no vitest suite",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

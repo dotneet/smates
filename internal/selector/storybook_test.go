@@ -128,6 +128,25 @@ export default { plugins: [storybookTest()], test: { setupFiles: ["./test/setup.
 		{name: "trusted: unreadable static directories distrust every story", trust: true,
 			extra: map[string]string{"web/ui/.storybook/main.ts": `export default { stories: ["../src/**/*.stories.tsx"], staticDirs: dirs }`},
 			want:  map[string]string{button: ReasonFailed, card: ReasonFailed}},
+		// Must keep: what main.* imports runs for every story (a mock it aliases in).
+		{name: "trusted: a module Storybook's main imports", trust: true, change: "web/ui/tools/mock-api.ts",
+			extra: map[string]string{
+				"web/ui/.storybook/main.ts": `import { mockApi } from "../tools/mock-api"
+export default { stories: ["../src/**/*.stories.@(ts|tsx)"], staticDirs: ["../public"], addons: [mockApi] }`,
+				"web/ui/tools/mock-api.ts": `export const mockApi = "x"`,
+			},
+			want: map[string]string{button: ReasonChanged, card: ReasonChanged}},
+		// Must keep: Vite settings of main.* (viteFinal), preview annotations and local
+		// addons may load anything for the stories.
+		{name: "trusted: viteFinal distrusts every story", trust: true,
+			extra: map[string]string{"web/ui/.storybook/main.ts": `export default { stories: ["../src/**/*.stories.@(ts|tsx)"], staticDirs: [], viteFinal: (c) => c }`},
+			want:  map[string]string{button: ReasonFailed, card: ReasonFailed}},
+		{name: "trusted: preview annotations distrust every story", trust: true,
+			extra: map[string]string{"web/ui/.storybook/main.ts": `export default { stories: ["../src/**/*.stories.@(ts|tsx)"], staticDirs: [], previewAnnotations: ["../tools/a.ts"] }`},
+			want:  map[string]string{button: ReasonFailed, card: ReasonFailed}},
+		{name: "trusted: a local addon distrusts every story", trust: true,
+			extra: map[string]string{"web/ui/.storybook/main.ts": `export default { stories: ["../src/**/*.stories.@(ts|tsx)"], staticDirs: [], addons: ["./preset.ts"] }`},
+			want:  map[string]string{button: ReasonFailed, card: ReasonFailed}},
 		{name: "a module no story imports goes to the orphan policy", trust: true, change: "web/ui/src/unused.ts",
 			want: map[string]string{button: "-unaffected", card: "-unaffected"}, orphan: true},
 	}

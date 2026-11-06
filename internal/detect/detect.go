@@ -44,6 +44,14 @@ func (p *packageJSON) has(dep string) bool {
 	return a || b
 }
 
+// vitestProjectConfigRe matches a per-project vitest configuration file
+// (vitest.storybook.config.ts), which configures vitest when a command names it.
+var vitestProjectConfigRe = regexp.MustCompile(`^vitest\.[^.]+\.config\.(ts|mts|cts|js|mjs|cjs)$`)
+
+// vitestMentionRe matches what makes a vite.config.* configure vitest: an import of
+// vitest, or a test key.
+var vitestMentionRe = regexp.MustCompile(`["']vitest(?:/[^"']*)?["']|\btest\s*:`)
+
 var vitestConfigRe = regexp.MustCompile(`^(vitest\.config|vite\.config|vitest\.workspace)\.(ts|mts|cts|js|mjs|cjs|json)$`)
 var jestConfigRe = regexp.MustCompile(`^jest\.config\.(ts|mts|cts|js|mjs|cjs|json)$`)
 
@@ -97,6 +105,10 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 	// JS: one suite per package that uses a test runner, unless an ancestor suite with
 	// the same runner already covers it (workspace-level vitest/jest config).
 	jsRoots := map[string]string{}
+	// vitestConfigured: the package has a vitest configuration (a vitest.config.*, a
+	// workspace or per-project file, or a vite.config.* importing vitest or with a test
+	// key), so finding no test file is worth a note; a plain Vite app is not.
+	vitestConfigured := map[string]bool{}
 	for _, d := range dirs {
 		if !has(d, "package.json") {
 			continue
@@ -111,8 +123,19 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		var tests []string
 		_, craAt, craBin := craTest(test)
 		nodeCommand, nodeEnv, isNodeTest := nodeTest(test)
+		vitestConfigured[d] = hasMatch(d, vitestProjectConfigRe) ||
+			slices.ContainsFunc(dirFiles[d], func(n string) bool {
+				if !vitestConfigRe.MatchString(n) {
+					return false
+				}
+				if !strings.HasPrefix(n, "vite.config.") {
+					return true
+				}
+				src, _ := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(d), n))
+				return vitestMentionRe.Match(src)
+			})
 		switch {
-		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
+		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe) || hasMatch(d, vitestProjectConfigRe):
 			r = "vitest"
 		case craAt >= 0 || strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
@@ -187,7 +210,7 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 			}
 		}
 		rs, err := runner.NewSuite(repo, s)
-		configured := s.Runner == "vitest" && hasMatch(s.Root, vitestConfigRe) || s.Runner == "jest" && hasMatch(s.Root, jestConfigRe)
+		configured := s.Runner == "vitest" && vitestConfigured[s.Root] || s.Runner == "jest" && hasMatch(s.Root, jestConfigRe)
 		switch {
 		case err != nil:
 			if configured {
@@ -199,6 +222,15 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 				why := ""
 				if rs.DiscoveryWarning != "" {
 					why = " (" + rs.DiscoveryWarning + ")"
+				}
+				if s.Runner == "vitest" && !hasMatch(s.Root, vitestConfigRe) {
+					// Only per-project files: vitest reads one when the command names it.
+					for _, n := range dirFiles[s.Root] {
+						if vitestProjectConfigRe.MatchString(n) {
+							why += fmt.Sprintf(" (%s configures vitest only when named: set command: vitest run --config %s)", n, n)
+							break
+						}
+					}
 				}
 				notes = append(notes, fmt.Sprintf("%s: no %s suite: its configuration names no test file smates can find (test patterns: %s)%s; write the suite in smates.yml with tests: if it has tests",
 					s.Root, s.Runner, strings.Join(rs.TestPatterns(), " "), why))

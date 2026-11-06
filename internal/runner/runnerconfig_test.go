@@ -151,7 +151,11 @@ func TestVitestInputsPerProjectConfigs(t *testing.T) {
 		"web/vitest.storybook.config.mts": true,
 		"web/vitest.node.config.cts":      true,
 		"web/vitest.config.e2e.ts":        true,
+		"web/vite.storybook.config.ts":    true,
+		"web/vite.e2e.config.mts":         true,
+		"web/vite.config.e2e.ts":          true,
 		"web/src/vitest.helpers.ts":       false,
+		"web/src/vite.helpers.ts":         false,
 	} {
 		if got := s.InputMatch(f); got != want {
 			t.Errorf("InputMatch(%s) = %v, want %v", f, got, want)

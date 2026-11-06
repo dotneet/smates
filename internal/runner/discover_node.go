@@ -494,8 +494,12 @@ func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
 		// The configuration cannot be read, but Storybook's plugin in it still says
 		// where its stories are; the other tests keep the defaults.
 		src := repoReader(repo)(file)
-		if stories, serr := storybookMatchers(file, s.Root, src, nil, repoReader(repo)); len(stories) > 0 {
-			def := Matcher{Base: s.Root, Tests: vitestInclude, Browser: true}
+		if stories, serr := storybookMatchers(file, s.Root, s.Root, src, nil, repoReader(repo)); len(stories) > 0 {
+			// With projects (or a workspace) the default include may hold node tests
+			// next to the Storybook project: not browser-only. Either way the rest of
+			// the configuration is unknown, so no pass of it is trusted.
+			def := Matcher{Base: s.Root, Tests: vitestInclude, Browser: !projectsRe.Match(src),
+				Unsure: file + " cannot be read: " + err.Error()}
 			if serr != nil {
 				err = serr
 			}
@@ -504,6 +508,9 @@ func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
 	}
 	return d, err
 }
+
+// projectsRe matches a configuration's projects or workspace key.
+var projectsRe = regexp.MustCompile(`\b(?:projects|workspace)\s*:`)
 
 // vitestConfigDiscovery is vitestDiscover once the configuration file is known ("":
 // none).
@@ -594,7 +601,7 @@ func vitestConfigDiscovery(repo *gitx.Repo, s *Suite, file string) (Discovery, e
 		}
 	}
 	if projects != nil {
-		d, err := vitestProjects(repo, root, projFile, projKey, test, projects, commandFlags(s, "--project"))
+		d, err := vitestProjects(repo, s.Root, root, projFile, projKey, test, projects, commandFlags(s, "--project"))
 		for _, f := range []string{file, projFile} {
 			if f != "" && !slices.Contains(d.Files, f) {
 				d.Files = append(d.Files, f)
@@ -613,7 +620,7 @@ func vitestConfigDiscovery(repo *gitx.Repo, s *Suite, file string) (Discovery, e
 		src = repoReader(repo)(file)
 	}
 	m.Browser = browserEnabled(test, src)
-	stories, err := storybookMatchers(file, root, src, nil, repoReader(repo))
+	stories, err := storybookMatchers(file, root, s.Root, src, nil, repoReader(repo))
 	switch {
 	case len(stories) > 0:
 		// Storybook's plugin adds the stories to the project's include; the default
@@ -706,7 +713,7 @@ func vitestMatcher(file, root string, test *js.Object) (Matcher, []string, error
 
 // vitestProjects unites the projects of a workspace: strings are globs of project
 // directories or config files (relative to root), objects inline project configs.
-func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object, projects []any, only []string) (Discovery, error) {
+func vitestProjects(repo *gitx.Repo, cwd, root, file, key string, rootTest *js.Object, projects []any, only []string) (Discovery, error) {
 	label := file
 	if key != "" {
 		label += " " + key
@@ -722,8 +729,9 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 			skipped = append(skipped, m...)
 			return
 		}
-		if err != nil && warn == nil {
-			warn = err
+		var se *storiesError
+		if err != nil && (warn == nil || errors.As(err, &se) && !errors.As(warn, &se)) {
+			warn = err // a stories guess (the suite runs whole) is the one to report
 		}
 		ms = append(ms, m...)
 		n++
@@ -769,7 +777,7 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 					continue
 				}
 				files = append(files, cfg)
-				pm, name, err := vitestProjectFile(repo, cfg)
+				pm, name, err := vitestProjectFile(repo, cwd, cfg)
 				add(pm, name, err)
 			}
 		case *js.Object:
@@ -810,7 +818,7 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 			}
 			m.Browser = browserEnabled(t, nil)
 			plugins, _ := x.Get("plugins")
-			stories, err := storybookMatchers(file, pr, src, pluginText(plugins), read)
+			stories, err := storybookMatchers(file, pr, cwd, src, pluginText(plugins), read)
 			name := projectName(t)
 			if len(stories) > 0 {
 				m.Browser = true
@@ -879,13 +887,19 @@ func runsProject(name string, ms []Matcher, only []string) bool {
 // file's directory unless it sets one. An unreadable file yields the defaults for its
 // directory and the reason. Storybook's plugin in it adds the stories (see
 // storybookMatchers), whether the rest can be read or not.
-func vitestProjectFile(repo *gitx.Repo, cfg string) ([]Matcher, string, error) {
+func vitestProjectFile(repo *gitx.Repo, cwd, cfg string) ([]Matcher, string, error) {
 	dir := path.Dir(cfg)
 	read := repoReader(repo)
 	src := read(cfg)
-	stories, serr := storybookMatchers(cfg, dir, src, nil, read)
+	stories, serr := storybookMatchers(cfg, dir, cwd, src, nil, read)
 	def := Matcher{Base: dir, Tests: vitestInclude, Browser: len(stories) > 0 || mentionsBrowser(src)}
 	fallback := func(err error) ([]Matcher, string, error) {
+		// The stories being a guess (run whole) is what the warning must say; the
+		// load error goes with it.
+		var se *storiesError
+		if errors.As(serr, &se) {
+			err = &storiesError{fmt.Errorf("%v; %w", err, se.err)}
+		}
 		return append([]Matcher{def}, stories...), "", err
 	}
 	obj, err := loadJSConfig(repo, cfg)

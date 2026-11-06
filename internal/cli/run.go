@@ -662,7 +662,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
-		if w := noTraceWarning(b.units, r); w != "" {
+		if w := noTraceWarning(b.units, r, sr.Suite.Runner, c.sel.diffUnrecorded); w != "" {
 			p.logf("%s: %s", sr.Name, w)
 		} else if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
@@ -707,9 +707,38 @@ func (c *cycle) recordSuites() {
 			continue
 		}
 		full := res.full && len(c.notRun[sr.Name]) == 0
+		if w := untrustedWarning(sr, res.obs); w != "" {
+			p.logf("%s: %s", sr.Name, w)
+		}
 		events := selector.Record(p.state, sr, res.obs, c.hasher.ForSuite(sr.Suite), selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
 	}
+}
+
+// untrustedWarning says which browser tests' passes trust_browser_passes does not
+// record as passed (their known dependencies may not be all, see Suite.Untrusted), and
+// why, for a few of them: they stay unknown and run again next time ("" when none).
+func untrustedWarning(sr *selector.Suite, obs map[string]*runner.Observation) string {
+	var units []string
+	for u, o := range obs {
+		if o.StaticOnly && o.Status == state.Pass && sr.Untrusted[u] != "" {
+			units = append(units, u)
+		}
+	}
+	if len(units) == 0 {
+		return ""
+	}
+	slices.Sort(units)
+	const shown = 3
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d browser test(s) passed but are not trusted (trust_browser_passes), so they will run again next time:", len(units))
+	for _, u := range units[:min(shown, len(units))] {
+		fmt.Fprintf(&b, " %s (%s);", u, sr.Untrusted[u])
+	}
+	if len(units) > shown {
+		fmt.Fprintf(&b, " and %d more", len(units)-shown)
+	}
+	return strings.TrimSuffix(b.String(), ";")
 }
 
 // settleOutcomes corrects the outcomes a run reported for its units before they are
@@ -756,13 +785,26 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 }
 
 // noTraceWarning warns about a recorded batch that passed while none of its units
-// left a trace or reported a result: they stay unrecorded and run again next time,
-// so selection stays safe, but it never learns what they depend on.
-func noTraceWarning(units []string, r *runner.RunResult) string {
+// left a trace or reported a result: they stay unrecorded, and selection never learns
+// what they depend on. What happens to them next depends on how unrecorded tests are
+// decided (diffUnrecorded: against the base revision by static analysis, which misses
+// what they read at run time; otherwise they run again as new). A custom suite is
+// traced only through the Node and Python processes its command starts: one whose
+// command starts none (a shell script, a JVM build) and writes no junit report can
+// never be recorded, which is said instead of blaming a wrapper.
+func noTraceWarning(units []string, r *runner.RunResult, runnerName string, diffUnrecorded bool) string {
 	if r.ExitCode != 0 || len(units) == 0 || len(r.Observations) > 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d test unit(s) ran and passed but left no trace, so they stay unrecorded and run again next time: %s", len(units), runner.NoTraceCauses)
+	next := "run again next time"
+	if diffUnrecorded {
+		next = "are decided against the base revision by static analysis next time, which does not see what they read at run time"
+	}
+	why := runner.NoTraceCauses
+	if runnerName == "custom" {
+		why = "a custom suite is recorded through the Node and Python processes its command starts, or a junit: report; this command left neither"
+	}
+	return fmt.Sprintf("%d test unit(s) ran and passed but left no trace, so they stay unrecorded and %s: %s", len(units), next, why)
 }
 
 // unreportedUnits returns the units of a failed run that nothing was observed for

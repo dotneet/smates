@@ -92,7 +92,7 @@ func (vitest) Defaults(repo *gitx.Repo, root string) Defaults {
 		Tests:   []string{"**/*.{test,spec}." + jsTestExts},
 		Exclude: jsOutputExclude,
 		Inputs: append([]string{
-			"vitest.config.*", "vite.config.*", "vitest.*.config.*", "vitest.workspace.*", "vitest.setup.*", "/vitest.config.*", "/vitest.workspace.*",
+			"vitest.config.*", "vite.config.*", "vitest.*.config.*", "vite.*.config.*", "vitest.workspace.*", "vitest.setup.*", "/vitest.config.*", "/vitest.workspace.*",
 		}, jsLockInputs(root)...),
 		Command: jsBinCommand(repo.Root, dir, "vitest", "run"),
 	}

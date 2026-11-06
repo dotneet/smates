@@ -187,7 +187,7 @@ func (vitest) ErasesTypes(s *Suite, src Sources) bool {
 			configs = append(configs, f)
 		}
 	}
-	return !mentionsTypeCheck(src, configs)
+	return !mentionsTypeCheck(src, configs, root)
 }
 
 // ErasesTypes implements TypeEraser. bun test transpiles TypeScript itself and never
@@ -238,7 +238,8 @@ func knownConfigModule(m string) bool {
 // resolves inside the repository, whose files the closure holds, is seen); or a
 // configuration file cannot be read. Storybook's Vitest plugin counts as seen in a
 // configuration storybookKnown accepts, whose main.* files are scanned in turn.
-func mentionsTypeCheck(src Sources, configs []string) bool {
+// cwd is the directory vitest runs in (the suite root).
+func mentionsTypeCheck(src Sources, configs []string, cwd string) bool {
 	if len(configs) == 0 {
 		return false
 	}
@@ -274,7 +275,7 @@ func mentionsTypeCheck(src Sources, configs []string) bool {
 			configs = append(configs, projects...)
 		}
 		if usesStorybookPlugin(b) {
-			mains, ok := storybookKnown(f, b, src)
+			mains, ok := storybookKnown(f, b, src, cwd)
 			if !ok {
 				return true
 			}
@@ -298,7 +299,7 @@ func mentionsTypeCheck(src Sources, configs []string) bool {
 				spec := string(m[1])
 				switch {
 				case knownConfigModule(spec), typeOnly[spec], storybook[f] && storybookModule(spec):
-				case src.Resolve != nil && len(src.Resolve(f, spec)) > 0:
+				case src.Resolve != nil && slices.ContainsFunc(src.Resolve(f, spec), func(h string) bool { return packageSource(src, spec, h) }):
 				default:
 					return true
 				}
@@ -306,6 +307,34 @@ func mentionsTypeCheck(src Sources, configs []string) bool {
 		}
 	}
 	return false
+}
+
+// packageSource reports whether file h, which the bare specifier spec resolves to, is
+// what loading the package runs: a source file (not a declaration file, not a manual
+// mock under __mocks__) of a workspace package of that name, the package.json nearest
+// h naming it. A tsconfig path or a mock resolves the specifier for the static
+// analysis only; at run time the configuration loads the installed package, whose
+// files smates never scans.
+func packageSource(src Sources, spec, h string) bool {
+	if strings.HasSuffix(h, ".d.ts") || strings.HasSuffix(h, ".d.mts") || strings.HasSuffix(h, ".d.cts") ||
+		slices.Contains(strings.Split(h, "/"), "__mocks__") {
+		return false
+	}
+	name := spec
+	if parts := strings.SplitN(spec, "/", 3); strings.HasPrefix(spec, "@") && len(parts) >= 2 {
+		name = parts[0] + "/" + parts[1]
+	} else {
+		name = parts[0]
+	}
+	for d := path.Dir(h); ; d = path.Dir(d) {
+		if b := src.Read(path.Join(d, "package.json")); b != nil {
+			var pkg struct{ Name string }
+			return json.Unmarshal(b, &pkg) == nil && pkg.Name == name
+		}
+		if d == "." || d == "/" {
+			return false
+		}
+	}
 }
 
 // typeOnlyImports returns the specifiers source b (of file f) imports only in
@@ -434,19 +463,23 @@ var (
 // each call's configuration directory, and the main.* there can be read, sets no
 // viteFinal and no typescript options (react-docgen), and names only the addons and
 // framework of storybookAddons and storybookFrameworks.
-func storybookKnown(f string, b []byte, src Sources) ([]string, bool) {
+func storybookKnown(f string, b []byte, src Sources, cwd string) ([]string, bool) {
 	if bytes.Contains(b, []byte("@storybook/experimental-addon-test")) || storybookMajor(path.Dir(f), src) < 10 {
 		return nil, false
 	}
 	names, imported := storybookNames(b)
-	dirs, found, err := storybookDirs(f, path.Dir(f), b, names, imported)
+	dirs, found, err := storybookDirs(f, path.Dir(f), cwd, b, names, imported)
 	if err != nil || !found || len(dirs) == 0 {
 		return nil, false
 	}
 	var mains []string
 	for _, d := range dirs {
-		main := readStorybookMain(d, src.Read)
-		if main.err != nil {
+		if d.unsure != "" {
+			return nil, false // which directory Storybook reads is not certain
+		}
+		main := readStorybookMain(d.dir, src.Read)
+		// The source too: a method (async viteFinal(config) {...}) may not read as a key.
+		if main.err != nil || mainLoadsRe.Match(main.src) {
 			return nil, false
 		}
 		for _, k := range []string{"viteFinal", "typescript"} {

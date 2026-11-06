@@ -304,7 +304,12 @@ so a shared state (local runs, `state merge`, CI without a `cache-key` per job) 
 hides a change from the suites that have not compared it. Orphans a `--suite` run
 handles are recorded the same way. A suite with no recorded entry compares nothing with
 a marker: in state mode its tests are decided against the base revision by static
-analysis (locally, or in CI with `--base`) or run as new. So a marker every recorded
+analysis (locally, or in CI with `--base`) or run as new. Nor does one whose entries all
+come from selective runs while no full run took a snapshot (`State.Commit` unset) and
+no marker names it: when changes are judged against a base revision it counts as never
+recorded too (its entries are decided by their own dependencies, which markers do not
+touch), so its first ordinary run does not bring the flood back; without a base its
+markers stay changes, and orphans, as before. So a marker every recorded
 suite of the run saw (and some suite saw) is no change for that run either
 (`selection.markerFilter`); otherwise one `--all --suite` recording would make every
 file of the tree an orphan of the next unscoped run. The files dropped this way that
@@ -763,8 +768,9 @@ naming other configs by path (`projects:`, `workspace:`, `extends:`) except an a
 which are scanned in turn, and inline projects with `extends: true`), no run-time import
 of a package other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
 `vite-tsconfig-paths`), `@tailwindcss/vite`, Node's builtins and packages the analyzer
-resolves inside the repository (`Sources.Resolve`; their files are in the closure
-scanned) — a preset, or a plugin whose config hook may return test settings — and no
+resolves to a source file of the workspace package of that name (`Sources.Resolve`,
+`packageSource`; their files are in the closure scanned; a `.d.ts`, a `__mocks__` file or
+a tsconfig path to another package's file is not what loads at run time) — a preset, or a plugin whose config hook may return test settings — and no
 `*.test-d.*` / `*.spec-d.*` file in the suite; or `bun test` itself. Storybook's Vitest
 plugin applies the Vite settings of `<configDir>/main.*` and of the addons and framework
 it names as strings, which no import reaches: `storybookKnown` accepts it only from

@@ -6,6 +6,7 @@ import (
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // changes computes the changed files (Result.Changed): against the state's snapshot,
@@ -38,15 +39,38 @@ func (s *selection) changes() error {
 // still an orphan of the never-recorded suites that own it when it changed since Base
 // and no test explains it (neverRecordedOrphans). This holds in state mode only: with
 // no entry at all (diff mode) the changes against the snapshot decide every test.
+//
+// A suite whose entries all come from selective runs, after only partial recordings of
+// the others (no full snapshot: State.Commit is unset, and no marker names it), has no
+// snapshot to compare a marker with either: it counts as never recorded too, so that
+// its first ordinary run does not turn every marker back into a change. Its entries
+// are decided by their own dependencies, which markers do not affect. Only where its
+// changes are judged against Base (DiffUnrecorded): without a base revision the
+// markers stay changed for it, and the unexplained ones orphans, as before.
 func (s *selection) markerFilter() {
 	in := s.in
 	if len(in.State.Files) == 0 {
 		return
 	}
 	names := NewOwnership(in.Suites, in.Others).Picked()
+	var seen map[string]bool // suites some marker names (unsnapshotted, computed once)
+	unsnapshotted := func(name string) bool {
+		if in.State.Commit != "" || in.Base == "" || !in.DiffUnrecorded {
+			return false
+		}
+		if seen == nil {
+			seen = map[string]bool{}
+			for _, v := range in.State.Files {
+				for _, n := range state.ParseSnap(v).SeenBy() {
+					seen[n] = true
+				}
+			}
+		}
+		return !seen[name]
+	}
 	var recorded, never []string
 	for _, name := range names {
-		if st := in.State.Suites[name]; st != nil && len(st.Tests) > 0 {
+		if st := in.State.Suites[name]; st != nil && len(st.Tests) > 0 && !unsnapshotted(name) {
 			recorded = append(recorded, name)
 		} else {
 			never = append(never, name)

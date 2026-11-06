@@ -196,6 +196,25 @@ export default mergeConfig(viteConfig, defineConfig({ plugins: [storybookTest({ 
 			source: "vitest.config.ts test.projects (1 project)", warn: "does not export an object literal",
 			tests: []string{"src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
 		},
+		// The stories being a guess (the suite then runs whole) must reach the warning
+		// even when the project file cannot be read either.
+		{
+			name: "unreadable per-project config with a computed configDir: guessed stories reported", suite: vitest,
+			files: with(sbFiles, ".storybook/main.ts", sbMain,
+				"vitest.config.ts", `export default { test: { projects: ['./vitest.node.config.ts', './vitest.storybook.config.ts'] } }`,
+				"vitest.node.config.ts", `export default mergeConfig(base, { test: { include: ['src/**/*.test.ts'] } })`,
+				"vitest.storybook.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest({ configDir: getDir() })] }))`),
+			source: "vitest.config.ts test.projects (2 projects)", warn: "running the whole suite whenever one of them is selected",
+			tests: []string{"docs/guide.stories.tsx", "other/page.stories.jsx", "src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
+		},
+		{
+			name: "unreadable per-project config without main.*: guessed stories reported", suite: vitest,
+			files: with(sbFiles,
+				"vitest.config.ts", `export default { test: { projects: ['./vitest.storybook.config.ts'] } }`,
+				"vitest.storybook.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest()] }))`),
+			source: "vitest.config.ts test.projects (1 project)", warn: "running the whole suite whenever one of them is selected",
+			tests: []string{"docs/guide.stories.tsx", "other/page.stories.jsx", "src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
+		},
 		{
 			name: "unreadable top-level config keeps the defaults and adds the stories", suite: vitest,
 			files: with(sbFiles, ".storybook/main.ts", sbMain,
@@ -229,7 +248,92 @@ func TestStorybookMatchers(t *testing.T) {
 				"src/b.stories.tsx":      ``,
 			},
 			unit: "src/b.stories.tsx", browser: true,
-			globs: []string{".storybook/**", "public/**", "assets/**"}, starts: []string{".storybook/preview.tsx"},
+			globs: []string{".storybook/**", "public/**", "assets/**"}, starts: []string{".storybook/preview.tsx", ".storybook/main.ts"},
+		},
+		// Must keep: what main.* loads for the stories outside the configuration
+		// directory (a Vite plugin or alias in viteFinal, preview annotations, a local
+		// addon) is not known, so their passes are never trusted.
+		{
+			name: "viteFinal makes passes untrusted",
+			files: map[string]string{
+				".storybook/main.ts": `import { mockApi } from '../tools/mock-api'
+export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], viteFinal: (c) => ({ ...c, plugins: [mockApi()] }) }`,
+				"vitest.config.ts":  sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx": ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "sets viteFinal",
+		},
+		{
+			name: "an async viteFinal method makes passes untrusted",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], async viteFinal(c) { return c } }`,
+				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "sets viteFinal",
+		},
+		{
+			name: "previewAnnotations make passes untrusted",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], previewAnnotations: ['../tools/annotations.ts'] }`,
+				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "sets previewAnnotations",
+		},
+		{
+			name: "a local addon makes passes untrusted",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], addons: ['@storybook/addon-a11y', './local-preset.ts'] }`,
+				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "local addon or preset in addons",
+		},
+		{
+			name: "a local addon through a helper makes passes untrusted",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], addons: [getAbsolutePath('../addons/x')] }`,
+				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "local addon or preset in addons",
+		},
+		{
+			name: "package addons and framework are known",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], addons: ['@storybook/addon-a11y', getAbsolutePath('@storybook/addon-docs')], framework: { name: '@storybook/react-vite' } }`,
+				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"},
+		},
+		// Storybook resolves configDir against the directory vitest runs in (the suite
+		// root), not the project file's: the root's .storybook is the one read, and as
+		// the two differ the stories are not trusted.
+		{
+			name: "default configDir of a project file in a subdirectory",
+			files: map[string]string{
+				"vitest.config.ts":         `export default { test: { projects: ['web/vitest.config.ts'] } }`,
+				"web/vitest.config.ts":     sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
+				".storybook/main.ts":       `export default { stories: ['../web/src/**/*.stories.tsx'], staticDirs: [] }`,
+				".storybook/preview.tsx":   ``,
+				"web/.storybook/main.ts":   `export default { stories: ['../lib/**/*.stories.tsx'], staticDirs: [] }`,
+				"web/src/b.stories.tsx":    ``,
+				"web/lib/other.stories.ts": ``,
+			},
+			unit: "web/src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/preview.tsx", ".storybook/main.ts"},
+			unsure: "against the directory vitest runs in",
+		},
+		{
+			name: "configDir joined to the file's directory stays the file's",
+			files: map[string]string{
+				"vitest.config.ts":       `export default { test: { projects: ['web/vitest.config.ts'] } }`,
+				"web/vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest({ configDir: path.join(__dirname, '.storybook') })] })`,
+				"web/.storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [] }`,
+				"web/src/b.stories.tsx":  ``,
+			},
+			unit: "web/src/b.stories.tsx", browser: true, globs: []string{"web/.storybook/**"}, starts: []string{"web/.storybook/main.ts"},
 		},
 		{
 			name: "unreadable static directories make passes untrusted",
@@ -238,7 +342,7 @@ func TestStorybookMatchers(t *testing.T) {
 				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
 				"src/b.stories.tsx":  ``,
 			},
-			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, unsure: "staticDirs is not a literal",
+			unit: "src/b.stories.tsx", browser: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "staticDirs is not a literal",
 		},
 		{
 			name: "fallback stories run whole and are untrusted",
@@ -247,7 +351,7 @@ func TestStorybookMatchers(t *testing.T) {
 				"vitest.config.ts":   sbImport + `export default defineConfig({ plugins: [storybookTest()] })`,
 				"src/b.stories.tsx":  ``,
 			},
-			unit: "src/b.stories.tsx", browser: true, whole: true, globs: []string{".storybook/**"}, unsure: "stories is not a literal",
+			unit: "src/b.stories.tsx", browser: true, whole: true, globs: []string{".storybook/**"}, starts: []string{".storybook/main.ts"}, unsure: "stories is not a literal",
 		},
 		{
 			name: "browser-mode test",
@@ -282,6 +386,31 @@ func TestStorybookMatchers(t *testing.T) {
 				"src/a.test.ts":    ``,
 			},
 			unit: "src/a.test.ts",
+		},
+		// Must keep the node tests' traces required: an unreadable configuration with
+		// projects may run the default include in node, next to the Storybook project.
+		{
+			name: "unreadable projects configuration with Storybook: node tests are not browser-only",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [] }`,
+				"vitest.config.ts": sbImport + `export default mergeConfig(viteConfig, defineConfig({ test: { projects: [
+  { extends: true, test: { name: 'unit', environment: 'jsdom', include: ['src/**/*.test.ts'] } },
+  { extends: true, plugins: [storybookTest({ configDir: '.storybook' })], test: { name: 'storybook', browser: { enabled: true } } },
+] } }))`,
+				"src/util.test.ts":  ``,
+				"src/b.stories.tsx": ``,
+			},
+			unit: "src/util.test.ts",
+		},
+		{
+			name: "unreadable single-project configuration with Storybook: browser, never trusted",
+			files: map[string]string{
+				".storybook/main.ts": `export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [] }`,
+				"vitest.config.ts":   sbImport + `export default mergeConfig(viteConfig, defineConfig({ plugins: [storybookTest()] }))`,
+				"src/util.test.ts":   ``,
+				"src/b.stories.tsx":  ``,
+			},
+			unit: "src/util.test.ts", browser: true, unsure: "cannot be read",
 		},
 		{
 			name: "unreadable browser project",

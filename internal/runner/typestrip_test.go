@@ -313,27 +313,43 @@ func TestErasesTypesResolvedPackage(t *testing.T) {
 		"web/vitest.config.ts":     `import { shared } from '@ws/test-config'; export default shared`,
 		"packages/tc/src/index.ts": `export const shared = { test: {} }`,
 	}
+	pkg := `{"name": "@ws/test-config"}`
 	cases := []struct {
 		name     string
-		resolves bool
+		resolves string // the file the specifier resolves to ("" = none)
 		content  string
+		extra    map[string]string
 		want     bool
 	}{
-		{name: "resolved inside the repository", resolves: true, content: files["packages/tc/src/index.ts"], want: true},
-		{name: "resolved inside the repository, which enables typecheck", resolves: true, content: `export const shared = { test: { typecheck: { enabled: true } } }`},
+		{name: "resolved inside the repository", resolves: "packages/tc/src/index.ts", content: files["packages/tc/src/index.ts"],
+			extra: map[string]string{"packages/tc/package.json": pkg}, want: true},
+		{name: "resolved inside the repository, which enables typecheck", resolves: "packages/tc/src/index.ts", content: `export const shared = { test: { typecheck: { enabled: true } } }`,
+			extra: map[string]string{"packages/tc/package.json": pkg}},
 		{name: "not resolved", content: files["packages/tc/src/index.ts"]},
+		// Must keep types: at run time the installed package loads, not what the static
+		// analysis resolved the name to.
+		{name: "a declaration file (tsconfig paths)", resolves: "web/types/test-config.d.ts", content: files["packages/tc/src/index.ts"],
+			extra: map[string]string{"web/types/test-config.d.ts": `export declare const shared: object`}},
+		{name: "a manual mock", resolves: "web/__mocks__/@ws/test-config.ts", content: files["packages/tc/src/index.ts"],
+			extra: map[string]string{"web/package.json": `{"name": "web"}`, "web/__mocks__/@ws/test-config.ts": `export const shared = {}`}},
+		{name: "a source file of another package (tsconfig paths)", resolves: "web/shims/test-config.ts", content: files["packages/tc/src/index.ts"],
+			extra: map[string]string{"web/package.json": `{"name": "web"}`, "web/shims/test-config.ts": `export const shared = {}`}},
+		{name: "a source file under no package.json", resolves: "packages/tc/src/index.ts", content: files["packages/tc/src/index.ts"]},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fs := map[string]string{"web/vitest.config.ts": files["web/vitest.config.ts"], "packages/tc/src/index.ts": c.content}
+			for k, v := range c.extra {
+				fs[k] = v
+			}
 			var imports map[string][]string
 			src := fakeSources(fs, nil)
-			if c.resolves {
-				imports = map[string][]string{"web/vitest.config.ts": {"packages/tc/src/index.ts"}}
+			if c.resolves != "" {
+				imports = map[string][]string{"web/vitest.config.ts": {c.resolves}}
 				src = fakeSources(fs, imports)
 				src.Resolve = func(from, spec string) []string {
 					if from == "web/vitest.config.ts" && spec == "@ws/test-config" {
-						return []string{"packages/tc/src/index.ts"}
+						return []string{c.resolves}
 					}
 					return nil
 				}

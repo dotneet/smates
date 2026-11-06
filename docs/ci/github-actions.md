@@ -445,8 +445,12 @@ a single step would select for its suites:
 To adopt suites one at a time in a single job instead, record the ready ones with
 `--suite <name> --all` and pass `--base` to the job's selection: the suites that have
 never been recorded are then decided against that revision by static analysis, as with
-no state at all (without `--base`, CI runs their tests as new). A file only they have
-not seen since a recorded suite saw it is no change for the recorded suites.
+no state at all (without `--base`, CI runs their tests as new), until a full run records
+them all; so are those the job has only run selectively since. A file only they have not
+seen since a recorded suite saw it is no change for the recorded suites. The base must be
+in the checkout: fetch it (`fetch-depth: 0`, or `git fetch origin <branch>`) and pass,
+say, `--base origin/${{ github.base_ref }}`. A `--base` that names no commit stops the
+selection: exit code 4 in a shallow clone that lacks it, 2 otherwise.
 
 ### Switch existing workflows { #switch-existing-workflows }
 

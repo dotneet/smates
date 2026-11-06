@@ -81,11 +81,12 @@ func TestSelectNeverRecordedSuites(t *testing.T) {
 		// edit changes the fixture and the state after the partial recording.
 		edit func(f *fixture, st *state.State)
 		// scope: the suites selected (nil: both) and left out.
-		scope   func(f *fixture) (picked, left []*runner.Suite)
-		noBase  bool
-		want    map[string]string
-		orphans []string
-		note    string // a note containing this ("" = no never-recorded note)
+		scope    func(f *fixture) (picked, left []*runner.Suite)
+		noBase   bool
+		noPolicy bool // NoOrphanPolicy (orphans: ignore, --orphans=skip)
+		want     map[string]string
+		orphans  []string
+		note     string // a note containing this ("" = no never-recorded note)
 	}{
 		{
 			name: "unscoped with a base",
@@ -94,7 +95,7 @@ func TestSelectNeverRecordedSuites(t *testing.T) {
 			// every suite owns, changed since the base revision and no test explains
 			// them. The Dockerfile did not change since then: no orphan.
 			orphans: []string{"api/migrations/001.sql", "api/old.sql", "tools/gen.sh"},
-			note:    "1 suite(s) have never been recorded (their tests are decided against the base revision",
+			note:    "1 suite(s) have never been recorded in a full run (their tests are decided against the base revision",
 		},
 		{
 			name:   "unscoped without a base",
@@ -117,11 +118,69 @@ func TestSelectNeverRecordedSuites(t *testing.T) {
 				e2e := suite(f.t.(*testing.T), config.Suite{Name: "e2e", Runner: "pytest", Root: "e2e", Tests: []string{"test_*.py"}})
 				f.suites = append(f.suites, e2e)
 				st.Suite("e2e").Tests["e2e/test_e2e.py"] = &state.Entry{Status: state.Pass, Deps: map[string]string{"e2e/test_e2e.py": f.snap()["e2e/test_e2e.py"]}}
+				st.Commit = "c0" // a full run took the snapshot e2e compares with
 			},
 			want: map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": ReasonDiff, "api/test_other.py": "-unaffected", "e2e/test_e2e.py": "-unaffected"},
 			// e2e has entries but saw none of the markers: they are changed for it,
 			// and the unexplained ones orphans, as before.
 			orphans: []string{"Dockerfile", "api/migrations/001.sql", "api/old.sql", "e2e/fixtures/users.json", "tools/gen.sh"},
+		},
+		// Its first ordinary run after a partial recording gave api entries: api still
+		// has no snapshot (no full run, no marker names it), so the files only it has not
+		// seen stay no change for web, and what changed since the base is its orphans.
+		{
+			name: "a suite recorded only by a selective run",
+			edit: func(f *fixture, st *state.State) {
+				st.Suite("api").Tests["api/test_app.py"] = &state.Entry{Status: state.Pass, Deps: map[string]string{"api/test_app.py": f.snap()["api/test_app.py"], "api/app.py": f.snap()["api/app.py"]}}
+			},
+			want:    map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": "-unaffected", "api/test_other.py": "-unaffected"},
+			orphans: []string{"api/migrations/001.sql", "api/old.sql", "tools/gen.sh"},
+			note:    "1 suite(s) have never been recorded in a full run",
+		},
+		{
+			// Must keep: without a base revision nothing judges api's changes, so the
+			// markers stay changed for it (orphans), as before.
+			name:   "a suite recorded only by a selective run, without a base",
+			noBase: true,
+			edit: func(f *fixture, st *state.State) {
+				st.Suite("api").Tests["api/test_app.py"] = &state.Entry{Status: state.Pass, Deps: map[string]string{"api/test_app.py": f.snap()["api/test_app.py"], "api/app.py": f.snap()["api/app.py"]}}
+			},
+			want:    map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": "-unaffected", "api/test_other.py": ReasonNew},
+			orphans: []string{"Dockerfile", "api/migrations/001.sql", "api/old.sql", "e2e/fixtures/users.json", "e2e/test_e2e.py", "tools/gen.sh"},
+		},
+		// Must keep: with no orphan policy the dropped files still get the note, and the
+		// decisions do not change.
+		{
+			name:     "no orphan policy",
+			noPolicy: true,
+			want:     map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": ReasonDiff, "api/test_other.py": "-unaffected"},
+			orphans:  []string{"api/migrations/001.sql", "api/old.sql", "tools/gen.sh"},
+			note:     "1 suite(s) have never been recorded in a full run",
+		},
+		// Must keep: a dropped file under api's root that a recorded test read at run
+		// time is explained (no orphan), and still reaches api's tests through the read.
+		{
+			name:    "a file of the never-recorded suite a recorded test read",
+			edit:    webReads("api/migrations/001.sql"),
+			want:    map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": ReasonDiff, "api/test_other.py": ReasonNew},
+			orphans: []string{"api/old.sql", "tools/gen.sh"},
+			note:    "1 suite(s) have never been recorded in a full run",
+		},
+		{
+			// With no orphan policy the read selects nothing, but says so.
+			name:     "a file of the never-recorded suite a recorded test read, no orphan policy",
+			edit:     webReads("api/migrations/001.sql"),
+			noPolicy: true,
+			want:     map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": ReasonDiff, "api/test_other.py": "-unaffected"},
+			orphans:  []string{"api/old.sql", "tools/gen.sh"},
+			note:     "none selected for them (no orphan policy)",
+		},
+		{
+			name:   "a file of the never-recorded suite a recorded test read, without a base",
+			edit:   webReads("api/migrations/001.sql"),
+			noBase: true,
+			want:   map[string]string{"web/a.test.ts": "-unaffected", "api/test_app.py": ReasonNew, "api/test_other.py": ReasonNew},
+			note:   "their tests run as new",
 		},
 		{
 			name: "an entry no suite has compared",
@@ -184,6 +243,7 @@ func TestSelectNeverRecordedSuites(t *testing.T) {
 				if !c.noBase {
 					in.Base, in.DiffUnrecorded = base, true
 				}
+				in.NoOrphanPolicy = c.noPolicy
 			})
 			if got := decisions(res); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("decisions\n got %v\nwant %v", got, c.want)
@@ -196,6 +256,14 @@ func TestSelectNeverRecordedSuites(t *testing.T) {
 				t.Errorf("notes %q, want one with %q", res.Notes, c.note)
 			}
 		})
+	}
+}
+
+// webReads gives web's recorded test a run-time read of file (as the trace records it,
+// with the content web saw).
+func webReads(file string) func(f *fixture, st *state.State) {
+	return func(f *fixture, st *state.State) {
+		st.Suite("web").Tests["web/a.test.ts"].Deps[file] = f.snap()[file]
 	}
 }
 

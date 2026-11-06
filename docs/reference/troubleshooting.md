@@ -58,7 +58,21 @@ Common causes of a test that never settles:
   tracing environment (`NODE_OPTIONS`, `NODE_V8_COVERAGE`, `SMATES_*`; a task runner
   such as turbo or nx, `env -i`, a container) or replays cached results. Point the
   suite's `command` at the test runner itself, with `root:` set to its package, or pass
-  that environment through.
+  that environment through. For a `custom` suite the warning says instead that it is
+  recorded only through the Node and Python processes its command starts, or a
+  `junit:` report: a shell script or a JVM build leaves neither. Such units stay
+  unrecorded: in CI without `--base` they run again as new, but locally (or with
+  `--base`) they are decided against the base revision by static analysis, which does
+  not see what they read at run time.
+- **Browser tests.** `N test file(s) ran in a browser, which smates cannot trace; they
+  will run again next time` means browser-mode tests or Storybook stories: nothing in
+  the browser is traced, so their outcome is unknown after every run. Set
+  `trust_browser_passes: true` on the suite to record their passes with their static
+  dependencies, and check it with `smates run --shadow` (see
+  [Browser mode and Storybook](../guides/runners.md#browser-mode-and-storybook)). With
+  the setting on, `N browser test(s) passed but are not trusted` names the stories it
+  still does not record, and why (an import smates cannot resolve, `viteFinal` in
+  `main.*`, ...).
 - **Runner arguments.** A run with arguments after `--` never records a test as passed.
   Move permanent flags into the suite's `command`.
 - **A unittest module written for pytest.** Its status stays unknown, so it runs every

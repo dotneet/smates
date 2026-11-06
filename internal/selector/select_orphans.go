@@ -73,7 +73,7 @@ func (s *selection) neverRecordedOrphans() {
 	if len(names) > 5 {
 		names = append(slices.Clip(names[:5]), fmt.Sprintf("… (+%d)", len(never)-5))
 	}
-	res.Notes = append(res.Notes, fmt.Sprintf("%d suite(s) have never been recorded (%s), and the changes only they have not seen are no change for the others: %s", len(never), how, strings.Join(names, ", ")))
+	res.Notes = append(res.Notes, fmt.Sprintf("%d suite(s) have never been recorded in a full run (%s), and the changes only they have not seen are no change for the others: %s", len(never), how, strings.Join(names, ", ")))
 }
 
 // Explains reports whether some test's D(T) explains a change to f (see

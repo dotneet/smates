@@ -193,7 +193,7 @@ smates doctor [flags]
 |---|---|
 | `git-installed`、`repository`、`project-load`、`config` | git が `PATH` にあり、リポジトリと `smates.yml` を読み込めること |
 | `suites-detected`、`suite-units` | スイートがあり、それぞれにテストファイルが一致すること |
-| `suite-not-detected` | `smates.yml` がないとき、テストランナーを設定しているのにスイートにならなかったパッケージ（smates が見つけられるテストファイルがない）。`smates init` も同じ注意を出します |
+| `suite-not-detected` | `smates.yml` がないとき、テストランナーを設定している（vitest や jest の設定ファイル、プロジェクトごとの `vitest.*.config.*`、vitest を import するか `test` を設定する `vite.config.*`。ただの Vite アプリは含みません）のにスイートにならなかったパッケージ（smates が見つけられるテストファイルがない）。`smates init` も同じ注意を出します |
 | `suite-tests-source`、`suite-test-discovery` | テストのパターンの出どころと、smates が読めなかったランナー設定 |
 | `suite-launcher`、`suite-dependencies-installed` | スイートのコマンドを起動できること、`node_modules` がインストールされていること |
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
