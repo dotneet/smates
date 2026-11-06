@@ -82,8 +82,7 @@ need tests belong in `ignore:`: `smates config add-ignore 'deploy/**'` (`--dry-r
   afterwards: `smates run --output failures --report smates-report.json` (per-test
   results and `exit_code`).
 - `--max-time 5m` starts no test batch that would end after 5 minutes; the tests left
-  out stay selected and run in a later run, in the usual order (not necessarily first;
-  CI runs them all).
+  out stay selected for a later run (not necessarily first; CI runs them all).
 
 ## Do not
 

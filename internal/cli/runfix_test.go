@@ -134,7 +134,9 @@ suites:
 	if rep.ExitCode != ExitEnv {
 		t.Errorf("report exit_code %d, want 4 (as smates exits)", rep.ExitCode)
 	}
-	// In CI (locally an unrecorded test is judged against the base revision instead).
+	// In CI (locally an unrecorded test is judged against the base revision instead),
+	// on a feature branch (on the default branch CI selects everything).
+	r.g.git("checkout", "-q", "-b", "topic")
 	t.Setenv("CI", "true")
 	code, out, errs := r.run("select", "--no-agent", "--format", "files")
 	if code != 0 || strings.TrimSpace(out) != "b/two_check.py" {
