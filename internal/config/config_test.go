@@ -219,3 +219,86 @@ func TestBool(t *testing.T) {
 		t.Fatal("Bool")
 	}
 }
+
+func TestParseRequires(t *testing.T) {
+	c, err := Parse([]byte(`
+suites:
+  - runner: go
+    requires:
+      - tcp: 127.0.0.1:5432
+        tests: ["./store/**"]
+        timeout: 500ms
+      - tcp: "[::1]:6379"
+      - tcp: ${DB_HOST}:5432
+      - cmd: ./scripts/db-ready.sh
+      - env: DATABASE_URL
+      - file: .env.test
+      - file: /opt/browsers/*/chrome
+      - file: ${HOME}/.cache/browsers
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := c.Suites[0].Requires
+	if len(req) != 8 {
+		t.Fatalf("requires: %+v", req)
+	}
+	for i, tc := range []struct {
+		kind, str string
+		timeout   time.Duration
+	}{
+		{"tcp", "tcp 127.0.0.1:5432", 500 * time.Millisecond},
+		{"tcp", "tcp [::1]:6379", DefaultTCPTimeout},
+		{"tcp", "tcp ${DB_HOST}:5432", DefaultTCPTimeout},
+		{"cmd", "cmd ./scripts/db-ready.sh", DefaultCmdTimeout},
+		{"env", "env DATABASE_URL", DefaultTCPTimeout},
+		{"file", "file .env.test", DefaultTCPTimeout},
+		{"file", "file /opt/browsers/*/chrome", DefaultTCPTimeout},
+		{"file", "file ${HOME}/.cache/browsers", DefaultTCPTimeout},
+	} {
+		if r := req[i]; r.Kind() != tc.kind || r.String() != tc.str || r.TimeoutOrDefault() != tc.timeout {
+			t.Errorf("requires[%d] = %s (%s, %s), want %s (%s, %s)", i, r, r.Kind(), r.TimeoutOrDefault(), tc.str, tc.kind, tc.timeout)
+		}
+	}
+	if got := req[0].Tests; len(got) != 1 || got[0] != "store/**" {
+		t.Errorf("tests globs are trimmed of ./: %q", got)
+	}
+}
+
+func TestParseRequiresErrors(t *testing.T) {
+	suite := "suites:\n  - runner: go\n    requires:\n"
+	cases := []struct{ name, entry, want string }{
+		{"unknown kind", "      - http: localhost:8080\n", `unknown key "http" in requires entry`},
+		{"misspelled key", "      - tcp: localhost:1\n        test: [a]\n", `unknown key "test"`},
+		{"no kind", "      - tests: [a/**]\n", "set exactly one of tcp, cmd, env and file"},
+		{"empty kind", "      - tcp:\n", "set exactly one of tcp, cmd, env and file"},
+		{"blank kind", "      - cmd: \"  \"\n", "cmd is empty"},
+		{"two kinds", "      - tcp: localhost:1\n        env: A\n", "set exactly one of tcp, cmd, env and file"},
+		{"tcp without port", "      - tcp: localhost\n", "want host:port"},
+		{"tcp without host", "      - tcp: \":5432\"\n", "the host is missing"},
+		{"tcp bad port", "      - tcp: localhost:http\n", `bad port "http"`},
+		{"tcp port out of range", "      - tcp: localhost:70000\n", `bad port "70000"`},
+		{"tcp port zero", "      - tcp: localhost:0\n", `bad port "0"`},
+		{"env not a name", "      - env: 1DB\n", "is not a variable name"},
+		{"env with value", "      - env: A=1\n", "is not a variable name"},
+		{"file bad glob", "      - file: \"a[\"\n", "bad glob"},
+		{"file backslash", "      - file: 'a\\b'\n", "use / as the path separator"},
+		{"negative timeout", "      - tcp: localhost:1\n        timeout: -1s\n", "must not be negative"},
+		{"timeout on env", "      - env: A\n        timeout: 1s\n", "timeout applies to tcp and cmd only"},
+		{"timeout on file", "      - file: a\n        timeout: 1s\n", "timeout applies to tcp and cmd only"},
+		{"bad timeout", "      - tcp: localhost:1\n        timeout: soon\n", ""},
+		{"bad tests glob", "      - env: A\n        tests: [\"a[\"]\n", "bad glob"},
+		{"not a list", "      tcp: localhost:1\n", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse([]byte(suite + c.entry))
+			if err == nil {
+				t.Fatalf("no error")
+			}
+			if c.want != "" && !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %q, want %q", err, c.want)
+			}
+		})
+	}
+}
