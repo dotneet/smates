@@ -385,7 +385,10 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	base := opt.base
 	// Locally the state only knows the tests that ran on this machine: tests it has
 	// not recorded yet are judged against the base branch instead of all running as new.
-	diffUnrecorded := p.ci.Name == "" && !opt.all
+	// In CI the state is the one the pipeline records, so a test it lacks is new,
+	// unless --base names a revision to judge such tests against (suites being
+	// adopted one at a time).
+	diffUnrecorded := (p.ci.Name == "" || opt.base != "") && !opt.all
 	// Without a recorded snapshot, changed files (and so orphans) come from the base.
 	if base == "" && !opt.all && (p.state.Empty() || diffUnrecorded || len(p.state.Files) == 0) {
 		base = autoBase(p.ci, p.repo)
