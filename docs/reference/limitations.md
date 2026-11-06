@@ -96,6 +96,12 @@ change to `go.work`, `go.work.sum` or the `go.mod`/`go.sum` of any module it use
 selects every test of the workspace, even when the bumped dependency is linked by few
 of them. See [Go](../guides/runners.md#go).
 
+**Go packages without tests** are not compiled by a selective run: when a library
+changes, the tests importing it run, but a `main` package importing it is not built, and
+a change to such a package itself is [untested code](../guides/orphans.md).
+Workaround: widen the suite's `tests` to their files, see
+[Go packages without tests](../guides/runners.md#go-packages-without-tests).
+
 **Go test functions** (`granularity: func`):
 
 - Recording costs one process per test function, so the default branch's full runs get

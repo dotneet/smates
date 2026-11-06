@@ -164,6 +164,9 @@ checks, for the changed package and the packages importing it. The check carries
 build failure; the functions keep their recorded outcomes, so after a fix only the
 checks run again.
 
+A package without tests has no check unless the suite's `tests` globs reach its files:
+see [Go packages without tests](runners.md#go-packages-without-tests).
+
 ## How selected functions run
 
 When not recording, selected functions run with one `go test` per group of packages:

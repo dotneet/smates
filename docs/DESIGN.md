@@ -361,6 +361,13 @@ when the config is not literal. Derived patterns do not mark the suite narrowed:
 run still lets the runner discover its tests, so an approximation (a converted
 extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
 
+A Go package unit is the directory of a test file, unless build constraints exclude every
+Go file of that directory in the suite's configuration (`go list -find` with the suite's
+build flags, as for test functions; when go list fails, or any Go file of the directory
+may compile, it stays a unit): `go test` would fail such a directory ("build constraints
+exclude all Go files") and `./...` skips it. Widening `tests` to non-test files
+(`**/cmd/**/*.go`) makes packages without tests units that `go test` compiles.
+
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
 so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
