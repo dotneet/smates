@@ -90,6 +90,12 @@ See [Environment variables](../guides/environment.md).
 For Python, data a module reads at import time or behind a cache belongs to that
 module.
 
+**Go dependency files count as a whole.** Any change to a `go.mod` or `go.sum` selects
+every test of its module and of the modules importing it; in a `go.work` workspace, a
+change to `go.work`, `go.work.sum` or the `go.mod`/`go.sum` of any module it uses
+selects every test of the workspace, even when the bumped dependency is linked by few
+of them. See [Go](../guides/runners.md#go).
+
 **Go test functions** (`granularity: func`):
 
 - Recording costs one process per test function, so the default branch's full runs get

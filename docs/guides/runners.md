@@ -175,6 +175,13 @@ directories listed, environment variables), via `go test -exec`. Node and Python
 processes a test starts are traced too. Build failures are attributed to their packages.
 `go.mod`, `go.sum`, `go.work` and `.tool-versions` are inputs.
 
+In a `go.work` workspace, Go picks one version of each dependency for all the modules
+the workspace uses, so a `require` bump in one module can change what another builds
+even when it never imports the first. Every Go file of the workspace therefore depends
+on the `go.mod` and `go.sum` of every module listed by `use`, and on the `go.mod` of
+each local `replace` target: a dependency bump in any of them selects every test of the
+workspace. A `go.work` smates cannot parse makes every module below it count.
+
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
 

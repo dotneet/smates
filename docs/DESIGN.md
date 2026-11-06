@@ -647,8 +647,17 @@ with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, im
 mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
 back to the whole package when unresolvable). Python imports including relative, dynamic
 with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
-on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
-package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
+on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`,
+package directories or `.go` files named in test string literals (`go run ../../cmd/tool`),
+and the files that pin dependency versions: the module's `go.mod`/`go.sum` and the `go.mod`
+of its local `replace` targets, and in a `go.work` workspace `go.work`/`go.work.sum` plus
+the `go.mod`/`go.sum` of every module it `use`s and the `go.mod` of their local replace
+targets (minimal version selection picks one version per dependency across them all, so a
+`require` bump in a module a package never imports can change what it links; another
+module's `go.sum` counts because the go command verifies checksums against all of them, so
+a removed line can fail the build). A `go.work` whose directives do not parse, or that
+uses nothing, counts every module below its directory. These are content keys: any edit
+selects every test of the workspace.
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
 into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript

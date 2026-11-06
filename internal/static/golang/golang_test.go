@@ -171,6 +171,7 @@ func TestDepsMultiModule(t *testing.T) {
 		"pkg/p.go":    goSrc("pkg"),
 		// Nested module whose path extends the root module path: longest prefix wins.
 		"sub/go.mod":         "module \"example.com/root/sub\"\n\nrequire example.com/util v0.0.0\n",
+		"sub/go.sum":         "",
 		"sub/inner/inner.go": goSrc("inner", `"example.com/util/strs"`),
 		// Independent module elsewhere in the tree (no go.sum).
 		"libs/util/go.mod":       "module example.com/util\n",
@@ -180,24 +181,198 @@ func TestDepsMultiModule(t *testing.T) {
 		"sub/inner/inner_test.go": goSrc("inner"),
 	})
 	a := New(h, Options{})
+	// Minimal version selection picks one version per dependency across the workspace:
+	// every file depends on the go.mod and go.sum of every module the go.work uses,
+	// whether or not it imports that module.
+	work := []string{"go.mod", "go.sum", "go.work", "go.work.sum", "sub/go.mod", "sub/go.sum", "libs/util/go.mod"}
 	tests := []struct {
 		file string
 		want []string
 	}{
-		{"root.go", []string{
-			"go.mod", "go.sum", "go.work", "go.work.sum",
-			"libs/util/util.go", "pkg/p.go", "sub/inner/inner.go",
-		}},
-		{"sub/inner/inner.go", []string{
-			"sub/go.mod", "go.work", "go.work.sum", "libs/util/strs/strs.go",
-		}},
-		{"libs/util/strs/strs.go", []string{"libs/util/go.mod", "go.work", "go.work.sum"}},
-		{"sub/inner/inner_test.go", []string{"sub/go.mod", "go.work", "go.work.sum", "sub/inner/inner.go"}},
+		{"root.go", append([]string{"libs/util/util.go", "pkg/p.go", "sub/inner/inner.go"}, work...)},
+		{"sub/inner/inner.go", append([]string{"libs/util/strs/strs.go"}, work...)},
+		{"libs/util/strs/strs.go", work},
+		{"sub/inner/inner_test.go", append([]string{"sub/inner/inner.go"}, work...)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
 			assertDeps(t, deps(a, h, tt.file), tt.want)
 		})
+	}
+}
+
+// wsModule returns the files of a module at dir with a non-test and a test file and a
+// requirement on a third-party module, plus extra files.
+func wsModule(dir, modPath string, extra ...string) map[string]string {
+	files := map[string]string{
+		dir + "/go.mod":    "module " + modPath + "\n\ngo 1.22\n\nrequire example.com/lib v1.2.0\n",
+		dir + "/go.sum":    "example.com/lib v1.2.0 h1:abc=\n",
+		dir + "/x.go":      goSrc("x"),
+		dir + "/x_test.go": goSrc("x", `"testing"`),
+	}
+	for i := 0; i+1 < len(extra); i += 2 {
+		files[extra[i]] = extra[i+1]
+	}
+	return files
+}
+
+// merge combines file maps.
+func merge(ms ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range ms {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func TestDepsWorkspacePins(t *testing.T) {
+	// Modules b and c share a workspace; c never imports b, but a require bump in
+	// b/go.mod can change the version of example.com/lib c links (minimal version
+	// selection picks one version per module across the workspace), so c's tests must
+	// depend on b/go.mod and b/go.sum. Module "unused" is in the tree but not in the
+	// workspace.
+	mods := merge(wsModule("b", "example.com/b"), wsModule("c", "example.com/c"), wsModule("unused", "example.com/unused"))
+	own := []string{"c/go.mod", "c/go.sum", "c/x.go", "go.work", "go.work.sum"}
+	withB := append([]string{"b/go.mod", "b/go.sum"}, own...)
+	all := append([]string{"unused/go.mod", "unused/go.sum"}, withB...)
+	tests := []struct {
+		name  string
+		files map[string]string // $ROOT is replaced by the repository root
+		file  string
+		want  []string
+	}{
+		{"use block with comments", merge(mods, map[string]string{
+			"go.work": "go 1.22\n\n// modules\nuse (\n\t./b // the b module\n\t./c\n)\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"single use lines", merge(mods, map[string]string{
+			"go.work": "go 1.22\n\nuse ./c\nuse ./b\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"bare, quoted and backquoted paths", merge(mods, map[string]string{
+			"go.work": "go 1.22\n\nuse b\nuse \"./c\"\nuse `./unused`\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"trailing slash and dot segments", merge(mods, map[string]string{
+			"go.work": "use ./b/\nuse ./unused/../c\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"Windows separators", merge(mods, map[string]string{
+			"go.work": "use .\\b\nuse .\\c\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"use of the workspace directory itself", merge(mods, map[string]string{
+			"go.work": "use .\nuse ./c\n", "go.work.sum": "", "go.mod": "module example.com/root\n", "go.sum": "",
+		}), "c/x_test.go", append([]string{"go.mod", "go.sum"}, own...)},
+		{"non-test file", merge(mods, map[string]string{
+			"go.work": "use ./b\nuse ./c\n", "go.work.sum": "",
+		}), "c/x.go", []string{"b/go.mod", "b/go.sum", "c/go.mod", "c/go.sum", "go.work", "go.work.sum"}},
+		{"parent path from a nested workspace", merge(
+			wsModule("b", "example.com/b"), wsModule("ws/c", "example.com/c"),
+			map[string]string{"ws/go.work": "use ./c\nuse ../b\n"},
+		), "ws/c/x_test.go", []string{"b/go.mod", "b/go.sum", "ws/c/go.mod", "ws/c/go.sum", "ws/c/x.go", "ws/go.work"}},
+		{"absolute path", merge(mods, map[string]string{
+			"go.work": "use $ROOT/b\nuse ./c\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"paths outside the repository or without a module are skipped", merge(mods, map[string]string{
+			"go.work": "use ./c\nuse ../../elsewhere\nuse ./gone\nuse ./b\n", "go.work.sum": "",
+		}), "c/x_test.go", withB},
+		{"local replace in the go.work", merge(mods, map[string]string{
+			"go.work":          "use ./b\nuse ./c\n\nreplace example.com/lib => ./forks/lib\n",
+			"go.work.sum":      "",
+			"forks/lib/go.mod": "module example.com/lib\n",
+			"forks/lib/go.sum": "",
+		}), "c/x_test.go", append([]string{"forks/lib/go.mod"}, withB...)},
+		{"local replace in another used module", merge(mods, map[string]string{
+			"go.work":          "use ./b\nuse ./c\n",
+			"go.work.sum":      "",
+			"b/go.mod":         "module example.com/b\n\nrequire example.com/lib v1.2.0\n\nreplace example.com/lib => ../forks/lib\n",
+			"forks/lib/go.mod": "module example.com/lib\n",
+		}), "c/x_test.go", append([]string{"forks/lib/go.mod"}, withB...)},
+		// Outside a workspace other modules do not take part in version selection,
+		// but a local replace target does even when nothing imports it.
+		{"no workspace", mods, "c/x_test.go", []string{"c/go.mod", "c/go.sum", "c/x.go"}},
+		{"no workspace, local replace", merge(mods, map[string]string{
+			"c/go.mod":         "module example.com/c\n\nreplace example.com/lib => ../forks/lib\n",
+			"forks/lib/go.mod": "module example.com/lib\n",
+		}), "c/x_test.go", []string{"c/go.mod", "c/go.sum", "c/x.go", "forks/lib/go.mod"}},
+		{"no workspace, local replace with Windows separators", merge(mods, map[string]string{
+			"c/go.mod":         "module example.com/c\n\nreplace example.com/lib => ..\\forks\\lib\n",
+			"forks/lib/go.mod": "module example.com/lib\n",
+		}), "c/x_test.go", []string{"c/go.mod", "c/go.sum", "c/x.go", "forks/lib/go.mod"}},
+		{"no workspace, replace by the parent directory", merge(mods, map[string]string{
+			"c/go.mod": "module example.com/c\n\nreplace example.com/b => ..\n",
+			"go.mod":   "module example.com/b\n",
+		}), "c/x_test.go", []string{"c/go.mod", "c/go.sum", "c/x.go", "go.mod"}},
+		{"no workspace, replace by a module path", merge(mods, map[string]string{
+			"c/go.mod":         "module example.com/c\n\nreplace example.com/lib => example.com/forks/lib v1.0.0\n",
+			"forks/lib/go.mod": "module example.com/lib\n",
+		}), "c/x_test.go", []string{"c/go.mod", "c/go.sum", "c/x.go"}},
+		// A go.work that cannot be parsed keeps every module below it.
+		{"unparsable: unterminated block", merge(mods, map[string]string{
+			"go.work": "use (\n\t./c\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"unparsable: block on one line", merge(mods, map[string]string{
+			"go.work": "use ( ./b ./c )\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"unparsable: unterminated quote", merge(mods, map[string]string{
+			"go.work": "use ./c\nuse \"./b\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"unparsable: use without a path", merge(mods, map[string]string{
+			"go.work": "use ./c\nuse\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"unparsable: bad replace", merge(mods, map[string]string{
+			"go.work": "use ./c\nreplace example.com/lib\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"no use directive", merge(mods, map[string]string{
+			"go.work": "go 1.22\n", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"empty go.work", merge(mods, map[string]string{
+			"go.work": "", "go.work.sum": "",
+		}), "c/x_test.go", all},
+		{"unparsable nested workspace keeps the modules below it", merge(mods,
+			wsModule("ws/c", "example.com/wsc"), wsModule("ws/d", "example.com/wsd"),
+			map[string]string{"ws/go.work": "use (\n"},
+		), "ws/c/x_test.go", []string{"ws/c/go.mod", "ws/c/go.sum", "ws/c/x.go", "ws/d/go.mod", "ws/d/go.sum", "ws/go.work"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newRepo(t, tt.files)
+			for p, content := range tt.files {
+				if strings.Contains(content, "$ROOT") {
+					content = strings.ReplaceAll(content, "$ROOT", filepath.ToSlash(h.root))
+					if err := os.WriteFile(filepath.Join(h.root, filepath.FromSlash(p)), []byte(content), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			assertDeps(t, deps(New(h, Options{}), h, tt.file), tt.want)
+		})
+	}
+}
+
+// countingHost counts reads per file.
+type countingHost struct {
+	*fsHost
+	mu    sync.Mutex
+	reads map[string]int
+}
+
+func (h *countingHost) Read(p string) []byte {
+	h.mu.Lock()
+	h.reads[p]++
+	h.mu.Unlock()
+	return h.fsHost.Read(p)
+}
+
+func TestDepsWorkspaceParsedOnce(t *testing.T) {
+	fs := newRepo(t, merge(wsModule("b", "example.com/b"), wsModule("c", "example.com/c"), map[string]string{
+		"go.work": "use ./b\nuse ./c\n",
+	}))
+	h := &countingHost{fsHost: fs, reads: map[string]int{}}
+	a := New(h, Options{})
+	for _, p := range []string{"b/x.go", "b/x_test.go", "c/x.go", "c/x_test.go"} {
+		a.Deps(p, fs.Read(p))
+	}
+	if h.reads["go.work"] != 1 || h.reads["b/go.mod"] != 1 {
+		t.Errorf("reads %v, want go.work and b/go.mod read once", h.reads)
 	}
 }
 
@@ -480,10 +655,28 @@ func TestParseModFile(t *testing.T) {
 		{"module block", "module (\n\texample.com/a\n)\n", modFile{module: "example.com/a"}},
 		{
 			"replaces",
-			"module m\nreplace a => ./a\nreplace a/b v1.0.0 => ../b v1.1.0\nreplace (\n\tc => ./c\n\td=>./d\n)\nrequire (\n\tx v1\n)\n",
+			"module m\nreplace a => ./a\nreplace a/b v1.0.0 => ../b v1.1.0\nreplace (\n\tc => ./c\n)\nrequire (\n\tx v1\n)\n",
 			modFile{module: "m", replaces: []replace{{"a", "./a"}, {"a/b", "../b"}, {"c", "./c"}}},
 		},
-		{"malformed", "module\nreplace => x\nreplace a =>\n\"unterminated\n", modFile{}},
+		{
+			// The go command reads "d=>./d" as one token: not a replace directive.
+			"replace without spaces",
+			"module m\nreplace (\n\tc => ./c\n\td=>./d\n)\n",
+			modFile{module: "m", replaces: []replace{{"c", "./c"}}, malformed: true},
+		},
+		{"malformed", "module\nreplace => x\nreplace a =>\n\"unterminated\n", modFile{malformed: true}},
+		{
+			"go.work uses",
+			"go 1.22\n\n// header\nuse ./a // first\nuse (\n\t./b\n\t\"../c d\" // quoted\n\n\tb2\n) // done\nuse `./e`\ntoolchain go1.22.1\n",
+			modFile{uses: []string{"./a", "./b", "../c d", "b2", "./e"}},
+		},
+		{"use block on one line", "use ( ./a )\n", modFile{malformed: true}},
+		{"use without a path", "use\n", modFile{malformed: true}},
+		{"use with two paths", "use ./a ./b\n", modFile{malformed: true}},
+		{"unterminated block", "use (\n\t./a\n", modFile{uses: []string{"./a"}, malformed: true}},
+		{"stray close", "use ./a\n)\n", modFile{uses: []string{"./a"}, malformed: true}},
+		{"unterminated quote", "use \"./a\n", modFile{malformed: true}},
+		{"bad escape", "use \"./a\\q\"\n", modFile{malformed: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
