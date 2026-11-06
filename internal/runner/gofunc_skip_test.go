@@ -113,3 +113,23 @@ func TestGoOutcomesSkip(t *testing.T) {
 		}
 	}
 }
+
+// A package recorded as a whole: with -v or -json go test prints each function's skip,
+// which is recorded as such; without, only the package's summary, a pass for each.
+func TestGoOutcomesWholePackageSkip(t *testing.T) {
+	for _, c := range []struct {
+		name, out, want string
+	}{
+		{"-v", "=== RUN   TestS\n--- SKIP: TestS (0.00s)\nPASS\nok  \tm/q\t0.01s\n", state.Skip},
+		{"-json", `{"Action":"skip","Package":"m/q","Test":"TestS"}` + "\n" + `{"Action":"pass","Package":"m/q"}` + "\n", state.Skip},
+		{"plain", "ok  \tm/q\t0.01s\n", state.Pass},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &goOutcomes{}
+			feed(g, c.out)
+			if st, _, _ := g.status("m/q", "TestS"); st != c.want {
+				t.Errorf("status %q, want %q", st, c.want)
+			}
+		})
+	}
+}

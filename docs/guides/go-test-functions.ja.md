@@ -160,7 +160,7 @@ func TestMain(m *testing.M) {
 smates: PASSED 12 of 12 selected test unit(s) (240 in total) in 3.1s; 2 skipped (not proven: they run again next time)
 ```
 
-そのため、常にスキップするテスト（`-short` で止めるテスト、サービスが起動していない統合テスト）は毎回実行されます。実行コストは小さく、`smates doctor` は前回の実行でスキップしたユニットを一覧します（`state-skipped`）。このように扱うのは関数単位の記録だけです。全体として記録されたパッケージや `granularity: package` のスイートは、パッケージの結果を記録します（[制限事項](../reference/limitations.md) を参照）。
+そのため、常にスキップするテスト（`-short` で止めるテスト、サービスが起動していない統合テスト）は毎回実行されます。実行コストは小さく、`smates doctor` は前回の実行でスキップしたユニットを一覧します（`state-skipped`）。このように扱うのは関数単位の記録だけです。`granularity: func` で全体として記録されたパッケージは、go test が各関数のスキップを出力するとき（スイートのコマンドに `-v` か `-json` があるとき）はそれも記録し、そうでなければパッケージの結果を記録します。`granularity: package` のスイートは常にパッケージの結果を記録します（[制限事項](../reference/limitations.md) を参照）。
 
 日付のように smates が追跡しないものに結果が左右されるテストは `volatile` に挙げると毎回実行されます。`max_age` を設定すると、記録した実行は一定時間で期限切れになります。
 

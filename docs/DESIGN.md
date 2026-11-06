@@ -123,17 +123,25 @@ A rule's deps are expanded once per selection (`newSuiteRules`) and added to `Kn
 inputs. `tests:` narrows a rule by path; `reaches:` by what the unit reaches, ANDed with
 `tests:` when both are set (`suiteRule.applies`): the unit's file-level static closure
 (before `MapStatic` keys it by declaration, so a Go function unit matches by its
-package's test files and imports) holds a file a glob matches (memoized per suite, as
-a file is in many closures), or, for a `$NAME` pattern, the unit's recorded entry holds
-an environment key it matches. Files are never matched against the entry: it records
+package's test files and imports), or a file the runner loads for every test through
+its configuration (`runner.ConfigOf`: setup files and their closure), holds a file a
+glob matches (memoized per suite, as a file is in many closures; a glob without a
+wildcard naming a directory also matches `dir/**`), or, for a `$NAME` pattern, the
+unit's recorded entry holds an environment key it matches or a file of its closure
+names such a variable (a word of its source: Go's test log starts in `m.Run`, so reads
+in `TestMain`, `init` and package initializers, and `os.Environ` scans, never reach the
+entry). Files are never matched against the entry: it records
 the rule's own deps, so a rule reaching them would keep applying to every unit it ever
 applied to. A rule cannot only add here: once one unit has the deps, a change to them
 is covered and no longer an orphan, so a unit the rule misses is skipped on such a
 change. It therefore applies whenever it cannot tell: static analysis is off, no
-analyzer reads the unit's files (`static.Graph.Analyzes`), or, for a `$NAME` pattern,
-the unit has no entry yet (it then records the deps once and drops them on its next
-recording). `smates doctor` counts the units each rule with `reaches:` applies to
-(`selector.RuleReach`) and warns about a rule that applies to none.
+analyzer reads the unit's files (`static.Graph.Analyzes`), a file of the closure has an
+import `static.Graph.Unresolved` reports (an alias only a bundler knows), or, for a
+`$NAME` pattern, the unit has no entry yet (it then records the deps once and drops them
+on its next recording) or the pattern may match a variable `env_ignore` or the default
+list drops before recording (`envBlind`). `smates doctor` counts the units each rule
+with `reaches:` applies to (`selector.RuleReach`), warns about a rule that applies to
+none, and about each glob that matches no file (`selector.UnmatchedReaches`).
 
 Dependency keys:
 

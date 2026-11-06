@@ -158,14 +158,22 @@ rules:
 ```
 
 `reaches` follows the file-level closure, including what other helpers and the other
-test files of a Go package import; for `granularity: func` it matches at the package
-level. When smates cannot tell, the rule applies: static analysis is off (`static:
-false`), no analyzer reads the test's files, or (for a `$NAME` entry) the test has no
-recorded run yet. A test that reaches the database in a way the rule does not name (its
-own `sql.Open`, a helper not in the list, a child process) does not get the deps, so
-name every entry point, and add the variables the database connection reads. `smates
-doctor` reports how many test units each such rule applies to, and warns about one that
-applies to none. See [Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database).
+test files of a Go package import, and the files the runner loads for every test through
+its configuration (Vitest `setupFiles` and `globalSetup`, Jest `setupFilesAfterEnv`, and
+what they import); for `granularity: func` it matches at the package level. A glob
+without a wildcard that names a directory (`pkg/shared/testkit`) matches what is below
+it. A `$NAME` entry also matches a test whose closure's source names such a variable
+(`os.Getenv("APP_DB_DSN")`): Go records no read made before `m.Run` (in `TestMain`,
+`init` or a package-level initializer), nor a scan of `os.Environ`. When smates cannot
+tell, the rule applies: static analysis is off (`static: false`), no analyzer reads the
+test's files, the closure has an import smates cannot resolve (a bundler alias, a
+virtual module, a missing file), or, for a `$NAME` entry, the test has no recorded run
+yet or the pattern may name a variable `env_ignore` (or the default ignore list) keeps
+out of every recorded run. A test that reaches the database in a way the rule does not
+name (its own `sql.Open`, a helper not in the list, a child process) does not get the
+deps, so name every entry point, and add the variables the database connection reads.
+`smates doctor` reports how many test units each such rule applies to, warns about one
+that applies to none, and about each glob that matches no file of the repository. See [Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database).
 
 ### depends_on
 

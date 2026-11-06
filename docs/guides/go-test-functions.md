@@ -260,7 +260,9 @@ smates: PASSED 12 of 12 selected test unit(s) (240 in total) in 3.1s; 2 skipped 
 A test that always skips (a `-short` gate, an integration test whose service is never
 up) therefore runs every time; it is cheap, and `smates doctor` lists the units that
 skipped in their last run (`state-skipped`). A skip only counts like this per
-function: a package recorded as a whole, or a `granularity: package` suite, records the
+function. A package recorded as a whole under `granularity: func` records each
+function's skip too when go test prints it (`-v` or `-json` in the suite's command),
+and the package's result otherwise; a `granularity: package` suite always records the
 package's result (see [Limitations](../reference/limitations.md)).
 
 Tests whose outcome depends on something smates does not track, such as the date,

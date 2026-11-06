@@ -162,8 +162,9 @@ Workaround: put permanent flags in the suite's `command`.
 **A skipped test counts as passed, except for Go test functions.** A Go test function
 recorded in its own process (`granularity: func`) that skips itself is recorded as not
 proven and runs again (see [Skipped tests](../guides/go-test-functions.md#skipped-tests)).
-Everywhere else a skip is a pass: a Go package (`granularity: package`, or a package
-recorded as a whole) whose tests all skip, a pytest `skip`/`xfail`, a vitest or jest file
+Everywhere else a skip is a pass: a Go package whose tests all skip under
+`granularity: package` (or recorded as a whole under `granularity: func` without `-v` or
+`-json`, which print each function's skip), a pytest `skip`/`xfail`, a vitest or jest file
 whose tests all skip. Such a test is not run again until its dependencies change, unless
 the gate is an environment variable it reads (a dependency) or a file it probes.
 Workaround: list it in `volatile`, or set `max_age`.

@@ -233,11 +233,11 @@ func TestRuleReachCounts(t *testing.T) {
 		config.Rule{Reaches: []string{"pkg/shared/nothing/**"}, Deps: []string{"database/migrations/**"}},
 	)
 	st := reachesRecord(f, nil)
-	if got, want := RuleReach(f.suites[0], slices.Sorted(maps.Keys(f.files)), f.graph(), st.Suites["go"]), map[int]int{1: 3, 2: 0}; !reflect.DeepEqual(got, want) {
+	if got, want := RuleReach(nil, f.suites[0], slices.Sorted(maps.Keys(f.files)), f.graph(), st.Suites["go"]), map[int]int{1: 3, 2: 0}; !reflect.DeepEqual(got, want) {
 		t.Errorf("RuleReach: %v, want %v", got, want)
 	}
 	// Without static analysis it cannot tell: every unit.
-	if got, want := RuleReach(f.suites[0], slices.Sorted(maps.Keys(f.files)), nil, st.Suites["go"]), map[int]int{1: 5, 2: 5}; !reflect.DeepEqual(got, want) {
+	if got, want := RuleReach(nil, f.suites[0], slices.Sorted(maps.Keys(f.files)), nil, st.Suites["go"]), map[int]int{1: 5, 2: 5}; !reflect.DeepEqual(got, want) {
 		t.Errorf("RuleReach without a graph: %v, want %v", got, want)
 	}
 }

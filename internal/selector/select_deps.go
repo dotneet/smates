@@ -3,6 +3,7 @@ package selector
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -141,7 +142,7 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	bulk := static && !slices.ContainsFunc(in.Graph.Closure(starts...), pathutil.IsVendored)
 	var bulkStarts []string
 	st := in.State.Suites[su.Name]
-	ss.rules = newSuiteRules(su, s.files)
+	ss.rules = newSuiteRules(in.Config, su, s.files)
 	ss.reachFiles = slices.ContainsFunc(ss.rules, func(r *suiteRule) bool { return len(r.reachFiles) > 0 })
 
 	for _, u := range units {
@@ -312,7 +313,7 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			s.declare(d)
 		}
 	}
-	reach := unitReach{entry: entry}
+	reach := unitReach{entry: entry, graph: s.in.Graph, loaded: ss.loaded}
 	switch {
 	case static && bulk && mapper == nil && !ss.selecting:
 		k.bulk = true // only the coverage needs it
@@ -526,22 +527,86 @@ type suiteRule struct {
 	// deps are the files Deps match.
 	deps []string
 	// reachFiles and reachEnv are Reaches split into file globs and variable name
-	// patterns (config.Rule.ReachesEnv).
+	// patterns (config.Rule.ReachesEnv); a file glob naming a directory without a
+	// wildcard also matches what is below it (dir/**).
 	reachFiles, reachEnv []string
-	// matched memoizes whether reachFiles match a file: a file is in the closures of
-	// many units.
-	matched map[string]bool
+	// envBlind: a variable pattern may match a variable env_ignore (or the default
+	// list) keeps out of every recorded entry, so an entry cannot tell.
+	envBlind bool
+	// matched memoizes whether reachFiles match a file, mentions whether a file's
+	// source names a variable reachEnv matches, and unresolved whether a file has an
+	// import static analysis cannot follow: a file is in the closures of many units.
+	matched, mentions, unresolved map[string]bool
 }
 
-// newSuiteRules expands the rules of su against files (the snapshot's).
-func newSuiteRules(su *runner.Suite, files []string) []*suiteRule {
+// newSuiteRules expands the rules of su against files (the snapshot's), with the
+// environment variables c (nil: none) ignores.
+func newSuiteRules(c *config.Config, su *runner.Suite, files []string) []*suiteRule {
 	var out []*suiteRule
 	for _, r := range su.Rules {
-		sr := &suiteRule{Rule: r, deps: expandInputs(r.Deps, files), matched: map[string]bool{}}
+		sr := &suiteRule{Rule: r, deps: expandInputs(r.Deps, files), matched: map[string]bool{}, mentions: map[string]bool{}, unresolved: map[string]bool{}}
 		sr.reachFiles, sr.reachEnv = r.ReachesEnv()
+		sr.reachFiles = expandReachDirs(sr.reachFiles, files)
+		sr.envBlind = envBlind(c, &su.Suite, sr.reachEnv)
 		out = append(out, sr)
 	}
 	return out
+}
+
+// expandReachDirs adds dir/** for each glob without a wildcard that names a directory
+// of files (a package directory, as tests globs and Go units name packages).
+func expandReachDirs(globs, files []string) []string {
+	out := slices.Clone(globs)
+	for _, g := range globs {
+		if strings.ContainsAny(g, "*?[{") {
+			continue
+		}
+		prefix := strings.TrimSuffix(g, "/") + "/"
+		i, _ := slices.BinarySearch(files, prefix)
+		if i < len(files) && strings.HasPrefix(files[i], prefix) {
+			out = append(out, prefix+"**")
+		}
+	}
+	return out
+}
+
+// envBlind reports whether a variable pattern may match a variable c ignores for
+// suite s (env_ignore, or the default list unless env_track names it): the recorded
+// entries never hold those (DropIgnoredEnv), so they cannot tell who reads it.
+func envBlind(c *config.Config, s *config.Suite, patterns []string) bool {
+	var ignore, track []string
+	if c != nil {
+		ignore, track = c.EnvIgnore, c.EnvTrack
+	}
+	if s != nil {
+		ignore, track = append(slices.Clone(ignore), s.EnvIgnore...), append(slices.Clone(track), s.EnvTrack...)
+	}
+	for _, p := range patterns {
+		if slices.ContainsFunc(ignore, func(i string) bool { return globsOverlap(p, i) }) {
+			return true
+		}
+		tracked := !strings.ContainsAny(p, "*?[") && matchName(track, p)
+		if !tracked && slices.ContainsFunc(config.DefaultEnvIgnore, func(d string) bool { return globsOverlap(p, d) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// globsOverlap reports whether two path.Match patterns may both match some name: one
+// without a wildcard matches the other, and two with wildcards overlap unless their
+// literal prefixes differ (more is assumed to overlap than does).
+func globsOverlap(a, b string) bool {
+	meta := func(s string) int { return strings.IndexAny(s, "*?[\\") }
+	ia, ib := meta(a), meta(b)
+	switch {
+	case ia < 0:
+		return matchName([]string{b}, a)
+	case ib < 0:
+		return matchName([]string{a}, b)
+	}
+	pa, pb := a[:ia], b[:ib]
+	return strings.HasPrefix(pa, pb) || strings.HasPrefix(pb, pa)
 }
 
 // unitReach is what the reaches of a rule are matched against for a unit.
@@ -552,6 +617,11 @@ type unitReach struct {
 	known   bool
 	// entry is the unit's recorded entry (nil: none).
 	entry *state.Entry
+	// graph reads the closure's files and tells their unresolved imports (nil: none).
+	graph *static.Graph
+	// loaded are the files the suite's runner loads through its configuration for
+	// every test (setup files, global setup and what they import).
+	loaded map[string]bool
 }
 
 // applies reports whether the rule gives its deps to unit (with test files files):
@@ -565,31 +635,52 @@ func (r *suiteRule) applies(su *runner.Suite, unit string, files []string, reach
 }
 
 // reaches reports whether a unit reaches what the rule's reaches names: its static
-// closure holds a file a file glob matches, or its recorded entry an environment
-// variable a "$NAME" pattern matches. A rule adds dependencies, but it also turns the
-// files of its deps from orphans (which run the suites, or ask the agent) into
-// dependencies of the units it applies to only; so when it cannot tell (the unit's
-// closure is unknown, for a file glob; the unit has no recorded entry, for a variable
-// pattern), the rule applies. The entry is not searched for files: it records the
-// deps the rule added, and a rule reaching those would keep itself applying.
+// closure, or a file its runner loads through its configuration for every test (a
+// setup file), holds a file a file glob matches; or its recorded entry an environment
+// variable a "$NAME" pattern matches, or its closure's source names one (a read the
+// entry cannot hold: Go's test log starts in m.Run, after TestMain, init and package
+// initializers; syscall.Getenv; os.Environ). A rule adds dependencies, but it also
+// turns the files of its deps from orphans (which run the suites, or ask the agent)
+// into dependencies of the units it applies to only; so when it cannot tell, the rule
+// applies: for a file glob, the unit's closure is unknown or has an import static
+// analysis cannot follow (a bundler alias, a virtual module, a missing file); for a
+// variable pattern, the unit has no recorded entry, or the pattern may name a variable
+// env_ignore keeps out of every entry. The entry is not searched for files: it records
+// the deps the rule added, and a rule reaching those would keep itself applying.
 func (r *suiteRule) reaches(reach unitReach) bool {
 	if len(r.reachFiles) > 0 {
 		if !reach.known {
 			return true
 		}
-		for _, f := range reach.closure {
+		match := func(f string) bool {
 			m, ok := r.matched[f]
 			if !ok {
 				m = pathutil.Match(r.reachFiles, f)
 				r.matched[f] = m
 			}
-			if m {
+			return m
+		}
+		if slices.ContainsFunc(reach.closure, match) {
+			return true
+		}
+		for f := range reach.loaded {
+			if match(f) {
 				return true
 			}
 		}
+		if reach.graph != nil && slices.ContainsFunc(reach.closure, func(f string) bool {
+			u, ok := r.unresolved[f]
+			if !ok {
+				u = len(reach.graph.Unresolved(f)) > 0
+				r.unresolved[f] = u
+			}
+			return u
+		}) {
+			return true
+		}
 	}
 	if len(r.reachEnv) > 0 {
-		if reach.entry == nil {
+		if reach.entry == nil || r.envBlind {
 			return true
 		}
 		for k := range reach.entry.Deps {
@@ -597,9 +688,23 @@ func (r *suiteRule) reaches(reach unitReach) bool {
 				return true
 			}
 		}
+		if reach.known && reach.graph != nil && slices.ContainsFunc(reach.closure, func(f string) bool {
+			m, ok := r.mentions[f]
+			if !ok {
+				m = slices.ContainsFunc(wordRe.FindAllString(string(reach.graph.Read(f)), -1), func(w string) bool { return matchName(r.reachEnv, w) })
+				r.mentions[f] = m
+			}
+			return m
+		}) {
+			return true
+		}
 	}
 	return false
 }
+
+// wordRe matches the identifiers and words of source, where a variable name a test
+// reads appears (os.Getenv("APP_DSN"), process.env.APP_DSN, os.environ["APP_DSN"]).
+var wordRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 
 // matchName reports whether an environment variable name matches one of the patterns
 // (path.Match globs).
@@ -612,12 +717,31 @@ func matchName(patterns []string, name string) bool {
 	return false
 }
 
+// UnmatchedReaches returns, by rule index in su.Rules, the file globs of its reaches
+// that match no file of files (a typo, an import path, a moved helper): units that use
+// the dependency only through what such a glob meant to name lose it, while the
+// rule's other globs keep it from being an orphan. A glob naming a directory matches
+// what is below it.
+func UnmatchedReaches(su *runner.Suite, files []string) map[int][]string {
+	out := map[int][]string{}
+	for i, r := range su.Rules {
+		globs, _ := r.ReachesEnv()
+		for _, g := range globs {
+			all := expandReachDirs([]string{g}, files)
+			if !slices.ContainsFunc(files, func(f string) bool { return pathutil.Match(all, f) }) {
+				out[i] = append(out[i], g)
+			}
+		}
+	}
+	return out
+}
+
 // RuleReach counts, for each rule of su with reaches (by index in su.Rules), the units
 // of the suite it applies to, as a selection over files with graph g (nil: no static
 // analysis) and the suite's recorded entries st (nil: none) applies it. Compile checks
 // get no rules and are not counted.
-func RuleReach(su *runner.Suite, files []string, g *static.Graph, st *state.Suite) map[int]int {
-	rules := newSuiteRules(su, files)
+func RuleReach(c *config.Config, su *runner.Suite, files []string, g *static.Graph, st *state.Suite) map[int]int {
+	rules := newSuiteRules(c, su, files)
 	out := map[int]int{}
 	for i, r := range rules {
 		if len(r.Reaches) > 0 {
@@ -638,6 +762,14 @@ func RuleReach(su *runner.Suite, files []string, g *static.Graph, st *state.Suit
 		}
 		g.Warm(starts)
 	}
+	var loaded map[string]bool
+	if static {
+		rc := runner.ConfigOf(su, runner.Sources{Files: files, Read: g.Read, Closure: g.Closure, Resolve: g.Resolve})
+		loaded = map[string]bool{}
+		for _, f := range rc.Files {
+			loaded[f] = true
+		}
+	}
 	for _, u := range units {
 		if runner.IsBuildCheck(u) {
 			continue
@@ -645,6 +777,7 @@ func RuleReach(su *runner.Suite, files []string, g *static.Graph, st *state.Suit
 		var reach unitReach
 		if static {
 			reach.closure, reach.known = g.Closure(unitFiles[u]...), g.Analyzes(unitFiles[u]...)
+			reach.graph, reach.loaded = g, loaded
 		}
 		if st != nil {
 			reach.entry = st.Tests[u]

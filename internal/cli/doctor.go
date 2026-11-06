@@ -230,12 +230,18 @@ func runDoctor(cf *commonFlags) *doctorReport {
 // an orphan (as without the rule), but once one unit matches, the units that do not are
 // skipped on such a change.
 func doctorRuleReach(p *project, s *runner.Suite, units int, r *doctorReport) {
-	counts := selector.RuleReach(s, p.files, p.graph, p.state.Suites[s.Name])
+	counts := selector.RuleReach(p.cfg, s, p.files, p.graph, p.state.Suites[s.Name])
+	unmatched := selector.UnmatchedReaches(s, p.files)
 	for _, i := range slices.Sorted(maps.Keys(counts)) {
 		rule := s.Rules[i]
 		subject := fmt.Sprintf("%s: rules[%d]", s.Name, i)
 		if n := counts[i]; n == 0 {
 			r.add(checkWarn, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to no test unit: no test's static imports reach a file its globs match, and no recorded test read a variable it names; check the globs, and name every helper the tests use the dependency through (a change to %s stays an orphan meanwhile)", s.Name, i, strings.Join(rule.Reaches, ", "), strings.Join(rule.Deps, ", ")).about(subject).
+				fix(doctorFix{Doc: docURL + "reference/configuration/#rules"})
+		} else if globs := unmatched[i]; len(globs) > 0 {
+			// The rule applies through its other globs, so the deps are no orphan:
+			// units that use them only through what these meant to name lose them.
+			r.add(checkWarn, "suite-rule-reaches", "suite %s: rules[%d] applies to %d of %d test units, but its reaches %s match no file of the repository: tests that use %s only through what they meant to name are skipped when it changes; fix the globs (a directory needs no /**, an import path is not a glob)", s.Name, i, n, units, strings.Join(globs, ", "), strings.Join(rule.Deps, ", ")).about(subject).
 				fix(doctorFix{Doc: docURL + "reference/configuration/#rules"})
 		} else {
 			r.add(checkOK, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to %d of %d test units", s.Name, i, strings.Join(rule.Reaches, ", "), n, units).about(subject)

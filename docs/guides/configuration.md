@@ -184,11 +184,15 @@ That last part is why the list must be complete. A test that connects some other
 (its own `sql.Open`, a helper the rule does not name, a child process) does not get the
 deps, and once the migration is covered it is not run for it either. Name every helper,
 and add the variables the connection reads: a test that reads them is kept even when it
-imports nothing the globs match. When smates cannot tell, the rule applies to the test:
-static analysis is off, no analyzer reads the test's files, or (for a `$NAME`
-entry) the test has never run.
-`smates doctor` prints how many test units each such rule applies to and warns when a
-rule applies to none (a glob that names nothing the tests import).
+imports nothing the globs match (also when it reads them in `TestMain` or `init`, which
+Go does not record: the variable's name in its source is enough). A setup file the
+runner loads for every test (Vitest `setupFiles`) counts as imported by every test. When
+smates cannot tell, the rule applies to the test: static analysis is off, no analyzer
+reads the test's files, the test imports something smates cannot resolve (a bundler
+alias), or, for a `$NAME` entry, the test has never run or the variable is in
+`env_ignore`. `smates doctor` prints how many test units each such rule applies to and
+warns when a rule applies to none, or when one of its globs matches no file (a typo, an
+import path instead of a directory).
 
 ## Set environment variables
 
