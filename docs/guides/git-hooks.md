@@ -12,7 +12,9 @@ installed the smates pre-push hook in /home/me/src/shop/.git/hooks/pre-push
 ```
 
 From now on, `git push` runs `smates run --no-agent` first and stops the push when a
-selected test fails.
+selected test fails. Tests this machine cannot run because a suite's
+[`requires`](../reference/configuration.md#requires) are not met do not stop it: they are
+left for later (one line says so) and stay selected, so CI runs them.
 
 | option | effect |
 |---|---|

@@ -136,9 +136,40 @@ func agentHookCmd(a agentHook, sub, dir string, user, useAgent bool, extra []str
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}
 	if err != nil {
-		return 1, err
+		return hookSetupError(err)
 	}
 	return 0, nil
+}
+
+// hookSetupError is the exit code and error of installing, removing or reading a hook
+// that failed: a settings file smates cannot edit (not JSON, an unexpected layout) is
+// the user's to fix (a configuration error, exit 3); anything else, such as a file
+// that cannot be read or written or a hook script already there, is the environment's
+// (exit 4). Never "tests failed".
+func hookSetupError(err error) (int, error) {
+	var ue usageError
+	var ce configError
+	switch {
+	case errors.As(err, &ue):
+		return ExitUsage, err
+	case errors.As(err, &ce):
+		return ExitConfig, err
+	}
+	return ExitEnv, asEnvError(err)
+}
+
+// hasRunFlag reports whether run flags args (up to a "--", after which the runner's
+// arguments follow) set flag name, with one dash or two, with or without "=value".
+func hasRunFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if n, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "="); strings.HasPrefix(a, "-") && n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // agentHookStatus prints whether the project's and the user's Claude Code settings,
@@ -207,8 +238,13 @@ func hookAgentStop(ctx context.Context, a agentHook, args []string, stdin io.Rea
 	if in.StopHookActive {
 		return 0, nil // the agent already continues because of a Stop hook: never block twice
 	}
-	// The run flags come last, so a --max-time among them wins.
-	f, err := parseRunFlags(append([]string{"--output", "failures", "--max-time", hookMaxTime.String()}, runArgs...), stderr)
+	// The run flags come last. The hook's own --max-time applies only when they set
+	// none, and not with --shadow, which runs every test and takes no limit.
+	pre := []string{"--output", "failures"}
+	if !hasRunFlag(runArgs, "max-time") && !hasRunFlag(runArgs, "shadow") {
+		pre = append(pre, "--max-time", hookMaxTime.String())
+	}
+	f, err := parseRunFlags(append(pre, runArgs...), stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", a.marker, err)
 		return 1, nil

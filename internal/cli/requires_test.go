@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -120,7 +122,7 @@ func TestPlanMaxTimeFullRun(t *testing.T) {
 		{ID: "pkg/b", Selected: true, Reason: selector.ReasonAll, Duration: 60000},
 	}}
 	res := &selector.Result{Mode: selector.ModeAll, Suites: []*selector.Suite{sr}}
-	st := &state.State{Suites: map[string]*state.Suite{"go": {Tests: map[string]*state.Entry{"pkg/a": {}, "pkg/b": {}}}}}
+	st := &state.State{Suites: map[string]*state.Suite{"go": {Tests: map[string]*state.Entry{"pkg/a": {Status: state.Pass}, "pkg/b": {Status: state.Pass}}}}}
 	prioritize(res, st, nil)
 	for _, tc := range []struct {
 		maxTime time.Duration
@@ -144,18 +146,23 @@ func TestOverTime(t *testing.T) {
 		est     time.Duration
 		unknown bool
 		want    bool
+		ranEst  time.Duration // batches that ran: estimated ...
+		ranWall time.Duration // ... and taken
 	}{
-		{"no limit", 0, true, time.Hour, time.Hour, false, false},
-		{"the first batch always starts", time.Minute, false, 0, time.Hour, false, false},
-		{"the first batch of unknown duration starts", time.Minute, false, 0, 0, true, false},
-		{"fits", time.Minute, true, 20 * time.Second, 30 * time.Second, false, false},
-		{"would end after the limit", time.Minute, true, 40 * time.Second, 30 * time.Second, false, true},
-		{"the limit has passed", time.Minute, true, 2 * time.Minute, 0, false, true},
-		{"unknown duration within the first half", time.Hour, true, 29 * time.Minute, 0, true, false},
-		{"unknown duration after half the time", time.Hour, true, 30 * time.Minute, 0, true, true},
+		{"no limit", 0, true, time.Hour, time.Hour, false, false, 0, 0},
+		{"the first batch always starts", time.Minute, false, 0, time.Hour, false, false, 0, 0},
+		{"the first batch of unknown duration starts", time.Minute, false, 0, 0, true, false, 0, 0},
+		{"fits", time.Minute, true, 20 * time.Second, 30 * time.Second, false, false, 0, 0},
+		{"would end after the limit", time.Minute, true, 40 * time.Second, 30 * time.Second, false, true, 0, 0},
+		{"the limit has passed", time.Minute, true, 2 * time.Minute, 0, false, true, 0, 0},
+		{"unknown duration within the first half", time.Hour, true, 29 * time.Minute, 0, true, false, 0, 0},
+		{"unknown duration after half the time", time.Hour, true, 30 * time.Minute, 0, true, true, 0, 0},
+		// The batches that ran took three times their estimate: 30s becomes 90s.
+		{"estimates scaled by what ran", 100 * time.Second, true, 20 * time.Second, 30 * time.Second, false, true, 10 * time.Second, 30 * time.Second},
+		{"faster than estimated: no scaling down", time.Minute, true, 20 * time.Second, 30 * time.Second, false, false, 30 * time.Second, 10 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}}
+			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}, ranEst: tc.ranEst, ranWall: tc.ranWall}
 			if tc.started {
 				c.started["go"] = []string{"pkg/a"}
 			}
@@ -421,6 +428,10 @@ func TestAgentStopHookDefers(t *testing.T) {
 			if code != 0 || out != "" || !strings.Contains(errs, "by --max-time 1ns") {
 				t.Errorf("--max-time: %d %q %q", code, out, errs)
 			}
+			// --shadow takes no limit: the hook adds none (it used to fail every Stop).
+			if code, _, errs := stop("--shadow"); strings.Contains(errs, "cannot be combined") || code != 0 {
+				t.Errorf("--shadow: %d %q", code, errs)
+			}
 			t.Setenv("SMATES_REQ_DB", "")
 			// Failing tests still block, with the units left out in the reason.
 			write("src/common.py", "X = 2\n")
@@ -438,6 +449,127 @@ func TestAgentStopHookDefers(t *testing.T) {
 			if code != 1 || out != "" || !strings.Contains(errs, a.name+" Stop hook): pt: the runner exited with code 127") ||
 				!strings.Contains(errs, "requirements not met") {
 				t.Errorf("runner error: %d %q %q", code, out, errs)
+			}
+		})
+	}
+}
+
+func TestHasRunFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		name string
+		want bool
+	}{
+		{[]string{"--max-time", "0"}, "max-time", true},
+		{[]string{"-max-time=5m"}, "max-time", true},
+		{[]string{"--shadow"}, "shadow", true},
+		{[]string{"--shadow=false"}, "shadow", true},
+		{[]string{"--suite", "max-time"}, "max-time", false},
+		{[]string{"--", "--shadow"}, "shadow", false}, // the runner's argument
+		{nil, "shadow", false},
+	} {
+		if got := hasRunFlag(tc.args, tc.name); got != tc.want {
+			t.Errorf("%v %s: %v, want %v", tc.args, tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPlanMaxTimeEstimates: entries recorded without a measured duration (an inferred
+// unknown from a failing batch, 0 ms) are not taken as quick units, nor pull the
+// suite's mean down; many short Go packages split into several batches, since each
+// package costs a build that recorded durations leave out.
+func TestPlanMaxTimeEstimates(t *testing.T) {
+	sec := int64(1000)
+	type unit struct {
+		id     string
+		dur    int64
+		status string // "" = no entry
+	}
+	type want struct {
+		batches int
+		unknown bool    // the first batch is of unknown duration
+		est     float64 // seconds, the first batch's estimate (when known)
+	}
+	cases := []struct {
+		name   string
+		runner string
+		units  []unit
+		want   want
+	}{
+		{"unmeasured entries count at the measured mean", "", []unit{
+			{"a", 60 * sec, state.Pass}, {"b", 0, state.Unknown}, {"c", 0, state.Unknown}, {"d", 0, state.Unknown},
+		}, want{4, false, 60}},
+		{"only unmeasured entries: unknown duration", "", []unit{
+			{"a", 0, state.Unknown}, {"b", 0, state.Unknown},
+		}, want{1, true, 0}},
+		{"an inferred unknown with an old duration is not measured", "", []unit{
+			{"a", 60 * sec, state.Pass}, {"b", 1, state.Unknown}, {"c", 1, state.Unknown},
+		}, want{3, false, 60}},
+		{"short go packages pay for their build", "go", func() []unit {
+			var us []unit
+			for i := range 200 {
+				us = append(us, unit{fmt.Sprintf("pkg/p%03d", i), 50, state.Pass})
+			}
+			return us
+		}(), want{4, false, 57 * 1.05}},
+		{"functions of one go package build it once", "go", []unit{
+			{"pkg/a#TestA", 10 * sec, state.Pass}, {"pkg/a#TestB", 10 * sec, state.Pass}, {"pkg/a#(build)", 10 * sec, state.Pass},
+		}, want{1, false, 31}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Runner: tc.runner}}}
+			entries := map[string]*state.Entry{}
+			for _, u := range tc.units {
+				sr.Tests = append(sr.Tests, &selector.Test{ID: u.id, Selected: true, Reason: selector.ReasonChanged, Duration: u.dur})
+				if u.status != "" {
+					entries[u.id] = &state.Entry{Status: u.status, DurationMs: u.dur}
+				}
+			}
+			res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr}}
+			st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: entries}}}
+			prioritize(res, st, nil)
+			c := &cycle{p: &project{state: st}, f: &runFlags{maxTime: 4 * time.Minute}, sel: &selection{res: res}}
+			plan := c.plan()
+			got := want{len(plan), plan[0].unknown, plan[0].est.Seconds()}
+			if got.batches != tc.want.batches || got.unknown != tc.want.unknown || !tc.want.unknown && math.Abs(got.est-tc.want.est) > 1 {
+				t.Errorf("plan %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitHookDefers: a git hook does not stop the push or commit when the only units
+// left out need what this machine lacks (unmet requires): they stay selected for CI. A
+// failing test still stops it, and is named as the reason.
+func TestGitHookDefers(t *testing.T) {
+	t.Setenv("SMATES_REQ_DB", "")
+	t.Setenv("SMATES_SKIP_HOOK", "")
+	for _, kind := range []string{"pre-push", "pre-commit"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, write, run := requiresFixture(t, "{env: SMATES_REQ_DB}")
+			hook := func() (int, string) {
+				t.Helper()
+				var out, errb bytes.Buffer
+				code, err := cmdHook(context.Background(), []string{"run", kind, "--", "-C", dir, "--no-agent"}, strings.NewReader(""), &out, &errb)
+				if err != nil {
+					errb.WriteString(err.Error())
+				}
+				return code, errb.String()
+			}
+			write("src/common.py", "X = 1  # changed\n")
+			code, errs := hook()
+			if code != 0 || !strings.Contains(errs, "left for a later run") || strings.Contains(errs, "stopped by") {
+				t.Errorf("unmet requires only: %d\n%s", code, errs)
+			}
+			if code, sel, _ := run("select", "--format", "files"); code != 0 || !strings.Contains(sel, "good/") {
+				t.Errorf("must keep: %q", sel)
+			}
+			// Unmet requires and a failing test: stopped, by the failing test.
+			write("src/common.py", "X = 2\n")
+			code, errs = hook()
+			if code != ExitFailed || !strings.Contains(errs, "stopped by failing tests") {
+				t.Errorf("unmet requires and a failure: %d\n%s", code, errs)
 			}
 		})
 	}

@@ -91,17 +91,25 @@ func TestClaudeHookSettingsRefused(t *testing.T) {
 		"duplicate Stop":     {`{"hooks": {"Stop": [], "Stop": [` + smatesEntry + `]}}`, `duplicate key "Stop"`},
 		"duplicate in entry": {`{"hooks": {"Stop": [{"hooks": [{"command": "a", "command": "smates hook claude-stop"}]}]}}`, `duplicate key "command"`},
 		"duplicate in group": {`{"hooks": {"Stop": [{"hooks": [], "hooks": [` + smatesEntry + `]}]}}`, `duplicate key "hooks"`},
+		"not JSON":           {`{"hooks": [`, `is not valid JSON`},
 	} {
-		os.WriteFile(path, []byte(tc.doc), 0o644)
-		for _, sub := range []string{"install", "uninstall"} {
-			code, _, errs := hookCmd(t, g.dir, sub, "--claude")
-			if code != 1 || !strings.Contains(errs, tc.want) || !strings.Contains(errs, "fix it first") {
-				t.Errorf("%s: %s: exit %d, %q", name, sub, code, errs)
-			}
-			if got := readFile(t, path); got != tc.doc {
-				t.Errorf("%s: %s changed the file: %q", name, sub, got)
+		// A file to fix by hand is a configuration error (exit 3), never "tests
+		// failed" (1), for either agent's settings.
+		codex := filepath.Join(g.dir, ".codex", "hooks.json")
+		os.MkdirAll(filepath.Dir(codex), 0o755)
+		for _, agent := range []struct{ flag, path string }{{"--claude", path}, {"--codex", codex}} {
+			os.WriteFile(agent.path, []byte(tc.doc), 0o644)
+			for _, sub := range []string{"install", "uninstall"} {
+				code, _, errs := hookCmd(t, g.dir, sub, agent.flag)
+				if code != ExitConfig || !strings.Contains(errs, tc.want) || !strings.Contains(errs, "fix it first") {
+					t.Errorf("%s: %s %s: exit %d, %q", name, sub, agent.flag, code, errs)
+				}
+				if got := readFile(t, agent.path); got != tc.doc {
+					t.Errorf("%s: %s %s changed the file: %q", name, sub, agent.flag, got)
+				}
 			}
 		}
+		os.RemoveAll(filepath.Dir(codex))
 		if _, out, _ := hookCmd(t, g.dir, "status", "--claude"); !strings.Contains(out, "(project): unreadable") || !strings.Contains(out, tc.want) {
 			t.Errorf("%s: status: %q", name, out)
 		}

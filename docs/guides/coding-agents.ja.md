@@ -75,7 +75,7 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
   `smates run` は最初に実行の分け方を表示します。スイートを 1 つずつ実行する（`--suite <name>`）か、
   `--report smates-report.json` を付けてバックグラウンドで実行し、あとでレポートを読む方法です。
 - **時間の上限。** `--max-time 5m` を付けると、記録済みの所要時間から見て 5 分より後に終わるバッチは
-  開始しません。外れたテストは選択されたまま残り、次の実行で先に走ります。
+  開始しません。外れたテストは選択されたまま残り、後の実行で通常の順序で実行されます（CI ではすべて実行します）。
   [時間の上限](../reference/cli.md#time-limit) を参照してください。
 
 ## エージェントの環境で実行できないテスト { #tests-the-agents-environment-cannot-run }

@@ -143,7 +143,7 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}
 	if err != nil {
-		return 1, err
+		return hookSetupError(err)
 	}
 	return 0, nil
 }
@@ -458,14 +458,30 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		os.Unsetenv(v)
 	}
 	f.dir = repo.Root
+	var deferred string
+	f.deferred = func(line string) { deferred = line }
 	code, err := runCycle(ctx, f, stdout, stderr, nil)
 	code = testsExitCode(code)
+	var re requiresError
+	if code == 0 && errors.As(err, &re) {
+		// Units left for later because this machine lacks what they require (unmet
+		// requires): no test failed, and they stay selected (CI runs them). Blocking
+		// would block every later push from this machine, as the Stop hooks would.
+		if deferred != "" {
+			fmt.Fprintln(stderr, deferred)
+		}
+		return 0, nil
+	}
 	if code != 0 || err != nil {
 		skip := "git push --no-verify"
 		if kind == "pre-commit" {
 			skip = "git commit --no-verify"
 		}
-		fmt.Fprintf(stderr, "smates: %s stopped by failing tests (skip once with `%s` or SMATES_SKIP_HOOK=1)\n", kind, skip)
+		why := "failing tests"
+		if code == 0 {
+			why = "a problem running the tests"
+		}
+		fmt.Fprintf(stderr, "smates: %s stopped by %s (skip once with `%s` or SMATES_SKIP_HOOK=1)\n", kind, why, skip)
 	}
 	return code, err
 }

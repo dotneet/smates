@@ -128,9 +128,10 @@ type Suite struct {
 	MaxAge time.Duration `yaml:"max_age" json:"-"`
 	// Requires are preconditions of the environment (a database listening, a browser
 	// installed): when one is not met, `smates run` does not start the units it covers
-	// and leaves them selected. Left out of the settings hash when empty, so that the
-	// hash of a suite that does not use it is the one an older smates recorded.
-	Requires []Requirement `yaml:"requires" json:",omitempty"`
+	// and leaves them selected. Like Volatile and MaxAge they choose when tests run, not
+	// how, so they are left out of the settings hash: adding a check or tuning its
+	// timeout reruns nothing.
+	Requires []Requirement `yaml:"requires" json:"-"`
 }
 
 // Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
@@ -230,8 +231,15 @@ var requirementKeys = []string{"tcp", "cmd", "env", "file", "tests", "timeout"}
 
 // UnmarshalYAML reports an unknown key of a requires entry with the keys it accepts.
 func (r *Requirement) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		hint := ""
+		if n.Kind == yaml.ScalarNode {
+			hint = fmt.Sprintf(" (for an address, write `tcp: %s`)", n.Value)
+		}
+		return fmt.Errorf("line %d: a requires entry is a mapping with one of tcp, cmd, env and file%s", n.Line, hint)
+	}
 	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
-	if n.Kind == yaml.MappingNode {
+	{
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			if k := n.Content[i]; !slices.Contains(requirementKeys, k.Value) {
 				return fmt.Errorf("line %d: unknown key %q in requires entry (want one of tcp, cmd, env and file, with optional tests and timeout)", k.Line, k.Value)
@@ -334,6 +342,12 @@ func checkHostPort(addr string) error {
 	if strings.Contains(addr, "$") {
 		return nil
 	}
+	return CheckHostPort(addr)
+}
+
+// CheckHostPort validates a tcp requirement's address once its variables are expanded:
+// a host and a port from 1 to 65535.
+func CheckHostPort(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return errors.New("want host:port")
@@ -365,11 +379,15 @@ type Dependency struct {
 
 // UnmarshalYAML accepts a suite name as a plain string.
 func (d *Dependency) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.ScalarNode {
+	switch n.Kind {
+	case yaml.ScalarNode:
 		return n.Decode(&d.Suite)
+	case yaml.MappingNode:
+	default:
+		return fmt.Errorf("line %d: a depends_on or serves entry is a suite name or a mapping with suite or paths", n.Line)
 	}
 	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
-	if n.Kind == yaml.MappingNode {
+	{
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			switch k := n.Content[i]; k.Value {
 			case "suite", "paths", "tests":

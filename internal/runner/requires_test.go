@@ -62,7 +62,14 @@ func TestCheckRequirement(t *testing.T) {
 		{"tcp closed", config.Requirement{TCP: closed, Timeout: short}, nil, "nothing accepts connections on " + closed},
 		{"tcp from the environment", config.Requirement{TCP: "127.0.0.1:${SMATES_REQ_PORT}"}, nil, ""},
 		{"tcp from the suite env", config.Requirement{TCP: "$DB_ADDR"}, map[string]string{"DB_ADDR": open}, ""},
-		{"tcp unset variable", config.Requirement{TCP: "$SMATES_REQ_UNSET_X"}, nil, "is not host:port"},
+		{"tcp unset variable", config.Requirement{TCP: "$SMATES_REQ_UNSET_X"}, nil, "$SMATES_REQ_UNSET_X not set"},
+		// Must keep the tests deferred: ":<port>" would dial the local machine, where
+		// something else may listen.
+		{"tcp unset host variable", config.Requirement{TCP: "${SMATES_REQ_UNSET_X}:" + openPort}, nil, "$SMATES_REQ_UNSET_X not set"},
+		{"tcp empty host variable", config.Requirement{TCP: "${SMATES_REQ_EMPTY}:" + openPort}, nil, "$SMATES_REQ_EMPTY not set"},
+		{"tcp unset port variable", config.Requirement{TCP: "127.0.0.1:${SMATES_REQ_UNSET_X}"}, nil, "$SMATES_REQ_UNSET_X not set"},
+		{"tcp host emptied by the suite env", config.Requirement{TCP: "${DB_HOST}:" + openPort}, map[string]string{"DB_HOST": ""}, "$DB_HOST not set"},
+		{"tcp expands to a bad port", config.Requirement{TCP: "127.0.0.1:${SMATES_REQ_SET}"}, nil, `bad port "yes"`},
 		{"tcp unresolvable host", config.Requirement{TCP: "no-such-host.invalid:1", Timeout: short}, nil, "nothing accepts connections"},
 		{"cmd exits 0", config.Requirement{Cmd: "test -f .env.test"}, nil, ""},
 		{"cmd runs in the suite root", config.Requirement{Cmd: "test -f fixtures/data.json"}, nil, ""},
@@ -86,6 +93,9 @@ func TestCheckRequirement(t *testing.T) {
 		{"file outside the suite root", config.Requirement{File: "../top.txt"}, nil, ""},
 		{"file absolute", config.Requirement{File: filepath.ToSlash(filepath.Join(root, "top.txt"))}, nil, ""},
 		{"file from the environment", config.Requirement{File: "${SMATES_REQ_DIR}/top.txt"}, nil, ""},
+		// Must keep: an empty path would name the suite directory, which exists.
+		{"file unset variable", config.Requirement{File: "${SMATES_REQ_UNSET_X}"}, nil, "$SMATES_REQ_UNSET_X not set"},
+		{"file unset directory variable", config.Requirement{File: "${SMATES_REQ_UNSET_X}/top.txt"}, nil, "$SMATES_REQ_UNSET_X not set"},
 	}
 	t.Setenv("SMATES_REQ_DIR", root)
 	for _, tc := range cases {

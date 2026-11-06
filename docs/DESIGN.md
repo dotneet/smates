@@ -44,8 +44,8 @@ those are the same, until the test runs again. A test that reads smates.yml itse
 records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
-comparing), so editing them selects nothing. A suite's `volatile` and `max_age` are
-left out of the hash too (they choose when tests run, not how), and so is an empty
+comparing), so editing them selects nothing. A suite's `volatile`, `max_age` and
+`requires` are left out of the hash too (they choose when tests run, not how), and so is an empty
 rule `reaches`, so an upgrade does not change the hash. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
 hash instead of the key; it counts as unchanged while the file is, until the test runs
@@ -888,11 +888,16 @@ pass: the units get no observation, keep their old entry and are selected again.
 
 `--max-time D` needs calls short enough to stop between. Each suite's calls (after the
 `--fail-fast` split) are cut into consecutive calls whose recorded durations add up to
-about D/4; a unit with no duration counts as the suite's mean, and a suite with none
-recorded stays one call of unknown length. Before each call smates checks that it would
-end within D (elapsed time plus its estimate); an unknown call starts only while less
-than D/2 is used. The first call always starts, so repeated capped runs make progress:
-what passed is deselected and the units left out come first next time, by priority.
+about D/4; a unit with no measured duration (no entry, or an entry without a pass, fail
+or skip, such as an outcome inferred from a failing batch) counts as the mean of the
+measured ones, and a suite with none measured stays one call of unknown length. A Go
+package adds one second per call that builds it (`goPackageCost`): recorded durations
+are the test binaries' run time, without compiling and linking them. Before each call
+smates checks that it would end within D (elapsed time plus its estimate, scaled up by
+how far the calls that ran overran theirs); an unknown call starts only while less than
+D/2 is used. The first call always starts, so repeated capped runs make progress: what
+passed is deselected, and the units left out stay selected for a later run, in the
+usual order (no boost: new direct changes still come first).
 Like `--fail-fast`, the cap never kills a running call, and a stopped run leaves the
 snapshot alone. Where the cap stopped the run and everything that ran passed, smates
 exits 0: the caller asked for a partial run, and the report (`max_time_reached`,

@@ -80,8 +80,8 @@ Agent tools often have a timeout, and a silent run looks like a hang.
   the run: one suite at a time (`--suite <name>`), or in the background with
   `--report smates-report.json` and the report read afterwards.
 - **Time limit.** `--max-time 5m` starts no test batch that would end after five
-  minutes, by recorded durations. The tests it leaves out stay selected and run first
-  next time. See [Time limit](../reference/cli.md#time-limit).
+  minutes, by recorded durations. The tests it leaves out stay selected and run in a
+  later run, in the usual order (CI runs them all). See [Time limit](../reference/cli.md#time-limit).
 
 ## Tests the agent's environment cannot run
 

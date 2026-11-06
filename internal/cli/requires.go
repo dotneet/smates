@@ -28,7 +28,9 @@ func (e requiresError) Unwrap() error { return e.error }
 // overTime reports whether batch b would end after --max-time, by the recorded
 // durations: the first batch that starts always runs, so every run makes progress; a
 // batch of unknown duration (its suite has none recorded) starts while less than half
-// the time is used.
+// the time is used. When the batches that ran took longer than estimated (building
+// test binaries, fixtures and startup are not in the recorded durations), b's estimate
+// grows by the same ratio.
 func (c *cycle) overTime(b *batch) bool {
 	if c.f.maxTime <= 0 || countUnits(c.started) == 0 {
 		return false
@@ -37,7 +39,11 @@ func (c *cycle) overTime(b *batch) bool {
 	if b.unknown {
 		return elapsed >= c.f.maxTime/2
 	}
-	return elapsed+b.est > c.f.maxTime
+	est := b.est
+	if c.ranEst > 0 && c.ranWall > c.ranEst {
+		est = time.Duration(float64(est) * float64(c.ranWall) / float64(c.ranEst))
+	}
+	return elapsed+est > c.f.maxTime
 }
 
 // unitsFrom counts the units of batches.

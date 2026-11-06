@@ -315,21 +315,22 @@ func readClaudeDoc(path, marker string) (*claudeDoc, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return d, nil
 	}
+	// The file's content smates cannot work with is a configuration error (exit 3).
 	if !json.Valid(data) {
-		return nil, fmt.Errorf("%s is not valid JSON; fix it first", path)
+		return nil, configError{fmt.Errorf("%s is not valid JSON; fix it first", path)}
 	}
 	s, e := rootBounds(data)
 	if data[s] != '{' {
-		return nil, fmt.Errorf("%s: not a JSON object", path)
+		return nil, configError{fmt.Errorf("%s: not a JSON object", path)}
 	}
 	root, err := jsonChildren(data, s, e)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w; fix it first", path, err)
+		return nil, configError{fmt.Errorf("%s: %w; fix it first", path, err)}
 	}
 	// What smates edits must be unambiguous: a duplicate key or a "hooks"/"Stop" of
 	// another kind is reported, and the file left alone, rather than worked around.
 	if _, err := d.entries(); err != nil {
-		return nil, fmt.Errorf("%s: %w; fix it first", path, err)
+		return nil, configError{fmt.Errorf("%s: %w; fix it first", path, err)}
 	}
 	if len(root) > 0 && lineOffset(data, root[0].keyStart) > 0 && bytes.ContainsRune(data[s:root[0].keyStart], '\n') {
 		d.unit = lineIndent(data, root[0].keyStart)

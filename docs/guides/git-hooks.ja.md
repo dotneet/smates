@@ -11,7 +11,8 @@ installed the smates pre-push hook in /home/me/src/shop/.git/hooks/pre-push
 ```
 
 これ以降、`git push` はまず `smates run --no-agent` を実行し、選択されたテストが失敗すると push を
-止めます。
+止めます。スイートの [`requires`](../reference/configuration.md#requires) を満たさず、このマシンで実行できない
+テストでは止めません。それらは後に回され（1 行で知らせます）、選択されたまま残るので CI が実行します。
 
 | オプション | 動作 |
 |---|---|

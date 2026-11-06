@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/depkey"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
 )
@@ -106,12 +107,15 @@ type batch struct {
 const timeSlices = 4
 
 // unitEstimates returns how long a unit of sr takes: its recorded duration, else the
-// mean of the suite's recorded durations; ok is false when the suite has none.
+// mean of the suite's recorded durations; ok is false when the suite has none. Only a
+// measured duration counts: an entry recorded without one (0 ms: an outcome inferred
+// from a failing batch, a package that did not build) is no evidence that the unit is
+// quick, and would let a batch of them start just before the limit.
 func unitEstimates(sr *selector.Suite, recorded map[string]*state.Entry) func(string) (time.Duration, bool) {
 	dur := map[string]time.Duration{}
 	var sum time.Duration
 	for _, t := range sr.Tests {
-		if _, ok := recorded[t.ID]; ok {
+		if e, ok := recorded[t.ID]; ok && measured(e) && t.Duration > 0 {
 			d := time.Duration(t.Duration) * time.Millisecond
 			dur[t.ID] = d
 			sum += d
@@ -128,20 +132,43 @@ func unitEstimates(sr *selector.Suite, recorded map[string]*state.Entry) func(st
 	}
 }
 
+// measured reports whether a state entry's outcome came from running the unit.
+func measured(e *state.Entry) bool {
+	return e.Status == state.Pass || e.Status == state.Fail || e.Status == state.Skip
+}
+
+// goPackageCost is what --max-time adds to a batch for each Go package it builds:
+// recorded durations are the test binaries' run time, without compiling and linking
+// them, which for a batch of many short packages takes longer than the tests.
+const goPackageCost = time.Second
+
 // splitByTime cuts b into consecutive batches whose estimated durations add up to at
 // most target each (at least one unit per batch), in b's order. Units of unknown
-// duration end up in one batch of unknown duration.
-func splitByTime(b *batch, est func(string) (time.Duration, bool), target time.Duration, byID map[string]*selector.Test) []*batch {
+// duration end up in one batch of unknown duration. pkgOf, when set, names the package
+// a unit is built in (Go): each package a batch builds adds goPackageCost.
+func splitByTime(b *batch, est func(string) (time.Duration, bool), target time.Duration, byID map[string]*selector.Test, pkgOf func(string) string) []*batch {
 	var out []*batch
+	var pkgs map[string]bool // the packages the last batch builds
 	for _, u := range b.units {
 		d, ok := est(u)
+		cost := time.Duration(0)
+		if pkgOf != nil && ok && !pkgs[pkgOf(u)] {
+			cost = goPackageCost
+		}
 		n := len(out)
-		if n == 0 || out[n-1].unknown != !ok || ok && out[n-1].est+d > target {
+		if n == 0 || out[n-1].unknown != !ok || ok && out[n-1].est+d+cost > target {
 			out = append(out, &batch{si: b.si, sr: b.sr, prio: rank(byID[u]), unknown: !ok})
+			pkgs = map[string]bool{}
+			if pkgOf != nil && ok {
+				cost = goPackageCost
+			}
 		}
 		last := out[len(out)-1]
 		last.units = append(last.units, u)
-		last.est += d
+		last.est += d + cost
+		if pkgOf != nil {
+			pkgs[pkgOf(u)] = true
+		}
 	}
 	return out
 }
@@ -193,9 +220,18 @@ func (c *cycle) plan() []*batch {
 		}
 		if c.f.maxTime > 0 {
 			est := unitEstimates(sr, recorded)
+			var pkgOf func(string) string
+			if sr.Suite != nil && sr.Suite.Runner == "go" {
+				pkgOf = func(u string) string {
+					if d, _, ok := runner.SplitFuncUnit(u); ok {
+						return d
+					}
+					return u
+				}
+			}
 			var split []*batch
 			for _, b := range parts {
-				split = append(split, splitByTime(b, est, c.f.maxTime/timeSlices, byID)...)
+				split = append(split, splitByTime(b, est, c.f.maxTime/timeSlices, byID, pkgOf)...)
 			}
 			parts = split
 		}

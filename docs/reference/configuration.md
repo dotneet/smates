@@ -84,7 +84,8 @@ the key (see [Exit codes](exit-codes.md)). `smates config set` and
 
 !!! note "What an edit reruns"
     Editing a suite's entry reruns that suite's tests: every test depends on its suite's
-    settings as written (and on the top-level `env_track`). Editing the other top-level
+    settings as written (and on the top-level `env_track`), except `volatile`, `max_age`
+    and `requires`, which only decide when tests run. Editing the other top-level
     keys (`ignore`, `orphans`, `agent`, ...) or another suite reruns nothing. A test
     that reads `smates.yml` itself depends on its content as usual.
 
@@ -198,7 +199,8 @@ The rest of the run goes on. Each entry has exactly one of `tcp`, `cmd`, `env` a
 | `timeout` | duration | For `tcp` (default `2s`) and `cmd` (default `10s`). |
 
 `tcp` and `file` values may use `$VAR` and `${VAR}`, expanded from the environment and
-the suite's `env`.
+the suite's `env`. A variable they name that is not set (or empty) makes the requirement
+not met: `${DB_HOST}:5432` would otherwise dial this machine.
 
 ```yaml
 requires:
@@ -214,8 +216,9 @@ requires:
 A check that cannot tell (a command that is not found or times out, an address that
 does not parse) counts as not met. Each check runs once per run (`--dry-run` runs none). When tests were left
 out and no test failed, `smates run` exits 4 (an environment problem); see
-[`smates run`](cli.md#unmet-requires). The Claude Code and Codex Stop
-hooks print one line about them instead of blocking.
+[`smates run`](cli.md#unmet-requires). The git hooks and the Claude Code and Codex Stop
+hooks print one line about them instead of blocking. Adding a requirement or changing
+one reruns nothing: it is not part of the suite's settings hash.
 
 ## agent
 

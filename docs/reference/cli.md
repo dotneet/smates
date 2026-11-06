@@ -109,15 +109,20 @@ the suite's `command` instead.
 `--max-time 8m` keeps a run within about eight minutes:
 
 - smates cuts each suite's tests into batches of about a quarter of the limit, by the
-  durations recorded for them. A test with no recorded duration counts as the suite's
-  mean. A suite with no durations at all stays one batch, which starts only while less
-  than half the limit is used.
+  durations recorded for them. A test with no measured duration (never recorded, or
+  recorded without passing or failing) counts as the suite's mean. A suite with no
+  durations at all stays one batch, which starts only while less than half the limit is
+  used. Each Go package a batch builds adds a second, as recorded durations leave out
+  compiling and linking the test binaries.
 - Batches start in the usual order, the likeliest to fail first. Before each one,
-  smates checks whether it would end after the limit. If so, it starts nothing more.
+  smates checks whether it would end after the limit (its estimate grows when the
+  batches that ran took longer than theirs). If so, it starts nothing more.
 - The first batch always starts, so every run makes progress. A batch that is running
   is never stopped.
-- The tests left out are not run and not recorded. They stay selected, and come first
-  in the next run. The log, the summary (`Time limit`) and the report
+- The tests left out are not run and not recorded. They stay selected, and a later run
+  runs them in the usual order (by priority, then shortest recorded duration first), so
+  a long test can be left out again while new changes keep selecting others; CI runs
+  them all. The log, the summary (`Time limit`) and the report
   (`max_time_reached`, `not_run`) list them.
 
 When everything that ran passed, the run exits 0. Do not use `--max-time` to gate a
@@ -457,10 +462,12 @@ Code and Codex hooks. See [Git hooks and Claude Code](../guides/git-hooks.md).
 
 The installed hooks call internal subcommands, which you normally do not run yourself:
 
-- `smates hook run pre-push|pre-commit [-- run flags]`: what the git hook runs.
+- `smates hook run pre-push|pre-commit [-- run flags]`: what the git hook runs. Tests
+  left out by unmet [`requires`](configuration.md#requires) do not stop the push or
+  commit: it prints one line about them and exits 0 (they stay selected for CI).
 - `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`: what the
   Claude Code and Codex Stop hooks run (`--output failures --max-time 8m` is implied;
-  a `--max-time` in the run flags wins). It exits 0 and prints
+  a `--max-time` in the run flags wins, and with `--shadow` none is added). It exits 0 and prints
   `{"decision": "block", ...}` when tests fail, or exits 1 on smates' own errors. Tests
   left out by the time limit or by unmet [`requires`](configuration.md#requires) do not
   block: it prints one line about them to stderr and exits 0.

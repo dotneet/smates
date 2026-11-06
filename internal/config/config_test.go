@@ -303,6 +303,8 @@ func TestParseRequiresErrors(t *testing.T) {
 		{"bad timeout", "      - tcp: localhost:1\n        timeout: soon\n", ""},
 		{"bad tests glob", "      - env: A\n        tests: [\"a[\"]\n", "bad glob"},
 		{"not a list", "      tcp: localhost:1\n", ""},
+		{"scalar entry", "      - \"127.0.0.1:5432\"\n", "a requires entry is a mapping with one of tcp, cmd, env and file (for an address, write `tcp: 127.0.0.1:5432`)"},
+		{"sequence entry", "      - [a, b]\n", "a requires entry is a mapping"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

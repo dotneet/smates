@@ -20,8 +20,10 @@ import (
 
 // CheckRequirement checks one requires entry of suite s (see config.Requirement): nil
 // when it is met. Anything that keeps the check from telling (a command that cannot
-// start, an address that does not parse once expanded) is an error, so the requirement
-// counts as unmet: its tests do not run and stay selected.
+// start, an address that does not parse once expanded, a variable it names that is not
+// set) is an error, so the requirement counts as unmet: its tests do not run and stay
+// selected. An unset $DB_HOST in "${DB_HOST}:5432" would otherwise leave ":5432", which
+// dials the local machine, and "${CERT}" an empty path, which names the suite directory.
 func CheckRequirement(ctx context.Context, repoRoot string, s *Suite, r config.Requirement) error {
 	env := MergeEnv(baseEnv(), suiteEnv(s))
 	lookup := func(name string) string {
@@ -32,10 +34,31 @@ func CheckRequirement(ctx context.Context, repoRoot string, s *Suite, r config.R
 		}
 		return ""
 	}
+	expand := func(v string) (string, error) {
+		var unset []string
+		out := os.Expand(v, func(name string) string {
+			val := lookup(name)
+			if val == "" {
+				unset = append(unset, "$"+name)
+			}
+			return val
+		})
+		if len(unset) > 0 {
+			return "", fmt.Errorf("%s: %s not set", v, strings.Join(unset, ", "))
+		}
+		return out, nil
+	}
 	dir := filepath.Join(repoRoot, filepath.FromSlash(s.Root))
 	switch r.Kind() {
 	case "tcp":
-		return checkTCP(ctx, os.Expand(r.TCP, lookup), r.TimeoutOrDefault())
+		addr, err := expand(r.TCP)
+		if err != nil {
+			return err
+		}
+		if err := config.CheckHostPort(addr); err != nil {
+			return fmt.Errorf("%q: %v", addr, err)
+		}
+		return checkTCP(ctx, addr, r.TimeoutOrDefault())
 	case "cmd":
 		return checkCmd(ctx, dir, env, r.Cmd, r.TimeoutOrDefault())
 	case "env":
@@ -44,7 +67,14 @@ func CheckRequirement(ctx context.Context, repoRoot string, s *Suite, r config.R
 		}
 		return nil
 	case "file":
-		return checkFile(dir, os.Expand(r.File, lookup))
+		p, err := expand(r.File)
+		if err != nil {
+			return err
+		}
+		if p == "" {
+			return errors.New("the file is empty")
+		}
+		return checkFile(dir, p)
 	}
 	return fmt.Errorf("unknown requirement %q", r.String())
 }
