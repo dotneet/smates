@@ -32,7 +32,7 @@ func TestObserveBrowserResults(t *testing.T) {
 		{name: "story pass, trusted", trust: &yes, file: "src/a.stories.tsx", status: "pass", want: state.Pass, static: true},
 		{name: "story failure, trusted", trust: &yes, file: "src/a.stories.tsx", status: "fail", want: state.Fail},
 		{name: "story stopped short, trusted", trust: &yes, file: "src/a.stories.tsx", status: "unknown", want: state.Unknown, warn: "ran in a browser"},
-		{name: "node test pass with no trace, trusted suite", trust: &yes, file: "src/a.test.ts", status: "pass", want: state.Unknown, warn: "likely killed"},
+		{name: "node test pass with no trace, trusted suite", trust: &yes, file: "src/a.test.ts", status: "pass", want: state.Unknown, warn: "none left a trace"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

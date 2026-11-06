@@ -326,19 +326,28 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 		if ss.eraseTypes {
 			full := closure
 			closure = s.in.Graph.RuntimeClosure(files...)
-			if !bulk && len(closure) != len(full) {
-				k.typeOnly = sortedMinus(full, closure)
-			}
-			if len(ss.loaded) > 0 && len(k.typeOnly) > 0 {
-				kept := k.typeOnly[:0:0]
-				for _, f := range k.typeOnly {
-					if ss.loaded[f] {
-						closure = append(closure, f)
-					} else {
-						kept = append(kept, f)
+			if (!bulk || len(ss.loaded) > 0) && len(closure) != len(full) {
+				typeOnly := sortedMinus(full, closure)
+				if len(ss.loaded) > 0 {
+					var add []string
+					kept := typeOnly[:0:0]
+					for _, f := range typeOnly {
+						if ss.loaded[f] {
+							add = append(add, f)
+						} else {
+							kept = append(kept, f)
+						}
 					}
+					if len(add) > 0 {
+						// The closure may be the graph's: never append to it in place.
+						closure = append(slices.Clone(closure), add...)
+						slices.Sort(closure)
+					}
+					typeOnly = kept
 				}
-				k.typeOnly = kept
+				if !bulk {
+					k.typeOnly = typeOnly // with bulk the suite's union covers them
+				}
 			}
 		}
 		k.bulk = bulk

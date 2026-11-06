@@ -106,8 +106,10 @@ type Suite struct {
 	// TrustBrowserPasses records a vitest test that runs only in a browser (browser
 	// mode, Storybook stories), where no trace sees what it loads, as passed when the
 	// reporter says so, with its static dependencies; otherwise (the default) such a
-	// test is unknown after every run and runs again next time.
-	TrustBrowserPasses *bool `yaml:"trust_browser_passes"`
+	// test is unknown after every run and runs again next time. Left out of the
+	// settings hash when unset, so that the hash of a suite that does not set it is the
+	// one an older smates recorded.
+	TrustBrowserPasses *bool `yaml:"trust_browser_passes" json:",omitempty"`
 	// Junit: optional path (relative to Root) of a JUnit XML report the command writes;
 	// used for per-file pass/fail when the runner cannot report it otherwise.
 	Junit string `yaml:"junit"`
