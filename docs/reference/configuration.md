@@ -166,10 +166,16 @@ it. A `$NAME` entry also matches a test whose closure's source names such a vari
 (`os.Getenv("APP_DB_DSN")`): Go records no read made before `m.Run` (in `TestMain`,
 `init` or a package-level initializer), nor a scan of `os.Environ`. When smates cannot
 tell, the rule applies: static analysis is off (`static: false`), no analyzer reads the
-test's files, the closure has an import smates cannot resolve (a bundler alias, a
-virtual module, a missing file), or, for a `$NAME` entry, the test has no recorded run
-yet or the pattern may name a variable `env_ignore` (or the default ignore list) keeps
-out of every recorded run. A test that reaches the database in a way the rule does not
+test's files, the closure (or a setup file the runner loads) has a JavaScript or
+TypeScript import smates cannot resolve (a bundler alias, a virtual module, a missing
+file), or, for a `$NAME` entry, the test has no recorded run yet, the pattern may name
+a variable `env_ignore` (or the default ignore list) keeps out of every recorded run,
+or a Go test's source cannot be read (static analysis off). Imports in Python, Go and
+Java that smates cannot resolve are dropped from the closure without a trace: a Python
+test that reaches a helper through `sys.path` (`from dbkit import reset`, with
+`support/` added to the path) does not reach `support/dbkit.py` as far as the rule can
+tell, so name such a test with `tests:` in another rule, or import the helper by its
+repository path. A test that reaches the database in a way the rule does not
 name (its own `sql.Open`, a helper not in the list, a child process) does not get the
 deps, so name every entry point, and add the variables the database connection reads.
 `smates doctor` reports how many test units each such rule applies to, warns about one

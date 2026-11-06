@@ -313,7 +313,7 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			s.declare(d)
 		}
 	}
-	reach := unitReach{entry: entry, graph: s.in.Graph, loaded: ss.loaded}
+	reach := unitReach{entry: entry, graph: s.in.Graph, loaded: ss.loaded, missesEnv: entryMissesEnv(su)}
 	switch {
 	case static && bulk && mapper == nil && !ss.selecting:
 		k.bulk = true // only the coverage needs it
@@ -622,6 +622,16 @@ type unitReach struct {
 	// loaded are the files the suite's runner loads through its configuration for
 	// every test (setup files, global setup and what they import).
 	loaded map[string]bool
+	// missesEnv: the runner's recorded entries can miss variables read before a test
+	// starts (Go: the test log starts in m.Run, after TestMain, init and package
+	// initializers), so only the source can tell about those.
+	missesEnv bool
+}
+
+// entryMissesEnv reports whether the recorded entries of suite su can miss variables
+// its tests read (see unitReach.missesEnv).
+func entryMissesEnv(su *runner.Suite) bool {
+	return su != nil && su.Runner == "go"
 }
 
 // applies reports whether the rule gives its deps to unit (with test files files):
@@ -642,10 +652,11 @@ func (r *suiteRule) applies(su *runner.Suite, unit string, files []string, reach
 // initializers; syscall.Getenv; os.Environ). A rule adds dependencies, but it also
 // turns the files of its deps from orphans (which run the suites, or ask the agent)
 // into dependencies of the units it applies to only; so when it cannot tell, the rule
-// applies: for a file glob, the unit's closure is unknown or has an import static
-// analysis cannot follow (a bundler alias, a virtual module, a missing file); for a
-// variable pattern, the unit has no recorded entry, or the pattern may name a variable
-// env_ignore keeps out of every entry. The entry is not searched for files: it records
+// applies: for a file glob, the unit's closure is unknown, or it or a file the runner
+// loads for every test has an import static analysis cannot follow (a bundler alias, a
+// virtual module, a missing file); for a variable pattern, the unit has no recorded
+// entry, the pattern may name a variable env_ignore keeps out of every entry, or no
+// source can be read while the entry can miss reads (missesEnv). The entry is not searched for files: it records
 // the deps the rule added, and a rule reaching those would keep itself applying.
 func (r *suiteRule) reaches(reach unitReach) bool {
 	if len(r.reachFiles) > 0 {
@@ -668,15 +679,25 @@ func (r *suiteRule) reaches(reach unitReach) bool {
 				return true
 			}
 		}
-		if reach.graph != nil && slices.ContainsFunc(reach.closure, func(f string) bool {
-			u, ok := r.unresolved[f]
-			if !ok {
-				u = len(reach.graph.Unresolved(f)) > 0
-				r.unresolved[f] = u
+		if reach.graph != nil {
+			unresolved := func(f string) bool {
+				u, ok := r.unresolved[f]
+				if !ok {
+					u = len(reach.graph.Unresolved(f)) > 0
+					r.unresolved[f] = u
+				}
+				return u
 			}
-			return u
-		}) {
-			return true
+			// A setup file runs for every test: an import of it smates cannot follow
+			// (an alias, a virtual module) may reach what the rule names too.
+			if slices.ContainsFunc(reach.closure, unresolved) {
+				return true
+			}
+			for f := range reach.loaded {
+				if unresolved(f) {
+					return true
+				}
+			}
 		}
 	}
 	if len(r.reachEnv) > 0 {
@@ -688,7 +709,12 @@ func (r *suiteRule) reaches(reach unitReach) bool {
 				return true
 			}
 		}
-		if reach.known && reach.graph != nil && slices.ContainsFunc(reach.closure, func(f string) bool {
+		if !reach.known || reach.graph == nil {
+			// No source to read: an entry that can miss reads made before the test
+			// starts cannot tell.
+			return reach.missesEnv
+		}
+		if slices.ContainsFunc(reach.closure, func(f string) bool {
 			m, ok := r.mentions[f]
 			if !ok {
 				m = slices.ContainsFunc(wordRe.FindAllString(string(reach.graph.Read(f)), -1), func(w string) bool { return matchName(r.reachEnv, w) })
@@ -774,7 +800,7 @@ func RuleReach(c *config.Config, su *runner.Suite, files []string, g *static.Gra
 		if runner.IsBuildCheck(u) {
 			continue
 		}
-		var reach unitReach
+		reach := unitReach{missesEnv: entryMissesEnv(su)}
 		if static {
 			reach.closure, reach.known = g.Closure(unitFiles[u]...), g.Analyzes(unitFiles[u]...)
 			reach.graph, reach.loaded = g, loaded

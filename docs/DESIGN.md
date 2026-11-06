@@ -135,11 +135,14 @@ the rule's own deps, so a rule reaching them would keep applying to every unit i
 applied to. A rule cannot only add here: once one unit has the deps, a change to them
 is covered and no longer an orphan, so a unit the rule misses is skipped on such a
 change. It therefore applies whenever it cannot tell: static analysis is off, no
-analyzer reads the unit's files (`static.Graph.Analyzes`), a file of the closure has an
-import `static.Graph.Unresolved` reports (an alias only a bundler knows), or, for a
-`$NAME` pattern, the unit has no entry yet (it then records the deps once and drops them
-on its next recording) or the pattern may match a variable `env_ignore` or the default
-list drops before recording (`envBlind`). `smates doctor` counts the units each rule
+analyzer reads the unit's files (`static.Graph.Analyzes`), a file of the closure or a
+file the runner loads for every test has an import `static.Graph.Unresolved` reports
+(an alias only a bundler knows; only the JS/TS analyzer reports any, so an unresolved
+Python, Go or Java import goes unnoticed), or, for a `$NAME` pattern, the unit has no
+entry yet (it then records the deps once and drops them on its next recording), the
+pattern may match a variable `env_ignore` or the default list drops before recording
+(`envBlind`), or no source can be read (static analysis off, or no graph) while the
+runner's entries can miss reads made before the test starts (Go, `entryMissesEnv`). `smates doctor` counts the units each rule
 with `reaches:` applies to (`selector.RuleReach`), warns about a rule that applies to
 none, and about each glob that matches no file (`selector.UnmatchedReaches`).
 

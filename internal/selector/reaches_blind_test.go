@@ -25,6 +25,8 @@ func TestRuleReachesEnvBlindSpots(t *testing.T) {
 		reaches []string
 		ignore  []string // env_ignore
 		track   []string // env_track
+		static  *bool    // the suite's static (nil: default)
+		noGraph bool     // no static analysis graph
 		want    []string // go units with the rule's deps
 	}{
 		{name: "a read in TestMain before m.Run",
@@ -54,6 +56,15 @@ func TestRuleReachesEnvBlindSpots(t *testing.T) {
 		{name: "a name of the default list", reaches: []string{"$CI_DB_URL"}, want: every},
 		{name: "a name env_track tracks again", reaches: []string{"$LANG"}, track: []string{"LANG"}, want: nil},
 		{name: "env_ignore of another name", reaches: []string{"$APP_DB_DSN"}, ignore: []string{"OTHER_*"}, want: []string{"pkg/app/envdb"}},
+		// Must keep: without static analysis (or a graph) no source tells about a read
+		// before m.Run, and Go's entries miss it.
+		{name: "a read in TestMain before m.Run, static analysis off", static: ptr(false),
+			extra:   map[string]string{"pkg/app/mainenv/main_test.go": "package mainenv\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\t_ = os.Getenv(\"APP_DB_DSN\")\n\tos.Exit(m.Run())\n}\n\nfunc TestX(t *testing.T) {}\n"},
+			reaches: []string{"$APP_DB_*"}, want: every},
+		{name: "a read in TestMain before m.Run, no graph", noGraph: true,
+			extra:   map[string]string{"pkg/app/mainenv/main_test.go": "package mainenv\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestMain(m *testing.M) {\n\t_ = os.Getenv(\"APP_DB_DSN\")\n\tos.Exit(m.Run())\n}\n\nfunc TestX(t *testing.T) {}\n"},
+			reaches: []string{"$APP_DB_*"}, want: every},
+		{name: "variable only, static analysis off", static: ptr(false), reaches: []string{"$APP_DB_DSN"}, want: every},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := reachesFixture(t, "", config.Rule{Reaches: c.reaches, Deps: deps})
@@ -61,14 +72,20 @@ func TestRuleReachesEnvBlindSpots(t *testing.T) {
 				f.write(p, src)
 			}
 			f.suites = f.suites[:1]
+			f.suites[0].Static = c.static
 			f.cfg.EnvIgnore, f.cfg.EnvTrack = c.ignore, c.track
-			st := reachesRecord(f, nil)
-			got := withMigration(f.sel(st, nil))
+			mut := func(in *Input) {
+				if c.noGraph {
+					in.Graph = nil
+				}
+			}
+			st := reachesRecord(f, mut)
+			got := withMigration(f.sel(st, mut))
 			want := c.want
 			if len(want) == len(every) {
 				// Every unit, the extra ones included.
 				want = nil
-				for _, tt := range f.sel(st, nil).SuiteByName("go").Tests {
+				for _, tt := range f.sel(st, mut).SuiteByName("go").Tests {
 					want = append(want, tt.ID)
 				}
 				slices.Sort(want)
@@ -118,6 +135,24 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 		// Narrowing still: no setup file, every import resolved.
 		{name: "no setup file", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: {} }`,
+		}, want: []string{"web/src/b.test.ts"}},
+		// Must keep: an import of a setup file smates cannot follow may reach the
+		// helper too, for every test.
+		{name: "a setup file importing the helper through a Vite alias", runner: "vitest", reaches: kit, files: map[string]string{
+			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testkit" } }, test: { setupFiles: ["./test/setup.ts"] } }`,
+			"web/test/setup.ts":    `import { reset } from "~kit/db"; reset()`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "a setup file importing a virtual module", runner: "vitest", reaches: kit, files: map[string]string{
+			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
+			"web/test/setup.ts":    `import kit from "virtual:kit"`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "a setup file importing a missing file", runner: "vitest", reaches: kit, files: map[string]string{
+			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
+			"web/test/setup.ts":    `import { reset } from "./nope"`,
+		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
+		{name: "a setup file whose imports all resolve", runner: "vitest", reaches: kit, files: map[string]string{
+			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
+			"web/test/setup.ts":    `import { repo } from "../src/repo"`,
 		}, want: []string{"web/src/b.test.ts"}},
 		{name: "a Vite alias", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testkit" } }, test: {} }`,
@@ -220,3 +255,5 @@ func TestUnmatchedReaches(t *testing.T) {
 		t.Errorf("unmatched %v, want %v", got, want)
 	}
 }
+
+func ptr[T any](v T) *T { return &v }

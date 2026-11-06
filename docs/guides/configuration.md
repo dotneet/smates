@@ -188,9 +188,11 @@ imports nothing the globs match (also when it reads them in `TestMain` or `init`
 Go does not record: the variable's name in its source is enough). A setup file the
 runner loads for every test (Vitest `setupFiles`) counts as imported by every test. When
 smates cannot tell, the rule applies to the test: static analysis is off, no analyzer
-reads the test's files, the test imports something smates cannot resolve (a bundler
-alias), or, for a `$NAME` entry, the test has never run or the variable is in
-`env_ignore`. `smates doctor` prints how many test units each such rule applies to and
+reads the test's files, the test or a setup file imports something smates cannot
+resolve in JavaScript or TypeScript (a bundler alias), or, for a `$NAME` entry, the
+test has never run or the variable is in `env_ignore`. An import smates cannot resolve
+in Python, Go or Java is not noticed: a Python test that finds a helper through
+`sys.path` does not count as reaching it, so name such tests with `tests:`. `smates doctor` prints how many test units each such rule applies to and
 warns when a rule applies to none, or when one of its globs matches no file (a typo, an
 import path instead of a directory).
 
