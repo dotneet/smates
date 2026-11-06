@@ -110,11 +110,71 @@ type Suite struct {
 	EnvTrack  []string `yaml:"env_track"`
 }
 
-// Rule declares dependencies tracing cannot see.
+// Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
+// a unit must match both.
 type Rule struct {
 	// Tests: globs relative to the suite root; Deps: repo-relative globs.
 	Tests []string `yaml:"tests"`
-	Deps  []string `yaml:"deps"`
+	// Reaches narrows the rule to the units whose static import closure reaches a file
+	// one of these repo-relative globs matches, or, for an entry "$NAME" (a glob over
+	// variable names), whose recorded run read that environment variable. A unit whose
+	// closure is unknown (static analysis off, no analyzer for its files) gets the deps.
+	// Left out of the settings hash when empty, so that the hash of a suite that does
+	// not use it is the one an older smates recorded.
+	Reaches []string `yaml:"reaches" json:",omitempty"`
+	Deps    []string `yaml:"deps"`
+}
+
+// ReachesEnv splits Reaches into file globs and environment variable name patterns
+// (the "$NAME" entries, without the "$").
+func (r Rule) ReachesEnv() (files, env []string) {
+	for _, g := range r.Reaches {
+		if name, ok := strings.CutPrefix(g, "$"); ok {
+			env = append(env, name)
+		} else {
+			files = append(files, g)
+		}
+	}
+	return files, env
+}
+
+// checkRules validates the rules of suite s, and strips a leading "./" from their
+// globs.
+func checkRules(s *Suite) error {
+	for i := range s.Rules {
+		r := &s.Rules[i]
+		at := fmt.Sprintf("suite %q: rules[%d]", s.Name, i)
+		trimDotSlash(r.Tests)
+		trimDotSlash(r.Deps)
+		for j, g := range r.Reaches {
+			if !strings.HasPrefix(g, "$") {
+				for strings.HasPrefix(g, "./") {
+					g = g[2:]
+				}
+				r.Reaches[j] = g
+			}
+		}
+		files, env := r.ReachesEnv()
+		switch {
+		case len(r.Tests) == 0 && len(r.Reaches) == 0:
+			return fmt.Errorf("%s: needs tests or reaches (a rule with neither applies to no test)", at)
+		case len(r.Deps) == 0:
+			return fmt.Errorf("%s: needs deps", at)
+		}
+		if err := checkGlobs(at+": tests", r.Tests); err != nil {
+			return err
+		}
+		if err := checkRepoGlobs(at+": deps", r.Deps); err != nil {
+			return err
+		}
+		if err := checkRepoGlobs(at+": reaches", files); err != nil {
+			return err
+		}
+		if err := checkEnvPatterns(at+": reaches", env); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Dependency is one entry of Suite.DependsOn: exactly one of Suite and Paths. A plain
@@ -508,6 +568,9 @@ func (c *Config) Normalize() error {
 		}
 		if s.RecordJobs < 0 {
 			return fmt.Errorf("suite %q: record_jobs must not be negative (got %d)", s.Name, s.RecordJobs)
+		}
+		if err := checkRules(s); err != nil {
+			return err
 		}
 	}
 	for i := range c.Suites {

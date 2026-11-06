@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
+	"github.com/dotneet/smates/internal/static"
 )
 
 // suiteSel is one suite of a selection in progress.
@@ -31,7 +33,9 @@ type suiteSel struct {
 	// checking them (runner.ErasesTypes): its static closures leave type-only imports
 	// out (see knownDeps).
 	eraseTypes bool
-	units      []*unitSel
+	// rules are the suite's rules with their globs expanded (newSuiteRules).
+	rules []*suiteRule
+	units []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -115,9 +119,14 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure,
 	})
 	st := in.State.Suites[su.Name]
+	ss.rules = newSuiteRules(su, s.files)
 
 	for _, u := range units {
-		via, typeOnly := s.knownDeps(ss, u, inputs, static, mapper)
+		var entry *state.Entry
+		if st != nil {
+			entry = st.Tests[u]
+		}
+		via, typeOnly := s.knownDeps(ss, u, entry, inputs, static, mapper)
 		// Files reached only through type-only imports are no dependency, but a change
 		// to them is explained (not an orphan): it cannot affect the tests.
 		for _, f := range typeOnly {
@@ -137,10 +146,6 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		}
 		sort.Strings(known)
 		sr.Known[u] = known
-		var entry *state.Entry
-		if st != nil {
-			entry = st.Tests[u]
-		}
 		if entry == nil {
 			sr.Unrecorded = true
 		} else {
@@ -170,8 +175,10 @@ func (s *selection) unitDeps(ss *suiteSel) {
 // depends on what the compiler reads, not on what the tests do at run time: neither
 // declarations nor rules apply to it. With suiteSel.eraseTypes the static closure is
 // the one at run time (static.Graph.RuntimeClosure), and typeOnly returns the files
-// the full closure adds to it.
-func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bool, mapper runner.StaticMapper) (via map[string]string, typeOnly []string) {
+// the full closure adds to it. The reaches of a rule see the full file closure, before
+// the mapper keys it by declaration, and entry (the unit's recorded entry, nil: none)
+// for the environment variables the unit read (see suiteRule.reaches).
+func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs []string, static bool, mapper runner.StaticMapper) (via map[string]string, typeOnly []string) {
 	sr, su := ss.sr, ss.sr.Suite
 	files := sr.Files[u]
 	via = map[string]string{}
@@ -182,8 +189,10 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 			s.declare(d)
 		}
 	}
+	reach := unitReach{entry: entry}
 	if static {
 		closure := s.in.Graph.Closure(files...)
+		reach.closure, reach.known = closure, s.in.Graph.Analyzes(files...)
 		if ss.eraseTypes {
 			full := closure
 			closure = s.in.Graph.RuntimeClosure(files...)
@@ -202,8 +211,12 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 		via[f] = ViaInput
 	}
 	if !check {
-		for _, f := range ruleDeps(su, u, files, s.files) {
-			via[f] = ViaInput
+		for _, r := range ss.rules {
+			if r.applies(su, u, files, reach) {
+				for _, f := range r.deps {
+					via[f] = ViaInput
+				}
+			}
 		}
 	}
 	// The unit's own test files, unless the mapper keyed them by declaration (a Go
@@ -292,15 +305,140 @@ func suiteInputFiles(su *runner.Suite, files []string) []string {
 	return out
 }
 
-// ruleDeps are the files the suite's rules declare for unit (with test files
-// unitFiles), among files.
-func ruleDeps(su *runner.Suite, unit string, unitFiles, files []string) []string {
-	var out []string
+// suiteRule is a rule of a suite with its globs expanded at HEAD.
+type suiteRule struct {
+	config.Rule
+	// deps are the files Deps match.
+	deps []string
+	// reachFiles and reachEnv are Reaches split into file globs and variable name
+	// patterns (config.Rule.ReachesEnv).
+	reachFiles, reachEnv []string
+	// matched memoizes whether reachFiles match a file: a file is in the closures of
+	// many units.
+	matched map[string]bool
+}
+
+// newSuiteRules expands the rules of su against files (the snapshot's).
+func newSuiteRules(su *runner.Suite, files []string) []*suiteRule {
+	var out []*suiteRule
 	for _, r := range su.Rules {
-		if !UnitMatches(su, unit, unitFiles, r.Tests) {
+		sr := &suiteRule{Rule: r, deps: expandInputs(r.Deps, files), matched: map[string]bool{}}
+		sr.reachFiles, sr.reachEnv = r.ReachesEnv()
+		out = append(out, sr)
+	}
+	return out
+}
+
+// unitReach is what the reaches of a rule are matched against for a unit.
+type unitReach struct {
+	// closure is the unit's file-level static closure; known is false when it tells
+	// nothing (static analysis off, or no analyzer reads the unit's files).
+	closure []string
+	known   bool
+	// entry is the unit's recorded entry (nil: none).
+	entry *state.Entry
+}
+
+// applies reports whether the rule gives its deps to unit (with test files files):
+// the unit matches its tests, when it has any, and reaches what its reaches names,
+// when it has any.
+func (r *suiteRule) applies(su *runner.Suite, unit string, files []string, reach unitReach) bool {
+	if len(r.Tests) > 0 && !UnitMatches(su, unit, files, r.Tests) {
+		return false
+	}
+	return len(r.Reaches) == 0 || r.reaches(reach)
+}
+
+// reaches reports whether a unit reaches what the rule's reaches names: its static
+// closure holds a file a file glob matches, or its recorded entry an environment
+// variable a "$NAME" pattern matches. A rule adds dependencies, but it also turns the
+// files of its deps from orphans (which run the suites, or ask the agent) into
+// dependencies of the units it applies to only; so when it cannot tell (the unit's
+// closure is unknown, for a file glob; the unit has no recorded entry, for a variable
+// pattern), the rule applies. The entry is not searched for files: it records the
+// deps the rule added, and a rule reaching those would keep itself applying.
+func (r *suiteRule) reaches(reach unitReach) bool {
+	if len(r.reachFiles) > 0 {
+		if !reach.known {
+			return true
+		}
+		for _, f := range reach.closure {
+			m, ok := r.matched[f]
+			if !ok {
+				m = pathutil.Match(r.reachFiles, f)
+				r.matched[f] = m
+			}
+			if m {
+				return true
+			}
+		}
+	}
+	if len(r.reachEnv) > 0 {
+		if reach.entry == nil {
+			return true
+		}
+		for k := range reach.entry.Deps {
+			if kind, name := depkey.Parse(k); kind == depkey.KindEnv && matchName(r.reachEnv, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchName reports whether an environment variable name matches one of the patterns
+// (path.Match globs).
+func matchName(patterns []string, name string) bool {
+	for _, p := range patterns {
+		if ok, _ := path.Match(p, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// RuleReach counts, for each rule of su with reaches (by index in su.Rules), the units
+// of the suite it applies to, as a selection over files with graph g (nil: no static
+// analysis) and the suite's recorded entries st (nil: none) applies it. Compile checks
+// get no rules and are not counted.
+func RuleReach(su *runner.Suite, files []string, g *static.Graph, st *state.Suite) map[int]int {
+	rules := newSuiteRules(su, files)
+	out := map[int]int{}
+	for i, r := range rules {
+		if len(r.Reaches) > 0 {
+			out[i] = 0
+		}
+	}
+	if len(out) == 0 {
+		return out
+	}
+	tests := su.TestFiles(files)
+	unitFiles := groupUnitFiles(su, tests)
+	units := su.Adapter.Units(su, tests)
+	static := config.Bool(su.Static, true) && g != nil
+	if static {
+		var starts []string
+		for _, u := range units {
+			starts = append(starts, unitFiles[u]...)
+		}
+		g.Warm(starts)
+	}
+	for _, u := range units {
+		if runner.IsBuildCheck(u) {
 			continue
 		}
-		out = append(out, expandInputs(r.Deps, files)...)
+		var reach unitReach
+		if static {
+			reach.closure, reach.known = g.Closure(unitFiles[u]...), g.Analyzes(unitFiles[u]...)
+		}
+		if st != nil {
+			reach.entry = st.Tests[u]
+		}
+		for i := range out {
+			if rules[i].applies(su, u, unitFiles[u], reach) {
+				out[i]++
+			}
+		}
 	}
 	return out
 }

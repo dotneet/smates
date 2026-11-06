@@ -151,10 +151,44 @@ cannot observe:
   root; a leading `/` makes a glob repository-relative. Lockfiles, manifests and the
   runner's own config are inputs by default.
 - `rules`: dependencies for some tests only. `tests` are globs relative to the suite
-  root, `deps` are repository-relative globs.
+  root, `deps` are repository-relative globs. `reaches` picks the tests by what they
+  import instead of where they live (next section).
 
 A server that tests reach over the network is a different case: declare its code with
 `depends_on` or `serves` (see [Tests that talk to a server](servers.md)).
+
+### Tests backed by a database
+
+A database schema is usually applied before the tests run, by a migration tool in a
+separate step (`make migrate`, a CI job), and test data may be loaded the same way. No
+test process reads those files, so a change to a migration is an
+[orphan](orphans.md): the agent decides, or the whole suite runs. Path globs rarely
+describe "the tests that use the database": they sit next to tests that do not. What
+they share is a helper they import to connect, so name the helper with `reaches`:
+
+```yaml
+  - name: go
+    runner: go
+    rules:
+      - reaches: ["pkg/shared/dbtest/**", "$APP_DB_*"]
+        deps: ["database/migrations/**", "database/fixtures/**"]
+```
+
+A test gets the migrations and fixtures as dependencies when its static import closure
+reaches `pkg/shared/dbtest/` (directly, through another helper, or from another test
+file of its Go package), or when its last recorded run read a variable matching
+`APP_DB_*`. A change to a migration then selects those tests and is no longer an
+orphan.
+
+That last part is why the list must be complete. A test that connects some other way
+(its own `sql.Open`, a helper the rule does not name, a child process) does not get the
+deps, and once the migration is covered it is not run for it either. Name every helper,
+and add the variables the connection reads: a test that reads them is kept even when it
+imports nothing the globs match. When smates cannot tell, the rule applies to the test:
+static analysis is off, no analyzer reads the test's files, or (for a `$NAME`
+entry) the test has never run.
+`smates doctor` prints how many test units each such rule applies to and warns when a
+rule applies to none (a glob that names nothing the tests import).
 
 ## Set environment variables
 

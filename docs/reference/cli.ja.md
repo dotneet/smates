@@ -180,6 +180,7 @@ smates doctor [flags]
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
 | `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
+| `suite-rule-reaches` | `reaches` を持つルールごとに適用されるテストユニットの数。1 つにも適用されないルールは警告 |
 | `state-recorded` | 記録されたステートがあるか、どのコミットのものか |
 | `agent`、`ci` | エージェントが使えるか、検出した CI と、デフォルトで全件実行になるか |
 | `workflow-test-step` | smates を使わずにテストを実行している GitHub ワークフローのステップ |

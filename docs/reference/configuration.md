@@ -134,13 +134,29 @@ One entry of `suites:`.
 | Key | Type | Meaning |
 |---|---|---|
 | `tests` | list of globs (relative to the suite `root`) | The tests the rule applies to. |
-| `deps` | list of globs (repo-relative) | Files those tests depend on. |
+| `reaches` | list of globs (repo-relative) or `$NAME` patterns | The rule applies only to the tests whose static import closure reaches a file a glob matches, or, for a `$NAME` entry (a glob over variable names, such as `$DB_*`), whose last recorded run read that environment variable. With `tests`, a test must match both. |
+| `deps` | list of globs (repo-relative) | Files those tests depend on. **Required.** |
+
+A rule needs `tests` or `reaches`. A leading `./` is removed from its globs.
 
 ```yaml
 rules:
   - tests: ["src/db/**"]
     deps: ["migrations/**"]
+  # Every test that imports the database test helper, wherever it lives.
+  - reaches: ["pkg/shared/dbtest/**", "$APP_DB_*"]
+    deps: ["database/migrations/**"]
 ```
+
+`reaches` follows the file-level closure, including what other helpers and the other
+test files of a Go package import; for `granularity: func` it matches at the package
+level. When smates cannot tell, the rule applies: static analysis is off (`static:
+false`), no analyzer reads the test's files, or (for a `$NAME` entry) the test has no
+recorded run yet. A test that reaches the database in a way the rule does not name (its
+own `sql.Open`, a helper not in the list, a child process) does not get the deps, so
+name every entry point, and add the variables the database connection reads. `smates
+doctor` reports how many test units each such rule applies to, and warns about one that
+applies to none. See [Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database).
 
 ### depends_on
 

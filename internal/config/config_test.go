@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,16 @@ func TestParseErrors(t *testing.T) {
 		{"wrong type", "suites: 3\n", ""},
 		{"bad env pattern", "env_ignore: [\"A[\"]\n", "bad environment variable pattern"},
 		{"empty suite env pattern", "suites:\n  - runner: go\n    env_track: [\"\"]\n", "bad environment variable pattern"},
+		{"rule without tests or reaches", "suites:\n  - runner: go\n    rules: [{deps: [m/**]}]\n", "needs tests or reaches"},
+		{"rule with empty lists", "suites:\n  - runner: go\n    rules: [{tests: [], reaches: [], deps: [m/**]}]\n", "needs tests or reaches"},
+		{"rule without deps", "suites:\n  - runner: go\n    rules: [{tests: [\"**\"]}]\n", "needs deps"},
+		{"rule absolute deps", "suites:\n  - runner: go\n    rules: [{tests: [\"**\"], deps: [/m/**]}]\n", "rules[0]: deps"},
+		{"rule parent reaches", "suites:\n  - runner: go\n    rules: [{reaches: [../kit/**], deps: [m/**]}]\n", "rules[0]: reaches"},
+		{"rule bad reaches glob", "suites:\n  - runner: go\n    rules: [{reaches: [\"kit/[\"], deps: [m/**]}]\n", "bad glob"},
+		{"rule empty variable", "suites:\n  - runner: go\n    rules: [{reaches: [\"$\"], deps: [m/**]}]\n", "bad environment variable pattern"},
+		{"rule bad variable pattern", "suites:\n  - runner: go\n    rules: [{reaches: [\"$DB_[\"], deps: [m/**]}]\n", "bad environment variable pattern"},
+		{"rule bad tests glob", "suites:\n  - runner: go\n    rules: [{tests: [\"a\\\\b\"], deps: [m/**]}]\n", "path separator"},
+		{"unknown rule field", "suites:\n  - runner: go\n    rules: [{test: [\"**\"], deps: [m/**]}]\n", "field test not found"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -217,5 +228,36 @@ func TestBool(t *testing.T) {
 	tr, fa := true, false
 	if !Bool(nil, true) || Bool(nil, false) || !Bool(&tr, false) || Bool(&fa, true) {
 		t.Fatal("Bool")
+	}
+}
+
+func TestParseRules(t *testing.T) {
+	c, err := Parse([]byte(`
+suites:
+  - runner: go
+    rules:
+      - reaches: ["./pkg/shared/testkit/**", "$APP_DB_*"]
+        deps: ["./database/migrations/**"]
+      - tests: ["./pkg/app/**"]
+        reaches: ["pkg/shared/testkit/**"]
+        deps: ["database/fixtures/**"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Suites[0]
+	r := s.Rules[0]
+	if want := []string{"pkg/shared/testkit/**", "$APP_DB_*"}; !reflect.DeepEqual(r.Reaches, want) {
+		t.Errorf("reaches %v, want %v", r.Reaches, want)
+	}
+	if want := []string{"database/migrations/**"}; !reflect.DeepEqual(r.Deps, want) {
+		t.Errorf("deps %v, want %v", r.Deps, want)
+	}
+	files, env := r.ReachesEnv()
+	if !reflect.DeepEqual(files, []string{"pkg/shared/testkit/**"}) || !reflect.DeepEqual(env, []string{"APP_DB_*"}) {
+		t.Errorf("ReachesEnv: %v %v", files, env)
+	}
+	if want := []string{"pkg/app/**"}; !reflect.DeepEqual(s.Rules[1].Tests, want) {
+		t.Errorf("tests %v, want %v", s.Rules[1].Tests, want)
 	}
 }

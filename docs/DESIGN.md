@@ -113,6 +113,22 @@ into `Result.Covered` once, and `Result.Explains` (used by selection and `smates
 also matches deleted ones. Older smates versions read
 the key as a missing file and select the test, which is safe.
 
+A rule's deps are expanded once per selection (`newSuiteRules`) and added to `Known` as
+inputs. `tests:` narrows a rule by path; `reaches:` by what the unit reaches, ANDed with
+`tests:` when both are set (`suiteRule.applies`): the unit's file-level static closure
+(before `MapStatic` keys it by declaration, so a Go function unit matches by its
+package's test files and imports) holds a file a glob matches (memoized per suite, as
+a file is in many closures), or, for a `$NAME` pattern, the unit's recorded entry holds
+an environment key it matches. Files are never matched against the entry: it records
+the rule's own deps, so a rule reaching them would keep applying to every unit it ever
+applied to. A rule cannot only add here: once one unit has the deps, a change to them
+is covered and no longer an orphan, so a unit the rule misses is skipped on such a
+change. It therefore applies whenever it cannot tell: static analysis is off, no
+analyzer reads the unit's files (`static.Graph.Analyzes`), or, for a `$NAME` pattern,
+the unit has no entry yet (it then records the deps once and drops them on its next
+recording). `smates doctor` counts the units each rule with `reaches:` applies to
+(`selector.RuleReach`) and warns about a rule that applies to none.
+
 Dependency keys:
 
 | key | hash | recorded when |

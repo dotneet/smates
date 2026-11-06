@@ -14,7 +14,11 @@ Workaround: declare the server's code with `depends_on` or `serves`. See
 
 **Data outside the repository.** What a test reads from databases or external services
 is not tracked. Workaround: declare the files it depends on with `rules` or `inputs`,
-or let such changes reach the agent as [orphans](../guides/orphans.md).
+or let such changes reach the agent as [orphans](../guides/orphans.md). For a schema
+applied before the tests run, a rule with `reaches` gives the migrations to the tests
+that import the database helper; a test that connects in a way the rule does not name
+is then not run for a migration change (see
+[Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database)).
 
 **Code that runs in a browser.** Code executed in a browser (vitest browser mode,
 Playwright) is covered by the static import graph only.
