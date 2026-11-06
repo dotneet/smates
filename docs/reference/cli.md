@@ -121,9 +121,11 @@ the suite's `command` instead.
   smates checks whether it would end after the limit. Its estimate grows by how much
   longer than estimated the batches that ran took, on average per batch (starting the
   runner and building take about the same time for a short batch as for a long one):
-  the batches of the same suite, or of every suite before a suite's first batch. A
-  batch whose units are partly left out by unmet requirements is estimated by the units
-  that run. If it would end after the limit, smates starts nothing more.
+  the batches of the same suite, or of every suite before a suite's first batch. The
+  requirements are checked first: a batch whose units are partly left out by unmet
+  requirements is estimated by the units that run, and one with no unit left does not
+  count against the limit (the next batch is checked instead). If it would end after
+  the limit, smates starts nothing more.
 - The first batch always starts, so every run makes progress. A batch that is running
   is never stopped.
 - The tests left out are not run and not recorded. They stay selected, and a later run

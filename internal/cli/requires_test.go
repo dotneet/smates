@@ -242,6 +242,67 @@ func TestDeferUnmetReestimates(t *testing.T) {
 	}
 }
 
+// TestAdmitMaxTimeAfterRequires: --max-time is checked against the units of a batch
+// that run, after those whose requirements are unmet are deferred. Units that never
+// start must not stop the run (a cheaper batch after them still starts); units that
+// run and do not fit still cap it.
+func TestAdmitMaxTimeAfterRequires(t *testing.T) {
+	sec := int64(1000)
+	for _, tc := range []struct {
+		name      string
+		tests     map[string]int64 // unit of suite s -> seconds
+		admitS    bool             // suite s's batch starts
+		capped    bool
+		admitNext bool // the 5s batch of suite t after it starts
+		unmet     []string
+	}{
+		// Must keep running: nothing of the batch would start.
+		{"all units unmet, over the limit in all", map[string]int64{"db/a.test.ts": 90}, false, false, true, []string{"db/a.test.ts"}},
+		{"kept units fit", map[string]int64{"db/a.test.ts": 90, "ui/b.test.ts": 5}, true, false, true, []string{"db/a.test.ts"}},
+		{"kept units do not fit", map[string]int64{"db/a.test.ts": 40, "ui/b.test.ts": 75}, false, true, false, []string{"db/a.test.ts"}},
+		{"nothing unmet, over the limit", map[string]int64{"ui/b.test.ts": 75}, false, true, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs := []config.Requirement{{File: "missing-file-for-the-test", Tests: []string{"db/**"}}}
+			sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Root: ".", Requires: reqs}}}
+			next := &selector.Suite{Name: "t", Suite: &runner.Suite{Suite: config.Suite{Name: "t", Root: "."}}, Tests: []*selector.Test{
+				{ID: "t/c.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 5 * sec},
+			}}
+			st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: map[string]*state.Entry{}}, "t": {Tests: map[string]*state.Entry{
+				"t/c.test.ts": {Status: state.Pass, DurationMs: 5 * sec},
+			}}}}
+			for id, d := range tc.tests {
+				sr.Tests = append(sr.Tests, &selector.Test{ID: id, Selected: true, Reason: selector.ReasonChanged, Duration: d * sec})
+				st.Suites["s"].Tests[id] = &state.Entry{Status: state.Pass, DurationMs: d * sec}
+			}
+			slices.SortFunc(sr.Tests, func(a, b *selector.Test) int { return strings.Compare(a.ID, b.ID) })
+			res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr, next}}
+			prioritize(res, st, nil)
+			c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: t.TempDir()}, log: io.Discard}, f: &runFlags{maxTime: 8 * time.Minute}, sel: &selection{res: res},
+				checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+			plan := c.plan()
+			slices.SortStableFunc(plan, func(a, b *batch) int { return strings.Compare(a.sr.Name, b.sr.Name) })
+			if len(plan) != 2 {
+				t.Fatalf("plan %+v", plan)
+			}
+			// Another suite's batch already ran; 7 of the 8 minutes are gone.
+			c.start, c.started = time.Now().Add(-7*time.Minute), map[string][]string{"other": {"x"}}
+			if got := c.admit(context.Background(), plan[0], plan); got != tc.admitS {
+				t.Errorf("suite s admitted %v, want %v (units %v, est %s)", got, tc.admitS, plan[0].units, plan[0].est)
+			}
+			if c.capped != tc.capped {
+				t.Errorf("capped %v, want %v", c.capped, tc.capped)
+			}
+			if got := c.admit(context.Background(), plan[1], plan[1:]); got != tc.admitNext {
+				t.Errorf("suite t admitted %v, want %v", got, tc.admitNext)
+			}
+			if !slices.Equal(c.unmet["s"], tc.unmet) {
+				t.Errorf("unmet %v, want %v", c.unmet["s"], tc.unmet)
+			}
+		})
+	}
+}
+
 func TestParseRunFlagsMaxTime(t *testing.T) {
 	for _, tc := range []struct {
 		args []string

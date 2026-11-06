@@ -299,6 +299,9 @@ func TestParseRequiresErrors(t *testing.T) {
 		{"file backslash", "      - file: 'a\\b'\n", "use / as the path separator"},
 		// Shell forms smates does not expand would be an unset variable everywhere.
 		{"tcp default", "      - tcp: \"${DB_HOST:-localhost}:5432\"\n", "${DB_HOST:-localhost} is not a variable reference"},
+		// The hint must not send a default into the suite's env, which overrides the
+		// environment (a CI value would be replaced).
+		{"tcp default hint", "      - tcp: \"${DB_HOST:-localhost}:5432\"\n", "use a cmd requirement, whose shell expands it; a suite env value overrides the environment, so it is no default"},
 		{"tcp default without colon", "      - tcp: \"${DB_HOST-localhost}:5432\"\n", "${DB_HOST-localhost} is not a variable reference"},
 		{"tcp error form", "      - tcp: \"${DB_HOST:?}:5432\"\n", "${DB_HOST:?} is not a variable reference"},
 		{"tcp positional", "      - tcp: \"$1:5432\"\n", `"$1" is not a variable reference`},

@@ -253,18 +253,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	}
 	c.hasher.PinBefore(p.state, ran, start)
 	for i, b := range batches {
-		if !c.stopped && ctx.Err() != nil {
-			c.interrupted, c.stopped = true, true // Ctrl-C between batches
-		}
-		if !c.stopped && c.overTime(b) {
-			c.stopped, c.capped = true, true
-			p.logf("--max-time %s: starting no further test batch (%d selected unit(s) left; they stay selected)", f.maxTime, c.unitsFrom(batches[i:]))
-		}
-		if c.stopped {
-			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
-			continue
-		}
-		if c.deferUnmet(ctx, b) {
+		if !c.admit(ctx, b, batches[i:]) {
 			continue
 		}
 		batchStart := time.Now()

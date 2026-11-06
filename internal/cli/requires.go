@@ -161,6 +161,31 @@ func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 	return len(keep) == 0
 }
 
+// admit decides whether batch b (the first of rest, the batches not started yet)
+// starts. A run that stopped (Ctrl-C, --fail-fast, --max-time) starts nothing more and
+// checks no requirement. Otherwise the units whose requirements are unmet are deferred
+// first (deferUnmet), and --max-time is checked against the estimate of the units
+// that are left: units that never start neither cap the run nor make it stop early.
+func (c *cycle) admit(ctx context.Context, b *batch, rest []*batch) bool {
+	if !c.stopped && ctx.Err() != nil {
+		c.interrupted, c.stopped = true, true // Ctrl-C between batches
+	}
+	if c.stopped {
+		c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+		return false
+	}
+	if c.deferUnmet(ctx, b) {
+		return false
+	}
+	if c.overTime(b) {
+		c.stopped, c.capped = true, true
+		c.p.logf("--max-time %s: starting no further test batch (%d selected unit(s) left; they stay selected)", c.f.maxTime, c.unitsFrom(rest))
+		c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+		return false
+	}
+	return true
+}
+
 // checkRequirement checks r for suite s once per run (the same check of suites with
 // the same root and env is shared).
 func (c *cycle) checkRequirement(ctx context.Context, s *runner.Suite, r config.Requirement) error {

@@ -217,7 +217,12 @@ the suite's `env`. A variable they name that is not set (or empty) makes the req
 not met: `${DB_HOST}:5432` would otherwise dial this machine. No other shell form is
 expanded: a default (`${DB_HOST:-localhost}`, `${DB_HOST-localhost}`), `${DB_HOST:?}`,
 `$1`, `$$` or a `$` on its own is a configuration error (exit 3), since it would read as
-a variable that is never set. Set the default in the suite's `env` instead.
+a variable that is never set. For a default, set the variable in the environment that
+runs smates (`DB_HOST=localhost` in your shell or `.envrc`, while CI sets its own), or
+use a `cmd` requirement, whose shell expands it
+(`cmd: 'nc -z "${DB_HOST:-localhost}" 5432'`). The suite's `env` is no default: it
+overrides the environment, so `env: {DB_HOST: localhost}` would also replace the
+`DB_HOST` CI sets, for the check and for the tests.
 
 ```yaml
 requires:

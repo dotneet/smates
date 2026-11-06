@@ -347,7 +347,7 @@ func checkRequires(s *Suite) error {
 // default as in ${NAME:-x} or ${NAME-x}, ${NAME:?}, $1, $$, ${}) would be read as an
 // unset variable on every machine, leaving the suite's tests out for good.
 func CheckVarRefs(v string) error {
-	const forms = "write $NAME or ${NAME} (smates expands no defaults such as ${NAME:-x}, no $1 and no $$)"
+	const forms = "write $NAME or ${NAME} (smates expands no defaults such as ${NAME:-x}, no $1 and no $$; for a default, set the variable where smates runs, or use a cmd requirement, whose shell expands it; a suite env value overrides the environment, so it is no default)"
 	for i := 0; i < len(v); i++ {
 		if v[i] != '$' {
 			continue
