@@ -40,7 +40,7 @@ suites:
           - "internal/runner/{runner,common,custom,preflight,procgroup*,discover,typestrip}.go"
       - tests: ["."]
         # vitest, jest, node --test and bun.
-        deps: &js ["internal/runner/node.go", "internal/runner/discover_node.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
+        deps: &js ["internal/runner/node.go", "internal/runner/discover_node.go", "internal/runner/runnerconfig.go", "internal/runner/storybook.go", "internal/static/js/**", "internal/trace/shims/node.cjs"]
       - tests: ["."]
         deps: &vitest ["internal/trace/shims/vitest-reporter.mjs"]
       - tests: ["."]
