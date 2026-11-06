@@ -231,7 +231,8 @@ workspace. A `go.work` smates cannot parse makes every module below it count. Go
 the `go.work` nearest the directory it runs in, so a file counts the pins of every
 `go.work` at or above it (a nested `svc/go.work` and the root's). A `go.work` that
 `GOWORK` names elsewhere (in the suite's `env:` or smates' environment) has its pins
-made inputs of every test of the suite.
+made inputs of every test of the suite. `GOWORK=auto` is the same as leaving it unset:
+the nearest `go.work` is used, and the nested modules it lists stay in the suite.
 
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
@@ -261,7 +262,15 @@ with no function units. A directory whose Go files the suite's build constraints
 exclude (`//go:build` lines, `_linux.go` names, with the tags of `GOFLAGS`, the command
 and arguments passed through) is no unit. When smates cannot tell, it stays one: go list
 fails, or the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
-`sh -c "..."`) or passes words after `--`, where tags reach go test unseen.
+`sh -c "..."`) or passes words after `--`, where tags reach go test unseen. When go test
+then reports "build constraints exclude all Go files" for such a directory, that is no
+test failure: the unit is recorded as a skip, and the run exits 0 if nothing else
+failed. A directory whose test files the configuration all leaves out (a tag in
+`GOFLAGS`, a `_linux_test.go` name on another platform) reports `[no test files]` too,
+but it is recorded as a skip, not a pass, so it runs again on the next run: the
+environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
+and the platform are no dependencies, and a configuration that compiles those tests
+must run them.
 
 A package that compiles only after code generation fails like any build failure (exit
 1), not as an environment error: smates cannot tell a missing generated file from a real

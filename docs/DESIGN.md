@@ -442,7 +442,14 @@ the directory may compile, it stays a unit): `go test` would fail such a directo
 non-test files (`**/cmd/**/*.go`) makes packages without tests units that `go test`
 compiles; their `[no test files]` line (or a package-level `-json` skip event) is
 recorded as a pass whose dependencies are the known ones, as for a compile check, since
-no test binary runs to leave a trace.
+no test binary runs to leave a trace. When the directory has `*_test.go` files, the
+line means the configuration left them out, and it is recorded as a skip instead: the
+environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
+and the platform are not dependencies, so a pass would hide those tests from a
+configuration that compiles them. A unit kept because a wrapper's flags are unseen,
+which go test then fails with "build constraints exclude all Go files" (read from its
+stderr), is recorded as a skip too, and the exit code 1 is forgiven when every other
+package of the invocation is reported as passing or without test files.
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
@@ -742,7 +749,7 @@ a removed line can fail the build). A `go.work` whose directives do not parse, o
 uses nothing, counts every module below its directory. Every `go.work` at or above the
 file counts, not only the nearest: the go command takes the one nearest its working
 directory, which may be above a nested one. A `go.work` named by `GOWORK` (suite env or
-smates' own) is invisible to static analysis, so the go runner makes its pins (the same
+smates' own; `auto` means the search, as unset) is invisible to static analysis, so the go runner makes its pins (the same
 set) suite inputs. These are content keys: any edit selects every test of the workspace.
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`

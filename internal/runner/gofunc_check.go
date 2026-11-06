@@ -90,7 +90,9 @@ func checkExec(rc *RunContext) string {
 // invocation (chunked when the arguments are long). A package go test reports as
 // failing to build or vet ([build failed], [setup failed]) fails its check with that
 // output; when the invocation failed before reporting any package, every check fails
-// with its output. Checks have no dependencies of their own: recording gives them
+// with its output. A package whose Go files build constraints all exclude (a wrapper
+// command's flags are unseen, see buildFailures.excluded) is a skip, not a failure.
+// Checks have no dependencies of their own: recording gives them
 // their known ones (the static closure).
 func runBuildChecks(ctx context.Context, rc *RunContext, dirs []string) (*RunResult, error) {
 	res := &RunResult{Observations: map[string]*Observation{}}
@@ -108,14 +110,23 @@ func runBuildChecks(ctx context.Context, rc *RunContext, dirs []string) (*RunRes
 		if err != nil {
 			return res, err
 		}
-		res.ExitCode = max(res.ExitCode, code)
+		var chunkDirs []string
 		for _, d := range dirs {
-			if !slices.Contains(args, pkgArg(rc.Suite, d)) {
-				continue
+			if slices.Contains(args, pkgArg(rc.Suite, d)) {
+				chunkDirs = append(chunkDirs, d)
 			}
+		}
+		if failed.onlyExcluded(rc, chunkDirs, code) {
+			code = 0 // packages build constraints all exclude: no failure (see buildFailures.excluded)
+		}
+		res.ExitCode = max(res.ExitCode, code)
+		for _, d := range chunkDirs {
 			ip := failed.key(rc, d)
 			o := &Observation{Files: map[string]bool{}, Status: state.Pass}
 			switch {
+			case failed.excluded[ip]:
+				// Nothing of it compiles in this configuration: not proven to build.
+				o.Status = state.Skip
 			case failed.paths[ip] || failed.status[ip] == state.Fail:
 				o.Status = state.Fail
 				if o.Failure = failed.output[ip]; o.Failure == "" {
