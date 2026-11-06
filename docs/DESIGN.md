@@ -758,6 +758,38 @@ selective run handled are marked seen by those suites alone. A suite command lin
 cannot be parsed still ends the run as a configuration error (exit 3).
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
+### `--max-time` and `requires`: units left for later
+
+Both leave selected units unstarted on the same path as above, so neither can record a
+pass: the units get no observation, keep their old entry and are selected again.
+
+`--max-time D` needs calls short enough to stop between. Each suite's calls (after the
+`--fail-fast` split) are cut into consecutive calls whose recorded durations add up to
+about D/4; a unit with no duration counts as the suite's mean, and a suite with none
+recorded stays one call of unknown length. Before each call smates checks that it would
+end within D (elapsed time plus its estimate); an unknown call starts only while less
+than D/2 is used. The first call always starts, so repeated capped runs make progress:
+what passed is deselected and the units left out come first next time, by priority.
+Like `--fail-fast`, the cap never kills a running call, and a stopped run leaves the
+snapshot alone. Where the cap stopped the run and everything that ran passed, smates
+exits 0: the caller asked for a partial run, and the report (`max_time_reached`,
+`not_run`), the summary and the log say what is left. Exit 4 would claim an environment
+problem that does not exist. The coding agent Stop hooks default to `--max-time 8m`, the
+600 s hook timeout less a margin for selection, recording and estimates that are off.
+
+A suite's `requires` are checked when a call of it is about to start, once per run for
+each distinct check (cached by root, check and env). A check that cannot tell (it fails
+to start, times out, its address does not parse) counts as unmet: running the tests
+anyway would record outcomes of a broken environment. Only the units a requirement's
+`tests` globs match (`UnitMatches`, as for rules) are taken out of the call; the call
+then passes explicit units. Their suite counts as left out for the snapshot, like a
+suite whose runner could not start, so the orphans it would have covered stay unseen
+for it. The run exits 4 when no test failed (`requiresError` inside an `envError`); a
+runner that could not start or a state that could not be saved is reported first. The
+Stop hooks tell `requiresError` apart and print one line instead of an error: in a
+worktree without the database, every turn would otherwise end with the same message.
+`--dry-run` does not run the checks (a `cmd` may be slow or have side effects).
+
 ### Flaky tests
 
 Because every entry stores the content hash of every input, a flaky test can be detected

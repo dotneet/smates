@@ -18,7 +18,7 @@
 | [`smates config`](#smates-config) | `smates.yml` を安全に編集する |
 | [`smates guide`](#smates-guide) | コーディングエージェント向けのガイドを表示する |
 | [`smates state`](#smates-state) | 記録されたステートの確認・移動・削除 |
-| [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code の Stop フックを設定する |
+| [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code や Codex の Stop フックを設定する |
 | [`smates version`](#smates-version-and-help) | バージョンを表示する |
 
 各コマンドのフラグは `smates <command> -h` で確認できます（終了コード 0）。`config`、`state`、`hook` ではサブコマンドの一覧も表示されます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数の前にも後ろにも置けます（`smates why src/a.ts --format json`）。`--` 以降はフラグとして扱いません。`run`、`select`、`watch` では、`--` より後ろの引数はテストランナーに渡されます。
@@ -68,6 +68,7 @@ smates run [flags] [-- runner args]
 | `--markdown` | file | | まとめを Markdown で `file` に書き出します（上書き）。プルリクエストのコメント用です。 |
 | `--summary` | file | GitHub Actions では `$GITHUB_STEP_SUMMARY` | Markdown のまとめを `file` に追記します。 |
 | `--budget` | duration | `90s` | 選択されたテストの記録済み所要時間の合計がこれを超えると、実行前に分割方法を表示します。`0` で無効になります。 |
+| `--max-time` | duration | `0`（上限なし） | 記録済み所要時間から見て、これより後に終わるバッチは開始しません。外れたテストは選択されたまま次の実行に残ります。[時間の上限](#time-limit) を参照してください。 |
 | `--dry-run` | | オフ | ランナーのコマンドを実行せずに表示します。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
@@ -75,13 +76,28 @@ smates run [flags] [-- runner args]
 次の組み合わせはエラー（終了コード 2）になります。
 
 - `--only` と `--all`、`--shadow`、`--add`、`--orphans`
-- `--shadow` と `--shard`、`--fail-fast`
+- `--shadow` と `--shard`、`--fail-fast`、`--max-time`
 - `--dry-run` と `--report`、`--markdown`、`--summary`（代わりに `smates select --format json|markdown` を使います）
 
 `--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行ではテストを成功として記録しません。常に使うフラグはスイートの `command` に書いてください。
 
 ??? note "詳細: `--output failures` の出力内容"
     ランナーのバッチごとに出力をバッファし、バッチが失敗したときだけ表示します。失敗したテストごとの出力を報告できるランナー（vitest、jest、pytest、`go test`、JUnit）ではその部分だけを、それ以外ではバッチの出力を最大 200 行（先頭 30 行と末尾 170 行）表示します。smates 自身の進捗行は省略されます。出力のないまま 30 秒経つと `smates: still running <suite> (...)` を表示します。間隔は `SMATES_HEARTBEAT` で変えられます。[コーディングエージェントから使う](../guides/coding-agents.md) を参照してください。
+
+#### 時間の上限 { #time-limit }
+
+`--max-time 8m` を付けると、実行をおよそ 8 分以内に収めます。
+
+- 各スイートのテストを、記録済みの所要時間をもとに、上限のおよそ 4 分の 1 ずつのバッチに分けます。所要時間が記録されていないテストは、そのスイートの平均として数えます。所要時間がまったく記録されていないスイートは 1 つのバッチのままで、使った時間が上限の半分未満のときだけ開始します。
+- バッチはいつもどおり失敗しそうなものから順に開始します。各バッチの前に、上限より後に終わるかを確かめ、終わるならそれ以降は何も開始しません。
+- 最初のバッチは必ず開始するので、どの実行でも少しは進みます。実行中のバッチを止めることはありません。
+- 外れたテストは実行も記録もされず、選択されたまま残り、次の実行で先に走ります。ログ、サマリー（`Time limit`）、レポート（`max_time_reached`、`not_run`）に表示されます。
+
+実行したものがすべて成功すれば、終了コードは 0 です。CI でマージの可否を決めるのには `--max-time` を使わないでください。外れたテストは実行されていません。Claude Code と Codex の Stop フックは、デフォルトで `--max-time 8m` を使います（[git フック](../guides/git-hooks.md#claude-code-stop-hook) を参照）。
+
+#### 前提条件を満たさないスイート { #unmet-requires }
+
+[`requires`](configuration.md#requires) を満たさないスイートのユニットは開始しません。選択されたまま残り、記録もされません。ログには失敗したチェックがそれぞれ表示されます。テストが失敗していなければ終了コードは 4、失敗していれば 1 です。レポートでは、チェックが `unmet_requires` に、ユニットが `not_run` に入ります。
 
 ### smates select { #smates-select }
 
@@ -344,27 +360,29 @@ smates state clear
 ```bash
 smates hook install [--hook pre-push|pre-commit] [--append] [--agent] [-- run flags]
 smates hook install --claude [--user] [--agent] [-- run flags]
-smates hook uninstall [--hook ...] | [--claude [--user]]
+smates hook install --codex [--agent] [-- run flags]
+smates hook uninstall [--hook ...] | [--claude [--user]] | [--codex]
 smates hook status
 ```
 
-`install` は `smates run --no-agent`（と `--` 以降の run のフラグ）を実行する git フックを書き出し、選択されたテストが失敗したら push やコミットを止めます。`--claude` を付けると、代わりに `.claude/settings.json` に Stop フックを追加します。`uninstall` は smates が書いた部分だけを取り除きます。`status` は git フックと Claude Code のフックを表示します。[git フックと Claude Code](../guides/git-hooks.md) を参照してください。
+`install` は `smates run --no-agent`（と `--` 以降の run のフラグ）を実行する git フックを書き出し、選択されたテストが失敗したら push やコミットを止めます。`--claude` を付けると代わりに `.claude/settings.json` に、`--codex` を付けると `.codex/hooks.json` に Stop フックを追加します。`uninstall` は smates が書いた部分だけを取り除きます。`status` は git フックと、Claude Code と Codex のフックを表示します。[git フックと Claude Code](../guides/git-hooks.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
-| `--hook` | `pre-push`、`pre-commit` | `pre-push` | 対象の git フック。`--claude` とは併用できません。 |
-| `--append` | | オフ | `install`: 既存のフックスクリプトの末尾に smates を追加します。`--claude` とは併用できません。 |
+| `--hook` | `pre-push`、`pre-commit` | `pre-push` | 対象の git フック。`--claude`、`--codex` とは併用できません。 |
+| `--append` | | オフ | `install`: 既存のフックスクリプトの末尾に smates を追加します。`--claude`、`--codex` とは併用できません。 |
 | `--agent` | | オフ | `install`: フックからエージェントを呼べるようにします（指定しなければ `--no-agent` を渡します）。 |
 | `--claude` | | オフ | git フックの代わりに、`.claude/settings.json` の Claude Code Stop フックを対象にします。 |
+| `--codex` | | オフ | git フックの代わりに、`.codex/hooks.json` の Codex Stop フックを対象にします。`--claude`、`--user` とは併用できません。 |
 | `--user` | | オフ | `--claude` と併用し、`~/.claude/settings.json` を使います（`smates.yml` のあるすべてのプロジェクトで有効）。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
 
-インストールされたフックは、次の 2 つの内部サブコマンドを呼びます。通常、自分で実行することはありません。
+インストールされたフックは、次の内部サブコマンドを呼びます。通常、自分で実行することはありません。
 
 - `smates hook run pre-push|pre-commit [-- run flags]`: git フックが実行するもの。
-- `smates hook claude-stop [--require-config] [-- run flags]`: Claude Code の Stop フックが実行するもの（`--output failures` が暗黙に付きます）。テストが失敗すると `{"decision": "block", ...}` を表示して 0 で終了し、smates 自身のエラーでは 1 で終了します。
+- `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`: Claude Code と Codex の Stop フックが実行するもの（`--output failures --max-time 8m` が暗黙に付きます。run のフラグに `--max-time` があればそちらが優先されます）。テストが失敗すると `{"decision": "block", ...}` を表示して 0 で終了し、smates 自身のエラーでは 1 で終了します。時間の上限や満たされない [`requires`](configuration.md#requires) で外れたテストではブロックしません。それらについて stderr に 1 行表示し、0 で終了します。
 
-どちらも、`SMATES_SKIP_HOOK` が `0` と `false` 以外の値に設定されていれば何もしません。
+いずれも、`SMATES_SKIP_HOOK` が `0` と `false` 以外の値に設定されていれば何もしません。
 
 ## 関連項目 { #see-also }
 

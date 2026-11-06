@@ -47,9 +47,12 @@ tests that did not run stay selected.
   executable" and "command not found", also through `npm test`, `yarn`, `pnpm exec` or
   `sh -c`) before any test reported a result;
 - a state that cannot be saved (for example, the shared state's lock is held by another
-  worktree's run).
+  worktree's run);
+- a suite's [`requires`](configuration.md#requires) (a database, a browser) that are not
+  met here.
 
-When a runner cannot start, the other suites still run and are recorded. The suite's
+When a runner cannot start, or requirements are not met, the other suites still run and
+are recorded. The suite's
 tests stay selected. smates prints the failure (output, summary) first, then exits 4.
 In `--output failures` mode the summary line reads `NOT STARTED` instead of `PASSED`.
 
@@ -72,7 +75,7 @@ could not be saved: exit 1 when tests failed, else 4.
 | `exit_code` in `smates run --report` | The runners' worst exit code; `4` when the run is an environment problem without failing tests. |
 | `exit-code` written to `$GITHUB_OUTPUT` by `smates run` | Same as `exit_code`. |
 | `exit-code` output of the GitHub Action | The exit code of the smates command itself (`1` for failed tests). |
-| `smates hook claude-stop` | `0` (allow, or block with a JSON decision when tests fail) or `1` (smates' own error, shown to you instead of Claude). It never exits 2. |
+| `smates hook claude-stop`, `codex-stop` | `0` (allow, or block with a JSON decision when tests fail) or `1` (smates' own error, shown to you instead of the agent). It never exits 2. Tests left out by unmet `requires` or the time limit are not an error: `0`, with one line on stderr. |
 
 ## See also
 
