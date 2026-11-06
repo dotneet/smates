@@ -40,7 +40,11 @@ func (s *selection) classifyOrphans() {
 // depkey.Covers): f is covered, or belongs to a depends_on/serves declaration some
 // test depends on (also when f no longer exists, which Covered cannot tell).
 func (r *Result) Explains(f string, existenceChanged bool) bool {
-	return depkey.Covers(r.Covered, f, existenceChanged) != depkey.CoverNone || slices.ContainsFunc(r.declared, func(d *ServiceDeps) bool { return d.match(f) })
+	// The index is built once Covered is complete, and again should it grow.
+	if r.coverIndex == nil || r.coverIndex.Len() != len(r.Covered) {
+		r.coverIndex = depkey.NewCoverIndex(r.Covered)
+	}
+	return r.coverIndex.Covers(f, existenceChanged) != depkey.CoverNone || slices.ContainsFunc(r.declared, func(d *ServiceDeps) bool { return d.match(f) })
 }
 
 // existedBefore reports whether f existed when the state was recorded (or at the base

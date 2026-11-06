@@ -49,6 +49,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 		files = append(files, f)
 	}
 	sort.Strings(files)
+	known := depkey.NewCoverIndex(s.knownCovered)
 	out := map[string][]string{}
 	n := 0
 	for _, f := range files {
@@ -57,7 +58,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 		}
 		// Whether f was added since Base is not known: only a deletion counts as an
 		// existence change, as for diff mode's orphans (existedBefore).
-		if depkey.Covers(s.knownCovered, f, in.Snap[f] == "") != depkey.CoverNone || slices.ContainsFunc(res.declared, func(d *ServiceDeps) bool { return d.match(f) }) {
+		if known.Covers(f, in.Snap[f] == "") != depkey.CoverNone || slices.ContainsFunc(res.declared, func(d *ServiceDeps) bool { return d.match(f) }) {
 			continue
 		}
 		if !res.Explains(f, in.Snap[f] == "" || !existedBefore(in, f)) {
@@ -100,15 +101,15 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changed)
 	}
-	s.reportConfig(t, u.via)
-	explain(t, ss.sr, u.via, sets)
+	s.reportConfig(t, u.known)
+	explain(t, ss.sr, u.known, sets)
 	return t
 }
 
 // reportConfig reports a changed settings key (depkey.Config) among t.Changed as the
-// configuration file, which reaches the test as an input unless via explains it
+// configuration file, which reaches the test as an input unless known explains it
 // otherwise.
-func (s *selection) reportConfig(t *Test, via map[string]string) {
+func (s *selection) reportConfig(t *Test, known *unitKnown) {
 	path := s.in.Config.Path
 	if path == "" {
 		return
@@ -121,8 +122,8 @@ func (s *selection) reportConfig(t *Test, via map[string]string) {
 	if !slices.Contains(t.Changed, path) {
 		t.Changed = append(t.Changed, path)
 		sort.Strings(t.Changed)
-		if via[path] == "" {
-			via[path] = ViaInput
+		if known.how(path) == "" {
+			known.rest[path] = ViaInput
 		}
 	}
 }
@@ -176,12 +177,12 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 }
 
-// explain sets how each changed dependency reached t: via holds the known deps by
+// explain sets how each changed dependency reached t: known holds the known deps by
 // strongest explanation (anything else was traced). A changed set key stands for the
 // files of its declaration that changed (sets, against the snapshot or base revision
 // decide compared with), each named with the declaration; it stays as the key only
 // when none can be named (they changed between the test's run and the snapshot).
-func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]string) {
+func explain(t *Test, sr *Suite, known *unitKnown, sets map[*ServiceDeps][]string) {
 	if len(t.Changed) == 0 {
 		return
 	}
@@ -204,11 +205,11 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 	// test itself keeps that stronger explanation over the declaration's.
 	var setKeys []*ServiceDeps
 	for _, c := range t.Changed {
-		if d := sr.service(c); d != nil && via[c] == ViaService {
+		if d := sr.service(c); d != nil && known.how(c) == ViaService {
 			setKeys = append(setKeys, d)
 			continue
 		}
-		how := via[c]
+		how := known.how(c)
 		if how == "" {
 			how = ViaTraced
 		}

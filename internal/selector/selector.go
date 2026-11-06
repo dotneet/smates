@@ -3,6 +3,7 @@ package selector
 
 import (
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
@@ -232,6 +233,8 @@ type Result struct {
 	// declared are the depends_on/serves declarations some test depends on (their
 	// files are in Covered; Explains also matches deleted ones).
 	declared []*ServiceDeps
+	// coverIndex indexes Covered for Explains.
+	coverIndex *depkey.CoverIndex
 }
 
 // HandleOrphans records how orphans were handled; earlier records win.
