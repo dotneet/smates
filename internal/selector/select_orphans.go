@@ -3,6 +3,8 @@ package selector
 import (
 	"fmt"
 	"slices"
+	"sort"
+	"strings"
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
@@ -31,9 +33,47 @@ func (s *selection) classifyOrphans() {
 			res.Orphans = append(res.Orphans, f)
 		}
 	}
+	s.neverRecordedOrphans()
 	if len(res.LeftOut) > 0 {
 		res.Notes = append(res.Notes, fmt.Sprintf("%d unattributed change(s) belong only to suites left out by --suite: left to the jobs that run them", len(res.LeftOut)))
 	}
+}
+
+// neverRecordedOrphans notes the suites of the run that have never been recorded
+// while others have (markerFilter), and adds to the orphans the changes it dropped for
+// them (unseen) that changed since Base, that no test explains and that one of them
+// owns: the orphans diff mode would find for them. Without Base (in CI, or none could
+// be resolved) their tests all run as new, so no change needs to reach them.
+func (s *selection) neverRecordedOrphans() {
+	in, res := s.in, s.res
+	never := s.neverRecorded
+	if len(never) == 0 {
+		return
+	}
+	how := "their tests run as new: no base revision to compare with"
+	if s.baseChanged != nil {
+		how = "their tests are decided against the base revision by static analysis"
+		own := NewOwnership(in.Suites, in.Others)
+		ignore := IgnoreGlobs(in.Config)
+		n := len(res.Orphans)
+		for f := range s.unseen {
+			if !s.baseChanged[f] || pathutil.IsVendored(f) || pathutil.Match(ignore, f) || res.Explains(f, in.Snap[f] == "") {
+				continue
+			}
+			v, _ := in.State.Snap(f)
+			if slices.ContainsFunc(own.Owners(f), func(name string) bool { return slices.Contains(never, name) && !v.Seen(name) }) {
+				res.Orphans = append(res.Orphans, f)
+			}
+		}
+		if len(res.Orphans) > n {
+			sort.Strings(res.Orphans)
+		}
+	}
+	names := never
+	if len(names) > 5 {
+		names = append(slices.Clip(names[:5]), fmt.Sprintf("… (+%d)", len(never)-5))
+	}
+	res.Notes = append(res.Notes, fmt.Sprintf("%d suite(s) have never been recorded (%s), and the changes only they have not seen are no change for the others: %s", len(never), how, strings.Join(names, ", ")))
 }
 
 // Explains reports whether some test's D(T) explains a change to f (see
