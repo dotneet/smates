@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
@@ -138,38 +140,105 @@ func TestPlanMaxTimeFullRun(t *testing.T) {
 }
 
 func TestOverTime(t *testing.T) {
+	type ran struct {
+		suite     string
+		est, wall time.Duration
+	}
 	for _, tc := range []struct {
 		name    string
 		maxTime time.Duration
 		started bool
 		elapsed time.Duration
+		suite   string
 		est     time.Duration
 		unknown bool
+		ran     []ran // batches that ran before, through addRan
 		want    bool
-		ranEst  time.Duration // batches that ran: estimated ...
-		ranWall time.Duration // ... and taken
 	}{
-		{"no limit", 0, true, time.Hour, time.Hour, false, false, 0, 0},
-		{"the first batch always starts", time.Minute, false, 0, time.Hour, false, false, 0, 0},
-		{"the first batch of unknown duration starts", time.Minute, false, 0, 0, true, false, 0, 0},
-		{"fits", time.Minute, true, 20 * time.Second, 30 * time.Second, false, false, 0, 0},
-		{"would end after the limit", time.Minute, true, 40 * time.Second, 30 * time.Second, false, true, 0, 0},
-		{"the limit has passed", time.Minute, true, 2 * time.Minute, 0, false, true, 0, 0},
-		{"unknown duration within the first half", time.Hour, true, 29 * time.Minute, 0, true, false, 0, 0},
-		{"unknown duration after half the time", time.Hour, true, 30 * time.Minute, 0, true, true, 0, 0},
-		// The batches that ran took three times their estimate: 30s becomes 90s.
-		{"estimates scaled by what ran", 100 * time.Second, true, 20 * time.Second, 30 * time.Second, false, true, 10 * time.Second, 30 * time.Second},
-		{"faster than estimated: no scaling down", time.Minute, true, 20 * time.Second, 30 * time.Second, false, false, 30 * time.Second, 10 * time.Second},
+		{name: "no limit", started: true, elapsed: time.Hour, est: time.Hour},
+		{name: "the first batch always starts", maxTime: time.Minute, est: time.Hour},
+		{name: "the first batch of unknown duration starts", maxTime: time.Minute, unknown: true},
+		{name: "fits", maxTime: time.Minute, started: true, elapsed: 20 * time.Second, est: 30 * time.Second},
+		{name: "would end after the limit", maxTime: time.Minute, started: true, elapsed: 40 * time.Second, est: 30 * time.Second, want: true},
+		{name: "the limit has passed", maxTime: time.Minute, started: true, elapsed: 2 * time.Minute, want: true},
+		{name: "unknown duration within the first half", maxTime: time.Hour, started: true, elapsed: 29 * time.Minute, unknown: true},
+		{name: "unknown duration after half the time", maxTime: time.Hour, started: true, elapsed: 30 * time.Minute, unknown: true, want: true},
+		// A long batch that took 60s more than its 30s: the next 30s batch is counted
+		// as 90s, which does not fit.
+		{name: "a long batch that overran: estimates grow", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 90 * time.Second}}, want: true},
+		{name: "faster than estimated: no shrinking", maxTime: time.Minute, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 10 * time.Second}}},
+		{name: "faster than estimated still counts against an overrun", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 90 * time.Second}, {"go", 30 * time.Second, 10 * time.Second}}},
+		// Must start: a tiny batch whose startup took 3s says the next batch takes 3s
+		// more, not 30 times its estimate.
+		{name: "a tiny batch with startup overrun, then a long batch", maxTime: 8 * time.Minute, started: true, elapsed: 4 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 100 * time.Millisecond, 3 * time.Second}}},
+		{name: "the same suite: startup overrun, then a long batch", maxTime: 8 * time.Minute, started: true, elapsed: 4 * time.Second,
+			suite: "a", est: 30 * time.Second, ran: []ran{{"a", 100 * time.Millisecond, 3 * time.Second}}},
+		// A suite's own overrun wins over another suite's.
+		{name: "another suite's overrun does not apply once the suite has its own", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 10 * time.Second, 80 * time.Second}, {"b", 10 * time.Second, 10 * time.Second}}},
+		{name: "a suite's first batch takes the overrun of the others", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 10 * time.Second, 80 * time.Second}}, want: true},
+		{name: "batches of unknown duration do not count", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 0, 90 * time.Second}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}, ranEst: tc.ranEst, ranWall: tc.ranWall}
+			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}}
 			if tc.started {
 				c.started["go"] = []string{"pkg/a"}
 			}
-			if got := c.overTime(&batch{est: tc.est, unknown: tc.unknown}); got != tc.want {
+			for _, r := range tc.ran {
+				c.addRan(&batch{sr: &selector.Suite{Name: r.suite}, est: r.est}, r.wall)
+			}
+			b := &batch{est: tc.est, unknown: tc.unknown}
+			if tc.suite != "" {
+				b.sr = &selector.Suite{Name: tc.suite}
+			}
+			if got := c.overTime(b); got != tc.want {
 				t.Errorf("overTime = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A batch partly deferred by unmet requirements is re-estimated from the units it keeps,
+// so the overrun measured on them is not hidden by the estimate of units that never ran.
+func TestDeferUnmetReestimates(t *testing.T) {
+	sec := int64(1000)
+	sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Root: ".", Requires: []config.Requirement{
+		{File: "missing-file-for-the-test", Tests: []string{"db/**"}},
+	}}}, Tests: []*selector.Test{
+		{ID: "db/a.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 90 * sec},
+		{ID: "ui/b.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 10 * sec},
+	}}
+	res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr}}
+	st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: map[string]*state.Entry{
+		"db/a.test.ts": {Status: state.Pass, DurationMs: 90 * sec}, "ui/b.test.ts": {Status: state.Pass, DurationMs: 10 * sec},
+	}}}}
+	prioritize(res, st, nil)
+	repo := t.TempDir()
+	c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: repo}, log: io.Discard}, f: &runFlags{maxTime: time.Hour}, sel: &selection{res: res},
+		checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+	plan := c.plan()
+	if len(plan) != 1 || plan[0].est != 100*time.Second {
+		t.Fatalf("plan %+v", plan)
+	}
+	b := plan[0]
+	if c.deferUnmet(context.Background(), b) {
+		t.Fatal("everything deferred")
+	}
+	if !slices.Equal(b.units, []string{"ui/b.test.ts"}) || b.est != 10*time.Second {
+		t.Fatalf("kept %v est %s, want [ui/b.test.ts] 10s", b.units, b.est)
+	}
+	// The 10s that ran took 30s: a later 30s batch is counted as 50s.
+	c.addRan(b, 30*time.Second)
+	c.start, c.started = time.Now().Add(-40*time.Second), map[string][]string{"s": {"ui/b.test.ts"}}
+	c.f.maxTime = 85 * time.Second
+	if !c.overTime(&batch{sr: sr, est: 30 * time.Second}) {
+		t.Error("a later batch was not grown by the overrun of the units that ran")
 	}
 }
 

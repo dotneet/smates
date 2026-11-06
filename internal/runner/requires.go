@@ -35,6 +35,9 @@ func CheckRequirement(ctx context.Context, repoRoot string, s *Suite, r config.R
 		return ""
 	}
 	expand := func(v string) (string, error) {
+		if err := config.CheckVarRefs(v); err != nil {
+			return "", fmt.Errorf("%s: %v", v, err)
+		}
 		var unset []string
 		out := os.Expand(v, func(name string) string {
 			val := lookup(name)

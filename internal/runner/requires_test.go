@@ -50,6 +50,7 @@ func TestCheckRequirement(t *testing.T) {
 	t.Setenv("SMATES_REQ_SET", "yes")
 	t.Setenv("SMATES_REQ_EMPTY", "")
 	t.Setenv("SMATES_REQ_PORT", openPort)
+	t.Setenv("SMATES_REQ_HOST", "127.0.0.1")
 	t.Setenv("ANTHROPIC_API_KEY", "secret") // tests never get it, so it is not set for them
 	short := 300 * time.Millisecond
 	cases := []struct {
@@ -63,6 +64,9 @@ func TestCheckRequirement(t *testing.T) {
 		{"tcp from the environment", config.Requirement{TCP: "127.0.0.1:${SMATES_REQ_PORT}"}, nil, ""},
 		{"tcp from the suite env", config.Requirement{TCP: "$DB_ADDR"}, map[string]string{"DB_ADDR": open}, ""},
 		{"tcp unset variable", config.Requirement{TCP: "$SMATES_REQ_UNSET_X"}, nil, "$SMATES_REQ_UNSET_X not set"},
+		{"tcp set variables in both forms", config.Requirement{TCP: "${SMATES_REQ_HOST}:$SMATES_REQ_PORT"}, nil, ""},
+		// A form smates does not expand is reported as such, not as an unset variable.
+		{"tcp default form", config.Requirement{TCP: "${SMATES_REQ_HOST:-localhost}:" + openPort}, nil, "is not a variable reference"},
 		// Must keep the tests deferred: ":<port>" would dial the local machine, where
 		// something else may listen.
 		{"tcp unset host variable", config.Requirement{TCP: "${SMATES_REQ_UNSET_X}:" + openPort}, nil, "$SMATES_REQ_UNSET_X not set"},

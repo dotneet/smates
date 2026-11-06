@@ -909,13 +909,16 @@ pass: the units get no observation, keep their old entry and are selected again.
 
 `--max-time D` needs calls short enough to stop between. Each suite's calls (after the
 `--fail-fast` split) are cut into consecutive calls whose recorded durations add up to
-about D/4; a unit with no measured duration (no entry, or an entry without a pass, fail
-or skip, such as an outcome inferred from a failing batch) counts as the mean of the
-measured ones, and a suite with none measured stays one call of unknown length. A Go
+about D/4; a unit with no measured duration (no entry, an entry without a pass, fail
+or skip, such as an outcome inferred from a failing batch, or one recorded at 0 ms)
+counts as the mean of the measured ones, and a suite with none measured stays one call of unknown length. A Go
 package adds one second per call that builds it (`goPackageCost`): recorded durations
 are the test binaries' run time, without compiling and linking them. Before each call
-smates checks that it would end within D (elapsed time plus its estimate, scaled up by
-how far the calls that ran overran theirs); an unknown call starts only while less than
+smates checks that it would end within D (elapsed time plus its estimate plus the mean
+per-call overrun of the calls of its suite that ran, or of all calls before the suite's
+first: startup and builds are a cost per call, so a ratio taken from a short call would
+blow up a long one; a call that requires trimmed is re-estimated from the units it
+kept, so its overrun is measured on what ran); an unknown call starts only while less than
 D/2 is used. The first call always starts, so repeated capped runs make progress: what
 passed is deselected, and the units left out stay selected for a later run, in the
 usual order (no boost: new direct changes still come first).

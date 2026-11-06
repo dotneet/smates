@@ -269,10 +269,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 		batchStart := time.Now()
 		code, err := c.runBatch(ctx, i, b)
-		if !b.unknown && b.est > 0 {
-			c.ranEst += b.est
-			c.ranWall += time.Since(batchStart)
-		}
+		c.addRan(b, time.Since(batchStart))
 		var ce configError
 		if errors.As(err, &ce) {
 			return 1, err
@@ -441,9 +438,9 @@ type cycle struct {
 	interrupted bool
 	// capped: --max-time stopped the run.
 	capped bool
-	// ranEst and ranWall add up the estimates and the wall time of the batches of
-	// known duration that ran: overTime scales later estimates by how far off they were.
-	ranEst, ranWall time.Duration
+	// ran adds up the batches of known duration that ran, per suite name and for all
+	// of them ("\x00all"): overTime adds their mean overrun to later estimates.
+	batchTimes map[string]*ranTime
 	// unmet are the units (also in unstarted) left out because requirements they need
 	// are not met (suite -> units); unmetWhy the failed checks (suite -> descriptions);
 	// unmetErr the error the run reports for them; checked caches the checks of the run.

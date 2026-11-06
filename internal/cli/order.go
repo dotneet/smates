@@ -99,6 +99,9 @@ type batch struct {
 	// its suite has none recorded.
 	est     time.Duration
 	unknown bool
+	// estOf estimates a batch of units of this one as est does (nil without
+	// --max-time): deferUnmet re-estimates the units it keeps.
+	estOf func(units []string) time.Duration
 }
 
 // timeSlices is the number of batches a --max-time budget is cut into: a batch takes
@@ -232,6 +235,24 @@ func (c *cycle) plan() []*batch {
 			var split []*batch
 			for _, b := range parts {
 				split = append(split, splitByTime(b, est, c.f.maxTime/timeSlices, byID, pkgOf)...)
+			}
+			estOf := func(units []string) time.Duration {
+				var sum time.Duration
+				pkgs := map[string]bool{}
+				for _, u := range units {
+					d, _ := est(u)
+					sum += d
+					if pkgOf != nil && !pkgs[pkgOf(u)] {
+						pkgs[pkgOf(u)] = true
+						sum += goPackageCost
+					}
+				}
+				return sum
+			}
+			for _, b := range split {
+				if !b.unknown {
+					b.estOf = estOf
+				}
 			}
 			parts = split
 		}

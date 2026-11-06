@@ -109,14 +109,21 @@ the suite's `command` instead.
 `--max-time 8m` keeps a run within about eight minutes:
 
 - smates cuts each suite's tests into batches of about a quarter of the limit, by the
-  durations recorded for them. A test with no measured duration (never recorded, or
-  recorded without passing or failing) counts as the suite's mean. A suite with no
+  durations recorded for them. A test counts as measured when its last pass, failure
+  or skip was recorded with a duration above 0 ms; any other test (never recorded,
+  recorded with another outcome, or recorded at 0 ms) counts as the mean of the
+  suite's measured tests. A suite whose runner reports 0 ms for every test therefore
+  has no durations at all. A suite with no
   durations at all stays one batch, which starts only while less than half the limit is
   used. Each Go package a batch builds adds a second, as recorded durations leave out
   compiling and linking the test binaries.
 - Batches start in the usual order, the likeliest to fail first. Before each one,
-  smates checks whether it would end after the limit (its estimate grows when the
-  batches that ran took longer than theirs). If so, it starts nothing more.
+  smates checks whether it would end after the limit. Its estimate grows by how much
+  longer than estimated the batches that ran took, on average per batch (starting the
+  runner and building take about the same time for a short batch as for a long one):
+  the batches of the same suite, or of every suite before a suite's first batch. A
+  batch whose units are partly left out by unmet requirements is estimated by the units
+  that run. If it would end after the limit, smates starts nothing more.
 - The first batch always starts, so every run makes progress. A batch that is running
   is never stopped.
 - The tests left out are not run and not recorded. They stay selected, and a later run

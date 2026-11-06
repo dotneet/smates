@@ -208,7 +208,10 @@ The rest of the run goes on. Each entry has exactly one of `tcp`, `cmd`, `env` a
 
 `tcp` and `file` values may use `$VAR` and `${VAR}`, expanded from the environment and
 the suite's `env`. A variable they name that is not set (or empty) makes the requirement
-not met: `${DB_HOST}:5432` would otherwise dial this machine.
+not met: `${DB_HOST}:5432` would otherwise dial this machine. No other shell form is
+expanded: a default (`${DB_HOST:-localhost}`, `${DB_HOST-localhost}`), `${DB_HOST:?}`,
+`$1`, `$$` or a `$` on its own is a configuration error (exit 3), since it would read as
+a variable that is never set. Set the default in the suite's `env` instead.
 
 ```yaml
 requires:

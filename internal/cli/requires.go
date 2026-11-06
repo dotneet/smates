@@ -28,9 +28,11 @@ func (e requiresError) Unwrap() error { return e.error }
 // overTime reports whether batch b would end after --max-time, by the recorded
 // durations: the first batch that starts always runs, so every run makes progress; a
 // batch of unknown duration (its suite has none recorded) starts while less than half
-// the time is used. When the batches that ran took longer than estimated (building
-// test binaries, fixtures and startup are not in the recorded durations), b's estimate
-// grows by the same ratio.
+// the time is used. The batches that ran took longer than estimated by about the same
+// amount each (starting the runner, building test binaries, fixtures: time the
+// recorded durations leave out), so b's estimate grows by that per-batch overrun (see
+// batchOverrun), not by a ratio: a short batch whose startup took longer than its tests
+// says nothing about how much longer a long batch's tests take.
 func (c *cycle) overTime(b *batch) bool {
 	if c.f.maxTime <= 0 || countUnits(c.started) == 0 {
 		return false
@@ -39,11 +41,56 @@ func (c *cycle) overTime(b *batch) bool {
 	if b.unknown {
 		return elapsed >= c.f.maxTime/2
 	}
-	est := b.est
-	if c.ranEst > 0 && c.ranWall > c.ranEst {
-		est = time.Duration(float64(est) * float64(c.ranWall) / float64(c.ranEst))
+	return elapsed+b.est+c.batchOverrun(b) > c.f.maxTime
+}
+
+// ranTime adds up the batches of known duration that ran (of a suite, or of all of
+// them): how many, and how much longer than estimated they took in all (negative when
+// they were faster).
+type ranTime struct {
+	batches int
+	extra   time.Duration
+}
+
+// suiteName is the name of b's suite ("" when it has none).
+func (b *batch) suiteName() string {
+	if b.sr == nil {
+		return ""
 	}
-	return elapsed+est > c.f.maxTime
+	return b.sr.Name
+}
+
+// addRan notes that batch b, estimated at b.est, took wall.
+func (c *cycle) addRan(b *batch, wall time.Duration) {
+	if b.unknown || b.est <= 0 {
+		return
+	}
+	if c.batchTimes == nil {
+		c.batchTimes = map[string]*ranTime{}
+	}
+	for _, k := range []string{"\x00all", b.suiteName()} {
+		r := c.batchTimes[k]
+		if r == nil {
+			r = &ranTime{}
+			c.batchTimes[k] = r
+		}
+		r.batches++
+		r.extra += wall - b.est
+	}
+}
+
+// batchOverrun is how much longer than its estimate batch b is expected to take: the
+// mean overrun of the batches of its suite that ran, else of all batches that ran (a
+// suite's first batch); never negative.
+func (c *cycle) batchOverrun(b *batch) time.Duration {
+	r := c.batchTimes[b.suiteName()]
+	if r == nil || r.batches == 0 {
+		r = c.batchTimes["\x00all"]
+	}
+	if r == nil || r.batches == 0 || r.extra <= 0 {
+		return 0
+	}
+	return r.extra / time.Duration(r.batches)
 }
 
 // unitsFrom counts the units of batches.
@@ -107,6 +154,10 @@ func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 		}
 	}
 	b.units, b.full = keep, false
+	if b.estOf != nil {
+		// What runs is the units kept: the overrun of the batch is measured on them.
+		b.est = b.estOf(keep)
+	}
 	return len(keep) == 0
 }
 

@@ -307,6 +307,9 @@ func checkRequires(s *Suite) error {
 		case strings.TrimSpace(r.TCP+r.Cmd+r.Env+r.File) == "":
 			return fmt.Errorf("%s: %s is empty", at, r.Kind())
 		case r.TCP != "":
+			if err := CheckVarRefs(r.TCP); err != nil {
+				return fmt.Errorf("%s: tcp %q: %v", at, r.TCP, err)
+			}
 			if err := checkHostPort(r.TCP); err != nil {
 				return fmt.Errorf("%s: tcp %q: %v", at, r.TCP, err)
 			}
@@ -315,6 +318,9 @@ func checkRequires(s *Suite) error {
 				return fmt.Errorf("%s: env %q is not a variable name", at, r.Env)
 			}
 		case r.File != "":
+			if err := CheckVarRefs(r.File); err != nil {
+				return fmt.Errorf("%s: file %q: %v", at, r.File, err)
+			}
 			if strings.Contains(r.File, "\\") {
 				return fmt.Errorf("%s: file %q: use / as the path separator", at, r.File)
 			}
@@ -332,6 +338,44 @@ func checkRequires(s *Suite) error {
 		if err := checkGlobs(at+": tests", r.Tests); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// CheckVarRefs checks that every "$" of a tcp or file requirement starts a variable
+// reference smates expands: $NAME or ${NAME}. Shell forms it does not expand (a
+// default as in ${NAME:-x} or ${NAME-x}, ${NAME:?}, $1, $$, ${}) would be read as an
+// unset variable on every machine, leaving the suite's tests out for good.
+func CheckVarRefs(v string) error {
+	const forms = "write $NAME or ${NAME} (smates expands no defaults such as ${NAME:-x}, no $1 and no $$)"
+	for i := 0; i < len(v); i++ {
+		if v[i] != '$' {
+			continue
+		}
+		rest := v[i+1:]
+		if strings.HasPrefix(rest, "{") {
+			end := strings.IndexByte(rest, '}')
+			if end < 0 {
+				return fmt.Errorf("%q has no closing }: %s", v[i:], forms)
+			}
+			if body := rest[1:end]; !envNameRe.MatchString(body) {
+				return fmt.Errorf("${%s} is not a variable reference: %s", body, forms)
+			}
+			i += end + 1
+			continue
+		}
+		n := 0
+		for n < len(rest) && (rest[n] == '_' || rest[n] >= 'a' && rest[n] <= 'z' || rest[n] >= 'A' && rest[n] <= 'Z' || n > 0 && rest[n] >= '0' && rest[n] <= '9') {
+			n++
+		}
+		if n == 0 {
+			ref := "$"
+			if rest != "" {
+				ref += rest[:1]
+			}
+			return fmt.Errorf("%q is not a variable reference: %s", ref, forms)
+		}
+		i += n
 	}
 	return nil
 }

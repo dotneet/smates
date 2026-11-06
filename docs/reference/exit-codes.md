@@ -27,7 +27,8 @@ tests that did not run stay selected.
 - an invalid flag value (`--shard 5/4`, `--output verbose`, `--orphans maybe`, an
   unknown `--format`);
 - flags that cannot be combined (see [`smates run`](cli.md#smates-run));
-- `--add` naming a test that is not part of the run.
+- `--add` naming a test that is not part of the run;
+- `--base` naming no commit (in a clone that is not shallow).
 
 ## 3: configuration error
 
@@ -49,7 +50,10 @@ tests that did not run stay selected.
 - a state that cannot be saved (for example, the shared state's lock is held by another
   worktree's run);
 - a suite's [`requires`](configuration.md#requires) (a database, a browser) that are not
-  met here.
+  met here;
+- a `--base` missing from a shallow clone (fetch it: `fetch-depth: 0`, or
+  `git fetch origin <branch>`), or git failing to diff against the base or to list the
+  repository while selecting.
 
 When a runner cannot start, or requirements are not met, the other suites still run and
 are recorded. The suite's
@@ -76,6 +80,8 @@ could not be saved: exit 1 when tests failed, else 4.
 | `exit-code` written to `$GITHUB_OUTPUT` by `smates run` | Same as `exit_code`. |
 | `exit-code` output of the GitHub Action | The exit code of the smates command itself (`1` for failed tests). |
 | `smates hook claude-stop`, `codex-stop` | `0` (allow, or block with a JSON decision when tests fail) or `1` (smates' own error, shown to you instead of the agent). It never exits 2. Tests left out by unmet `requires` or the time limit are not an error: `0`, with one line on stderr. |
+| `smates hook run pre-push`, `pre-commit` (the git hooks) | `0` when the tests passed, or when the only tests left out need what this machine lacks (unmet `requires`: one line on stderr, the push or commit goes on, and they stay selected for CI); `1` for failing tests; otherwise the codes of `smates run`. |
+| `smates hook install`, `uninstall` | `0` when done; `2` for an invalid command line; `3` for a settings file smates cannot edit (not JSON, an unexpected layout: fix it by hand); `4` for other setup failures (a file that cannot be read or written, a hook script already there). |
 
 ## See also
 
