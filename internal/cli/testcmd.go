@@ -88,6 +88,39 @@ func timeoutLess(a, b string) bool {
 	return d(a) < d(b)
 }
 
+// over returns c with the flags it does not set taken from base: flags on the go test
+// command line win over those of GOFLAGS (base).
+func (c goCarry) over(base goCarry) goCarry {
+	if c.P == 0 {
+		c.P = base.P
+	}
+	if c.Tags == nil {
+		c.Tags = base.Tags
+	}
+	c.Race = c.Race || base.Race
+	if c.Timeout == "" {
+		c.Timeout = base.Timeout
+	}
+	return c
+}
+
+// envGoCarry reads the carried flags (see goCarry) of the GOFLAGS that env (the env:
+// of a workflow, job and step, in order) sets; ok is false when smates cannot read it
+// (a ${{ }} expression, a $VAR).
+func envGoCarry(env [][2]string) (c goCarry, ok bool) {
+	v := ""
+	for _, kv := range env {
+		if kv[0] == "GOFLAGS" {
+			v = kv[1]
+		}
+	}
+	if strings.ContainsAny(v, "$`") {
+		return goCarry{}, false
+	}
+	args, _ := runner.ParseGoTestArgs(strings.Fields(v), true)
+	return goCarryOf(args), true
+}
+
 // merge combines the flags of two commands running the same tests toward the safer
 // run: the lower -p, -race if either has it, the longer -timeout. Tags are kept only
 // when both agree: a tag can also leave files out (//go:build !integration), so a
@@ -202,6 +235,9 @@ type testCmdCheck struct {
 	// step's directory): it runs only the tests under them, which stepPatch accepts
 	// only when each is the root of a suite it covers.
 	paths []string
+	// inlineGoflags is set when the line sets GOFLAGS for the command (GOFLAGS=...
+	// go test): it replaces the GOFLAGS of the step's env:.
+	inlineGoflags bool
 }
 
 // Flags of the JavaScript and Python runners, and of the package managers running
@@ -315,7 +351,7 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 				return c
 			}
 		}
-		goflags = strings.Fields(lit)
+		goflags, c.inlineGoflags = strings.Fields(lit), true
 	}
 	var args []string
 	for i := at + len(mw); i < to; i++ {
@@ -337,7 +373,9 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 	switch {
 	case strings.HasPrefix(match, "go test"):
 		// GOFLAGS come first: the command line's flags win over them.
-		return checkGoTestArgs(append(goflags, args...))
+		gc := checkGoTestArgs(append(goflags, args...))
+		gc.inlineGoflags = c.inlineGoflags
+		return gc
 	case strings.Contains(match, "turbo"):
 		c.skip = "turbo runs the tests through its own task graph and cache (and --filter picks packages): smates does not replace it; switch to `uses: " + actSmates + "` with `args: --suite <name>` per package by hand"
 		return c

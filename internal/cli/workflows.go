@@ -205,11 +205,21 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				ts.Env = mergeEnv(ts.Env, mapGet(n, "env"))
 			}
 			check := checkTestCmd(cmd, match)
+			envFlags := true
 			if !check.other {
 				ts.Carry = check.carry
+				// The GOFLAGS of the env: apply to the command too (unless the line
+				// sets its own): its -tags are those the step runs with.
+				if strings.HasPrefix(match, "go test") && !check.inlineGoflags {
+					var base goCarry
+					base, envFlags = envGoCarry(ts.Env)
+					ts.Carry = ts.Carry.over(base)
+				}
 			}
 			ts.Paths = check.paths
-			ts.Full = check.full && state == "" && wdSkip == "" && plainTestCmd(match) && !strings.HasSuffix(cmd, "\\")
+			// A GOFLAGS smates cannot read leaves the step's -tags unknown: it does not
+			// vote on them (see carryGoFlags).
+			ts.Full = check.full && envFlags && state == "" && wdSkip == "" && plainTestCmd(match) && !strings.HasSuffix(cmd, "\\")
 			if ts.Dash < 0 {
 				ts.Dash = 0
 			}
@@ -282,7 +292,8 @@ func shellStateChange(line string) bool {
 	words := shellWords(line)
 	start := true
 	assignOnly := false
-	for _, w := range words {
+	for i := 0; i < len(words); i++ {
+		w := words[i]
 		if shellControlOp(w) {
 			if assignOnly {
 				return true
@@ -292,6 +303,17 @@ func shellStateChange(line string) bool {
 		}
 		if start {
 			start = false
+			if path.Base(w) == "set" {
+				j := i + 1
+				for j < len(words) && !shellControlOp(words[j]) {
+					j++
+				}
+				if !harmlessSet(words[i+1 : j]) {
+					return true
+				}
+				i = j - 1
+				continue
+			}
 			if slices.Contains(shellStateCommands, path.Base(w)) {
 				return true
 			}
@@ -306,31 +328,110 @@ func shellStateChange(line string) bool {
 	return assignOnly
 }
 
+// harmlessSetOptions are the shell options set may turn on or off without changing
+// the directory or environment the commands after it run in: error handling and
+// tracing (-e, -u, -x, -v, -o pipefail, ...).
+var harmlessSetOptions = map[string]bool{"errexit": true, "nounset": true, "pipefail": true, "xtrace": true, "verbose": true}
+
+// harmlessSet reports whether set with arguments args only changes harmless options
+// (harmlessSetOptions): set -euo pipefail, set -x, set +e. Anything else may change
+// what the tests see: -a (allexport) exports later assignments, positional parameters
+// (set -- a b, set a b) change "$@", and an option smates does not know counts too.
+func harmlessSet(args []string) bool {
+	letters := map[rune]string{'e': "errexit", 'u': "nounset", 'x': "xtrace", 'v': "verbose"}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) < 2 || a[0] != '-' && a[0] != '+' || a == "--" || a == "-" {
+			return false
+		}
+		for _, r := range a[1:] {
+			switch {
+			case r == 'o':
+				if i+1 < len(args) {
+					i++
+					if !harmlessSetOptions[args[i]] {
+						return false
+					}
+				}
+			case letters[r] != "":
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // matrixKeys returns the keys of a job's strategy.matrix (those of include entries
-// too), sorted; skip says why the smates step cannot get a cache-key per leg (a matrix
-// built from an expression).
+// too), sorted, as the properties of matrix that name a leg: a dimension whose values
+// are objects ({os: ubuntu-latest, go: "1.22"}) is named by their properties
+// (platform.go, platform.os), since GitHub turns an object into the string "Object" in
+// a key. skip says why the smates step cannot get a cache-key per leg: the matrix, its
+// include or a dimension comes from an expression, or a value is a list or an object
+// holding more than plain values.
 func matrixKeys(m *yaml.Node) (keys []string, skip string) {
+	const expr = "the job's matrix comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg"
 	if m == nil {
 		return nil, ""
 	}
 	if m.Kind != yaml.MappingNode {
-		return nil, "the job's matrix comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg"
+		return nil, expr
 	}
 	add := func(k string) {
 		if !slices.Contains(keys, k) {
 			keys = append(keys, k)
 		}
 	}
+	// value adds the keys naming value v of dimension k; ok is false when none can.
+	value := func(k string, v *yaml.Node) bool {
+		switch v.Kind {
+		case yaml.ScalarNode:
+			if strings.Contains(v.Value, "${{") {
+				return false // fromJSON(...) may make it a list or an object
+			}
+			add(k)
+			return true
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				if p := v.Content[j+1]; p.Kind != yaml.ScalarNode || strings.Contains(p.Value, "${{") {
+					return false
+				}
+				add(k + "." + v.Content[j].Value)
+			}
+			return true
+		}
+		return false
+	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
-		switch k, v := m.Content[i].Value, m.Content[i+1]; k {
+		k, v := m.Content[i].Value, m.Content[i+1]
+		switch k {
 		case "exclude":
+			continue
 		case "include":
+			if v.Kind != yaml.SequenceNode {
+				return nil, expr
+			}
 			for _, e := range v.Content {
+				if e.Kind != yaml.MappingNode {
+					return nil, expr
+				}
 				for j := 0; j+1 < len(e.Content); j += 2 {
-					add(e.Content[j].Value)
+					if !value(e.Content[j].Value, e.Content[j+1]) {
+						return nil, fmt.Sprintf("the value of %q in an include entry of the job's matrix is an expression, a list or a nested object: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", e.Content[j].Value)
+					}
 				}
 			}
-		default:
+			continue
+		}
+		if v.Kind != yaml.SequenceNode {
+			return nil, fmt.Sprintf("the job's matrix dimension %q comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", k)
+		}
+		for _, e := range v.Content {
+			if !value(k, e) {
+				return nil, fmt.Sprintf("the job's matrix dimension %q has a value that is an expression, a list or a nested object: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", k)
+			}
+		}
+		if len(v.Content) == 0 {
 			add(k)
 		}
 	}
@@ -526,6 +627,12 @@ func stepPatch(st testStep, suites []config.Suite) ([]string, string) {
 				return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes -%s, so the smates step would leave out tests the step runs: drop it from the command, or switch the step by hand", s.Name, s.Command, strings.TrimPrefix(a.Name, "test."))
 			}
 		}
+		// -tags can leave test files out (//go:build !fast) as well as add them: a
+		// suite command with tags the step does not pass may not compile tests the
+		// step runs. (A step with -tags of its own is checked below.)
+		if have := goCarryOf(parsed); len(have.Tags) > 0 && len(st.Carry.Tags) == 0 {
+			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes -tags %s, which the step does not: build constraints may leave out test files the step compiles, so the smates step could skip tests it runs; drop -tags from the command, or switch the step by hand", s.Name, s.Command, strings.Join(have.Tags, ","))
+		}
 		if st.Carry.empty() {
 			continue
 		}
@@ -574,7 +681,10 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite, def str
 			todo = append(todo, patched{st, names})
 		}
 	}
-	split := len(todo) > 1
+	// Smates steps the workflows already have count too: a step patched in next to
+	// one of them must not share its state (nor take its cache-key).
+	existing, existingKeys := existingSmatesSteps(root)
+	split := len(todo)+existing > 1
 	byFile := map[string][]patched{}
 	var order []string
 	for _, st := range todo {
@@ -596,6 +706,9 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite, def str
 	// whose key names the leg.
 	keyOf := map[string]string{} // job + suite set -> key
 	used := map[string]bool{}
+	for _, k := range existingKeys {
+		used[k] = true
+	}
 	cacheKey := func(st patched) string {
 		set := st.Job + "\x00" + strings.Join(st.names, "\x00")
 		key, ok := keyOf[set]

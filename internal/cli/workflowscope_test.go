@@ -332,6 +332,7 @@ func TestCarryGoFlags(t *testing.T) {
 		makefile map[string]string // dir -> Makefile
 		want     map[string]string // suite -> command
 		stderr   string
+		noStderr string
 	}{
 		{name: "-p 1 only in the workflow", steps: step("pkg/app", "go test -p 1 ./..."),
 			want: map[string]string{"app": "go test -p 1"}},
@@ -380,6 +381,27 @@ func TestCarryGoFlags(t *testing.T) {
 		{name: "a plain test target with tags is carried",
 			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags db ./...\n"},
 			want:     map[string]string{"app": "go test -tags db"}},
+		// The GOFLAGS of a step's env: apply to its go test: its -tags vote.
+		{name: "env GOFLAGS tags agree with the test target",
+			steps:    envStep("pkg/app", "-tags=integration", "go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		{name: "env GOFLAGS tags alone are carried",
+			steps: envStep("pkg/app", "-tags=integration -p=1", "go test ./..."),
+			want:  map[string]string{"app": "go test -p 1 -tags integration"}},
+		{name: "the command's own -tags win over env GOFLAGS",
+			steps:    envStep("pkg/app", "-tags=integration", "go test -tags db ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags db ./...\n"},
+			want:     map[string]string{"app": "go test -tags db"}, noStderr: "different -tags"},
+		// Must keep apart: an inline GOFLAGS replaces the env's, so the step runs untagged.
+		{name: "an inline GOFLAGS replaces env GOFLAGS",
+			steps:    envStep("pkg/app", "-tags=integration", "GOFLAGS=-count=1 go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{}, stderr: "different -tags"},
+		{name: "env GOFLAGS from an expression does not vote",
+			steps:    envStep("pkg/app", "${{ vars.GOFLAGS }}", "go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -403,8 +425,16 @@ func TestCarryGoFlags(t *testing.T) {
 			if !strings.Contains(errb.String(), c.stderr) {
 				t.Errorf("stderr lacks %q:\n%s", c.stderr, errb.String())
 			}
+			if c.noStderr != "" && strings.Contains(errb.String(), c.noStderr) {
+				t.Errorf("stderr has %q:\n%s", c.noStderr, errb.String())
+			}
 		})
 	}
+}
+
+// envStep is a workflow step running run in directory wd with GOFLAGS set in its env:.
+func envStep(wd, goflags, run string) string {
+	return "      - working-directory: " + wd + "\n        env:\n          GOFLAGS: " + yamlStr(goflags) + "\n        run: " + yamlStr(run) + "\n"
 }
 
 func TestMakefileShellWords(t *testing.T) {

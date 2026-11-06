@@ -21,6 +21,7 @@ func TestStepPatchNarrowing(t *testing.T) {
 		{Name: "app", Runner: "go", Root: "pkg/app"},
 		{Name: "short", Runner: "go", Root: "pkg/short", Command: "go test -short"},
 		{Name: "filtered", Runner: "go", Root: "pkg/filtered", Command: "go test -run TestUnit"},
+		{Name: "tagged", Runner: "go", Root: "pkg/tagged", Command: "go test -tags fast"},
 		{Name: "py", Runner: "pytest", Root: "tests"},
 		{Name: "svc", Runner: "pytest", Root: "svc"},
 	}
@@ -43,6 +44,18 @@ func TestStepPatchNarrowing(t *testing.T) {
 		{"bare assignment before the test line", "pkg/app", "DB_PORT=3307\ngo test ./...", "changes the directory or environment", ""},
 		{"cd inside a chain", "", "make deps && cd pkg/app\ngo test ./...", "changes the directory or environment", ""},
 		{"harmless command before the test line", "pkg/app", "go mod download\ngo test ./...", "", ""},
+		// Shell options for errors and tracing change neither directory nor environment.
+		{"set -euo pipefail before the test line", "pkg/app", "set -euo pipefail\ngo test ./...", "", ""},
+		{"set -x before the test line", "pkg/app", "set -x\ngo test ./...", "", ""},
+		{"set +e before the test line", "pkg/app", "set +e\ngo test ./...", "", ""},
+		{"set -o errexit -o pipefail before the test line", "pkg/app", "set -o errexit -o pipefail\ngo test ./...", "", ""},
+		{"set -e in a chain before the test line", "pkg/app", "set -e && go mod download\ngo test ./...", "", ""},
+		// Must refuse: these change what the commands after them see.
+		{"set -a before the test line", "pkg/app", "set -a\ngo test ./...", "changes the directory or environment", ""},
+		{"set -o allexport before the test line", "pkg/app", "set -eo allexport\ngo test ./...", "changes the directory or environment", ""},
+		{"set -- before the test line", "pkg/app", "set -- -race\ngo test ./...", "changes the directory or environment", ""},
+		{"set positional parameters before the test line", "pkg/app", "set a b\ngo test ./...", "changes the directory or environment", ""},
+		{"set with an unknown option before the test line", "pkg/app", "set -k\ngo test ./...", "changes the directory or environment", ""},
 		{"assignment for one command only", "pkg/app", "CGO_ENABLED=0 go build ./...\ngo test ./...", "", ""},
 		{"pytest path equal to the suite root", "", "pytest tests", "", "py"},
 		{"pytest path inside a suite", "", "pytest tests/unit", "it runs only the tests under tests/unit, inside suite", ""},
@@ -51,6 +64,13 @@ func TestStepPatchNarrowing(t *testing.T) {
 		{"suite command with -short", "pkg/short", "go test ./...", "passes -short", ""},
 		{"suite command with -run", "pkg/filtered", "go test ./...", "passes -run", ""},
 		{"plain suite command", "pkg/app", "go test ./...", "", ""},
+		// Must refuse: the suite's -tags may leave out files the step compiles
+		// (//go:build !fast).
+		{"suite command with -tags, plain step", "pkg/tagged", "go test ./...", "passes -tags fast", ""},
+		{"suite command with -tags, -count and -v step", "pkg/tagged", "go test -count=1 -v ./...", "passes -tags fast", ""},
+		{"suite command with -tags, inline GOFLAGS step", "pkg/tagged", "GOFLAGS=-count=1 go test ./...", "passes -tags fast", ""},
+		{"suite command with -tags, step with other tags", "pkg/tagged", "go test -tags slow ./...", "-tags slow, which the command", ""},
+		{"suite command with -tags, step with the same tags", "pkg/tagged", "go test -tags fast ./...", "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

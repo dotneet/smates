@@ -353,6 +353,49 @@ func smatesWorkflows(root string) []string {
 	return out
 }
 
+// existingSmatesSteps counts the smates steps the workflows of .github/workflows
+// already have (action steps and run: steps calling smates) and returns the cache-key
+// inputs their action steps set.
+func existingSmatesSteps(root string) (n int, keys []string) {
+	var files []string
+	for _, pat := range []string{"*.yml", "*.yaml"} {
+		m, _ := filepath.Glob(filepath.Join(root, ".github", "workflows", pat))
+		files = append(files, m...)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var doc yaml.Node
+		if yaml.Unmarshal(data, &doc) != nil || len(doc.Content) == 0 {
+			continue
+		}
+		jobs := mapGet(doc.Content[0], "jobs")
+		if jobs == nil || jobs.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i+1 < len(jobs.Content); i += 2 {
+			steps := mapGet(jobs.Content[i+1], "steps")
+			if steps == nil || steps.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, st := range steps.Content {
+				if u := mapGet(st, "uses"); u != nil && strings.HasPrefix(u.Value, "dotneet/smates@") {
+					n++
+					if k := mapGet(mapGet(st, "with"), "cache-key"); k != nil && k.Value != "" {
+						keys = append(keys, k.Value)
+					}
+				} else if r := mapGet(st, "run"); r != nil && smatesRunRe.MatchString(r.Value) {
+					n++
+				}
+			}
+		}
+	}
+	return n, keys
+}
+
 func smatesSeedGaps(root, def string) []seedGap {
 	var files []string
 	for _, pat := range []string{"*.yml", "*.yaml"} {

@@ -466,8 +466,12 @@ tests, proposes a patch (`--patch FILE` writes it) instead of adding a second wo
   per-module jobs keep separate state, and steps of one job running the same suites
   share it (so do jobs of the same name in different workflows, such as a push workflow
   seeding the pull request one). Two jobs running the same suites never share a key:
-  they may run in different environments (a runtime version, other services). A step
-  in a `strategy.matrix` job gets a key naming the leg (`web-${{ matrix.node }}`).
+  they may run in different environments (a runtime version, other services). The
+  smates steps the workflows already have count too: a single step switched next to an
+  existing smates job gets a key of its own, never one that job uses. A step
+  in a `strategy.matrix` job gets a key naming the leg (`web-${{ matrix.node }}`); a
+  dimension whose values are objects is named by their properties
+  (`${{ matrix.platform.os }}`), since GitHub turns an object into the string `Object`.
 - The step's `id`, `if`, `timeout-minutes`, `continue-on-error` and `env` are kept.
 
 It reports the steps it leaves alone, and why:
@@ -478,12 +482,12 @@ It reports the steps it leaves alone, and why:
 | names packages other than `./...` or `.`, or computes them (`$(go list ./... \| grep -v x)`, `"${packages[@]}"`) | smates selects among all of the suite's packages, which the job may not be set up for |
 | passes `-run`, `-list`, `-bench`, `-c` or `-skip` (single tests, compile-only checks) | it is not the plain unit run |
 | passes `-json` or `-coverprofile`, or pipes or redirects its output | another step may read the output |
-| uses `${{ matrix.* }}` in its command or working directory, or its job's matrix comes from an expression | smates cannot tell which suite each leg runs, or give each leg its own state: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
-| sets a variable on the test line (`DB_PORT=3307 go test ./...`, `env X=1 ...`), or an earlier line of its `run:` block changes the directory or environment (`cd`, `export`, `source`) | the smates step would lose it: move it to the step's `env:` or `working-directory:`. An inline `GOFLAGS` is read as `go test` flags instead (carried as below, or left alone like the same flags on the command) |
+| uses `${{ matrix.* }}` in its command or working directory, or its job's matrix (the whole matrix, its `include`, a dimension or a value) comes from an expression, or a matrix value is a list or a nested object | smates cannot tell which suite each leg runs, or give each leg its own state: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
+| sets a variable on the test line (`DB_PORT=3307 go test ./...`, `env X=1 ...`), or an earlier line of its `run:` block changes the directory or environment (`cd`, `export`, `source`, `set -a`, `set --`; `set -e`, `set -u`, `set -x` and `set -o pipefail` do not) | the smates step would lose it: move it to the step's `env:` or `working-directory:`. An inline `GOFLAGS` is read as `go test` flags instead (carried as below, or left alone like the same flags on the command) |
 | passes `-short`, names tests (`vitest run unit`, `jest unit`, a `pytest` path other than a suite's root) or packages (`-w`, `--workspace`, `--filter`) | it runs only some of the suite's tests |
 | runs `turbo run test` or `node --test` | found, so that no second workflow runs the same tests, but never replaced |
 | runs `go test` with `-p`, `-tags`, `-race` or `-timeout` that the suite's `command:` lacks | the action would run without them: add them to `smates.yml`, then rerun |
-| is a plain run, but the suite's `command:` passes `-short`, `-run` or `-skip` | the action would leave out tests the step runs |
+| is a plain run, but the suite's `command:` passes `-short`, `-run` or `-skip`, or `-tags` the step does not pass | the action would leave out tests the step runs (a tag can leave out files: `//go:build !fast`) |
 
 Without an existing `smates.yml`, `smates init` writes those `go test` flags into the
 suite's `command:` itself, so that `-p 1` for tests sharing a database applies to local
@@ -493,7 +497,9 @@ lowest `-p`, `-race`, the longest `-timeout`). `-tags` can also leave files out
 them: the steps the action can replace and the Makefile's `test` (or `test-unit`)
 target, one without `-tags` voting for none. They are taken only when all votes agree;
 a `test-integration` target or a step testing a few packages never puts its tags on the
-whole suite. The environment the steps set goes into
+whole suite. A `GOFLAGS` set in the `env:` of the workflow, job or step counts as flags
+of the step's `go test` (its own flags win, and a `GOFLAGS` on the test line replaces
+it); one smates cannot read (`${{ vars.GOFLAGS }}`) keeps the step from voting. The environment the steps set goes into
 `smates.yml` only as a comment: CI values such as ports and database names may not hold
 locally, and in CI the step's `env:` reaches the action anyway. Nothing is added to
 `env_ignore`.
