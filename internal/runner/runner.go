@@ -155,6 +155,9 @@ type Observation struct {
 	Inferred bool
 	// Failure is the failure output a runner plugin reported for the unit (bounded).
 	Failure string
+	// BuildFailed is set for a Go test function failed because its package did not
+	// build (no test ran), as opposed to a failure the test itself reported.
+	BuildFailed bool
 	// StaticOnly is set for a pass trust_browser_passes took from the reporter alone (a
 	// test that runs in a browser, untraced): its dependencies are the known ones, and
 	// recording keeps it unknown when those may not be all (see selector.Record).

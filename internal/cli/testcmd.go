@@ -194,14 +194,45 @@ type testCmdCheck struct {
 	skip  string
 	other bool
 	carry goCarry
+	// full is set for a go test command read in full that runs every test of the
+	// packages of its directory (./... or ., no filter): its -tags are those of the
+	// suite's unit tests (see carryGoFlags).
+	full bool
+	// paths are the directories a pytest command names (literal, relative to the
+	// step's directory): it runs only the tests under them, which stepPatch accepts
+	// only when each is the root of a suite it covers.
+	paths []string
 }
 
-// Flags of the JavaScript and Python runners that pick tests or write reports.
+// Flags of the JavaScript and Python runners, and of the package managers running
+// them, that pick tests or packages or write reports.
 var (
 	runnerSelectFlags = []string{"-t", "--testNamePattern", "--testPathPattern", "--testPathPatterns", "--testPathIgnorePatterns", "--project", "--selectProjects", "--shard", "--changed", "--changedSince", "--onlyChanged", "-o", "--related", "--findRelatedTests", "--dir", "--exclude",
-		"-k", "-m", "--lf", "--last-failed", "--ff", "--deselect", "--ignore", "--ignore-glob", "--pyargs"}
+		"-k", "-m", "--lf", "--last-failed", "--ff", "--deselect", "--ignore", "--ignore-glob", "--pyargs",
+		"-w", "--workspace", "--workspaces", "--filter", "-F", "--scope"}
 	runnerReportFlags = []string{"--junitxml", "--junit-xml", "--outputFile", "--json", "--outputJson", "--resultlog", "--report-log"}
+	// runnerValueFlags take the next word as their value (written without "="); any
+	// other word that is not a flag names tests to run (a file filter, a directory).
+	runnerValueFlags = []string{"--reporter", "--reporters", "--config", "-c", "--environment", "--testEnvironment", "--pool", "--maxWorkers", "--maxConcurrency", "--testTimeout", "--root", "--mode", "--color",
+		"-n", "--numprocesses", "--dist", "-p", "--rootdir", "--tb", "--maxfail", "--durations", "-W", "--cov-report", "--timeout", "--log-level", "--log-cli-level", "--import-mode", "--basetemp", "--capture", "-r"}
 )
+
+// envName reports whether s is a shell variable name.
+func envName(s string) bool {
+	if s == "" || s[0] >= '0' && s[0] <= '9' {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// goCarryFlags are the flags of an inline GOFLAGS the smates step can stand in for:
+// the carried ones (goCarry) and those that do not change what runs or passes.
+var goCarryFlags = []string{"p", "tags", "race", "timeout", "count", "v", "failfast", "shuffle"}
 
 // checkTestCmd reads the test command line cmd of a workflow step; match is the test
 // command testCmdRe found in it ("go test", "pnpm test", "turbo run test", ...).
@@ -250,6 +281,42 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 		}
 		return c
 	}
+	// Words before the test command: variable assignments (after an optional env)
+	// apply to it only, and the smates step replacing the step would lose them. An
+	// inline GOFLAGS is read as go test flags (carried, or refused like the command's
+	// own); any other variable must move to the step's env:, which the smates step keeps.
+	var goflags []string
+	pre := words[:at]
+	if len(pre) > 0 && path.Base(pre[0]) == "env" {
+		pre = pre[1:]
+		if len(pre) > 0 && strings.HasPrefix(pre[0], "-") {
+			c.skip = "it runs the tests through env " + pre[0] + ", which changes their environment: run them without it, then use the smates action"
+			return c
+		}
+	}
+	for _, w := range pre {
+		name, val, ok := strings.Cut(w, "=")
+		if !ok || !envName(name) {
+			continue
+		}
+		lit, literal := shellLiteral(val)
+		if name != "GOFLAGS" || !strings.HasPrefix(match, "go test") {
+			c.skip = "it sets " + name + " for the test command on its line, which the smates step would lose: move it to the step's env: (the smates step keeps it), then rerun"
+			return c
+		}
+		if !literal {
+			c.skip = "its GOFLAGS value comes from the environment: set the flags in the suite's command in smates.yml, then switch the step by hand"
+			return c
+		}
+		for _, f := range strings.Fields(lit) {
+			fname, _, _ := strings.Cut(strings.TrimLeft(f, "-"), "=")
+			if !slices.Contains(goCarryFlags, strings.TrimPrefix(fname, "test.")) && fname != "run" && fname != "skip" && fname != "short" {
+				c.skip = "it sets GOFLAGS=" + lit + " on its line, and smates does not carry " + f + " into the suite's command: move GOFLAGS to the step's env: (the smates step keeps it), then rerun"
+				return c
+			}
+		}
+		goflags = strings.Fields(lit)
+	}
 	var args []string
 	for i := at + len(mw); i < to; i++ {
 		w := words[i]
@@ -269,7 +336,8 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 	}
 	switch {
 	case strings.HasPrefix(match, "go test"):
-		return checkGoTestArgs(args)
+		// GOFLAGS come first: the command line's flags win over them.
+		return checkGoTestArgs(append(goflags, args...))
 	case strings.Contains(match, "turbo"):
 		c.skip = "turbo runs the tests through its own task graph and cache (and --filter picks packages): smates does not replace it; switch to `uses: " + actSmates + "` with `args: --suite <name>` per package by hand"
 		return c
@@ -279,20 +347,28 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 	}
 	for i := 0; i < len(args); i++ {
 		w := args[i]
-		name, _, _ := strings.Cut(w, "=")
+		name, _, hasValue := strings.Cut(w, "=")
 		switch {
 		case w == "--" || w == "run" && i == 0:
 		case slices.Contains(runnerSelectFlags, name):
-			c.skip = "it passes " + name + ", which picks the tests to run: smates selects among all of the suite's tests"
+			c.skip = "it passes " + name + ", which picks the tests (or packages) to run: smates selects among all of the suite's tests"
 			return c
 		case slices.Contains(runnerReportFlags, name):
 			c.skip = "it passes " + name + ", which writes a report a later step may read: drop it if nothing does, then rerun"
 			return c
+		case slices.Contains(runnerValueFlags, name) && !hasValue:
+			i++ // its value
 		case strings.HasPrefix(w, "-"):
 		default:
+			// A word naming tests: vitest and jest take it as a filter on file paths
+			// (matching anywhere in them), pytest as a path to collect from.
 			lit, ok := shellLiteral(w)
-			if !ok || strings.ContainsAny(lit, "/*?") {
-				c.skip = "it runs only the tests under " + w + ": smates selects among all of the suite's tests; switch it by hand if those are the suite's tests"
+			switch {
+			case ok && lit == ".":
+			case ok && match == "pytest" && !strings.ContainsAny(lit, "*?[:"):
+				c.paths = append(c.paths, path.Clean(lit))
+			default:
+				c.skip = "it runs only the tests matching " + w + ": smates selects among all of the suite's tests; switch it by hand if those are the suite's tests"
 				return c
 			}
 		}
@@ -348,6 +424,8 @@ func checkGoTestArgs(words []string) testCmdCheck {
 			note(&other, "it passes -"+name+": it builds test binaries instead of running the tests; smates does not replace it")
 		case name == "skip":
 			note(&skip, "it passes -skip, which leaves tests out: smates selects among all of the suite's tests")
+		case name == "short":
+			note(&skip, "it passes -short, which skips the long tests: smates would run them; switch the step by hand if its job can run them (or add -short to the suite's command)")
 		case name == "json":
 			note(&skip, "its -json output feeds another tool (a report, or a sharding pipeline): smates does not replace it")
 		case name == "coverprofile" || strings.HasSuffix(name, "profile") || name == "trace" || name == "outputdir":
@@ -357,6 +435,7 @@ func checkGoTestArgs(words []string) testCmdCheck {
 		}
 	}
 	c.carry = goCarryOf(known)
+	c.full = other == "" && skip == "" && len(known) == len(args)
 	switch {
 	case other != "":
 		c.skip, c.other = other, true

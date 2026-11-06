@@ -78,13 +78,17 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stderr, "smates: %s\n", n)
 	}
 	mk := makefileHints(repo.Root, suites)
-	for _, h := range mk {
-		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
-	}
 	// The workflows running the tests tell which go test flags a suite needs (-p 1 for a
 	// shared database) and what environment they set.
 	wfSteps := workflowTestSteps(repo.Root)
-	carried := carryGoFlags(suites, mk, wfSteps, stderr)
+	carried := carryGoFlags(suites, mk, makeGoVotes(repo.Root, suites), wfSteps, stderr)
+	for _, h := range mk {
+		if c := carried[h.Suite]; c != "" {
+			fmt.Fprintf(stderr, "smates: %s target %q runs %q; the %s suite's command in smates.yml keeps %s, but smates runs the runner itself, so its other flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite, c)
+		} else {
+			fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
+		}
+	}
 	doc := renderConfig(suites, configHints(mk, workflowEnvHints(wfSteps, suites), carried))
 	// --force overwrites the config file smates reads, whichever of its names it has
 	// (a new smates.yml next to a .smates.yml would shadow it).

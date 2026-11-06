@@ -444,3 +444,26 @@ func TestFuncDepsNonTestFiles(t *testing.T) {
 		}
 	}
 }
+
+// A package that did not build fails its functions as a build failure; a function that
+// ran and failed did not fail for that reason (a sharded shadow run tells the two
+// apart, see Observation.BuildFailed).
+func TestGoOutcomesBuildFailed(t *testing.T) {
+	for _, c := range []struct {
+		name, out string
+		want      bool
+	}{
+		{"build failed", "# m/a\na.go:3:2: undefined: x\nFAIL\tm/a [build failed]\n", true},
+		{"build failed, json", `{"Action":"fail","Package":"m/a","FailedBuild":"m/a"}` + "\n", true},
+		{"assertion", "=== RUN   TestA\n--- FAIL: TestA (0.00s)\nFAIL\nFAIL\tm/a\t0.01s\n", false},
+		{"passed", "ok  \tm/a\t0.01s\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &goOutcomes{}
+			feed(g, c.out)
+			if got := g.buildFailed("m/a"); got != c.want {
+				t.Errorf("buildFailed %v, want %v", got, c.want)
+			}
+		})
+	}
+}

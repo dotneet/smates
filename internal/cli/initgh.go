@@ -274,7 +274,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 name: tests
 on:
   push:
-    branches: [` + yamlFlowStr(repo.DefaultBranch()) + `]
+    branches: [` + yamlFlowStr(defaultBranch(repo)) + `]
   pull_request:
 
 jobs:
@@ -344,10 +344,18 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 	}
 	// Workflows that already run smates, but only on pull requests, get the triggers
 	// that record the state their runs start from.
-	def := repo.DefaultBranch()
+	def := defaultBranch(repo)
 	var seedOnly []string
 	for _, g := range smatesSeedGaps(repo.Root, def) {
 		seedOnly = append(seedOnly, g.File)
+	}
+	// A workflow already running smates (on pull requests only, say) would run the same
+	// tests as a new one, under the same default cache-key.
+	var running []string
+	for _, f := range smatesWorkflows(repo.Root) {
+		if f != wfRel {
+			running = append(running, f)
+		}
 	}
 	if len(steps) > 0 || len(seedOnly) > 0 {
 		if len(steps) > 0 {
@@ -391,6 +399,11 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 			res.Skipped = "existing workflows already run the tests: apply the patch instead (or rerun with --force)"
 			return res, nil
 		}
+	}
+	if len(running) > 0 && !force {
+		fmt.Fprintf(stderr, "smates: not writing %s: %s already runs smates, and a second workflow would run the same tests again (use --force to write it anyway)\n", wfRel, strings.Join(running, ", "))
+		res.Skipped = strings.Join(running, ", ") + " already runs smates (rerun with --force to write it anyway)"
+		return res, nil
 	}
 	if _, err := os.Stat(wf); err == nil && !force {
 		fmt.Fprintf(stderr, "smates: %s exists, not overwritten (use --force)\n", wfRel)

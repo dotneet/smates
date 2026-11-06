@@ -815,8 +815,10 @@ With `--shard I/N` a shadow run runs every unit its shard owns (`cycle.units`), 
 or not, so the shards of one run together run every unit once. `checkShadow` judges only
 owned units, against the selection before `applyShard` (`cycle.preShard`): a failure the
 runner reports for a unit another shard owns is never an escape here, since its owner
-reports it. A Go function whose package's selected compile check another shard owns is a
-possible escape when it fails: only that shard sees whether the package builds.
+reports it. A Go function failed because its package did not build
+(`Observation.BuildFailed`, from go test's build failure lines) while its package's
+selected compile check is another shard's is a possible escape: that shard reports the
+build failure. A function that ran and failed is an escape.
 
 ### Run order and `--fail-fast`
 
@@ -920,8 +922,10 @@ when nothing is selected, else the recorded duration of the selected units over
 `--shard-time`, rounded up and kept within `1..N`. A selected unit without a duration
 weighs its suite's median; a suite with selected units and no duration at all yields `N`
 (nothing to size by). On a full-run branch it sizes for every unit, as the shards'
-`smates run` will run them all. The count never changes what runs, only how many jobs
-share it, so a wrong estimate costs time, not coverage. The `shard-matrix` output carries
+`smates run` will run them all. For selective legs the count never changes what runs,
+only how many jobs share it, so a wrong estimate costs time, not coverage. It is sized
+for the selection, so it must not feed `run --shadow` legs, which run every unit their
+shard owns: with nothing selected it is `0`, and no shadow leg would run. The `shard-matrix` output carries
 the count in each value (`"2/3"`) so legs cannot disagree on it. Balancing shards by
 duration (instead of the hash) is not done: it would need a plan file every shard reads,
 and a single point of failure where the hash needs none.

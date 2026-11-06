@@ -362,9 +362,18 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 				fix(doctorFix{Config: &configFix{Key: "suites." + suiteOf(cs, e.ReadBy) + ".env." + e.Name, Value: e.Example}})
 		}
 	}
-	for _, st := range workflowTestSteps(p.repo.Root) {
+	wfSteps := workflowTestSteps(p.repo.Root)
+	patchSuites := cs
+	if p.cfg.Path == "" {
+		// Without smates.yml, `smates init --github --patch` writes one first, whose
+		// suite commands keep the go test flags the workflows and Makefiles pass: judge
+		// the steps against those commands.
+		patchSuites = slices.Clone(cs)
+		carryGoFlags(patchSuites, makefileHints(p.repo.Root, patchSuites), makeGoVotes(p.repo.Root, patchSuites), wfSteps, io.Discard)
+	}
+	for _, st := range wfSteps {
 		subject := st.File + ":" + st.Job + ":" + st.Step
-		if names, why := stepPatch(st, cs); why != "" && (st.Skip != "" || len(names) > 0) {
+		if names, why := stepPatch(st, patchSuites); why != "" && (st.Skip != "" || len(names) > 0) {
 			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, why).about(subject).
 				fix(doctorFix{Doc: docURL + "ci/github-actions/"})
 			continue
@@ -372,7 +381,7 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 		r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates).about(subject).
 			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/"})
 	}
-	def := p.repo.DefaultBranch()
+	def := defaultBranch(p.repo)
 	for _, g := range smatesSeedGaps(p.repo.Root, def) {
 		keys := ""
 		if len(g.Keys) > 1 || g.Keys[0] != "" {

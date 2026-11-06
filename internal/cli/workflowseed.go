@@ -157,6 +157,26 @@ func branchMatch(pat, branch string) bool {
 	return err == nil && re.MatchString(branch)
 }
 
+// flowFilter renders a path filter of an event (paths: or paths-ignore:, key) as one
+// line, from its value v: a list of strings or one string; ok is false for anything
+// else.
+func flowFilter(key string, v *yaml.Node) (string, bool) {
+	switch v.Kind {
+	case yaml.ScalarNode:
+		return key + ": [" + yamlFlowStr(v.Value) + "]", true
+	case yaml.SequenceNode:
+		var items []string
+		for _, n := range v.Content {
+			if n.Kind != yaml.ScalarNode {
+				return "", false
+			}
+			items = append(items, yamlFlowStr(n.Value))
+		}
+		return key + ": [" + strings.Join(items, ", ") + "]", true
+	}
+	return "", false
+}
+
 // lineEdit replaces lines From..To (1-based, inclusive) of a file; To = From-1 inserts
 // before line From.
 type lineEdit struct {
@@ -219,6 +239,17 @@ func seedPatch(file string, data []byte, def string) (lineEdit, []string, bool) 
 			for j := 0; j+1 < len(prCfg.Content); j += 2 {
 				k := prCfg.Content[j]
 				if k.Value != "paths" && k.Value != "paths-ignore" {
+					continue
+				}
+				if prCfg.Style&yaml.FlowStyle != 0 {
+					// pull_request: {paths: [...]}: its lines hold the event key too, so
+					// the filter is written from the nodes.
+					l, ok := flowFilter(k.Value, prCfg.Content[j+1])
+					if !ok {
+						notes[0] += "; add `push: branches: [" + def + "]` with the pull request's " + k.Value + " and a nightly `schedule:` to its on: by hand"
+						return lineEdit{}, notes, false
+					}
+					add = append(add, subInd+l)
 					continue
 				}
 				from, to := k.Line, end
@@ -296,6 +327,32 @@ type seedGap struct {
 
 // smatesSeedGaps finds the workflows of .github/workflows that run smates only on pull
 // requests with nothing seeding their state.
+// smatesWorkflows lists the workflows (repo-relative) with a step using the smates
+// action.
+func smatesWorkflows(root string) []string {
+	var files []string
+	for _, pat := range []string{"*.yml", "*.yaml"} {
+		m, _ := filepath.Glob(filepath.Join(root, ".github", "workflows", pat))
+		files = append(files, m...)
+	}
+	sort.Strings(files)
+	var out []string
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var doc yaml.Node
+		if yaml.Unmarshal(data, &doc) != nil || len(doc.Content) == 0 {
+			continue
+		}
+		if len(smatesCacheKeys(doc.Content[0])) > 0 {
+			out = append(out, ".github/workflows/"+filepath.Base(f))
+		}
+	}
+	return out
+}
+
 func smatesSeedGaps(root, def string) []seedGap {
 	var files []string
 	for _, pat := range []string{"*.yml", "*.yaml"} {

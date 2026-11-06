@@ -60,6 +60,13 @@ func detectCI() ciInfo {
 	return ciInfo{}
 }
 
+// defaultBranch is the repository's default branch: the CI's when it says (a CI
+// checkout often has no origin/HEAD, nor a main or master ref, for git to tell), else
+// git's.
+func defaultBranch(repo *gitx.Repo) string {
+	return first(detectCI().DefaultBranch, repo.DefaultBranch())
+}
+
 func first(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {

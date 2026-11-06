@@ -70,7 +70,9 @@ inputs:
   cache-key:
     description: >-
       Extra component for the state cache key. Set it when several jobs of one workflow
-      run smates on the same OS with different tests (matrix entries, shards).
+      run smates on the same OS with different tests (matrix entries, a fixed number of
+      shards). Jobs a plan job selects for (shards sized with --max-shards, suites gated
+      per job) share one key with the plan instead, with a job merging their states.
     required: false
     default: ''
   state-path:

@@ -249,6 +249,14 @@ func (g *goOutcomes) event(ev goTestEvent) {
 	}
 }
 
+// buildFailed reports whether package ip failed to build (none of its tests ran).
+func (g *goOutcomes) buildFailed(ip string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p := g.pkgs[ip]
+	return p != nil && ip != "" && p.build
+}
+
 // status returns the outcome of test name in package ip: reported for the test
 // itself, or derived from the package (its passing summary covers every test; a failed
 // build fails them all; otherwise it is unknown and inferred). ran is false when the

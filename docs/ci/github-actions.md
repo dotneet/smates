@@ -83,7 +83,7 @@ state.
 | `openai-api-key` | | Same, for OpenAI (`OPENAI_API_KEY`). |
 | `openrouter-api-key` | | Same, for OpenRouter (`OPENROUTER_API_KEY`). With several keys, `agent.provider` in `smates.yml` picks one (default: Anthropic, then OpenAI, then OpenRouter). |
 | `cache` | `true` | Restore/save state with the Actions cache. `false` if you store it yourself. |
-| `cache-key` | | Extra cache key component, for jobs that run different tests on the same OS (matrix entries, shards). |
+| `cache-key` | | Extra cache key component, for jobs that run different tests on the same OS (matrix entries, a fixed number of shards). Jobs a plan job selects for (sized shards, suites gated per job) share one key with it instead, see [Size the shards to the selection](#size-the-shards-to-the-selection). |
 | `state-path` | `.smates` | State directory, relative to `working-directory`. Must match `state` in `smates.yml`. |
 | `comment` | `false` | `true` posts the summary as a pull request comment, updated in place ([below](#pull-request-comment)). |
 | `comment-key` | | Separates the comments of several smates jobs in one pull request. |
@@ -197,6 +197,7 @@ jobs:
         uses: dotneet/smates@vX.Y.Z
         with:
           command: select
+          cache-key: suites        # the state the suite jobs record
   api:
     needs: plan
     if: >-
@@ -204,7 +205,36 @@ jobs:
       fromJSON(needs.plan.outputs.suites || '{}')['api'].skip != true) }}
     runs-on: ubuntu-latest
     steps:
-      # ... then the smates step with args: --suite api and cache-key: api
+      - uses: actions/checkout@v5
+      # ... toolchains, services
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --suite api
+          cache-key: suites
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smates-state-api
+          path: .smates/state.json.gz
+          include-hidden-files: true
+          if-no-files-found: ignore
+  # web: the same with --suite web and the artifact smates-state-web.
+  # Combine what the suite jobs recorded, so the next plan sees all of it.
+  merge-state:
+    needs: [api, web]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smates-state-*
+          path: ${{ runner.temp }}/suite-states
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          command: state
+          args: merge ${{ runner.temp }}/suite-states/*/state.json.gz
+          cache-key: suites
 ```
 
 Skip a job only when the output explicitly says its suite selected nothing:
@@ -217,6 +247,15 @@ Skip a job only when the output explicitly says its suite selected nothing:
   `!cancelled()` so that the job is not skipped along with it). smates exits 2 to 4 on
   its own errors (configuration, environment), and then the outputs say nothing.
 - `|| '{}'` keeps `fromJSON` from failing on an empty output.
+- **One state for the plan and the suite jobs.** The plan selects from the state the
+  suite jobs record, so they all share one `cache-key`, and `merge-state` combines
+  what each suite job saved, as for [sized shards](#size-the-shards-to-the-selection).
+  With a `cache-key` of its own (or none, while the suite jobs have theirs) the plan
+  restores no recorded run: it selects by static analysis against the base revision,
+  which does not see what the tests read at run time, nor re-select the tests that
+  failed last time, and can skip a suite that its own job would run. If `merge-state`
+  does not run, the next plan restores one suite job's state, in which the other
+  suites' tests are unrecorded: they are then selected against the base, or run.
 
 smates selects across suites: a change to a shared package selects the tests of every
 suite that depends on it. This usually runs more than hand-written path filters, which
@@ -251,8 +290,9 @@ the required check, have it accept a skipped job only when the plan said so:
 `--shard I/N` assigns every test to a shard by a stable hash
 of its suite and ID, so for a given `N` a test always lands in the same shard and every
 shard agrees, whatever state each one restored. Which shard owns a test depends on `N`,
-so all shards of one run must use the same `N` (a matrix does). Give each shard its own
-`cache-key`, so jobs do not overwrite each other's state:
+so all shards of one run must use the same `N` (a matrix does). With a fixed shard count,
+give each shard its own `cache-key`, so jobs do not overwrite each other's state (shards
+sized by a plan job share one key instead, [below](#size-the-shards-to-the-selection)):
 
 ```yaml
     strategy:
@@ -286,7 +326,10 @@ build of the default branch (or a `full_run_branches` branch), where `smates run
 every test, the count is sized for all of them.
 
 The count only decides how many jobs share the selection: every selected test still runs
-in one of them. Ownership depends on the count, so the matrix values carry it
+in one of them. It is sized for the selection, so do not feed it to `--shadow` legs,
+which run every test their shard owns: on a change that selects nothing it is `0` and no
+shadow leg runs, which is where an escape would hide. Give sharded shadow runs a fixed
+matrix (`--shadow --shard ${{ matrix.shard }}/4`). Ownership depends on the count, so the matrix values carry it
 (`"1/3"`), and every shard of a run uses the same one.
 
 ```yaml
@@ -389,8 +432,9 @@ jobs:
 
 A single smates step covers every suite of the repository (`smates.yml` at the
 repository root lists them). To split suites across jobs, give each job
-`args: --suite <name>` and a distinct `cache-key`. Each job then selects what a single
-step would select for its suites:
+`args: --suite <name>` and a distinct `cache-key` (or, when a plan job gates them, one
+shared key, see [Gate jobs per suite](#gate-jobs-per-suite)). Each job then selects what
+a single step would select for its suites:
 
 - a change another suite's tests depend on is not an orphan in it;
 - nor is a change under the root of a suite the job leaves out (the job running that
@@ -415,7 +459,11 @@ tests, proposes a patch (`--patch FILE` writes it) instead of adding a second wo
   `defaults.run.working-directory`). The action's `working-directory` is not set:
   smates reads `smates.yml` and keeps its state at the repository root.
 - When several steps are switched, each gets a `cache-key` named after its suites:
-  per-module jobs keep separate state, and steps running the same suites share it.
+  per-module jobs keep separate state, and steps of one job running the same suites
+  share it (so do jobs of the same name in different workflows, such as a push workflow
+  seeding the pull request one). Two jobs running the same suites never share a key:
+  they may run in different environments (a runtime version, other services). A step
+  in a `strategy.matrix` job gets a key naming the leg (`web-${{ matrix.node }}`).
 - The step's `id`, `if`, `timeout-minutes`, `continue-on-error` and `env` are kept.
 
 It reports the steps it leaves alone, and why:
@@ -426,15 +474,22 @@ It reports the steps it leaves alone, and why:
 | names packages other than `./...` or `.`, or computes them (`$(go list ./... \| grep -v x)`, `"${packages[@]}"`) | smates selects among all of the suite's packages, which the job may not be set up for |
 | passes `-run`, `-list`, `-bench`, `-c` or `-skip` (single tests, compile-only checks) | it is not the plain unit run |
 | passes `-json` or `-coverprofile`, or pipes or redirects its output | another step may read the output |
-| uses `${{ matrix.* }}` in its command or working directory | smates cannot tell which suite each leg runs: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
+| uses `${{ matrix.* }}` in its command or working directory, or its job's matrix comes from an expression | smates cannot tell which suite each leg runs, or give each leg its own state: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
+| sets a variable on the test line (`DB_PORT=3307 go test ./...`, `env X=1 ...`), or an earlier line of its `run:` block changes the directory or environment (`cd`, `export`, `source`) | the smates step would lose it: move it to the step's `env:` or `working-directory:`. An inline `GOFLAGS` is read as `go test` flags instead (carried as below, or left alone like the same flags on the command) |
+| passes `-short`, names tests (`vitest run unit`, `jest unit`, a `pytest` path other than a suite's root) or packages (`-w`, `--workspace`, `--filter`) | it runs only some of the suite's tests |
 | runs `turbo run test` or `node --test` | found, so that no second workflow runs the same tests, but never replaced |
 | runs `go test` with `-p`, `-tags`, `-race` or `-timeout` that the suite's `command:` lacks | the action would run without them: add them to `smates.yml`, then rerun |
+| is a plain run, but the suite's `command:` passes `-short`, `-run` or `-skip` | the action would leave out tests the step runs |
 
 Without an existing `smates.yml`, `smates init` writes those `go test` flags into the
 suite's `command:` itself, so that `-p 1` for tests sharing a database applies to local
 runs too. Flags from several steps or the Makefile combine toward the safer run (the
-lowest `-p`, `-race`, the longest `-timeout`); `-tags` is taken only when they all
-agree, since a tag can also leave files out. The environment the steps set goes into
+lowest `-p`, `-race`, the longest `-timeout`). `-tags` can also leave files out
+(`//go:build !integration`), so only the runs of all of a suite's unit tests vote on
+them: the steps the action can replace and the Makefile's `test` (or `test-unit`)
+target, one without `-tags` voting for none. They are taken only when all votes agree;
+a `test-integration` target or a step testing a few packages never puts its tags on the
+whole suite. The environment the steps set goes into
 `smates.yml` only as a comment: CI values such as ports and database names may not hold
 locally, and in CI the step's `env:` reaches the action anyway. Nothing is added to
 `env_ignore`.
@@ -453,7 +508,7 @@ It works with shards: `args: --shadow --shard ${{ matrix.shard }}/4` runs every 
 the shard owns, selected or not, and reports as escapes the failing tests of its own
 share that the selection (of the whole run) would have skipped. Together the shards run
 every test once, and an escape is reported only by the shard that owns the test.
-`smates stats` adds up the escapes of the shards' records.
+`smates stats` counts the shards as one shadow run and adds up their escapes.
 
 ### Seed the state { #seed-the-state }
 

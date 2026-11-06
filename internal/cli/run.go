@@ -783,7 +783,8 @@ func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
 // before sharding (preShard). A unit another shard owns is that shard's to report,
 // whatever the runner said about it here. A function whose package's selected compile
 // check another shard owns may have failed because the package does not build, which
-// only that shard sees: its failure is a possible escape.
+// that shard reports: such a failure (the package did not build here either) is a
+// possible escape. A function that ran and failed on its own is an escape.
 func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
 	owned := func(t *selector.Test) bool { return !c.shadowShard() || t.Shard == c.f.shardI }
 	selected := func(t *selector.Test) bool { return t.Selected || c.preShard[sr.Name][t.ID] }
@@ -810,7 +811,7 @@ func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observati
 		if isFunc && brokenBuild[dir] {
 			continue
 		}
-		if o.Inferred || isFunc && elsewhere[dir] {
+		if o.Inferred || isFunc && elsewhere[dir] && o.BuildFailed {
 			c.possible = append(c.possible, sr.Name+": "+t.ID)
 		} else {
 			c.escapes = append(c.escapes, sr.Name+": "+t.ID)
@@ -1279,11 +1280,13 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 1, err
 	}
 	all := f.all
-	if f.maxShards > 0 && !all {
-		// The shards are sized for what `smates run` will run in them: everything where
-		// it runs everything by default (the default branch on CI).
+	if !all {
+		// The selection (its skip and suites outputs, which gate jobs, and the shard
+		// count) is what `smates run` will run: everything where it runs everything by
+		// default (the default branch on CI), or a gated job would skip the full run
+		// that refreshes the state.
 		if full, branch := fullRunBranch(p.ci, p.repo, p.cfg.FullRunBranches); full {
-			p.logf("on %s (%s): sizing the shards for a full run, as `smates run` runs every test there", branch, p.ci.Name)
+			p.logf("on %s (%s): selecting every test, as `smates run` runs every test there", branch, p.ci.Name)
 			all = true
 		}
 	}

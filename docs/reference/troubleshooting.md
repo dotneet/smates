@@ -131,8 +131,11 @@ The state was probably not restored, so every test is new.
 
 - **GitHub Actions:** open the "Restore smates state" step log and check for a cache
   hit. `state-path` must match `state` in `smates.yml`. Jobs that run different tests
-  (matrix entries, shards, suites split across jobs) each need their own `cache-key`.
-  See [GitHub Actions](../ci/github-actions.md).
+  (matrix entries, a fixed number of shards, suites split across jobs) each need their
+  own `cache-key`, except when a plan job selects for them (shards sized with
+  `--max-shards`, suites gated per job): the plan and those jobs then share one key, and a
+  merge job combines their states. See [GitHub Actions](../ci/github-actions.md) and
+  [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection).
 - **Other CI:** restore `.smates/` before `smates run`, save it after, also when tests
   failed. See [Other CI systems](../ci/other-ci.md).
 - **Check:** `smates state show` prints where the state is and what it recorded;

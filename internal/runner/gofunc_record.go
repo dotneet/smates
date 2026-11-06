@@ -551,7 +551,7 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 			if po == nil && !ran {
 				continue
 			}
-			o := &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n)}
+			o := &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n), BuildFailed: st == state.Fail && oc.buildFailed(ip)}
 			if po != nil {
 				for f := range po.Files {
 					o.AddFile(f)

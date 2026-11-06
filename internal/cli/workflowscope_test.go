@@ -74,7 +74,21 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "go test ./..."},
 		{run: "go test -count=1 -v ./..."},
 		{run: "go test ./... 2>&1"},
-		{run: "GOFLAGS=-mod=mod go test ./..."},
+		// Inline assignments apply to the test command only: GOFLAGS is read as go test
+		// flags (carried or refused), anything else must move to the step's env:.
+		{run: "GOFLAGS=-tags=integration go test ./...", carry: "-tags integration"},
+		{run: "GOFLAGS='-p=1 -race' go test ./...", carry: "-p 1 -race"},
+		{run: "GOFLAGS=-p=4 go test -p 1 ./...", carry: "-p 1"},
+		{run: "env GOFLAGS=-tags=db go test ./...", carry: "-tags db"},
+		{run: "GOFLAGS=-mod=mod go test ./...", skip: "move GOFLAGS to the step's env:"},
+		{run: "GOFLAGS=-run=TestA go test ./...", skip: "it passes -run", other: true},
+		{run: "GOFLAGS=-short go test ./...", skip: "it passes -short"},
+		{run: "GOFLAGS=$FLAGS go test ./...", skip: "its GOFLAGS value comes from the environment"},
+		{run: "DB_PORT=3307 go test ./...", skip: "it sets DB_PORT for the test command"},
+		{run: "env X=1 go test ./...", skip: "it sets X for the test command"},
+		{run: "env -i go test ./...", skip: "through env -i"},
+		{run: "CI=true pnpm test", skip: "it sets CI for the test command"},
+		{run: "go test -short ./...", skip: "it passes -short"},
 		{run: "go test -p 1 -tags integration,db -race -timeout 20m -count=1 ./...", carry: "-p 1 -tags db,integration -race -timeout 20m"},
 		{run: "go test -p=2 -tags='a b' .", carry: "-p 2 -tags a,b"},
 		{run: "npx vitest run --reporter dot"},
@@ -105,7 +119,15 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: `go test -tags "$TAGS" ./...`, skip: "its -tags value comes from the environment"},
 		{run: "go test -p $N ./...", skip: "its -p value comes from the environment"},
 		// Other runners.
-		{run: "npx vitest run src/a.test.ts", skip: "it runs only the tests under src/a.test.ts"},
+		{run: "npx vitest run src/a.test.ts", skip: "it runs only the tests matching src/a.test.ts"},
+		{run: "npx vitest run unit", skip: "it runs only the tests matching unit"},
+		{run: "npx jest unit", skip: "it runs only the tests matching unit"},
+		{run: "npx vitest run --reporter dot --config vitest.unit.ts"},
+		{run: "npx vitest run ."},
+		{run: "npm test --workspace=web", skip: "it passes --workspace"},
+		{run: "npm test -w web", skip: "it passes -w"},
+		{run: "pnpm test --filter web", skip: "it passes --filter"},
+		{run: "pytest -n auto"},
 		{run: `npx jest -t "adds"`, skip: "it passes -t"},
 		{run: "npx jest --shard=1/4", skip: "it passes --shard"},
 		{run: "pytest -k smoke", skip: "it passes -k"},
@@ -334,6 +356,30 @@ func TestCarryGoFlags(t *testing.T) {
 			want:  map[string]string{}},
 		{name: "a step without flags changes nothing", steps: step("pkg/app", "go test ./..."),
 			want: map[string]string{}},
+		{name: "tags of a plain step running the whole suite are carried",
+			steps: step("pkg/app", "go test -tags integration ./..."),
+			want:  map[string]string{"app": "go test -tags integration"}},
+		// Must keep the untagged files: -tags only from runs of all of the suite's tests.
+		{name: "tags of a step testing a few packages are not carried",
+			steps:  step("pkg/app", "go test -tags integration -p 1 ./internal/db/..."),
+			want:   map[string]string{"app": "go test -p 1"},
+			stderr: "run only some of its tests with -tags"},
+		{name: "a tagless test target and a tagged step disagree",
+			steps:    step("pkg/app", "go test -tags integration ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -v ./...\n"},
+			want:     map[string]string{},
+			stderr:   "different -tags"},
+		{name: "a test-integration target does not tag the suite",
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test ./...\n\ntest-integration:\n\tgo test -tags integration -p 1 ./...\n"},
+			want:     map[string]string{"app": "go test -p 1"},
+			stderr:   "run only some of its tests with -tags"},
+		{name: "make test in one job, a tagged package step in another",
+			steps:    "      - run: make test\n" + step("pkg/app", "go test -tags integration ./internal/db/..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test ./...\n"},
+			want:     map[string]string{}},
+		{name: "a plain test target with tags is carried",
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags db ./...\n"},
+			want:     map[string]string{"app": "go test -tags db"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -344,7 +390,7 @@ func TestCarryGoFlags(t *testing.T) {
 			dir := treeDir(t, files)
 			ss := suites()
 			var errb bytes.Buffer
-			carryGoFlags(ss, makefileHints(dir, ss), workflowTestSteps(dir), &errb)
+			carryGoFlags(ss, makefileHints(dir, ss), makeGoVotes(dir, ss), workflowTestSteps(dir), &errb)
 			got := map[string]string{}
 			for _, s := range ss {
 				if s.Command != "" {
@@ -377,7 +423,7 @@ func TestMakefileShellWords(t *testing.T) {
 		{"$(GO) test -tags 'a b' ./... 2>&1", "root", "$(GO) test -tags 'a b'", "", true},
 	}
 	for _, c := range cases {
-		h, ok := parseRecipeLine(c.recipe, ".", suites)
+		h, ok := parseRecipeLine(c.recipe, ".", suites, false)
 		if !ok || h.Suite != c.suite || h.Command != c.cmd || h.Picked != c.picked || h.Exact != c.exact {
 			t.Errorf("%q: %+v %t, want %s %q %q exact %t", c.recipe, h, ok, c.suite, c.cmd, c.picked, c.exact)
 		}
@@ -469,6 +515,12 @@ func TestSeedPatch(t *testing.T) {
 			want: []string{"  schedule:"}, note: "refers to pull-request-only context"},
 		{name: "a flow mapping is left to the user", workflow: "on: {pull_request: {}}\n" + job,
 			noPatch: true, note: "add `push: branches: [main]` and a nightly `schedule:` to its on: by hand"},
+		{name: "flow-style pull_request filters", workflow: "on:\n  pull_request: {paths: ['pkg/app/**', go.work]}\n" + job,
+			want: []string{"  pull_request: {paths: ['pkg/app/**', go.work]}\n  push:   # runs on the default branch record the state pull requests start from\n    branches: [main]\n    paths: [pkg/app/**, go.work]\n  schedule:"}},
+		{name: "flow-style pull_request paths-ignore with branches", workflow: "on:\n  pull_request: {branches: [main], paths-ignore: ['docs/**']}\n" + job,
+			want: []string{"    branches: [main]\n    paths-ignore: [docs/**]\n  schedule:"}},
+		{name: "flow-style filters needing quotes", workflow: "on:\n  pull_request: {paths: ['**.md', '!x,y', \"a: b\"]}\n" + job,
+			want: []string{"    paths: ["}},
 		{name: "seeded by a schedule", workflow: "on:\n  pull_request:\n  schedule:\n    - cron: '0 1 * * *'\n" + job, noPatch: true},
 		{name: "CRLF", workflow: strings.ReplaceAll("on:\n  pull_request:\n"+job, "\n", "\r\n"),
 			want: []string{"  pull_request:\r\n  push:   # runs on the default branch record the state pull requests start from\r\n    branches: [main]\r\n"}},
@@ -513,6 +565,11 @@ func TestSeedPatch(t *testing.T) {
 			var doc yaml.Node
 			if err := yaml.Unmarshal(data, &doc); err != nil {
 				t.Fatalf("patched workflow does not parse: %v\n%s", err, data)
+			}
+			// A yaml.Node accepts duplicate keys; a map does not (nor does GitHub).
+			var m map[string]any
+			if err := yaml.Unmarshal(data, &m); err != nil {
+				t.Fatalf("patched workflow has duplicate keys: %v\n%s", err, data)
 			}
 			if kind, pr, _ := workflowSeed(doc.Content[0], "main"); kind != seedYes || !pr {
 				t.Errorf("patched workflow: %d %t\n%s", kind, pr, data)

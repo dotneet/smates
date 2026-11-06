@@ -52,6 +52,14 @@ type testStep struct {
 	// Other is set for test targets other than the unit tests (test:e2e, test-integration,
 	// go test -run).
 	Other bool
+	// Paths are the directories a pytest command names (relative to WorkDir).
+	Paths []string
+	// Matrix are the keys of the job's strategy.matrix (sorted): its legs may run in
+	// different environments (runtime versions, services), so each needs its own state.
+	Matrix []string
+	// Full is set for a go test step that runs every test of the suites under its
+	// directory with flags smates read in full: its -tags vote (see carryGoFlags).
+	Full bool
 }
 
 // testCmdRe finds test commands; suffixed script names ("test:e2e", "test-e2e") are
@@ -143,6 +151,7 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 		}) {
 			continue // the job already runs smates
 		}
+		matrix, matrixSkip := matrixKeys(mapGet(mapGet(jobNode, "strategy"), "matrix"))
 		for si, st := range steps.Content {
 			if st.Kind != yaml.MappingNode {
 				continue
@@ -151,7 +160,7 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 			if run == nil || mapGet(st, "uses") != nil || strings.Contains(run.Value, "smates") {
 				continue
 			}
-			var cmd, match string
+			var cmd, match, state string
 			others, after := 0, 0
 			for _, l := range strings.Split(run.Value, "\n") {
 				t := strings.TrimSpace(l)
@@ -165,12 +174,14 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				others++
 				if cmd != "" {
 					after++
+				} else if state == "" && shellStateChange(t) {
+					state = t
 				}
 			}
 			if cmd == "" {
 				continue
 			}
-			ts := testStep{File: rel, Job: job, Step: fmt.Sprintf("#%d", si+1), Command: cmd, Runners: runnersOf(match), Line: st.Line, Dash: st.Column - 3, Blocks: map[string][2]int{}}
+			ts := testStep{File: rel, Job: job, Step: fmt.Sprintf("#%d", si+1), Command: cmd, Runners: runnersOf(match), Line: st.Line, Dash: st.Column - 3, Blocks: map[string][2]int{}, Matrix: matrix}
 			if n := mapGet(st, "name"); n != nil {
 				ts.Step = n.Value
 			}
@@ -197,6 +208,8 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 			if !check.other {
 				ts.Carry = check.carry
 			}
+			ts.Paths = check.paths
+			ts.Full = check.full && state == "" && wdSkip == "" && plainTestCmd(match) && !strings.HasSuffix(cmd, "\\")
 			if ts.Dash < 0 {
 				ts.Dash = 0
 			}
@@ -233,8 +246,12 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				ts.Skip, ts.Other = check.skip, check.other
 			case wdSkip != "":
 				ts.Skip = wdSkip
+			case matrixSkip != "":
+				ts.Skip = matrixSkip
 			case after > 0:
 				ts.Skip = "commands after the test line use its output (or must run after the tests); move them to their own step, then use the smates action for the tests"
+			case state != "":
+				ts.Skip = fmt.Sprintf("the line %q before the test line changes the directory or environment the tests run in, which the smates step after it would not keep: set working-directory: or env: on the step instead, then rerun", state)
 			case others > 0:
 				// Keep the commands before it: drop only the test line of the run: block.
 				b := ts.Blocks["run"]
@@ -252,6 +269,73 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 		}
 	}
 	return out
+}
+
+// shellStateCommands are shell commands that change the directory or environment of the
+// commands after them in the same shell.
+var shellStateCommands = []string{"cd", "pushd", "popd", "export", "set", "unset", "source", ".", "alias", "ulimit", "umask", "shopt", "eval", "nvm", "conda", "pyenv", "rbenv", "asdf", "mise", "direnv", "activate"}
+
+// shellStateChange reports whether a line of a run: block changes the directory or
+// environment of the lines after it (cd, export, source, a bare NAME=value, ...), in
+// any of its commands.
+func shellStateChange(line string) bool {
+	words := shellWords(line)
+	start := true
+	assignOnly := false
+	for _, w := range words {
+		if shellControlOp(w) {
+			if assignOnly {
+				return true
+			}
+			start = true
+			continue
+		}
+		if start {
+			start = false
+			if slices.Contains(shellStateCommands, path.Base(w)) {
+				return true
+			}
+			if n, _, ok := strings.Cut(w, "="); ok && envName(n) {
+				assignOnly = true
+				start = true // NAME=v cmd: the next word is the command
+				continue
+			}
+			assignOnly = false
+		}
+	}
+	return assignOnly
+}
+
+// matrixKeys returns the keys of a job's strategy.matrix (those of include entries
+// too), sorted; skip says why the smates step cannot get a cache-key per leg (a matrix
+// built from an expression).
+func matrixKeys(m *yaml.Node) (keys []string, skip string) {
+	if m == nil {
+		return nil, ""
+	}
+	if m.Kind != yaml.MappingNode {
+		return nil, "the job's matrix comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg"
+	}
+	add := func(k string) {
+		if !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		switch k, v := m.Content[i].Value, m.Content[i+1]; k {
+		case "exclude":
+		case "include":
+			for _, e := range v.Content {
+				for j := 0; j+1 < len(e.Content); j += 2 {
+					add(e.Content[j].Value)
+				}
+			}
+		default:
+			add(k)
+		}
+	}
+	slices.Sort(keys)
+	return keys, ""
 }
 
 func mapGet(n *yaml.Node, key string) *yaml.Node {
@@ -394,8 +478,33 @@ func stepPatch(st testStep, suites []config.Suite) ([]string, string) {
 		s := suites[slices.IndexFunc(suites, func(s config.Suite) bool { return s.Name == partial })]
 		return names, fmt.Sprintf("it runs in %s, inside suite %q (root %s), so it runs only part of that suite and the smates action would select among all of it: add a suite rooted at %s to smates.yml, or switch the step by hand", st.WorkDir, s.Name, cleanRoot(s.Root), st.WorkDir)
 	}
-	if st.Carry.empty() {
-		return names, ""
+	if len(st.Paths) > 0 {
+		// The step collects only below the paths it names: the suites rooted there are
+		// what it runs; a suite holding such a path runs more than the step did.
+		wd := cleanRoot(st.WorkDir)
+		var kept []string
+		for _, s := range suites {
+			if !slices.Contains(names, s.Name) {
+				continue
+			}
+			root := cleanRoot(s.Root)
+			for _, p := range st.Paths {
+				d := path.Join(wd, p)
+				switch {
+				case d == "." || root == d || strings.HasPrefix(root, d+"/"):
+					kept = append(kept, s.Name)
+				case root == "." || strings.HasPrefix(d, root+"/"):
+					return names, fmt.Sprintf("it runs only the tests under %s, inside suite %q (root %s): smates selects among all of the suite's tests; switch it by hand if those are the suite's tests", p, s.Name, root)
+				default:
+					continue
+				}
+				break
+			}
+		}
+		if len(kept) == 0 {
+			return nil, "it runs tests of no suite smates detected"
+		}
+		names = kept
 	}
 	for _, s := range suites {
 		if s.Runner != "go" || !slices.Contains(names, s.Name) {
@@ -403,9 +512,23 @@ func stepPatch(st testStep, suites []config.Suite) ([]string, string) {
 		}
 		_, args, ok := goSuiteCommand(s.Command)
 		if !ok {
+			if st.Carry.empty() {
+				continue
+			}
 			return names, fmt.Sprintf("it runs go test with %s, and suite %q's command is not go test: check that the command keeps them, then switch the step by hand", st.Carry, s.Name)
 		}
 		parsed, _ := runner.ParseGoTestArgs(args, false)
+		// The other way round: a suite command that leaves tests out would run fewer
+		// tests than the step it replaces.
+		for _, a := range parsed {
+			switch strings.TrimPrefix(a.Name, "test.") {
+			case "short", "run", "skip":
+				return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes -%s, so the smates step would leave out tests the step runs: drop it from the command, or switch the step by hand", s.Name, s.Command, strings.TrimPrefix(a.Name, "test."))
+			}
+		}
+		if st.Carry.empty() {
+			continue
+		}
 		if unmet := st.Carry.unmet(goCarryOf(parsed)); len(unmet) > 0 {
 			want, _, _ := withGoCarry(s.Command, st.Carry)
 			return names, fmt.Sprintf("it runs go test with %s, which the command of suite %q in smates.yml (%s) lacks: set `command: %s` for the suite, then rerun", strings.Join(unmet, ", "), s.Name, orGoTest(s.Command), yamlStr(want))
@@ -465,24 +588,35 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite, def str
 			order = append(order, f)
 		}
 	}
-	// One cache key per set of suites: steps running the same suites share state.
-	keyOf := map[string]string{} // suite set -> key
+	// One cache key per job and set of suites: steps of a job running the same suites
+	// share state (as do jobs of the same name in different workflows: a push workflow
+	// seeding the state of the pull request one). Other jobs may run in another
+	// environment (a runtime version, other services), where a test that passes in one
+	// can fail in the other, so they never share a key; nor do the legs of a matrix job,
+	// whose key names the leg.
+	keyOf := map[string]string{} // job + suite set -> key
 	used := map[string]bool{}
 	cacheKey := func(st patched) string {
-		set := strings.Join(st.names, "\x00")
-		if k, ok := keyOf[set]; ok {
-			return k
+		set := st.Job + "\x00" + strings.Join(st.names, "\x00")
+		key, ok := keyOf[set]
+		if !ok {
+			slug := func(s string) string { return strings.Trim(cacheKeyRe.ReplaceAllString(s, "-"), "-") }
+			base := slug(st.Job)
+			if len(st.names) <= 3 {
+				base = slug(strings.Join(st.names, "-"))
+			}
+			if used[base] && base != slug(st.Job) {
+				base += "-" + slug(st.Job)
+			}
+			key = base
+			for n := 2; used[key]; n++ {
+				key = base + "-" + strconv.Itoa(n)
+			}
+			used[key], keyOf[set] = true, key
 		}
-		base := st.Job
-		if len(st.names) <= 3 {
-			base = strings.Join(st.names, "-")
+		for _, k := range st.Matrix {
+			key += "-${{ matrix." + k + " }}"
 		}
-		base = strings.Trim(cacheKeyRe.ReplaceAllString(base, "-"), "-")
-		key := base
-		for n := 2; used[key]; n++ {
-			key = base + "-" + strconv.Itoa(n)
-		}
-		used[key], keyOf[set] = true, key
 		return key
 	}
 	var notes []string
@@ -531,7 +665,7 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite, def str
 				}
 				rep = append(rep, ind+"    args: "+yamlStr(strings.TrimSpace(args)))
 			}
-			if split {
+			if split || len(st.Matrix) > 0 {
 				rep = append(rep, ind+"    cache-key: "+yamlStr(cacheKey(st)))
 			}
 			rep = append(rep, ind+"    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional (or openai-api-key / openrouter-api-key)")

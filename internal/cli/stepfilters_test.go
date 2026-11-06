@@ -1,0 +1,216 @@
+package cli
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
+)
+
+// TestStepPatchNarrowing: the smates step must not stand in for a step whose shell
+// state it would lose (a cd or export on an earlier line of the run: block), for a
+// pytest step that collects only part of a suite, or for a plain step when the suite's
+// own command would leave tests out (-short, -run, -skip). Harmless lines and paths
+// equal to a suite's root still patch.
+func TestStepPatchNarrowing(t *testing.T) {
+	suites := []config.Suite{
+		{Name: "app", Runner: "go", Root: "pkg/app"},
+		{Name: "short", Runner: "go", Root: "pkg/short", Command: "go test -short"},
+		{Name: "filtered", Runner: "go", Root: "pkg/filtered", Command: "go test -run TestUnit"},
+		{Name: "py", Runner: "pytest", Root: "tests"},
+		{Name: "svc", Runner: "pytest", Root: "svc"},
+	}
+	step := func(wd, run string) string {
+		s := "on: push\njobs:\n  t:\n    steps:\n      - "
+		if wd != "" {
+			s += "working-directory: " + wd + "\n        "
+		}
+		return s + "run: |\n" + "          " + strings.ReplaceAll(run, "\n", "\n          ") + "\n"
+	}
+	cases := []struct {
+		name, wd, run string
+		why           string // substring of the refusal ("" = patched)
+		names         string // the suites patched in, when checked
+	}{
+		{"cd before the test line", "", "cd pkg/app\ngo test ./...", "changes the directory or environment", ""},
+		{"export before the test line", "pkg/app", "export GOFLAGS=-tags=integration\ngo test ./...", "changes the directory or environment", ""},
+		{"source before the test line", "svc", "source .venv/bin/activate\npytest", "changes the directory or environment", ""},
+		{"dot-source before the test line", "svc", ". .venv/bin/activate\npytest", "changes the directory or environment", ""},
+		{"bare assignment before the test line", "pkg/app", "DB_PORT=3307\ngo test ./...", "changes the directory or environment", ""},
+		{"cd inside a chain", "", "make deps && cd pkg/app\ngo test ./...", "changes the directory or environment", ""},
+		{"harmless command before the test line", "pkg/app", "go mod download\ngo test ./...", "", ""},
+		{"assignment for one command only", "pkg/app", "CGO_ENABLED=0 go build ./...\ngo test ./...", "", ""},
+		{"pytest path equal to the suite root", "", "pytest tests", "", "py"},
+		{"pytest path inside a suite", "", "pytest tests/unit", "it runs only the tests under tests/unit, inside suite", ""},
+		{"pytest path of one suite of two", "", "pytest svc", "", "svc"},
+		{"pytest . from the suite's directory", "svc", "pytest .", "", ""},
+		{"suite command with -short", "pkg/short", "go test ./...", "passes -short", ""},
+		{"suite command with -run", "pkg/filtered", "go test ./...", "passes -run", ""},
+		{"plain suite command", "pkg/app", "go test ./...", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			steps := parseWorkflowSteps("ci.yml", []byte(step(c.wd, c.run)))
+			if len(steps) != 1 {
+				t.Fatalf("steps %+v", steps)
+			}
+			names, why := stepPatch(steps[0], suites)
+			if (c.why == "") != (why == "") || !strings.Contains(why, c.why) {
+				t.Errorf("why %q, want %q", why, c.why)
+			}
+			if c.names != "" && strings.Join(names, " ") != c.names {
+				t.Errorf("suites %v, want %s", names, c.names)
+			}
+		})
+	}
+}
+
+// TestInitMakefileMessage: init says which Makefile flags the suite's command keeps,
+// never that flags it wrote into command: are not applied.
+func TestInitMakefileMessage(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	cases := []struct {
+		name, makefile string
+		want, not      string
+	}{
+		{"carried", "test:\n\tgo test -p 1 -v ./...\n", "command in smates.yml keeps -p 1", "so those flags/variables are not applied"},
+		{"nothing carried", "test:\n\tTZ=UTC go test -v ./...\n", "so those flags/variables are not applied", "keeps"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := newGitRepo(t)
+			writeTree(t, g.dir, map[string]string{"go.mod": "module x\n\ngo 1.22\n", "x_test.go": "package x\n", "Makefile": c.makefile})
+			g.git("add", "-A")
+			g.commit("fixture")
+			code, _, errs := smatesCmd(t, g.dir, "init", "--stdout")
+			if code != 0 || !strings.Contains(errs, c.want) || strings.Contains(errs, c.not) {
+				t.Errorf("code %d stderr:\n%s\nwant %q, not %q", code, errs, c.want, c.not)
+			}
+		})
+	}
+}
+
+// TestInitGitHubExistingSmatesWorkflow: a workflow already running smates (on pull
+// requests only) gets the seed patch, and no second workflow running the same tests.
+func TestInitGitHubExistingSmatesWorkflow(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	cases := []struct {
+		name    string
+		args    []string
+		written bool
+	}{
+		{"seed patch only", nil, false},
+		{"forced", []string{"--force"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := newGitRepo(t)
+			writeTree(t, g.dir, map[string]string{
+				".github/workflows/ci.yml": "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - uses: dotneet/smates@v1\n",
+				"go.mod":                   "module example.com/x\n\ngo 1.22\n",
+				"x_test.go":                "package x\n",
+				"smates.yml":               "version: 1\nsuites:\n  - name: go\n    runner: go\n",
+			})
+			g.git("add", ".")
+			g.commit("files")
+			var out, errb bytes.Buffer
+			args := append([]string{"init", "--github", "-C", g.dir}, c.args...)
+			if code := Main(args, &out, &errb); code != 0 {
+				t.Fatalf("init: %d %s", code, errb.String())
+			}
+			_, err := os.Stat(filepath.Join(g.dir, ".github/workflows/smates.yml"))
+			if (err == nil) != c.written {
+				t.Errorf("written %t, want %t\n%s", err == nil, c.written, errb.String())
+			}
+			if !strings.Contains(errb.String(), "+  schedule:") {
+				t.Errorf("no seed patch:\n%s", errb.String())
+			}
+			if !c.written && !strings.Contains(errb.String(), "ci.yml already runs smates") {
+				t.Errorf("no reason given:\n%s", errb.String())
+			}
+		})
+	}
+}
+
+// TestDefaultBranchFromCI: in a CI checkout without origin/HEAD (nor main or master),
+// the CI's default branch is the one the push trigger and the seed check name.
+func TestDefaultBranchFromCI(t *testing.T) {
+	clearCI(t)
+	g := newGitRepo(t)
+	g.git("checkout", "-q", "-b", "develop")
+	writeTree(t, g.dir, map[string]string{"x": "x\n"})
+	g.git("add", ".")
+	g.commit("x")
+	g.git("branch", "-q", "-D", "main")
+	repo, err := gitx.Open(g.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultBranch(repo); got != "main" {
+		t.Errorf("outside CI: %q (git's fallback), want main", got)
+	}
+	ev := filepath.Join(t.TempDir(), "event.json")
+	os.WriteFile(ev, []byte(`{"repository":{"default_branch":"develop"}}`), 0o644)
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("GITHUB_EVENT_PATH", ev)
+	if got := defaultBranch(repo); got != "develop" {
+		t.Errorf("in CI: %q, want develop", got)
+	}
+}
+
+// TestDoctorWorkflowWithoutConfig: without smates.yml, a step whose go test flags init
+// would carry into the suite's command gets the init fix, not advice to edit a
+// smates.yml that does not exist; with one lacking the flags, the advice stays.
+func TestDoctorWorkflowWithoutConfig(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	cases := []struct {
+		name, config string
+		fix          string // the fix command ("" = none)
+		message      string
+	}{
+		{"no smates.yml", "", "smates init --github --patch smates.patch", "`smates init --github --patch smates.patch`"},
+		{"smates.yml lacking the flag", "version: 1\nsuites:\n  - name: go\n    runner: go\n    root: .\n", "", "set `command: go test -p 1` for the suite"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := newGitRepo(t)
+			files := map[string]string{
+				".github/workflows/ci.yml": "on: pull_request\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -p 1 ./...\n",
+				"go.mod":                   "module example.com/x\n\ngo 1.22\n",
+				"x_test.go":                "package x\n",
+			}
+			if c.config != "" {
+				files["smates.yml"] = c.config
+			}
+			writeTree(t, g.dir, files)
+			g.git("add", ".")
+			g.commit("files")
+			_, out, _ := smatesCmd(t, g.dir, "doctor", "--format", "json")
+			rep := decodeJSON[doctorReport](t, out)
+			found := false
+			for _, ch := range rep.Checks {
+				if ch.ID != "workflow-test-step" {
+					continue
+				}
+				found = true
+				got := ""
+				if ch.Fix != nil {
+					got = ch.Fix.Command
+				}
+				if got != c.fix || !strings.Contains(ch.Message, c.message) {
+					t.Errorf("fix %q message %q, want %q %q", got, ch.Message, c.fix, c.message)
+				}
+			}
+			if !found {
+				t.Errorf("no workflow-test-step check:\n%s", out)
+			}
+		})
+	}
+}

@@ -52,6 +52,7 @@ import (
 	"strings"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/state"
 )
 
 func funcGranularity(s *Suite) bool { return s.Granularity == config.GranularityFunc }
@@ -234,7 +235,7 @@ func runFuncsPlain(ctx context.Context, rc *RunContext, dirs []string, funcs map
 				if !ran {
 					continue
 				}
-				res.Observations[FuncUnit(d, n)] = &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n)}
+				res.Observations[FuncUnit(d, n)] = &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n), BuildFailed: st == state.Fail && oc.buildFailed(ip)}
 			}
 		}
 	}

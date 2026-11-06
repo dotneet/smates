@@ -164,14 +164,17 @@ suites:
 	if code, errs := run("run", "--all"); code != 0 {
 		t.Fatalf("baseline: %d\n%s", code, errs)
 	}
-	outputs := func(env map[string]string) map[string]string {
+	outputs := func(env map[string]string, extra ...string) map[string]string {
 		t.Helper()
 		for k, v := range env {
 			t.Setenv(k, v)
 		}
 		path := filepath.Join(t.TempDir(), "out")
 		t.Setenv("GITHUB_OUTPUT", path)
-		if code, errs := run("select", "--format", "github", "--max-shards", "4"); code != 0 {
+		if extra == nil {
+			extra = []string{"--max-shards", "4"}
+		}
+		if code, errs := run(append([]string{"select", "--format", "github"}, extra...)...); code != 0 {
 			t.Fatalf("select: %d\n%s", code, errs)
 		}
 		data, err := os.ReadFile(path)
@@ -195,6 +198,15 @@ suites:
 	push := map[string]string{"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_HEAD_REF": "", "GITHUB_REF_NAME": "main"}
 	if out := outputs(push); out["shards"] == "0" || out["skip"] != "false" || out["selected"] != out["total"] {
 		t.Errorf("default branch: %v", out)
+	}
+	// Must keep, without --max-shards too: the skip and suites outputs gate jobs, which
+	// must not skip the default branch's full run.
+	if out := outputs(push, "--suite", "sh"); out["skip"] != "false" || out["selected"] != out["total"] || !strings.Contains(out["suites"], `"skip":false`) || strings.Contains(out["suites"], `"skip":true`) {
+		t.Errorf("default branch, plain select: %v", out)
+	}
+	// A pull request build of the same change still skips.
+	if out := outputs(pr, "--suite", "sh"); out["skip"] != "true" {
+		t.Errorf("pull request, plain select: %v", out)
 	}
 	// A changed test is selected: at least one shard.
 	write("tests/u2_check.sh", "exit 0 # changed\n")

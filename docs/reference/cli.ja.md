@@ -105,7 +105,7 @@ smates run [flags] [-- runner args]
 smates select [flags]
 ```
 
-何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。
+何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。[全件実行するブランチ](configuration.md#top-level-keys)への push のビルドでは、`smates run` がそこで全テストを実行するので、全テストを選択します。ジョブをゲートする出力（`skip`、`suites`）が、ステートを更新する全件実行をスキップさせることはありません。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -117,7 +117,7 @@ smates select [flags]
 | `--orphans` | `agent`、`full`、`skip` | `smates.yml` の `orphans:` | `run` と同じです。 |
 | `--no-agent` | | オフ | エージェントを呼びません。 |
 | `--shard` | `I/N` | | 選択結果のうち `I/N` のシャード分だけを対象にします。 |
-| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。[全件実行するブランチ](configuration.md#top-level-keys)への push のビルドでは、`smates run` がそこで全テストを実行するので、全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
+| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。全件実行するブランチへの push のビルドでは、選択と同じく全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
 | `--shard-time` | 期間 | `10m` | `--max-shards` のとき: 1 シャードあたりの記録済みテスト時間の目安。実行時間が記録されていない選択済みテストはスイートの中央値として数えます。選択されたテストがあり、実行時間が 1 つも記録されていないスイートがあれば `N` になります。 |
 | `--markdown` | file | | Markdown のまとめを `file` にも書き出します。 |
 
@@ -271,7 +271,7 @@ smates orphans --apply [--dry-run]
 smates init [flags]
 ```
 
-リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。Go スイートのテストの実行のしかたを変える `go test` のフラグ（`-p`、`-tags`、`-race`、`-timeout`）は、そのスイートを実行するワークフローのステップや Makefile のテストターゲットが使っていれば、スイートの `command:` に入ります。それらのステップが設定する環境変数はコメントとしてだけ書き出します。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
+リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。Go スイートのテストの実行のしかたを変える `go test` のフラグ（`-p`、`-tags`、`-race`、`-timeout`）は、そのスイートを実行するワークフローのステップや Makefile のテストターゲットが使っていれば、スイートの `command:` に入ります（`-tags` は、スイートの単体テストをすべて実行するものがすべて一致するときだけです。[既存のワークフローを切り替える](../ci/github-actions.md#switch-existing-workflows) を参照してください）。それらのステップが設定する環境変数はコメントとしてだけ書き出します。すでに smates を実行するワークフローがあれば、`--github` は 2 つ目を書きません（`--force` を除く）。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -342,7 +342,7 @@ smates state clear
 |---|---|
 | `show` | ステートの場所（共有か、どこからシードされたか）、記録したコミット、スナップショットの大きさ、スイートごとの件数を表示します。 |
 | `path` | ステートファイルのパスを表示します。 |
-| `pull` | git の ref からステートを取得して保存します。`--ref` がなければ `refs/smates/state/<branch>`、次にデフォルトブランチの ref を試します。`state_shared: true` では取得したエントリをマージします。 |
+| `pull` | git の ref からステートを取得して保存します。`--ref` がなければ `refs/smates/state/<branch>`、次にマージリクエストやプルリクエストの対象ブランチ（CI が報告するときのベースブランチ）の ref、次にデフォルトブランチの ref を試します。`state_shared: true` では取得したエントリをマージします。 |
 | `push` | ステートを専用のコミットとして、リモートの `refs/smates/state/<branch>`（または `--ref`）に push します（強制 push、フックは実行されません）。 |
 | `merge` | 指定したステートファイルをステート（または `-o file`）にマージします。 |
 | `clear` | ステートを削除します。リンクされた worktree では以後シードされません。`state_shared: true` ではすべての worktree のステートが消えます。 |

@@ -75,11 +75,12 @@ func testByID(sr *selector.Suite, id string) *selector.Test {
 // units its own shard owns that the whole run did not select.
 func TestCheckShadowSharded(t *testing.T) {
 	type unit struct {
-		id       string
-		selected bool // before sharding
-		owner    int
-		status   string // "" when the runner said nothing about it
-		inferred bool
+		id          string
+		selected    bool // before sharding
+		owner       int
+		status      string // "" when the runner said nothing about it
+		inferred    bool
+		buildFailed bool
 	}
 	fn := func(name string) string { return runner.FuncUnit("pkg", name) }
 	build := runner.FuncUnit("pkg", runner.BuildCheck)
@@ -131,10 +132,17 @@ func TestCheckShadowSharded(t *testing.T) {
 			units: []unit{{id: build, selected: true, owner: 1, status: state.Fail}, {id: fn("TestA"), owner: 1, status: state.Fail}},
 		},
 		{
-			// The package may not build, which only the check's shard sees.
-			name:     "function of a package whose selected check another shard runs",
+			// It ran and failed on its own: the package built here.
+			name:    "function failing an assertion, its package's selected check in another shard",
+			shard:   [2]int{1, 2},
+			units:   []unit{{id: build, selected: true, owner: 2}, {id: fn("TestA"), owner: 1, status: state.Fail}},
+			escapes: []string{fn("TestA")},
+		},
+		{
+			// The package did not build here either, which the check's shard reports.
+			name:     "function of a package that did not build, its selected check in another shard",
 			shard:    [2]int{1, 2},
-			units:    []unit{{id: build, selected: true, owner: 2}, {id: fn("TestA"), owner: 1, status: state.Fail}},
+			units:    []unit{{id: build, selected: true, owner: 2}, {id: fn("TestA"), owner: 1, status: state.Fail, buildFailed: true}},
 			possible: []string{fn("TestA")},
 		},
 		{
@@ -156,7 +164,7 @@ func TestCheckShadowSharded(t *testing.T) {
 			for _, u := range c.units {
 				sr.Tests = append(sr.Tests, &selector.Test{ID: u.id, Selected: u.selected, Shard: u.owner})
 				if u.status != "" {
-					obs[u.id] = &runner.Observation{Status: u.status, Inferred: u.inferred}
+					obs[u.id] = &runner.Observation{Status: u.status, Inferred: u.inferred, BuildFailed: u.buildFailed}
 				}
 			}
 			res := &selector.Result{Suites: []*selector.Suite{sr}}

@@ -139,6 +139,9 @@ smates select [flags]
 
 Prints the selection without running anything. It may still call the agent, and then
 saves its answer in the state so the next `smates run` on the same change reuses it.
+On a push build of a [full-run branch](configuration.md#top-level-keys) it selects every
+test, as `smates run` runs them all there: outputs that gate jobs (`skip`, `suites`)
+never skip the full run that refreshes the state.
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
@@ -150,7 +153,7 @@ saves its answer in the state so the next `smates run` on the same change reuses
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | As for `run`. |
 | `--no-agent` | | off | Do not call the agent. |
 | `--shard` | `I/N` | | Only shard `I` of `N` of the selection. |
-| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On a push build of a [full-run branch](configuration.md#top-level-keys) it is sized for every test, as `smates run` runs them all there. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
+| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On a push build of a full-run branch it is sized for every test, as the selection is. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
 | `--shard-time` | duration | `10m` | With `--max-shards`: recorded test time to aim for per shard. A selected test without a recorded duration counts as its suite's median; a suite with selected tests and no recorded duration at all gives `N`. |
 | `--markdown` | file | | Also write the Markdown summary to `file`. |
 
@@ -327,8 +330,10 @@ smates init [flags]
 Detects the suites of the repository, writes `smates.yml` and adds `.smates/` to
 `.gitignore`. The `go test` flags that change how a Go suite's tests run (`-p`,
 `-tags`, `-race`, `-timeout`) go into its `command:` when the workflow steps or the
-Makefile test target running it use them; the environment those steps set is written
-as a comment only. It refuses to overwrite an existing config unless `--force`; with
+Makefile test target running it use them (`-tags` only when every run of all the
+suite's unit tests agrees, see [Switch existing workflows](../ci/github-actions.md#switch-existing-workflows));
+the environment those steps set is written as a comment only. When a workflow already
+runs smates, `--github` writes no second one (unless `--force`). It refuses to overwrite an existing config unless `--force`; with
 `--github` or `--agents-md` over an existing config, only that part runs. See
 [Quick start](../getting-started/quickstart.md).
 
@@ -403,7 +408,7 @@ smates state clear
 |---|---|
 | `show` | Where the state lives (and whether it is shared or was seeded), the recorded commit, the snapshot size and per-suite counts. |
 | `path` | Print the state file's path. |
-| `pull` | Fetch the state from a git ref and save it. Without `--ref` it tries `refs/smates/state/<branch>`, then the default branch's ref. With `state_shared: true` the pulled entries are merged in. |
+| `pull` | Fetch the state from a git ref and save it. Without `--ref` it tries `refs/smates/state/<branch>`, then the ref of the branch a merge or pull request targets (its base branch, when the CI reports one), then the default branch's ref. With `state_shared: true` the pulled entries are merged in. |
 | `push` | Push the state as a commit of its own to `refs/smates/state/<branch>` (or `--ref`) on the remote (force-push, hooks skipped). |
 | `merge` | Merge the given state files into the state (or into `-o file`). |
 | `clear` | Delete the state. In a linked worktree it is then not seeded again. With `state_shared: true` this clears it for every worktree. |

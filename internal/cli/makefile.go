@@ -36,6 +36,9 @@ type makeHint struct {
 	Carry goCarry
 	// Picked is a command substitution choosing the packages ($(go list ./... | grep -v x)).
 	Picked string
+	// Partial is set when the command runs only some of the suite's tests (named
+	// packages or paths, Picked, a filter): its -tags say nothing about the others.
+	Partial bool
 }
 
 var makeTargetRe = regexp.MustCompile(`^([A-Za-z0-9_.%/-]+(?:\s+[A-Za-z0-9_.%/-]+)*)\s*::?(?:[^=]|$)`)
@@ -62,7 +65,7 @@ func makefileHints(root string, suites []config.Suite) []makeHint {
 			targets := slices.Sorted(maps.Keys(recipes)) // "test" before "test-*"
 			for _, target := range targets {
 				for _, line := range recipes[target] {
-					h, ok := parseRecipeLine(line, d, suites)
+					h, ok := parseRecipeLine(line, d, suites, false)
 					if !ok || seen[h.Suite] {
 						continue
 					}
@@ -75,6 +78,43 @@ func makefileHints(root string, suites []config.Suite) []makeHint {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Suite < out[j].Suite })
+	return out
+}
+
+// makeGoVotes returns the go test runs of the plain unit-test targets (test, test-unit,
+// test_unit) of the Makefiles at the repository root and the suite roots that run in a
+// Go suite's own directory and cover all of it, with or without flags: each says which
+// -tags (none included) the suite's unit tests run with (see carryGoFlags). Other
+// targets (test-integration) run other tests.
+func makeGoVotes(root string, suites []config.Suite) []makeHint {
+	dirs := []string{"."}
+	for _, s := range suites {
+		if !slices.Contains(dirs, s.Root) {
+			dirs = append(dirs, s.Root)
+		}
+	}
+	var out []makeHint
+	for _, d := range dirs {
+		for _, name := range []string{"Makefile", "makefile", "GNUmakefile"} {
+			rel := joinRel(d, name)
+			data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+			if err != nil {
+				continue
+			}
+			recipes := makeTestRecipes(string(data))
+			for _, target := range []string{"test", "test-unit", "test_unit"} {
+				for _, line := range recipes[target] {
+					h, ok := parseRecipeLine(line, d, suites, true)
+					if !ok || !h.Exact || h.Partial || !slices.ContainsFunc(suites, func(s config.Suite) bool { return s.Name == h.Suite && s.Runner == "go" }) {
+						continue
+					}
+					h.File, h.Target, h.Line = rel, target, line
+					out = append(out, h)
+				}
+			}
+			break
+		}
+	}
 	return out
 }
 
@@ -119,8 +159,8 @@ func makeTestRecipes(mk string) map[string][]string {
 }
 
 // parseRecipeLine finds a direct runner invocation with flags or environment in a
-// recipe line run from directory dir.
-func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
+// recipe line run from directory dir (with all, one without them too).
+func parseRecipeLine(line, dir string, suites []config.Suite, all bool) (makeHint, bool) {
 	var env [][2]string
 	cd := dir
 	// make passes $$ to the shell as $; $(VAR) is make's own and stays one word.
@@ -169,7 +209,7 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 		env = append(env, local...)
 		cmd := slices.Clone(seg[:at])
 		var args []string
-		flags, picked := 0, ""
+		flags, picked, partial := 0, "", false
 		for _, w := range seg[at:] {
 			if shellRedirect(w) {
 				break
@@ -179,6 +219,7 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 				continue
 			}
 			if strings.HasPrefix(w, "./") || strings.HasPrefix(w, "../") || strings.Contains(w, "...") || w == "." {
+				partial = partial || w != "./..." && w != "."
 				continue // packages / test paths: smates passes its own
 			}
 			if strings.HasPrefix(w, "-") {
@@ -190,7 +231,7 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 		if runner == "vitest" && len(cmd) == at && at == 1 {
 			cmd = append(cmd, "run")
 		}
-		if flags == 0 && len(env) == 0 {
+		if flags == 0 && len(env) == 0 && !all {
 			return makeHint{}, false
 		}
 		suite, exact := "", false
@@ -206,11 +247,13 @@ func parseRecipeLine(line, dir string, suites []config.Suite) (makeHint, bool) {
 		if suite == "" {
 			return makeHint{}, false
 		}
-		h := makeHint{Suite: suite, Command: strings.Join(cmd, " "), Env: env, Exact: exact, Picked: picked}
+		h := makeHint{Suite: suite, Command: strings.Join(cmd, " "), Env: env, Exact: exact, Picked: picked, Partial: partial || picked != ""}
 		if runner == "go" {
-			if c := checkGoTestArgs(args); !c.other {
+			c := checkGoTestArgs(args)
+			if !c.other {
 				h.Carry = c.carry
 			}
+			h.Partial = h.Partial || !c.full
 		}
 		return h, true
 	}
@@ -304,29 +347,38 @@ func workflowEnvHints(steps []testStep, suites []config.Suite) map[string]envHin
 
 // carryGoFlags moves the go test flags that change how a Go suite's tests run (-p,
 // -tags, -race, -timeout: see goCarry) from the workflow steps and the Makefile test
-// target running it into the suite's command, and returns the flags each suite got.
+// targets running it into the suite's command, and returns the flags each suite got.
 // Sources that disagree combine toward the safer run (the lowest -p, -race, the longest
-// -timeout); -tags only when they all agree (a tag can also leave files out).
-func carryGoFlags(suites []config.Suite, mk []makeHint, steps []testStep, stderr io.Writer) map[string]string {
+// -timeout), whatever part of the suite they run. -tags can also leave files out
+// (//go:build !integration), so only the runs of all of the suite's unit tests vote on
+// them: workflow steps the smates step can stand in for (Full) and the plain test
+// targets of votes (makeGoVotes), a run without -tags voting for none; they are carried
+// only when all votes agree. A test-integration target or a step testing a few packages
+// never puts its tags on the whole suite.
+func carryGoFlags(suites []config.Suite, mk, votes []makeHint, steps []testStep, stderr io.Writer) map[string]string {
 	type source struct {
 		c    goCarry
 		from string
+		vote bool // a run of all the suite's unit tests: its -tags count
 	}
 	per := map[string][]source{}
 	for _, h := range mk {
 		// Only a target run in the suite's own directory: a Makefile elsewhere may
 		// test another module.
 		if h.Exact && !h.Carry.empty() {
-			per[h.Suite] = append(per[h.Suite], source{h.Carry, fmt.Sprintf("%s target %q", h.File, h.Target)})
+			per[h.Suite] = append(per[h.Suite], source{h.Carry, fmt.Sprintf("%s target %q", h.File, h.Target), false})
 		}
+	}
+	for _, h := range votes {
+		per[h.Suite] = append(per[h.Suite], source{h.Carry, fmt.Sprintf("%s target %q", h.File, h.Target), true})
 	}
 	for _, st := range steps {
 		if st.Other || !slices.Equal(st.Runners, []string{"go"}) {
 			continue
 		}
-		names, _ := stepSuites(st, suites)
+		names, partial := stepSuites(st, suites)
 		for _, n := range names {
-			per[n] = append(per[n], source{st.Carry, fmt.Sprintf("%s (job %q)", st.File, st.Job)})
+			per[n] = append(per[n], source{st.Carry, fmt.Sprintf("%s (job %q)", st.File, st.Job), st.Full && n != partial})
 		}
 	}
 	out := map[string]string{}
@@ -336,18 +388,42 @@ func carryGoFlags(suites []config.Suite, mk []makeHint, steps []testStep, stderr
 		if s.Runner != "go" || len(srcs) == 0 {
 			continue
 		}
-		merged, from := srcs[0].c, []string{srcs[0].from}
-		conflict := false
-		for _, src := range srcs[1:] {
-			var c bool
-			merged, c = merged.merge(src.c)
-			conflict = conflict || c
-			if !slices.Contains(from, src.from) {
+		var merged goCarry
+		var from, tagFrom []string
+		var tags []string
+		voted, conflict := false, false
+		for _, src := range srcs {
+			c := src.c
+			c.Tags = nil
+			merged, _ = merged.merge(c)
+			if !src.c.empty() && !slices.Contains(from, src.from) {
 				from = append(from, src.from)
 			}
+			switch {
+			case !src.vote:
+				if len(src.c.Tags) > 0 && !slices.Contains(tagFrom, src.from) {
+					tagFrom = append(tagFrom, src.from)
+				}
+			case !voted:
+				tags, voted = src.c.Tags, true
+			case !slices.Equal(tags, src.c.Tags):
+				conflict = true
+			}
 		}
-		if conflict {
-			fmt.Fprintf(stderr, "smates: suite %s: %s run go test with different -tags; smates.yml has one command per suite, so its command sets none (add a suite per set of tags, or set command: yourself)\n", s.Name, strings.Join(from, ", "))
+		switch {
+		case conflict:
+			tags = nil
+			fmt.Fprintf(stderr, "smates: suite %s: the runs of its unit tests use different -tags; smates.yml has one command per suite, so its command sets none (add a suite per set of tags, or set command: yourself)\n", s.Name)
+		case len(tagFrom) > 0 && len(tags) == 0:
+			fmt.Fprintf(stderr, "smates: suite %s: %s run only some of its tests with -tags; its command sets none (set command: yourself if all of its tests need them)\n", s.Name, strings.Join(tagFrom, ", "))
+		}
+		merged.Tags = tags
+		if len(tags) > 0 {
+			for _, src := range srcs {
+				if src.vote && !slices.Contains(from, src.from) {
+					from = append(from, src.from)
+				}
+			}
 		}
 		if merged.empty() {
 			continue
