@@ -17,7 +17,7 @@ import (
 // never recorded, nor is a scan of os.Environ; and a variable env_ignore (or the
 // default list) keeps out of every entry. The rule must keep applying to such units.
 func TestRuleReachesEnvBlindSpots(t *testing.T) {
-	deps := []string{"database/migrations/**"}
+	deps := []string{"db/migrations/**"}
 	every := []string{"pkg/app/envdb", "pkg/app/pure", "pkg/app/repo", "pkg/app/split", "pkg/app/svc"}
 	for _, c := range []struct {
 		name    string
@@ -103,7 +103,7 @@ func TestRuleReachesEnvBlindSpots(t *testing.T) {
 // the rule applies to both. A glob naming a directory matches what is below it.
 func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 	deps := []string{"migrations/**"}
-	kit := []string{"web/src/testkit/**"}
+	kit := []string{"web/src/testdb/**"}
 	for _, c := range []struct {
 		name    string
 		runner  string
@@ -114,16 +114,16 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 	}{
 		{name: "vitest setupFiles", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
-			"web/test/setup.ts":    `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts":    `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "vitest globalSetup", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: { globalSetup: "./test/global.ts" } }`,
-			"web/test/global.ts":   `import { reset } from "../src/testkit/db"; export default () => reset()`,
+			"web/test/global.ts":   `import { reset } from "../src/testdb/db"; export default () => reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "vitest setup file importing the helper indirectly", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
 			"web/test/setup.ts":    `import "./db-setup"`,
-			"web/test/db-setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/db-setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "naming the setup file itself", runner: "vitest", reaches: []string{"web/test/setup.ts"}, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: { setupFiles: ["./test/setup.ts"] } }`,
@@ -131,35 +131,35 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "jest setupFilesAfterEnv", runner: "jest", reaches: kit, files: map[string]string{
 			"web/jest.config.js": `module.exports = { setupFilesAfterEnv: ["<rootDir>/test/setup.ts"] }`,
-			"web/test/setup.ts":  `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts":  `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		// Must keep: setup files a JSON configuration or package.json names, and the
 		// preloads of bun test (bunfig.toml, --preload).
 		{name: "jest.config.json setupFilesAfterEnv", runner: "jest", reaches: kit, files: map[string]string{
 			"web/jest.config.json": `{"setupFilesAfterEnv": ["<rootDir>/test/setup.ts"]}`,
-			"web/test/setup.ts":    `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts":    `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "package.json jest setupFiles", runner: "jest", reaches: kit, files: map[string]string{
 			"web/package.json":  `{"name":"web","jest":{"setupFiles":["<rootDir>/test/setup.ts"]}}`,
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "bunfig.toml [test] preload", runner: "bun", reaches: kit, files: map[string]string{
 			"web/bunfig.toml":   "[test]\npreload = [\"./test/setup.ts\"]\n",
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "bunfig.toml test.preload dotted key", runner: "bun", reaches: kit, files: map[string]string{
 			"web/bunfig.toml":   "test.preload = \"./test/setup.ts\"\n",
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "bunfig.toml inline test table", runner: "bun", reaches: kit, files: map[string]string{
 			"web/bunfig.toml":   "test = { preload = [\"./test/setup.ts\"] }\n",
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "bun test --preload", runner: "bun", command: "bun test --preload ./test/setup.ts", reaches: kit, files: map[string]string{
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "bun test --preload=", runner: "bun", command: "bun test --preload=./test/setup.ts", reaches: kit, files: map[string]string{
-			"web/test/setup.ts": `import { reset } from "../src/testkit/db"; reset()`,
+			"web/test/setup.ts": `import { reset } from "../src/testdb/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		// Must keep: a configuration smates cannot read may load the helper too.
 		{name: "a jest.config.json that does not parse", runner: "jest", reaches: kit, files: map[string]string{
@@ -182,7 +182,7 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 		// Must keep: an import of a setup file smates cannot follow may reach the
 		// helper too, for every test.
 		{name: "a setup file importing the helper through a Vite alias", runner: "vitest", reaches: kit, files: map[string]string{
-			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testkit" } }, test: { setupFiles: ["./test/setup.ts"] } }`,
+			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testdb" } }, test: { setupFiles: ["./test/setup.ts"] } }`,
 			"web/test/setup.ts":    `import { reset } from "~kit/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "a setup file importing a virtual module", runner: "vitest", reaches: kit, files: map[string]string{
@@ -198,7 +198,7 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 			"web/test/setup.ts":    `import { repo } from "../src/repo"`,
 		}, want: []string{"web/src/b.test.ts"}},
 		{name: "a Vite alias", runner: "vitest", reaches: kit, files: map[string]string{
-			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testkit" } }, test: {} }`,
+			"web/vitest.config.ts": `export default { resolve: { alias: { "~kit": "/src/testdb" } }, test: {} }`,
 			"web/src/a.test.ts":    `import { reset } from "~kit/db"; reset()`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "a virtual module", runner: "vitest", reaches: kit, files: map[string]string{
@@ -207,7 +207,7 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "a missing file", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: {} }`,
-			"web/src/a.test.ts":    `import { x } from "./testkit/nope"`,
+			"web/src/a.test.ts":    `import { x } from "./testdb/nope"`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		{name: "an unresolved tsconfig path", runner: "vitest", reaches: kit, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: {} }`,
@@ -215,18 +215,18 @@ func TestRuleReachesLoadedAndUnresolved(t *testing.T) {
 			"web/src/a.test.ts":    `import { x } from "@kit/db"`,
 		}, want: []string{"web/src/a.test.ts", "web/src/b.test.ts"}},
 		// A directory without /** matches what is below it.
-		{name: "a directory glob", runner: "vitest", reaches: []string{"web/src/testkit"}, files: map[string]string{
+		{name: "a directory glob", runner: "vitest", reaches: []string{"web/src/testdb"}, files: map[string]string{
 			"web/vitest.config.ts": `export default { test: {} }`,
 		}, want: []string{"web/src/b.test.ts"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			files := map[string]string{
-				"web/package.json":      `{"name":"web"}`,
-				"web/src/repo.ts":       `export const repo = 1`,
-				"web/src/testkit/db.ts": `export const reset = () => {}`,
-				"web/src/a.test.ts":     `import { repo } from "./repo"`,
-				"web/src/b.test.ts":     `import { reset } from "./testkit/db"`,
-				"migrations/001.sql":    "create table t();",
+				"web/package.json":     `{"name":"web"}`,
+				"web/src/repo.ts":      `export const repo = 1`,
+				"web/src/testdb/db.ts": `export const reset = () => {}`,
+				"web/src/a.test.ts":    `import { repo } from "./repo"`,
+				"web/src/b.test.ts":    `import { reset } from "./testdb/db"`,
+				"migrations/001.sql":   "create table t();",
 			}
 			for p, src := range c.files {
 				files[p] = src
@@ -293,11 +293,11 @@ func mapsKeys(m map[string]string) func(func(string) bool) {
 // of the rule matches (a bare directory matches what is below it).
 func TestUnmatchedReaches(t *testing.T) {
 	f := reachesFixture(t, "",
-		config.Rule{Reaches: []string{"pkg/shared/dbhelper/**", "pkg/shared/testkit", "example.com/m/pkg/shared/testkit", "pkg/shared/testkits/**", "$APP_DB_DSN"}, Deps: []string{"database/migrations/**"}},
-		config.Rule{Reaches: []string{"pkg/shared/testkit/**"}, Deps: []string{"database/fixtures/**"}},
+		config.Rule{Reaches: []string{"internal/dbhelper/**", "internal/testdb", "example.com/m/internal/testdb", "internal/testdbs/**", "$APP_DB_DSN"}, Deps: []string{"db/migrations/**"}},
+		config.Rule{Reaches: []string{"internal/testdb/**"}, Deps: []string{"db/seeds/**"}},
 	)
 	got := UnmatchedReaches(f.suites[0], slices.Sorted(mapsKeys(f.files)))
-	want := map[int][]string{0: {"example.com/m/pkg/shared/testkit", "pkg/shared/testkits/**"}}
+	want := map[int][]string{0: {"example.com/m/internal/testdb", "internal/testdbs/**"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("unmatched %v, want %v", got, want)
 	}

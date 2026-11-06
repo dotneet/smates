@@ -170,12 +170,12 @@ they share is a helper they import to connect, so name the helper with `reaches`
   - name: go
     runner: go
     rules:
-      - reaches: ["pkg/shared/dbtest/**", "$APP_DB_*"]
-        deps: ["database/migrations/**", "database/fixtures/**"]
+      - reaches: ["internal/testdb/**", "$APP_DB_*"]
+        deps: ["db/migrations/**", "db/seeds/**"]
 ```
 
-A test gets the migrations and fixtures as dependencies when its static import closure
-reaches `pkg/shared/dbtest/` (directly, through another helper, or from another test
+A test gets the migrations and seeds as dependencies when its static import closure
+reaches `internal/testdb/` (directly, through another helper, or from another test
 file of its Go package), or when its last recorded run read a variable matching
 `APP_DB_*`. A change to a migration then selects those tests and is no longer an
 orphan.

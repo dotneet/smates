@@ -30,17 +30,17 @@ func runnerConfigFixture(t *testing.T, config_ map[string]string) *fixture {
 // suite whose tests may run in a browser.
 func TestUntestedRunnerConfig(t *testing.T) {
 	nodeConfig := map[string]string{
-		"web/vitest.config.ts": `import api from "./test/api-plugin"
-export default { plugins: [api()], test: { setupFiles: ["./test/browser-setup.ts"], alias: { "x": "./test/x-mock" } } }`,
-		"web/test/browser-setup.ts": `import "./matchers"`,
-		"web/test/matchers.ts":      `export {}`,
-		"web/test/api-plugin.ts":    `import { items } from "./data/items"; export default () => ({ name: "api" })`,
-		"web/test/data/items.ts":    `export const items = []`,
-		"web/test/x-mock.ts":        `export {}`,
+		"web/vitest.config.ts": `import fakeServer from "./support/fake-server"
+export default { plugins: [fakeServer()], test: { setupFiles: ["./test/dom-setup.ts"], alias: { "x": "./test/x-mock" } } }`,
+		"web/test/dom-setup.ts":      `import "./matchers"`,
+		"web/test/matchers.ts":       `export {}`,
+		"web/support/fake-server.ts": `import { items } from "./data/items"; export default () => ({ name: "fake-server" })`,
+		"web/support/data/items.ts":  `export const items = []`,
+		"web/test/x-mock.ts":         `export {}`,
 	}
 	browserConfig := map[string]string{
-		"web/vitest.config.ts":         `export default { test: { projects: ["./vitest.browser.config.ts"] } }`,
-		"web/vitest.browser.config.ts": `export default mergeConfig(base, defineConfig({ test: { browser: { enabled: true } } }))`,
+		"web/vitest.config.ts":     `export default { test: { projects: ["./vitest.e2e.config.ts"] } }`,
+		"web/vitest.e2e.config.ts": `export default mergeConfig(base, defineConfig({ test: { browser: { enabled: true } } }))`,
 	}
 	cases := []struct {
 		name     string
@@ -49,10 +49,10 @@ export default { plugins: [api()], test: { setupFiles: ["./test/browser-setup.ts
 		untested bool
 	}{
 		{name: "control: a module no test imports", config: nodeConfig, change: "web/src/unused.ts", untested: true},
-		{name: "setup file named by the configuration", config: nodeConfig, change: "web/test/browser-setup.ts"},
+		{name: "setup file named by the configuration", config: nodeConfig, change: "web/test/dom-setup.ts"},
 		{name: "module a setup file imports", config: nodeConfig, change: "web/test/matchers.ts"},
-		{name: "plugin the configuration imports", config: nodeConfig, change: "web/test/api-plugin.ts"},
-		{name: "fixture a plugin imports", config: nodeConfig, change: "web/test/data/items.ts"},
+		{name: "plugin the configuration imports", config: nodeConfig, change: "web/support/fake-server.ts"},
+		{name: "fixture a plugin imports", config: nodeConfig, change: "web/support/data/items.ts"},
 		{name: "alias target", config: nodeConfig, change: "web/test/x-mock.ts"},
 		{name: "browser project: a module no test imports", config: browserConfig, change: "web/src/unused.ts"},
 	}
@@ -77,17 +77,17 @@ export default { plugins: [api()], test: { setupFiles: ["./test/browser-setup.ts
 // the runner loads the plugin anyway. Other type-only imports stay erased.
 func TestSelectTypeOnlyImportOfLoadedFile(t *testing.T) {
 	cfg := map[string]string{
-		"web/vitest.config.ts":   `import api from "./test/api-plugin"; export default { plugins: [api()] }`,
-		"web/test/api-plugin.ts": `export type Item = { id: string }; export default () => ({ name: "api" })`,
-		"web/src/types.ts":       `export type User = { id: string }`,
-		"web/src/api.test.ts":    `import type { Item } from "../test/api-plugin"; import type { User } from "./types"`,
+		"web/vitest.config.ts":       `import fakeServer from "./support/fake-server"; export default { plugins: [fakeServer()] }`,
+		"web/support/fake-server.ts": `export type Item = { id: string }; export default () => ({ name: "fake-server" })`,
+		"web/src/types.ts":           `export type User = { id: string }`,
+		"web/src/api.test.ts":        `import type { Item } from "../support/fake-server"; import type { User } from "./types"`,
 	}
 	cases := []struct {
 		name   string
 		change string
 		want   string
 	}{
-		{name: "plugin loaded by the configuration", change: "web/test/api-plugin.ts", want: ReasonChanged},
+		{name: "plugin loaded by the configuration", change: "web/support/fake-server.ts", want: ReasonChanged},
 		{name: "control: a module imported for its types only", change: "web/src/types.ts", want: "-unaffected"},
 	}
 	for _, c := range cases {

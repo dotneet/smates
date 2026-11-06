@@ -40,7 +40,7 @@ smates adds a reporter next to yours for per-file results. When you configure
 file failed.
 
 Vitest and Vite configuration files in the suite directory (`vitest.config.*`,
-`vite.config.*`, per-project files such as `vitest.browser.config.ts` or
+`vite.config.*`, per-project files such as `vitest.e2e.config.ts` or
 `vite.storybook.config.ts`, and
 `vitest.workspace.*`) are inputs of every test. The files a configuration loads by
 name, such as `setupFiles`, `globalSetup`, local Vite plugins and alias targets, and
@@ -285,9 +285,9 @@ must run them.
 
 A package that compiles only after code generation fails like any build failure (exit
 1), not as an environment error: smates cannot tell a missing generated file from a real
-break. Generated files git ignores (dependency injection or mock code produced by a
-`make` step) make these units fail locally until you generate them. Run the generator
-first, or leave such packages out with `exclude:`.
+break. Generated files that git ignores (code produced by a generator step) make these
+units fail locally until you generate them. Run the generator first, or leave such
+packages out with `exclude:`.
 
 ## Custom commands
 

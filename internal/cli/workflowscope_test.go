@@ -84,7 +84,7 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "GOFLAGS=-run=TestA go test ./...", skip: "it passes -run", other: true},
 		{run: "GOFLAGS=-short go test ./...", skip: "it passes -short"},
 		{run: "GOFLAGS=$FLAGS go test ./...", skip: "its GOFLAGS value comes from the environment"},
-		{run: "DB_PORT=3307 go test ./...", skip: "it sets DB_PORT for the test command"},
+		{run: "APP_DB_PORT=5433 go test ./...", skip: "it sets APP_DB_PORT for the test command"},
 		{run: "env X=1 go test ./...", skip: "it sets X for the test command"},
 		{run: "env -i go test ./...", skip: "through env -i"},
 		{run: "CI=true pnpm test", skip: "it sets CI for the test command"},
@@ -96,12 +96,12 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "pytest -x"},
 		// Packages other than ./... and .
 		{run: "go test ./internal/x", skip: "it tests only ./internal/x"},
-		{run: "go test ./common/... -count=1", skip: "it tests only ./common/..."},
+		{run: "go test ./sub/... -count=1", skip: "it tests only ./sub/..."},
 		{run: "go test -p 1 $(go list ./... | grep -v /e2e/)", skip: "the packages come from $(go list ./... | grep -v /e2e/) at run time", carry: "-p 1"},
-		{run: `go test -json -p 1 "${packages[@]}"`, skip: "its -json output feeds another tool", carry: "-p 1"},
+		{run: `go test -json -race "${pkgs[@]}"`, skip: "its -json output feeds another tool", carry: "-race"},
 		// Tests filtered or not run.
 		{run: "go test -run '^$' ./...", skip: "it passes -run", other: true},
-		{run: "go test -run TestDate -count=1 ./...", skip: "it passes -run", other: true},
+		{run: "go test -run TestOne -count=1 ./...", skip: "it passes -run", other: true},
 		{run: "go test -race -run=TestX ./...", skip: "it passes -run", other: true},
 		{run: "go test -list . ./...", skip: "it passes -list", other: true},
 		{run: "go test -c -o bin/x.test ./x", skip: "it passes -c", other: true},
@@ -371,9 +371,9 @@ func TestCarryGoFlags(t *testing.T) {
 			makefile: map[string]string{"pkg/app": "test:\n\tgo test -v ./...\n"},
 			want:     map[string]string{},
 			stderr:   "different -tags"},
-		{name: "a test-integration target does not tag the suite",
-			makefile: map[string]string{"pkg/app": "test:\n\tgo test ./...\n\ntest-integration:\n\tgo test -tags integration -p 1 ./...\n"},
-			want:     map[string]string{"app": "go test -p 1"},
+		{name: "a test-slow target does not tag the suite",
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test ./...\n\ntest-slow:\n\tgo test -tags slow -race ./...\n"},
+			want:     map[string]string{"app": "go test -race"},
 			stderr:   "run only some of its tests with -tags"},
 		{name: "make test in one job, a tagged package step in another",
 			steps:    "      - run: make test\n" + step("pkg/app", "go test -tags integration ./internal/db/..."),
@@ -490,7 +490,7 @@ func TestMakefileShellWords(t *testing.T) {
 	}
 	doc := renderConfig([]config.Suite{{Name: "root", Runner: "go", Root: ".", Command: "go test -p 1"}},
 		configHints([]makeHint{{Suite: "root", File: "Makefile", Target: "test", Line: "go test -p 1 -v $$(go list ./...)", Command: "go test -p 1 -v", Picked: "$(go list ./...)"}},
-			map[string]envHint{"root": {From: `.github/workflows/ci.yml (job "t")`, Env: [][2]string{{"DB_PORT", "3307"}}}},
+			map[string]envHint{"root": {From: `.github/workflows/ci.yml (job "t")`, Env: [][2]string{{"APP_DB_PORT", "5433"}}}},
 			map[string]string{"root": "-p 1"}))
 	if _, err := config.Parse([]byte(doc)); err != nil {
 		t.Fatalf("config does not parse: %v\n%s", err, doc)
@@ -499,7 +499,7 @@ func TestMakefileShellWords(t *testing.T) {
 		"    command: go test -p 1\n",
 		"    # smates runs the runner itself; command: above keeps -p 1; to keep the other flags/variables too, replace it with:\n    # command: \"go test -p 1 -v\"\n",
 		"    # It picks the packages with $(go list ./...): smates runs every package of the suite",
-		"    # .github/workflows/ci.yml (job \"t\") sets env: for these tests (CI values: check them before uncommenting):\n    # env:\n    #   DB_PORT: \"3307\"\n",
+		"    # .github/workflows/ci.yml (job \"t\") sets env: for these tests (CI values: check them before uncommenting):\n    # env:\n    #   APP_DB_PORT: \"5433\"\n",
 	} {
 		if !strings.Contains(doc, s) {
 			t.Errorf("config lacks %q:\n%s", s, doc)
@@ -699,18 +699,18 @@ func TestStateRefsFor(t *testing.T) {
 
 // TestInitGitHubPerModuleWorkflows: one workflow per Go module, each running in the
 // module through defaults.run, only on pull requests. The patch runs each module's
-// suite in its own job with its own cache-key, keeps -p 1 in smates.yml, leaves the
+// suite in its own job with its own cache-key, keeps -race in smates.yml, leaves the
 // targeted step alone and adds the seeding triggers.
 func TestInitGitHubPerModuleWorkflows(t *testing.T) {
 	clearCI(t)
 	noAgentCredentials(t)
 	module := func(m string) string {
-		return "name: " + m + "\non:\n  pull_request:\n    paths: ['pkg/" + m + "/**']\ndefaults:\n  run:\n    working-directory: pkg/" + m + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - name: unit\n        run: go test -p 1 ./...\n        env:\n          DB_PORT: \"3307\"\n"
+		return "name: " + m + "\non:\n  pull_request:\n    paths: ['pkg/" + m + "/**']\ndefaults:\n  run:\n    working-directory: pkg/" + m + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - name: unit\n        run: go test -race ./...\n        env:\n          APP_DB_DSN: \"postgres://localhost:5433/test\"\n"
 	}
 	g := newGitRepo(t)
 	writeTree(t, g.dir, map[string]string{
 		".github/workflows/app.yml":    module("app"),
-		".github/workflows/shared.yml": module("shared") + "  dates:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -run '^TestDate$' -count=1 ./calendar\n        working-directory: pkg/shared\n",
+		".github/workflows/shared.yml": module("shared") + "  focused:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -run '^TestOne$' -count=1 ./sub\n        working-directory: pkg/shared\n",
 		"pkg/app/go.mod":               "module example.com/app\n\ngo 1.22\n",
 		"pkg/app/a_test.go":            "package app\n",
 		"pkg/shared/go.mod":            "module example.com/shared\n\ngo 1.22\n",
@@ -728,12 +728,12 @@ func TestInitGitHubPerModuleWorkflows(t *testing.T) {
 		t.Fatalf("config: %v", err)
 	}
 	for _, s := range cfg.Suites {
-		if s.Command != "go test -p 1" {
-			t.Errorf("suite %s command %q, want go test -p 1\n%s", s.Name, s.Command, errb.String())
+		if s.Command != "go test -race" {
+			t.Errorf("suite %s command %q, want go test -race\n%s", s.Name, s.Command, errb.String())
 		}
 	}
 	raw, _ := os.ReadFile(filepath.Join(g.dir, "smates.yml"))
-	if !strings.Contains(string(raw), "#   DB_PORT: \"3307\"") || strings.Contains(string(raw), "env_ignore") {
+	if !strings.Contains(string(raw), "#   APP_DB_DSN: postgres://localhost:5433/test") || strings.Contains(string(raw), "env_ignore") {
 		t.Errorf("smates.yml env hint:\n%s", raw)
 	}
 	if !strings.Contains(errb.String(), "it passes -run") {
@@ -744,7 +744,7 @@ func TestInitGitHubPerModuleWorkflows(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(g.dir, ".github/workflows/"+m+".yml"))
 		for _, w := range []string{
 			"          args: --suite " + suiteNamed(cfg.Suites, "pkg/"+m) + "\n          cache-key: go-pkg-" + m + "\n",
-			"        env:\n          DB_PORT: \"3307\"\n",
+			"        env:\n          APP_DB_DSN: \"postgres://localhost:5433/test\"\n",
 			"  push:   # runs on the default branch record the state pull requests start from\n    branches: [main]\n    paths: ['pkg/" + m + "/**']\n",
 			"  schedule:",
 		} {
@@ -757,7 +757,7 @@ func TestInitGitHubPerModuleWorkflows(t *testing.T) {
 		}
 	}
 	data, _ := os.ReadFile(filepath.Join(g.dir, ".github/workflows/shared.yml"))
-	if !strings.Contains(string(data), "go test -run '^TestDate$' -count=1 ./calendar") {
+	if !strings.Contains(string(data), "go test -run '^TestOne$' -count=1 ./sub") {
 		t.Errorf("targeted step replaced:\n%s", data)
 	}
 	cmd := exec.Command("git", "diff", "--stat")

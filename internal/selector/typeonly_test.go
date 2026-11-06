@@ -110,10 +110,10 @@ func TestSelectTypeOnlyDiffMode(t *testing.T) {
 	}
 }
 
-// TestSelectTypeOnlyThroughAggregator: a package whose vitest configuration is an
-// aggregator of a node project and a Storybook project (with Tailwind's plugin) still
-// erases type-only imports, as long as smates sees every configuration in full.
-func TestSelectTypeOnlyThroughAggregator(t *testing.T) {
+// TestSelectTypeOnlyThroughProjects: a package whose vitest configuration lists a unit
+// project and a Storybook project (with Tailwind's plugin) still erases type-only
+// imports, as long as smates sees every configuration in full.
+func TestSelectTypeOnlyThroughProjects(t *testing.T) {
 	cases := []struct {
 		name string
 		main string
@@ -129,9 +129,9 @@ export default config`},
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := typeOnlyFixture(t, config.Suite{Runner: "vitest", Command: "vitest run"}, map[string]string{
-				"web/vitest.config.ts":      `export default defineConfig({ test: { projects: ["./vitest.node.config.ts", "./vitest.storybook.config.ts"] } })`,
-				"web/vitest.node.config.ts": `export default { test: { include: ["src/**/*.test.ts"] } }`,
-				"web/vitest.storybook.config.ts": `import tailwind from "@tailwindcss/vite"
+				"web/vitest.config.ts":      `export default defineConfig({ test: { projects: ["./vitest.unit.config.ts", "./vitest.stories.config.ts"] } })`,
+				"web/vitest.unit.config.ts": `export default { test: { include: ["src/**/*.test.ts"] } }`,
+				"web/vitest.stories.config.ts": `import tailwind from "@tailwindcss/vite"
 import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
 export default mergeConfig(base, defineConfig({ plugins: [tailwind(), storybookTest()] }))`,
 				"web/.storybook/main.ts": c.main,

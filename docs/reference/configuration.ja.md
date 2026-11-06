@@ -143,11 +143,11 @@ rules:
   - tests: ["src/db/**"]
     deps: ["migrations/**"]
   # データベースのテストヘルパーを import するテストすべて（置き場所を問わない）
-  - reaches: ["pkg/shared/dbtest/**", "$APP_DB_*"]
-    deps: ["database/migrations/**"]
+  - reaches: ["internal/testdb/**", "$APP_DB_*"]
+    deps: ["db/migrations/**"]
 ```
 
-`reaches` はファイル単位の閉包をたどります。ほかのヘルパーや、Go パッケージのほかのテストファイルが import するもの、ランナーが設定を通じてすべてのテストのために読み込むファイル（Vitest の `setupFiles` と `globalSetup`、`jest.config.*`（JSON も含む）または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル、それらが import するもの）も含みます。`granularity: func` ではパッケージ単位で照合します。ワイルドカードのない glob がディレクトリを指すとき（`pkg/shared/testkit`）は、その配下に一致します。`$NAME` の項目は、閉包のソースがそうした変数名を含むテスト（`os.Getenv("APP_DB_DSN")`）や、文字列リテラルにその接頭辞を含むテスト（`envconfig.Process("APP", &cfg)`、`viper.SetEnvPrefix("app")`、`env_prefix="APP_"`）にも一致します。Go は `m.Run` より前（`TestMain`、`init`、パッケージレベルの初期化）の読み取りや `os.Environ` の走査を記録せず、シェル、Bun、ブラウザの中の読み取りはトレースされず、環境を走査する設定ローダーは読み取りとして数えられないためです。それ以外の方法で名前を組み立てるローダーはソースに跡を残さないので、そうしたテストは `tests:` で指定してください。smates が判断できないときはルールを適用します。静的解析が無効（`static: false`）なとき、テストのファイルを読むアナライザがないとき、閉包（またはランナーが読み込むセットアップファイル）に smates が解決できない JavaScript や TypeScript の import（バンドラのエイリアス、仮想モジュール、存在しないファイル）があるとき、ランナーの設定を読めないとき（パースできない JSON ファイル、文字列ではない bun の preload、変数から来る `--preload`）、そして `$NAME` の項目でテストにまだ記録された実行がないとき、パターンが `env_ignore`（またはデフォルトの無視リスト）によってどの記録にも残らない変数を指しうるとき、またはランナーにかかわらずテストのソースを読めないとき（静的解析が無効、またはそのファイルを読むアナライザがない）です。Python、Go、Java で smates が解決できない import は、跡を残さずに閉包から外れます。`sys.path` 経由でヘルパーに届く Python のテスト（`support/` をパスに加えて `from dbkit import reset`）は、ルールから見ると `support/dbkit.py` に届きません。そうしたテストは別のルールの `tests:` で指定するか、ヘルパーをリポジトリ内のパスで import してください。ルールが挙げていない経路でデータベースに届くテスト（自前の `sql.Open`、リストにないヘルパー、子プロセス）は deps を得ないので、入口をすべて挙げ、データベース接続が読む変数も加えてください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールと、リポジトリのどのファイルにも一致しない glob を警告します。[データベースを使うテスト](../guides/configuration.md#tests-backed-by-a-database) を参照してください。
+`reaches` はファイル単位の閉包をたどります。ほかのヘルパーや、Go パッケージのほかのテストファイルが import するもの、ランナーが設定を通じてすべてのテストのために読み込むファイル（Vitest の `setupFiles` と `globalSetup`、`jest.config.*`（JSON も含む）または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル、それらが import するもの）も含みます。`granularity: func` ではパッケージ単位で照合します。ワイルドカードのない glob がディレクトリを指すとき（`internal/testdb`）は、その配下に一致します。`$NAME` の項目は、閉包のソースがそうした変数名を含むテスト（`os.Getenv("APP_DB_DSN")`）や、文字列リテラルにその接頭辞を含むテスト（`envconfig.Process("APP", &cfg)`、`viper.SetEnvPrefix("app")`、`env_prefix="APP_"`）にも一致します。Go は `m.Run` より前（`TestMain`、`init`、パッケージレベルの初期化）の読み取りや `os.Environ` の走査を記録せず、シェル、Bun、ブラウザの中の読み取りはトレースされず、環境を走査する設定ローダーは読み取りとして数えられないためです。それ以外の方法で名前を組み立てるローダーはソースに跡を残さないので、そうしたテストは `tests:` で指定してください。smates が判断できないときはルールを適用します。静的解析が無効（`static: false`）なとき、テストのファイルを読むアナライザがないとき、閉包（またはランナーが読み込むセットアップファイル）に smates が解決できない JavaScript や TypeScript の import（バンドラのエイリアス、仮想モジュール、存在しないファイル）があるとき、ランナーの設定を読めないとき（パースできない JSON ファイル、文字列ではない bun の preload、変数から来る `--preload`）、そして `$NAME` の項目でテストにまだ記録された実行がないとき、パターンが `env_ignore`（またはデフォルトの無視リスト）によってどの記録にも残らない変数を指しうるとき、またはランナーにかかわらずテストのソースを読めないとき（静的解析が無効、またはそのファイルを読むアナライザがない）です。Python、Go、Java で smates が解決できない import は、跡を残さずに閉包から外れます。`sys.path` 経由でヘルパーに届く Python のテスト（`support/` をパスに加えて `from dbkit import reset`）は、ルールから見ると `support/dbkit.py` に届きません。そうしたテストは別のルールの `tests:` で指定するか、ヘルパーをリポジトリ内のパスで import してください。ルールが挙げていない経路でデータベースに届くテスト（自前の `sql.Open`、リストにないヘルパー、子プロセス）は deps を得ないので、入口をすべて挙げ、データベース接続が読む変数も加えてください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールと、リポジトリのどのファイルにも一致しない glob を警告します。[データベースを使うテスト](../guides/configuration.md#tests-backed-by-a-database) を参照してください。
 
 ### depends_on { #depends_on }
 
@@ -184,7 +184,7 @@ requires:
     tests: ["internal/store/**"]
     timeout: 30s
   - file: ${HOME}/.cache/ms-playwright
-    tests: ["**/*.browser.test.ts"]
+    tests: ["e2e/**"]
 ```
 
 判定できないチェック（コマンドが見つからない、タイムアウトした、アドレスを解釈できないなど）は、満たされないものとして扱います。各チェックは 1 回の実行につき 1 度だけ行います（`--dry-run` では行いません）。テストが外れ、どのテストも失敗していなければ、`smates run` は終了コード 4（環境の問題）で終了します（[`smates run`](cli.md#unmet-requires) を参照）。git フックと Claude Code・Codex の Stop フックはブロックせず、それらについて 1 行表示します。前提条件を追加したり変えたりしても、何も再実行されません。スイートの設定のハッシュに含まれないためです。

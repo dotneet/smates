@@ -190,8 +190,8 @@ export default { plugins: [sb.storybookTest()] }`),
 			// stories still come from main.*.
 			name: "unreadable per-project config keeps the defaults and adds the stories", suite: vitest,
 			files: with(sbFiles, ".storybook/main.ts", sbMain,
-				"vitest.config.ts", `export default { test: { projects: ['./vitest.storybook.config.ts'] } }`,
-				"vitest.storybook.config.ts", sbImport+`import viteConfig from './vite.config'
+				"vitest.config.ts", `export default { test: { projects: ['./vitest.stories.config.ts'] } }`,
+				"vitest.stories.config.ts", sbImport+`import viteConfig from './vite.config'
 export default mergeConfig(viteConfig, defineConfig({ plugins: [storybookTest({ configDir: path.join(dirname, '.storybook') })] }))`),
 			source: "vitest.config.ts test.projects (1 project)", warn: "does not export an object literal",
 			tests: []string{"src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
@@ -201,17 +201,17 @@ export default mergeConfig(viteConfig, defineConfig({ plugins: [storybookTest({ 
 		{
 			name: "unreadable per-project config with a computed configDir: guessed stories reported", suite: vitest,
 			files: with(sbFiles, ".storybook/main.ts", sbMain,
-				"vitest.config.ts", `export default { test: { projects: ['./vitest.node.config.ts', './vitest.storybook.config.ts'] } }`,
-				"vitest.node.config.ts", `export default mergeConfig(base, { test: { include: ['src/**/*.test.ts'] } })`,
-				"vitest.storybook.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest({ configDir: getDir() })] }))`),
+				"vitest.config.ts", `export default { test: { projects: ['./vitest.unit.config.ts', './vitest.stories.config.ts'] } }`,
+				"vitest.unit.config.ts", `export default mergeConfig(base, { test: { include: ['src/**/*.test.ts'] } })`,
+				"vitest.stories.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest({ configDir: getDir() })] }))`),
 			source: "vitest.config.ts test.projects (2 projects)", warn: "running the whole suite whenever one of them is selected",
 			tests: []string{"docs/guide.stories.tsx", "other/page.stories.jsx", "src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
 		},
 		{
 			name: "unreadable per-project config without main.*: guessed stories reported", suite: vitest,
 			files: with(sbFiles,
-				"vitest.config.ts", `export default { test: { projects: ['./vitest.storybook.config.ts'] } }`,
-				"vitest.storybook.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest()] }))`),
+				"vitest.config.ts", `export default { test: { projects: ['./vitest.stories.config.ts'] } }`,
+				"vitest.stories.config.ts", sbImport+`export default mergeConfig(base, defineConfig({ plugins: [storybookTest()] }))`),
 			source: "vitest.config.ts test.projects (1 project)", warn: "running the whole suite whenever one of them is selected",
 			tests: []string{"docs/guide.stories.tsx", "other/page.stories.jsx", "src/button.stories.tsx", "src/card.stories.ts", "src/util.test.ts"},
 		},
@@ -356,18 +356,18 @@ export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], viteFinal
 		{
 			name: "browser-mode test",
 			files: map[string]string{
-				"vitest.config.ts":      `export default { test: { projects: [{ test: { include: ['**/*.browser.test.ts'], browser: { enabled: true } } }, { test: { include: ['**/*.unit.test.ts'] } }] } }`,
-				"src/a.browser.test.ts": ``,
-				"src/a.unit.test.ts":    ``,
+				"vitest.config.ts":   `export default { test: { projects: [{ test: { include: ['**/*.dom.test.ts'], browser: { enabled: true } } }, { test: { include: ['**/*.unit.test.ts'] } }] } }`,
+				"src/a.dom.test.ts":  ``,
+				"src/a.unit.test.ts": ``,
 			},
-			unit: "src/a.browser.test.ts", browser: true,
+			unit: "src/a.dom.test.ts", browser: true,
 		},
 		{
 			name: "node test next to a browser project",
 			files: map[string]string{
-				"vitest.config.ts":      `export default { test: { projects: [{ test: { include: ['**/*.browser.test.ts'], browser: { enabled: true } } }, { test: { include: ['**/*.unit.test.ts'] } }] } }`,
-				"src/a.browser.test.ts": ``,
-				"src/a.unit.test.ts":    ``,
+				"vitest.config.ts":   `export default { test: { projects: [{ test: { include: ['**/*.dom.test.ts'], browser: { enabled: true } } }, { test: { include: ['**/*.unit.test.ts'] } }] } }`,
+				"src/a.dom.test.ts":  ``,
+				"src/a.unit.test.ts": ``,
 			},
 			unit: "src/a.unit.test.ts",
 		},
@@ -415,9 +415,9 @@ export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], viteFinal
 		{
 			name: "unreadable browser project",
 			files: map[string]string{
-				"vitest.config.ts":         `export default { test: { projects: ['./vitest.browser.config.ts'] } }`,
-				"vitest.browser.config.ts": `export default mergeConfig(base, { test: { browser: { enabled: true } } })`,
-				"src/a.test.ts":            ``,
+				"vitest.config.ts":     `export default { test: { projects: ['./vitest.e2e.config.ts'] } }`,
+				"vitest.e2e.config.ts": `export default mergeConfig(base, { test: { browser: { enabled: true } } })`,
+				"src/a.test.ts":        ``,
 			},
 			unit: "src/a.test.ts", browser: true,
 		},

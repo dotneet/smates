@@ -85,13 +85,13 @@ func coverageCases() []coverageCase {
 			// The closures of a suite left out are covered as their union, but the
 			// reaches of a rule still need each unit's closure.
 			f := newFixture(t, map[string]string{
-				"web/a.test.js":               `require("./kit.js")`,
-				"web/b.test.js":               `require("./b.js")`,
-				"web/kit.js":                  `module.exports = 1`,
-				"web/b.js":                    `module.exports = 2`,
-				migration:                     "create table t()",
-				"database/fixtures/users.yml": "- id: 1",
-				"api/test_a.py":               "",
+				"web/a.test.js":      `require("./kit.js")`,
+				"web/b.test.js":      `require("./b.js")`,
+				"web/kit.js":         `module.exports = 1`,
+				"web/b.js":           `module.exports = 2`,
+				migration:            "create table t()",
+				"db/seeds/users.yml": "- id: 1",
+				"api/test_a.py":      "",
 			})
 			f.suites = []*runner.Suite{
 				suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.js"}, Rules: reachesRules("web/kit.js", "web/nothing.js")}),
@@ -99,7 +99,7 @@ func coverageCases() []coverageCase {
 			}
 			st := f.record(nil, nil)
 			f.write(migration, "create table t(id int)")
-			f.write("database/fixtures/users.yml", "- id: 2")
+			f.write("db/seeds/users.yml", "- id: 2")
 			return f, st
 		}},
 	}
@@ -111,20 +111,20 @@ func coverageCases() []coverageCase {
 // deps of both to units whose closure it did not compute.
 func reachesRules(reached, unreached string) []config.Rule {
 	return []config.Rule{
-		{Reaches: []string{reached}, Deps: []string{"database/migrations/**"}},
-		{Tests: []string{"**"}, Reaches: []string{unreached}, Deps: []string{"database/fixtures/**"}},
+		{Reaches: []string{reached}, Deps: []string{"db/migrations/**"}},
+		{Tests: []string{"**"}, Reaches: []string{unreached}, Deps: []string{"db/seeds/**"}},
 	}
 }
 
 // reachesCoverage is reachesFixture with reachesRules, both deps changed.
 func reachesCoverage(t *testing.T, granularity string) (*fixture, *state.State) {
-	f := reachesFixture(t, granularity, reachesRules("pkg/shared/testkit/**", "pkg/shared/testkits/**")...)
+	f := reachesFixture(t, granularity, reachesRules("internal/testdb/**", "internal/testdbs/**")...)
 	f.suites = f.suites[:1] // the shell suite: no analyzer reads it, so the rules apply
 	f.suites = append(f.suites, suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}}))
 	f.write("api/test_a.py", "")
 	st := reachesRecord(f, nil)
 	f.write(migration, "create table t(id int)")
-	f.write("database/fixtures/users.yml", "- id: 2")
+	f.write("db/seeds/users.yml", "- id: 2")
 	return f, st
 }
 

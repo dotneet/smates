@@ -40,15 +40,15 @@ func TestRunnerConfig(t *testing.T) {
 			want: []string{"web/test/global.ts", "web/vitest.config.ts"}},
 		{name: "plugin imported by a per-project config, and what it imports", runner: "vitest",
 			files: map[string]string{
-				"web/vitest.browser.config.ts": `import api from "./test/api-plugin"; export default mergeConfig(base, { plugins: [api()] })`,
-				"web/test/api-plugin.ts":       `import data from "./data/items"`,
-				"web/test/data/items.ts":       ``,
+				"web/vitest.e2e.config.ts":   `import fakeServer from "./support/fake-server"; export default mergeConfig(base, { plugins: [fakeServer()] })`,
+				"web/support/fake-server.ts": `import data from "./data/items"`,
+				"web/support/data/items.ts":  ``,
 			},
 			imports: map[string][]string{
-				"web/vitest.browser.config.ts": {"web/test/api-plugin.ts"},
-				"web/test/api-plugin.ts":       {"web/test/data/items.ts"},
+				"web/vitest.e2e.config.ts":   {"web/support/fake-server.ts"},
+				"web/support/fake-server.ts": {"web/support/data/items.ts"},
 			},
-			want: []string{"web/test/api-plugin.ts", "web/test/data/items.ts", "web/vitest.browser.config.ts"}},
+			want: []string{"web/support/data/items.ts", "web/support/fake-server.ts", "web/vitest.e2e.config.ts"}},
 		{name: "literal named by an imported file", runner: "vitest",
 			files: map[string]string{
 				"web/vitest.config.ts": `import { shared } from "./vitest.shared"; export default shared`,
@@ -104,8 +104,8 @@ func TestRunnerConfig(t *testing.T) {
 			},
 			want: []string{"web/jest.config.js", "web/test/after.ts"}},
 		{name: "browser mode", runner: "vitest", browser: true,
-			files: map[string]string{"web/vitest.browser.config.ts": `export default { test: { browser: { enabled: true, provider: "playwright" } } }`},
-			want:  []string{"web/vitest.browser.config.ts"}},
+			files: map[string]string{"web/vitest.e2e.config.ts": `export default { test: { browser: { enabled: true, provider: "playwright" } } }`},
+			want:  []string{"web/vitest.e2e.config.ts"}},
 		{name: "browser mode in an unreadable config", runner: "vitest", browser: true,
 			files: map[string]string{"web/vitest.config.ts": `export default mergeConfig(base, defineConfig({ test: { browser: opts } }))`},
 			want:  []string{"web/vitest.config.ts"}},
@@ -146,16 +146,16 @@ func TestRunnerConfig(t *testing.T) {
 func TestVitestInputsPerProjectConfigs(t *testing.T) {
 	s := &Suite{Suite: config.Suite{Root: "web", Inputs: vitest{}.Defaults(&gitx.Repo{Root: t.TempDir()}, "web").Inputs}}
 	for f, want := range map[string]bool{
-		"web/vitest.config.ts":            true,
-		"web/vitest.browser.config.ts":    true,
-		"web/vitest.storybook.config.mts": true,
-		"web/vitest.node.config.cts":      true,
-		"web/vitest.config.e2e.ts":        true,
-		"web/vite.storybook.config.ts":    true,
-		"web/vite.e2e.config.mts":         true,
-		"web/vite.config.e2e.ts":          true,
-		"web/src/vitest.helpers.ts":       false,
-		"web/src/vite.helpers.ts":         false,
+		"web/vitest.config.ts":          true,
+		"web/vitest.e2e.config.ts":      true,
+		"web/vitest.stories.config.mts": true,
+		"web/vitest.unit.config.cts":    true,
+		"web/vitest.config.e2e.ts":      true,
+		"web/vite.storybook.config.ts":  true,
+		"web/vite.e2e.config.mts":       true,
+		"web/vite.config.e2e.ts":        true,
+		"web/src/vitest.helpers.ts":     false,
+		"web/src/vite.helpers.ts":       false,
 	} {
 		if got := s.InputMatch(f); got != want {
 			t.Errorf("InputMatch(%s) = %v, want %v", f, got, want)

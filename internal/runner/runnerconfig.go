@@ -46,7 +46,7 @@ func ConfigOf(s *Suite, src Sources) RunnerConfig {
 }
 
 // vitestConfigFile matches the base names of Vitest and Vite configuration files,
-// including the per-project ones (vitest.browser.config.ts, vite.config.e2e.mts) and
+// including the per-project ones (vitest.e2e.config.ts, vite.config.e2e.mts) and
 // workspace files.
 var vitestConfigFile = regexp.MustCompile(`^(?:vitest|vite)(?:\.[\w-]+)?\.config(?:\.[\w-]+)?\.[cm]?[jt]s$|^vitest\.(?:workspace|projects)\.(?:[cm]?[jt]s|json)$`)
 

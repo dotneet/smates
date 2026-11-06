@@ -177,8 +177,8 @@ func TestShadowStatsSharded(t *testing.T) {
 		runs                                []state.Run
 		runsN, withEscapes, escapes, failed int
 	}{
-		{"4 shards, an escape in shard 3",
-			[]state.Run{shard("a", "c1", "1/4", 0, 0), shard("b", "c1", "2/4", 1, 0), shard("c", "c1", "3/4", 2, 1), shard("d", "c1", "4/4", 0, 0)},
+		{"3 shards, an escape in shard 2",
+			[]state.Run{shard("a", "c1", "1/3", 1, 0), shard("b", "c1", "2/3", 2, 1), shard("c", "c1", "3/3", 0, 0)},
 			1, 1, 1, 3},
 		{"escapes in two shards of one run",
 			[]state.Run{shard("a", "c1", "1/2", 1, 1), shard("b", "c1", "2/2", 1, 1)},

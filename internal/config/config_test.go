@@ -339,11 +339,11 @@ suites:
     volatile: ["./pkg/clock#TestToday", "pkg/calendar"]
     max_age: 168h
     rules:
-      - reaches: ["./pkg/shared/testkit/**", "$APP_DB_*"]
-        deps: ["./database/migrations/**"]
+      - reaches: ["./internal/testdb/**", "$APP_DB_*"]
+        deps: ["./db/migrations/**"]
       - tests: ["./pkg/app/**"]
-        reaches: ["pkg/shared/testkit/**"]
-        deps: ["database/fixtures/**"]
+        reaches: ["internal/testdb/**"]
+        deps: ["db/seeds/**"]
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -356,14 +356,14 @@ suites:
 		t.Errorf("max_age %v", s.MaxAge)
 	}
 	r := s.Rules[0]
-	if want := []string{"pkg/shared/testkit/**", "$APP_DB_*"}; !reflect.DeepEqual(r.Reaches, want) {
+	if want := []string{"internal/testdb/**", "$APP_DB_*"}; !reflect.DeepEqual(r.Reaches, want) {
 		t.Errorf("reaches %v, want %v", r.Reaches, want)
 	}
-	if want := []string{"database/migrations/**"}; !reflect.DeepEqual(r.Deps, want) {
+	if want := []string{"db/migrations/**"}; !reflect.DeepEqual(r.Deps, want) {
 		t.Errorf("deps %v, want %v", r.Deps, want)
 	}
 	files, env := r.ReachesEnv()
-	if !reflect.DeepEqual(files, []string{"pkg/shared/testkit/**"}) || !reflect.DeepEqual(env, []string{"APP_DB_*"}) {
+	if !reflect.DeepEqual(files, []string{"internal/testdb/**"}) || !reflect.DeepEqual(env, []string{"APP_DB_*"}) {
 		t.Errorf("ReachesEnv: %v %v", files, env)
 	}
 	if want := []string{"pkg/app/**"}; !reflect.DeepEqual(s.Rules[1].Tests, want) {

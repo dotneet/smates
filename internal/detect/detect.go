@@ -45,7 +45,7 @@ func (p *packageJSON) has(dep string) bool {
 }
 
 // vitestProjectConfigRe matches a per-project vitest configuration file
-// (vitest.storybook.config.ts), which configures vitest when a command names it.
+// (vitest.stories.config.ts), which configures vitest when a command names it.
 var vitestProjectConfigRe = regexp.MustCompile(`^vitest\.[^.]+\.config\.(ts|mts|cts|js|mjs|cjs)$`)
 
 // vitestMentionRe matches what makes a vite.config.* configure vitest: an import of
@@ -164,7 +164,7 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 			r = "node"
 			command, env = nodeCommand, nodeEnv
 		case hasMatch(d, vitestProjectConfigRe):
-			// A per-project file (vitest.storybook.config.ts) configures vitest only
+			// A per-project file (vitest.stories.config.ts) configures vitest only
 			// when named: it picks vitest only when nothing else names the runner of the
 			// package's tests (a test script, a dependency, a configuration).
 			r = "vitest"

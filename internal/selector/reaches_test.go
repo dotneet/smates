@@ -14,7 +14,7 @@ import (
 	"github.com/dotneet/smates/internal/state"
 )
 
-const migration = "database/migrations/001.sql"
+const migration = "db/migrations/001.sql"
 
 // reachesFixture is a Go module whose tests reach a database helper directly
 // (pkg/app/repo), through another helper (pkg/app/svc), only from a helper test file of
@@ -26,26 +26,26 @@ func reachesFixture(t *testing.T, granularity string, rules ...config.Rule) *fix
 	test := func(pkg, name, helper string) string {
 		src := "package " + pkg + "\n\n"
 		if helper != "" {
-			src += "import (\n\t\"testing\"\n\n\t_ \"example.com/m/pkg/shared/" + helper + "\"\n)\n\n"
+			src += "import (\n\t\"testing\"\n\n\t_ \"example.com/m/internal/" + helper + "\"\n)\n\n"
 		} else {
 			src += "import \"testing\"\n\n"
 		}
 		return src + "func " + name + "(t *testing.T) {}\n"
 	}
 	f := newFixture(t, map[string]string{
-		"go.mod":                          "module example.com/m\n\ngo 1.22\n",
-		"pkg/shared/testkit/testkit.go":   "package testkit\n",
-		"pkg/shared/dbhelper/dbhelper.go": "package dbhelper\n\nimport _ \"example.com/m/pkg/shared/testkit\"\n",
-		"pkg/app/repo/repo_test.go":       test("repo", "TestRepo", "testkit"),
-		"pkg/app/svc/svc_test.go":         test("svc", "TestSvc", "dbhelper"),
-		"pkg/app/split/a_test.go":         test("split", "TestSplit", ""),
-		"pkg/app/split/helpers_test.go":   "package split\n\nimport _ \"example.com/m/pkg/shared/testkit\"\n",
-		"pkg/app/envdb/envdb_test.go":     test("envdb", "TestEnvDB", ""),
-		"pkg/app/pure/pure_test.go":       test("pure", "TestPure", ""),
-		migration:                         "create table t()",
-		"database/fixtures/users.yml":     "- id: 1",
-		"scripts/check.sh":                "echo ok",
-		"scripts/test/smoke.test.sh":      "./check.sh",
+		"go.mod":                        "module example.com/m\n\ngo 1.22\n",
+		"internal/testdb/testdb.go":     "package testdb\n",
+		"internal/dbhelper/dbhelper.go": "package dbhelper\n\nimport _ \"example.com/m/internal/testdb\"\n",
+		"pkg/app/repo/repo_test.go":     test("repo", "TestRepo", "testdb"),
+		"pkg/app/svc/svc_test.go":       test("svc", "TestSvc", "dbhelper"),
+		"pkg/app/split/a_test.go":       test("split", "TestSplit", ""),
+		"pkg/app/split/helpers_test.go": "package split\n\nimport _ \"example.com/m/internal/testdb\"\n",
+		"pkg/app/envdb/envdb_test.go":   test("envdb", "TestEnvDB", ""),
+		"pkg/app/pure/pure_test.go":     test("pure", "TestPure", ""),
+		migration:                       "create table t()",
+		"db/seeds/users.yml":            "- id: 1",
+		"scripts/check.sh":              "echo ok",
+		"scripts/test/smoke.test.sh":    "./check.sh",
 	})
 	g := suite(t, config.Suite{Name: "go", Runner: "go", Tests: []string{"**/*_test.go"}, Granularity: granularity, Rules: rules})
 	g.RepoRoot = f.dir
@@ -108,8 +108,8 @@ func withMigration(res *Result) []string {
 // reaches a file its globs match, or whose recorded run read a variable it names; and,
 // failing toward running more, to every unit it cannot tell about.
 func TestRuleReaches(t *testing.T) {
-	deps := []string{"database/migrations/**"}
-	kit := []string{"pkg/shared/testkit/**"}
+	deps := []string{"db/migrations/**"}
+	kit := []string{"internal/testdb/**"}
 	db := []string{"pkg/app/repo", "pkg/app/split", "pkg/app/svc"}
 	every := []string{"pkg/app/envdb", "pkg/app/pure", "pkg/app/repo", "pkg/app/split", "pkg/app/svc", "scripts/test/smoke.test.sh"}
 	funcs := func(units ...string) []string {
@@ -160,8 +160,8 @@ func TestRuleReaches(t *testing.T) {
 		{name: "tests only", rule: config.Rule{Tests: []string{"pkg/app/pure"}, Deps: deps}, static: true, want: []string{"pkg/app/pure"}},
 		// A glob that names nothing the tests import: no unit (doctor warns), and a
 		// change to the deps stays an orphan.
-		{name: "typo", rule: config.Rule{Reaches: []string{"pkg/shared/testkits/**"}, Deps: deps}, static: true, goOnly: true, want: nil},
-		{name: "typo, a unit no analyzer reads", rule: config.Rule{Reaches: []string{"pkg/shared/testkits/**"}, Deps: deps}, static: true, want: []string{sh}},
+		{name: "typo", rule: config.Rule{Reaches: []string{"internal/testdbs/**"}, Deps: deps}, static: true, goOnly: true, want: nil},
+		{name: "typo, a unit no analyzer reads", rule: config.Rule{Reaches: []string{"internal/testdbs/**"}, Deps: deps}, static: true, want: []string{sh}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := reachesFixture(t, c.granularity, c.rule)
@@ -232,7 +232,7 @@ func TestRuleReachesVariableSources(t *testing.T) {
 		"sh/smoke.test.sh":    "psql \"$APP_DB_DSN\" -c 'select 1'\n",
 		migration:             "create table t()",
 	}
-	rule := config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: []string{"database/migrations/**"}}
+	rule := config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: []string{"db/migrations/**"}}
 	all := []string{"gopre", "goplain", "node/plain.test.js", "node/scan.test.js", "py/test_plain.py", "py/test_settings.py", "sh/smoke.test.sh", "web/db.test.ts", "web/plain.test.ts"}
 	slices.Sort(all)
 	for _, c := range []struct {
@@ -289,7 +289,7 @@ func TestRuleReachesVariableSources(t *testing.T) {
 // Before a unit has run, a "$NAME" entry cannot tell whether it reads the variable:
 // it gets the deps.
 func TestRuleReachesUnrecorded(t *testing.T) {
-	f := reachesFixture(t, "", config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: []string{"database/migrations/**"}})
+	f := reachesFixture(t, "", config.Rule{Reaches: []string{"$APP_DB_DSN"}, Deps: []string{"db/migrations/**"}})
 	want := []string{"pkg/app/envdb", "pkg/app/pure", "pkg/app/repo", "pkg/app/split", "pkg/app/svc", "scripts/test/smoke.test.sh"}
 	if got := withMigration(f.sel(state.New(), func(in *Input) { in.All = true })); !reflect.DeepEqual(got, want) {
 		t.Errorf("units with the rule's deps: %v, want %v", got, want)
@@ -298,7 +298,7 @@ func TestRuleReachesUnrecorded(t *testing.T) {
 
 // Compile checks of Go test functions get no rules, reaches or not.
 func TestRuleReachesBuildCheck(t *testing.T) {
-	f := reachesFixture(t, config.GranularityFunc, config.Rule{Reaches: []string{"pkg/shared/testkit/**"}, Deps: []string{"database/migrations/**"}})
+	f := reachesFixture(t, config.GranularityFunc, config.Rule{Reaches: []string{"internal/testdb/**"}, Deps: []string{"db/migrations/**"}})
 	res := f.sel(reachesRecord(f, nil), nil)
 	for u, known := range res.SuiteByName("go").Known {
 		if runner.IsBuildCheck(u) && slices.Contains(known, migration) {
@@ -309,9 +309,9 @@ func TestRuleReachesBuildCheck(t *testing.T) {
 
 func TestRuleReachCounts(t *testing.T) {
 	f := reachesFixture(t, "",
-		config.Rule{Tests: []string{"**"}, Deps: []string{"database/fixtures/**"}},
-		config.Rule{Reaches: []string{"pkg/shared/testkit/**"}, Deps: []string{"database/migrations/**"}},
-		config.Rule{Reaches: []string{"pkg/shared/nothing/**"}, Deps: []string{"database/migrations/**"}},
+		config.Rule{Tests: []string{"**"}, Deps: []string{"db/seeds/**"}},
+		config.Rule{Reaches: []string{"internal/testdb/**"}, Deps: []string{"db/migrations/**"}},
+		config.Rule{Reaches: []string{"internal/nothing/**"}, Deps: []string{"db/migrations/**"}},
 	)
 	st := reachesRecord(f, nil)
 	if got, want := RuleReach(nil, f.suites[0], slices.Sorted(maps.Keys(f.files)), f.graph(), st.Suites["go"]), map[int]int{1: 3, 2: 0}; !reflect.DeepEqual(got, want) {
@@ -336,7 +336,7 @@ func TestConfigHashReaches(t *testing.T) {
 		t.Errorf("an empty reaches is hashed: %s", data)
 	}
 	before := ConfigHash(c, s)
-	s.Rules[0].Reaches = []string{"pkg/shared/testkit/**"}
+	s.Rules[0].Reaches = []string{"internal/testdb/**"}
 	if ConfigHash(c, s) == before {
 		t.Error("reaches is not hashed")
 	}

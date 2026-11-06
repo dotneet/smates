@@ -190,9 +190,9 @@ func TestSelectWholeStorybookProject(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := storybookFixture(t, false, map[string]string{
-				"web/ui/vitest.config.ts":      `export default { test: { projects: ["./vitest.unit.config.ts", "./vitest.storybook.config.ts"] } }`,
+				"web/ui/vitest.config.ts":      `export default { test: { projects: ["./vitest.unit.config.ts", "./vitest.stories.config.ts"] } }`,
 				"web/ui/vitest.unit.config.ts": `export default { test: { include: ["src/**/*.test.ts"] } }`,
-				"web/ui/vitest.storybook.config.ts": `import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
+				"web/ui/vitest.stories.config.ts": `import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
 export default mergeConfig(base, defineConfig({ plugins: [storybookTest()] }))`,
 				"web/ui/.storybook/main.ts": c.main,
 				"web/ui/src/theme.test.ts":  `import { theme } from "./theme"`,

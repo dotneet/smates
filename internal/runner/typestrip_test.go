@@ -181,7 +181,7 @@ export default defineConfig({ plugins: [react()], resolve: { alias: { "@": path.
 // readable main.*, type-only imports. Every way it cannot see one keeps type-only
 // imports (want false).
 func TestErasesTypesAggregatorsAndPlugins(t *testing.T) {
-	agg := `export default defineConfig({ test: { projects: ['./vitest.node.config.ts', './vitest.ui.config.ts'] } })`
+	agg := `export default defineConfig({ test: { projects: ['./vitest.unit.config.ts', './vitest.dom.config.ts'] } })`
 	node := `export default { test: { include: ['src/**/*.test.ts'] } }`
 	ui := `import tailwind from '@tailwindcss/vite'
 export default mergeConfig(base, defineConfig({ plugins: [tailwind()], test: { browser: { enabled: true } } }))`
@@ -213,7 +213,7 @@ export default config`
 		want  bool
 	}{
 		{name: "aggregator of literal project files with Tailwind", want: true,
-			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node, "web/vitest.ui.config.ts": ui}},
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.unit.config.ts": node, "web/vitest.dom.config.ts": ui}},
 		{name: "inline projects extending the root configuration", want: true,
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [
   { extends: true, test: { name: 'unit', include: ['src/**/*.test.ts'] } },
@@ -229,34 +229,34 @@ export default { plugins: [storybookTest()] }`)},
 
 		// Must keep: what an aggregator names may check types.
 		{name: "a project file sets typecheck",
-			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": `export default { test: { typecheck: { enabled: true } } }`, "web/vitest.ui.config.ts": ui}},
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.unit.config.ts": `export default { test: { typecheck: { enabled: true } } }`, "web/vitest.dom.config.ts": ui}},
 		{name: "a project file is missing",
-			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.unit.config.ts": node}},
 		{name: "a project glob",
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./packages/*'] } }`, "web/packages/a/vitest.config.ts": node}},
 		{name: "a project directory",
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./packages/a'] } }`, "web/packages/a/vitest.config.ts": node}},
 		{name: "a negated project",
-			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.node.config.ts', '!./x.ts'] } }`, "web/vitest.node.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.unit.config.ts', '!./x.ts'] } }`, "web/vitest.unit.config.ts": node}},
 		{name: "a spread project list",
-			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [...shared, './vitest.node.config.ts'] } }`, "web/vitest.node.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [...shared, './vitest.unit.config.ts'] } }`, "web/vitest.unit.config.ts": node}},
 		{name: "a project list from a variable",
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: list } }`}},
 		{name: "an inline project extending a file",
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [{ extends: './vitest.shared.ts' }] } }`, "web/vitest.shared.ts": node}},
 		{name: "projects inside mergeConfig",
-			files: map[string]string{"web/vitest.config.ts": `export default mergeConfig(base, { test: { projects: ['./vitest.node.config.ts'] } })`, "web/vitest.node.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": `export default mergeConfig(base, { test: { projects: ['./vitest.unit.config.ts'] } })`, "web/vitest.unit.config.ts": node}},
 		{name: "a project root",
-			files: map[string]string{"web/vitest.config.ts": `export default { root: 'src', test: { projects: ['./vitest.node.config.ts'] } }`, "web/src/vitest.node.config.ts": node, "web/vitest.node.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": `export default { root: 'src', test: { projects: ['./vitest.unit.config.ts'] } }`, "web/src/vitest.unit.config.ts": node, "web/vitest.unit.config.ts": node}},
 		{name: "a project file that is itself an aggregator",
-			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.node.config.ts'] } }`,
-				"web/vitest.node.config.ts": `export default { test: { projects: ['./vitest.deep.config.ts'] } }`, "web/vitest.deep.config.ts": node}},
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.unit.config.ts'] } }`,
+				"web/vitest.unit.config.ts": `export default { test: { projects: ['./vitest.deep.config.ts'] } }`, "web/vitest.deep.config.ts": node}},
 		{name: "an unknown plugin imported by a project file only",
-			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node,
-				"web/vitest.ui.config.ts": `import checker from 'vite-plugin-checker'; export default { plugins: [checker()] }`}},
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.unit.config.ts": node,
+				"web/vitest.dom.config.ts": `import checker from 'vite-plugin-checker'; export default { plugins: [checker()] }`}},
 		{name: "another projects option next to test.projects",
 			files: map[string]string{"web/vitest.config.ts": `import paths from 'vite-tsconfig-paths'
-export default { plugins: [paths({ projects: ['./tsconfig.json'] })], test: { projects: ['./vitest.node.config.ts'] } }`, "web/vitest.node.config.ts": node}},
+export default { plugins: [paths({ projects: ['./tsconfig.json'] })], test: { projects: ['./vitest.unit.config.ts'] } }`, "web/vitest.unit.config.ts": node}},
 		{name: "test.workspace",
 			files: map[string]string{"web/vitest.config.ts": `export default { test: { workspace: './w.ts' } }`, "web/w.ts": `export default []`}},
 		{name: "a value import of a package also imported for types",

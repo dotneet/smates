@@ -479,11 +479,11 @@ It reports the steps it leaves alone, and why:
 | The step | Why it is left alone |
 |---|---|
 | runs in a directory inside a suite's root (`pkg/app/internal`) | it runs only part of that suite: add a suite rooted there |
-| names packages other than `./...` or `.`, or computes them (`$(go list ./... \| grep -v x)`, `"${packages[@]}"`) | smates selects among all of the suite's packages, which the job may not be set up for |
+| names packages other than `./...` or `.`, or computes them (`$(go list ./... \| grep -v x)`, `"${pkgs[@]}"`) | smates selects among all of the suite's packages, which the job may not be set up for |
 | passes `-run`, `-list`, `-bench`, `-c` or `-skip` (single tests, compile-only checks) | it is not the plain unit run |
 | passes `-json` or `-coverprofile`, or pipes or redirects its output | another step may read the output |
 | uses `${{ matrix.* }}` in its command or working directory, or its job's matrix (the whole matrix, its `include`, a dimension or a value) comes from an expression, or a matrix value is a list or a nested object | smates cannot tell which suite each leg runs, or give each leg its own state: give each leg `args: --suite <name>` and `cache-key: <name>` by hand |
-| sets a variable on the test line (`DB_PORT=3307 go test ./...`, `env X=1 ...`), or an earlier line of its `run:` block changes the directory or environment (`cd`, `export`, `source`, `set -a`, `set --`; `set -e`, `set -u`, `set -x` and `set -o pipefail` do not) | the smates step would lose it: move it to the step's `env:` or `working-directory:`. An inline `GOFLAGS` is read as `go test` flags instead (carried as below, or left alone like the same flags on the command) |
+| sets a variable on the test line (`APP_DB_PORT=5433 go test ./...`, `env X=1 ...`), or an earlier line of its `run:` block changes the directory or environment (`cd`, `export`, `source`, `set -a`, `set --`; `set -e`, `set -u`, `set -x` and `set -o pipefail` do not) | the smates step would lose it: move it to the step's `env:` or `working-directory:`. An inline `GOFLAGS` is read as `go test` flags instead (carried as below, or left alone like the same flags on the command) |
 | passes `-short`, names tests (`vitest run unit`, `jest unit`, a `pytest` path other than a suite's root) or packages (`-w`, `--workspace`, `--filter`) | it runs only some of the suite's tests |
 | runs `turbo run test` or `node --test` | found, so that no second workflow runs the same tests, but never replaced |
 | runs `go test` with `-p`, `-tags`, `-race` or `-timeout` that the suite's `command:` lacks | the action would run without them: add them to `smates.yml`, then rerun |

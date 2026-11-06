@@ -23,7 +23,7 @@ func TestConfigHashKeysAddedLater(t *testing.T) {
 		set    func(*config.Suite)
 		hashed bool
 	}{
-		{"reaches", "Reaches", func(s *config.Suite) { s.Rules[0].Reaches = []string{"pkg/shared/testkit/**"} }, true},
+		{"reaches", "Reaches", func(s *config.Suite) { s.Rules[0].Reaches = []string{"internal/testdb/**"} }, true},
 		{"requires", "Requires", func(s *config.Suite) { s.Requires = []config.Requirement{{TCP: "127.0.0.1:5432"}} }, false},
 		{"requires timeout", "Requires", func(s *config.Suite) {
 			s.Requires = []config.Requirement{{TCP: "127.0.0.1:5432", Timeout: 5 * time.Second}}

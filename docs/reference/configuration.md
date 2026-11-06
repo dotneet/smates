@@ -153,8 +153,8 @@ rules:
   - tests: ["src/db/**"]
     deps: ["migrations/**"]
   # Every test that imports the database test helper, wherever it lives.
-  - reaches: ["pkg/shared/dbtest/**", "$APP_DB_*"]
-    deps: ["database/migrations/**"]
+  - reaches: ["internal/testdb/**", "$APP_DB_*"]
+    deps: ["db/migrations/**"]
 ```
 
 `reaches` follows the file-level closure, including what other helpers and the other
@@ -163,7 +163,7 @@ its configuration (Vitest `setupFiles` and `globalSetup`, Jest `setupFilesAfterE
 `jest.config.*`, JSON included, or the `jest` key of `package.json`, bun's `preload` in
 `bunfig.toml` or `--preload`, and what they import); for `granularity: func` it matches
 at the package level. A glob without a wildcard that names a directory
-(`pkg/shared/testkit`) matches what is below it. A `$NAME` entry also matches a test
+(`internal/testdb`) matches what is below it. A `$NAME` entry also matches a test
 whose closure's source names such a variable (`os.Getenv("APP_DB_DSN")`), or names a
 prefix of it in a string literal (`envconfig.Process("APP", &cfg)`,
 `viper.SetEnvPrefix("app")`, `env_prefix="APP_"`): Go records no read made before
@@ -240,7 +240,7 @@ requires:
     tests: ["internal/store/**"]
     timeout: 30s
   - file: ${HOME}/.cache/ms-playwright
-    tests: ["**/*.browser.test.ts"]
+    tests: ["e2e/**"]
 ```
 
 A check that cannot tell (a command that is not found or times out, an address that

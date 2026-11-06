@@ -515,19 +515,19 @@ export default { plugins: [storybookTest()] }`
 		{
 			name: "only a per-project vitest configuration",
 			files: map[string]string{
-				"ui/package.json":               `{"devDependencies":{"vitest":"^4"},"scripts":{"test":"vitest --config vitest.storybook.config.ts"}}`,
-				"ui/vitest.storybook.config.ts": sbConfig,
-				"ui/.storybook/main.ts":         `export default { stories: ["../src/**/*.stories.tsx"] }`,
-				"ui/src/button.stories.tsx":     "",
+				"ui/package.json":             `{"devDependencies":{"vitest":"^4"},"scripts":{"test":"vitest --config vitest.stories.config.ts"}}`,
+				"ui/vitest.stories.config.ts": sbConfig,
+				"ui/.storybook/main.ts":       `export default { stories: ["../src/**/*.stories.tsx"] }`,
+				"ui/src/button.stories.tsx":   "",
 			},
-			note: "vitest.storybook.config.ts configures vitest only when named",
+			note: "vitest.stories.config.ts configures vitest only when named",
 		},
 		{
 			name: "only a per-project vitest configuration, no dependency",
 			files: map[string]string{
-				"ui/package.json":               `{}`,
-				"ui/vitest.storybook.config.ts": sbConfig,
-				"ui/src/button.stories.tsx":     "",
+				"ui/package.json":             `{}`,
+				"ui/vitest.stories.config.ts": sbConfig,
+				"ui/src/button.stories.tsx":   "",
 			},
 			note: "ui: no vitest suite",
 		},
@@ -556,7 +556,7 @@ export default { plugins: [storybookTest()] }`
 	}
 }
 
-// A per-project vitest file (vitest.storybook.config.ts) configures vitest only when
+// A per-project vitest file (vitest.stories.config.ts) configures vitest only when
 // named, so it does not decide the runner of a package whose tests something else runs.
 func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
 	const sb = "export default { test: { include: [\"src/**/*.stories.tsx\"] } }\n"
@@ -567,8 +567,8 @@ func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
 		want string // the runner of the suite rooted at ui
 	}{
 		// Must keep the jest suite: vitest would run jest's tests.
-		{"jest script", `{"scripts":{"test":"jest","test:stories":"vitest --config vitest.storybook.config.ts"},"devDependencies":{"jest":"^29"}}`, "jest.config.js", "jest"},
-		{"jest configuration only", `{"scripts":{"test:stories":"vitest --config vitest.storybook.config.ts"}}`, "jest.config.js", "jest"},
+		{"jest script", `{"scripts":{"test":"jest","test:stories":"vitest --config vitest.stories.config.ts"},"devDependencies":{"jest":"^29"}}`, "jest.config.js", "jest"},
+		{"jest configuration only", `{"scripts":{"test:stories":"vitest --config vitest.stories.config.ts"}}`, "jest.config.js", "jest"},
 		{"bun test", `{"scripts":{"test":"bun test"}}`, "", "bun"},
 		{"node --test", `{"scripts":{"test":"node --test"}}`, "", "node"},
 		{"react-scripts", `{"scripts":{"test":"react-scripts test"},"dependencies":{"react-scripts":"5"}}`, "", "jest"},
@@ -577,9 +577,9 @@ func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
 		{"nothing else but a bun lockfile", `{}`, "bun.lock", "vitest"},
 		// A script whose name holds another runner's word names no runner: it runs a
 		// package script, which runs vitest here.
-		{"bun running a package script", `{"scripts":{"test":"bun test:unit","test:unit":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
-		{"npm run of a script named after jest", `{"scripts":{"test":"npm run test:jest-compat","test:jest-compat":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
-		{"yarn script named after jest", `{"scripts":{"test":"yarn test:jest-x","test:jest-x":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
+		{"bun running a package script", `{"scripts":{"test":"bun test:unit","test:unit":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
+		{"npm run of a script named after jest", `{"scripts":{"test":"npm run test:jest-compat","test:jest-compat":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
+		{"yarn script named after jest", `{"scripts":{"test":"yarn test:jest-x","test:jest-x":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
 		// Must keep the runner a script really invokes, directly or through a package
 		// script.
 		{"npm run of a script running jest", `{"scripts":{"test":"npm run test:jest","test:jest":"jest --ci"}}`, "", "jest"},
@@ -593,7 +593,7 @@ func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			files := map[string]string{
-				"ui/package.json": c.pkg, "ui/vitest.storybook.config.ts": sb,
+				"ui/package.json": c.pkg, "ui/vitest.stories.config.ts": sb,
 				"ui/src/a.test.ts": "test('a', () => {})\n", "ui/src/b.stories.tsx": "",
 			}
 			if c.file != "" {

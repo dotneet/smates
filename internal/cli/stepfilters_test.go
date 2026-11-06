@@ -61,7 +61,7 @@ func TestStepPatchNarrowing(t *testing.T) {
 		{"export before the test line", "pkg/app", "export GOFLAGS=-tags=integration\ngo test ./...", "changes the directory or environment", "", [3]string{}},
 		{"source before the test line", "svc", "source .venv/bin/activate\npytest", "changes the directory or environment", "", [3]string{}},
 		{"dot-source before the test line", "svc", ". .venv/bin/activate\npytest", "changes the directory or environment", "", [3]string{}},
-		{"bare assignment before the test line", "pkg/app", "DB_PORT=3307\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"bare assignment before the test line", "pkg/app", "APP_DB_PORT=5433\ngo test ./...", "changes the directory or environment", "", [3]string{}},
 		{"cd inside a chain", "", "make deps && cd pkg/app\ngo test ./...", "changes the directory or environment", "", [3]string{}},
 		{"harmless command before the test line", "pkg/app", "go mod download\ngo test ./...", "", "", [3]string{}},
 		// Shell options for errors and tracing change neither directory nor environment.
@@ -145,7 +145,7 @@ func TestInitMakefileMessage(t *testing.T) {
 		name, makefile string
 		want, not      string
 	}{
-		{"carried", "test:\n\tgo test -p 1 -v ./...\n", "command in smates.yml keeps -p 1", "so those flags/variables are not applied"},
+		{"carried", "test:\n\tgo test -race -v ./...\n", "command in smates.yml keeps -race", "so those flags/variables are not applied"},
 		{"nothing carried", "test:\n\tTZ=UTC go test -v ./...\n", "so those flags/variables are not applied", "keeps"},
 	}
 	for _, c := range cases {
@@ -243,13 +243,13 @@ func TestDoctorWorkflowWithoutConfig(t *testing.T) {
 		message      string
 	}{
 		{"no smates.yml", "", "smates init --github --patch smates.patch", "`smates init --github --patch smates.patch`"},
-		{"smates.yml lacking the flag", "version: 1\nsuites:\n  - name: go\n    runner: go\n    root: .\n", "", "set `command: go test -p 1` for the suite"},
+		{"smates.yml lacking the flag", "version: 1\nsuites:\n  - name: go\n    runner: go\n    root: .\n", "", "set `command: go test -race` for the suite"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			g := newGitRepo(t)
 			files := map[string]string{
-				".github/workflows/ci.yml": "on: pull_request\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -p 1 ./...\n",
+				".github/workflows/ci.yml": "on: pull_request\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -race ./...\n",
 				"go.mod":                   "module example.com/x\n\ngo 1.22\n",
 				"x_test.go":                "package x\n",
 			}
