@@ -63,7 +63,8 @@ inputs:
   cache:
     description: >-
       Restore and save the smates state with the Actions cache (per branch, falling back
-      to the default branch). Set to "false" to manage the state yourself.
+      to a pull request's base branch, then to the default branch). Set to "false" to
+      manage the state yourself.
     required: false
     default: 'true'
   cache-key:
@@ -148,6 +149,7 @@ runs:
         SMATES_ACTION_REF: ${{ github.action_ref }}
         SMATES_ACTION_PATH: ${{ github.action_path }}
         SMATES_BRANCH: ${{ github.head_ref || github.ref_name }}
+        SMATES_BASE_BRANCH: ${{ github.base_ref }}
         SMATES_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
@@ -310,6 +312,9 @@ runs:
           # both save; restores pick the newest entry by prefix.
           echo "state-key=$prefix$branch-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${GITHUB_JOB}-${INPUT_COMMAND//[^A-Za-z0-9]/_}-$RANDOM"
           echo "state-restore-branch=$prefix$branch-"
+          # A pull request into another branch than the default starts from that
+          # branch's state (guarded: an empty base would match every branch's state).
+          echo "state-restore-base=$(smates_restore_base "$prefix" "$branch" "${SMATES_BASE_BRANCH:-}" "$default_branch")"
           echo "state-restore-default=$prefix$default_branch-"
         } >>"$GITHUB_OUTPUT"
 
@@ -515,6 +520,7 @@ runs:
         key: ${{ steps.resolve.outputs.state-key }}
         restore-keys: |
           ${{ steps.resolve.outputs.state-restore-branch }}
+          ${{ steps.resolve.outputs.state-restore-base }}
           ${{ steps.resolve.outputs.state-restore-default }}
 
     - name: smates ${{ inputs.command }}
