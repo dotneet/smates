@@ -65,6 +65,43 @@ func parseGoFlags(rc *RunContext) goFlags {
 	return g
 }
 
+// GoArg is one argument of a go test command line: a flag with its value, or a
+// package pattern (Name "").
+type GoArg struct {
+	Words    []string // the word(s) it was read from
+	Name     string   // the flag without its dashes ("test.run" stays as is)
+	Value    string
+	HasValue bool
+}
+
+// ParseGoTestArgs splits the arguments of go test (the words after "go test") into
+// flags and package patterns, reading the value of a flag that takes one from the
+// next word unless oneWord (GOFLAGS: one flag per word). tail holds the words after
+// -args (nil when there is none, and never with oneWord).
+func ParseGoTestArgs(words []string, oneWord bool) (args []GoArg, tail []string) {
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if !oneWord && (w == "-args" || w == "--args") {
+			return args, append([]string{}, words[i+1:]...)
+		}
+		if !strings.HasPrefix(w, "-") || w == "-" || w == "--" {
+			args = append(args, GoArg{Words: []string{w}})
+			continue
+		}
+		name, val, hasVal := strings.Cut(strings.TrimLeft(w, "-"), "=")
+		short := strings.TrimPrefix(name, "test.")
+		takesValue := goTestValueFlags[short] || (goBuildValueFlags[name] && !strings.HasPrefix(name, "test."))
+		a := GoArg{Words: []string{w}, Name: name, Value: val, HasValue: hasVal}
+		if takesValue && !hasVal && !oneWord && i+1 < len(words) {
+			i++
+			a.Words = append(a.Words, words[i])
+			a.Value, a.HasValue = words[i], true
+		}
+		args = append(args, a)
+	}
+	return args, nil
+}
+
 // words translates go test arguments: from GOFLAGS (fromEnv: one flag per word; build
 // flags are left to the go command, which reads GOFLAGS itself) or from the command.
 func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
@@ -72,22 +109,16 @@ func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
 	if fromEnv {
 		where = "GOFLAGS"
 	}
-	for i := 0; i < len(words); i++ {
-		w := words[i]
-		if !fromEnv && (w == "-args" || w == "--args") {
-			g.tail = words[i+1:]
-			break
-		}
-		if !strings.HasPrefix(w, "-") || w == "-" || w == "--" {
+	args, tail := ParseGoTestArgs(words, fromEnv)
+	if tail != nil {
+		g.tail = tail
+	}
+	for _, a := range args {
+		if a.Name == "" {
 			continue // package patterns: smates names the package itself
 		}
-		name, val, hasVal := strings.Cut(strings.TrimLeft(w, "-"), "=")
+		name, val, hasVal := a.Name, a.Value, a.HasValue
 		short := strings.TrimPrefix(name, "test.")
-		takesValue := goTestValueFlags[short] || (goBuildValueFlags[name] && !strings.HasPrefix(name, "test."))
-		if takesValue && !hasVal && !fromEnv && i+1 < len(words) {
-			i++
-			val, hasVal = words[i], true
-		}
 		if strings.HasPrefix(name, "test.") {
 			switch short {
 			case "run", "skip", "bench", "fuzz", "list":
@@ -121,11 +152,7 @@ func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
 			if fromEnv {
 				continue
 			}
-			if hasVal && !strings.Contains(w, "=") {
-				g.build = append(g.build, w, val) // the value was the next word
-			} else {
-				g.build = append(g.build, w)
-			}
+			g.build = append(g.build, a.Words...)
 		}
 	}
 }

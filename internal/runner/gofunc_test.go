@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -229,6 +230,36 @@ func TestParseGoFlags(t *testing.T) {
 	for _, cmd := range []string{"go test -run TestX", "go test -c", "go test -test.run=X", "gotestsum --", "make test", "go vet"} {
 		if g := parseGoFlags(goRC(t, cmd, nil)); g.why == "" {
 			t.Errorf("%q: per-function recording should not be possible", cmd)
+		}
+	}
+}
+
+func TestParseGoTestArgs(t *testing.T) {
+	type arg struct {
+		name, value string
+		words       int
+	}
+	cases := []struct {
+		words   []string
+		oneWord bool
+		want    []arg
+		tail    []string
+	}{
+		{[]string{"-p", "1", "-race", "./..."}, false, []arg{{"p", "1", 2}, {"race", "", 1}, {"", "", 1}}, nil},
+		{[]string{"-tags=a,b", "-test.run", "X", "-count", "1"}, false, []arg{{"tags", "a,b", 1}, {"test.run", "X", 2}, {"count", "1", 2}}, nil},
+		{[]string{"-v", "./...", "-args", "-update", "x"}, false, []arg{{"v", "", 1}, {"", "", 1}}, []string{"-update", "x"}},
+		{[]string{"-p", "-timeout=5m"}, true, []arg{{"p", "", 1}, {"timeout", "5m", 1}}, nil},
+		{[]string{"-timeout"}, false, []arg{{"timeout", "", 1}}, nil},
+		{[]string{"--", "-"}, false, []arg{{"", "", 1}, {"", "", 1}}, nil},
+	}
+	for _, c := range cases {
+		args, tail := ParseGoTestArgs(c.words, c.oneWord)
+		var got []arg
+		for _, a := range args {
+			got = append(got, arg{a.Name, a.Value, len(a.Words)})
+		}
+		if !reflect.DeepEqual(got, c.want) || !slices.Equal(tail, c.tail) {
+			t.Errorf("%q: %+v tail %q, want %+v %q", c.words, got, tail, c.want, c.tail)
 		}
 	}
 }
