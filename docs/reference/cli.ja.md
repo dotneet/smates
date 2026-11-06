@@ -61,7 +61,7 @@ smates run [flags] [-- runner args]
 | `--no-agent` | | オフ | エージェントを呼びません。紐づかない変更には影響しうるスイートを丸ごと実行し、失敗の説明も行いません。 |
 | `--no-record` | | オフ | トレースせず、ステートも更新せずに実行します。 |
 | `--shadow` | | オフ | すべてのテストを実行し、選択していたら見逃していた失敗テストを報告します。`--shard` と一緒なら、そのシャードが担当するテストをすべて実行します。[シャドーモード](../guides/trust.md#shadow-mode) を参照してください。 |
-| `--shard` | `I/N` | | 選択されたテストのうち、`N` 分割した `I` 番目のシャードを実行します。テストはスイートとテスト ID の安定したハッシュでシャードに割り当てられます。シャード実行ではエージェントを呼びません。 |
+| `--shard` | `I/N` | | 選択されたテストのうち、`N` 分割した `I` 番目のシャードを実行します。テストはスイートとテスト ID の安定したハッシュでシャードに割り当てられます。割り当ては `N` によって変わるので、1 回の実行の全シャードは同じ `N` を使います。シャード実行ではエージェントを呼びません。 |
 | `--fail-fast` | | オフ | あるバッチが失敗したら、それ以降のバッチを開始しません。テストは失敗しそうなものから順に実行されます。 |
 | `--output` | `full`、`failures` | `$SMATES_OUTPUT`、なければ `full` | `full` はランナーの出力をそのまま流します。`failures` は失敗したテストの出力だけを表示し、最後にそれらを再実行するコマンド付きの短いまとめを出します。`agent` は `failures` の別名として受け付けます。 |
 | `--report` | file | | JSON のレポート（選択結果、テストごとの結果、シャドーモードでの見逃し、`exit_code`）を `file` に書き出します。`-` を指定すると stdout に書き、ほかの出力はすべて stderr に回します。 |
@@ -101,6 +101,8 @@ smates select [flags]
 | `--orphans` | `agent`、`full`、`skip` | `smates.yml` の `orphans:` | `run` と同じです。 |
 | `--no-agent` | | オフ | エージェントを呼びません。 |
 | `--shard` | `I/N` | | 選択結果のうち `I/N` のシャード分だけを対象にします。 |
+| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。[全件実行するブランチ](configuration.md#top-level-keys)への push のビルドでは、`smates run` がそこで全テストを実行するので、全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
+| `--shard-time` | 期間 | `10m` | `--max-shards` のとき: 1 シャードあたりの記録済みテスト時間の目安。実行時間が記録されていない選択済みテストはスイートの中央値として数えます。選択されたテストがあり、実行時間が 1 つも記録されていないスイートがあれば `N` になります。 |
 | `--markdown` | file | | Markdown のまとめを `file` にも書き出します。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
@@ -109,8 +111,8 @@ smates select [flags]
 |---|---|
 | `text` | 選択されたテスト ID を 1 行に 1 つ。選択のまとめは stderr に出ます。 |
 | `files` | 選択されたテスト ID を 1 行に 1 つ。stderr には何も出ません。 |
-| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断。 |
-| `github` | `selected`、`total`、`run-all`、`skip`、`tests`、`suites` をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。[出力](../ci/github-actions.md#outputs) を参照してください。 |
+| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断、`--max-shards` のときは `shards`。 |
+| `github` | `selected`、`total`、`run-all`、`skip`、`tests`、`suites`（`--max-shards` のときは `shards` と `shard-matrix` も）をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。[出力](../ci/github-actions.md#outputs) を参照してください。 |
 | `markdown` | プルリクエストのコメントに使う Markdown のまとめ。 |
 
 ### smates watch { #smates-watch }

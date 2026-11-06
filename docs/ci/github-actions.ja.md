@@ -75,6 +75,8 @@ jobs:
 | `skip` | 何も選択されなかったとき `true`。 |
 | `tests` | JSON オブジェクト: スイートごとの、選択されたテストユニットの ID。 |
 | `suites` | JSON オブジェクト。スイートごとに 1 エントリ: `{"selected": 2, "total": 40, "all": false, "skip": false}`。`skip` が `true` になるのは、そのスイートで何も選択されなかったときだけです（[これでゲートします](#gate-jobs-per-suite)）。 |
+| `shards` | `command: select` と `--max-shards N` のとき: 選択に必要なシャード数。何も選択されなければ `0`、それ以外は `1` から `N`（[後述](#size-the-shards-to-the-selection)）。 |
+| `shard-matrix` | `--max-shards` のとき: `strategy.matrix` に渡せる `{"shard": ["1/3", "2/3", "3/3"]}`。値はそのまま `--shard` に渡せます。 |
 | `exit-code` | smates コマンドの終了コード。 |
 | `flaky` | `run` が flaky と証明したテストユニットの数（入力が変わらないのに結果が反転したもの）。 |
 | `flaky-tests` | それらのユニットの JSON 配列（`"suite: unit"`）。`smates flaky` も参照してください。 |
@@ -198,7 +200,7 @@ smates はスイートをまたいで選択します。共有パッケージへ�
 
 ### シャードとマトリクス { #shards-and-matrices }
 
-`--shard I/N` は、スイートと ID の安定したハッシュで各テストをシャードに割り当てます。そのため、あるテストは常に同じシャードに入り、各シャードがどのステートを復元していても割り当ては一致します。ジョブ同士がステートを上書きし合わないよう、シャードごとに別の `cache-key` を付けてください。
+`--shard I/N` は、スイートと ID の安定したハッシュで各テストをシャードに割り当てます。そのため、`N` が同じならあるテストは常に同じシャードに入り、各シャードがどのステートを復元していても割り当ては一致します。どのシャードがテストを担当するかは `N` によって変わるので、1 回の実行の全シャードは同じ `N` を使う必要があります（マトリクスならそうなります）。ジョブ同士がステートを上書きし合わないよう、シャードごとに別の `cache-key` を付けてください。
 
 ```yaml
     strategy:
@@ -215,6 +217,89 @@ smates はスイートをまたいで選択します。共有パッケージへ�
 Node のバージョンなどのマトリクスでも同じです（`cache-key: node-${{ matrix.node }}`）。ランナーの OS はすでにキーに含まれています。
 
 シャード実行ではエージェントを呼びません（[理由](../guides/agent.md#sharded-runs)）。各シャードは担当分にオーファンのポリシーを適用します。シャードでエージェントを使うには、シャードより前に（シャードなしで）`smates select` を 1 回実行し、そのステートを全シャードに復元させます。各シャードはキャッシュされた判断を再利用します。
+
+### シャード数を選択に合わせる { #size-the-shards-to-the-selection }
+
+固定のマトリクスでは、変更が 3 本のテストしか選択しなくても全シャードが起動し、それぞれがセットアップの費用を払います。`smates select --max-shards N` はシャード数を選択に合わせて決めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time`（既定 `10m`）で割って切り上げ、`1` から `N` の範囲に収めた値です。実行時間が記録されていない選択済みテストは、そのスイートの中央値として数えます。選択されたテストのあるスイートに記録済みの実行時間が 1 つもなければ、シャード数は `N` になります。`smates run` がすべてのテストを実行するデフォルトブランチ（または `full_run_branches` のブランチ）への push のビルドでは、全テストを前提にシャード数を決めます。
+
+シャード数が決めるのは、選択を何個のジョブで分けるかだけです。選択されたテストは必ずどれか 1 つのジョブで実行されます。担当はシャード数によって変わるので、マトリクスの値にはシャード数も含め（`"1/3"`）、1 回の実行の全シャードが同じ数を使うようにしています。
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      shard-matrix: ${{ steps.plan.outputs.shard-matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        uses: dotneet/smates@vX.Y.Z
+        with:
+          command: select
+          args: --max-shards 8
+          cache-key: sharded
+          comment: true            # 選択全体についてコメントを 1 つ
+  test:
+    needs: plan
+    if: needs.plan.outputs.shards != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.shard-matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ... ツールチェーン
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --shard ${{ matrix.shard }}
+          cache-key: sharded
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smates-state-${{ strategy.job-index }}
+          path: .smates/state.json.gz
+          include-hidden-files: true
+          if-no-files-found: ignore
+  # 必須: plan ジョブが成功しなかったときはマトリクスがなく、シャードのジョブは
+  # スキップされる。そのときは plan がない場合と同じく固定のマトリクスで実行する。
+  test-fallback:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result != 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ... ツールチェーン
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --shard ${{ matrix.shard }}/8
+          cache-key: sharded
+  # 各シャードが記録したものをまとめ、次の plan が全シャードの結果を見られるようにする。
+  merge-state:
+    needs: test
+    if: ${{ !cancelled() && needs.test.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smates-state-*
+          path: ${{ runner.temp }}/shard-states
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          command: state
+          args: merge ${{ runner.temp }}/shard-states/*/state.json.gz
+          cache-key: sharded
+```
+
+- **フォールバックは省略できません。** plan ジョブが失敗すると（smates が自身のエラーで 2 から 4 で終了した、ランナーが落ちた）、`needs.plan.outputs.shards` は空になり、シャードのジョブはスキップされます。`test-fallback` がなければ、変更を何もテストしないことになります。これらのジョブを束ねる必須チェックは、`test` のスキップを plan が成功して `shards` が `0` のときだけ、`test-fallback` のスキップを plan が成功したときだけ受け入れるようにします（[前述](#gate-jobs-per-suite)の集約ジョブを参照）。
+- **キャッシュキーは 1 つにします。** plan と全シャードは、シャードごとのキーではなく `cache-key: sharded` を共有します。シャード数が変わると、ある実行のシャード 2 と次の実行のシャード 2 は別のテストを担当するので、シャードごとのキーでは、もう実行しないテストのエントリを復元することがほとんどになります。各シャードは実行したものを保存し、`merge-state` がそれらをマージして（`smates state merge`、テストごとに新しいエントリを採用）最後に保存するので、次の実行はそれを復元します。`merge-state` が実行されなかった場合、次の実行は 1 つのシャードのステートを復元します。そのとき、別のシャードが実行したテストは、入力がそのステートにある古いエントリと異なれば再び選択されます。つまり実行が増えるだけで、減ることはありません。ただし、前回成功したときから入力が変わっていないのに別のシャードで失敗したテストは、マージしたステートにしか記録されないので、マージのジョブは残してください。
+- **コメント。** 各シャードのコメントは `shard-I-of-N` をキーにするので、シャード数が違う後の実行では古いコメントが残ります。上の例のように plan ジョブからコメントしてください。
+- **オーバーヘッド。** 記録される実行時間はテストの時間だけです。`go test` ではパッケージのコンパイル、`TestMain`、フィクスチャの時間を含まず、ジョブのセットアップは各シャードがそれぞれ払います。その費用が大きいときは `--shard-time` を小さくしてください。ハッシュはテストを実行時間ではなく本数で均等に分けるので、シャードの長さは揃わないことがあります。
 
 ### モノレポ { #monorepos }
 

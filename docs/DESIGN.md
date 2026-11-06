@@ -765,6 +765,21 @@ selective run handled are marked seen by those suites alone. A suite command lin
 cannot be parsed still ends the run as a configuration error (exit 3).
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
+### Shard counts
+
+`--shard I/N` hashes suite and unit ID (FNV-1a) modulo `N`: ownership needs no
+coordination and no state, but it depends on `N`, so every shard of a run must use the
+same count. `smates select --max-shards N` sizes `N` for a CI matrix (`shardCount`): `0`
+when nothing is selected, else the recorded duration of the selected units over
+`--shard-time`, rounded up and kept within `1..N`. A selected unit without a duration
+weighs its suite's median; a suite with selected units and no duration at all yields `N`
+(nothing to size by). On a full-run branch it sizes for every unit, as the shards'
+`smates run` will run them all. The count never changes what runs, only how many jobs
+share it, so a wrong estimate costs time, not coverage. The `shard-matrix` output carries
+the count in each value (`"2/3"`) so legs cannot disagree on it. Balancing shards by
+duration (instead of the hash) is not done: it would need a plan file every shard reads,
+and a single point of failure where the hash needs none.
+
 ### Flaky tests
 
 Because every entry stores the content hash of every input, a flaky test can be detected

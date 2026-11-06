@@ -1113,6 +1113,25 @@ type selectFlags struct {
 	shard    string
 	explain  bool
 	markdown string
+	// maxShards (--max-shards) asks for a shard count sized to the selection, at most
+	// this many; shardTime (--shard-time) is the recorded test time to aim for per shard.
+	maxShards int
+	shardTime time.Duration
+}
+
+// validateShards checks --max-shards and --shard-time (set: the flags given).
+func (f *selectFlags) validateShards(set map[string]bool) error {
+	switch {
+	case set["max-shards"] && (f.maxShards < 1 || f.maxShards > maxShardsLimit):
+		return usageError{fmt.Errorf("invalid --max-shards %d (want 1 to %d)", f.maxShards, maxShardsLimit)}
+	case set["shard-time"] && !set["max-shards"]:
+		return usageError{fmt.Errorf("--shard-time sizes --max-shards and needs it")}
+	case f.shardTime < time.Second:
+		return usageError{fmt.Errorf("invalid --shard-time %s (want at least 1s)", f.shardTime)}
+	case set["max-shards"] && f.shard != "":
+		return usageError{fmt.Errorf("--max-shards sizes the shards of the whole selection and cannot be combined with --shard")}
+	}
+	return nil
 }
 
 func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -1128,6 +1147,8 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs.StringVar(&f.shard, "shard", "", "only shard `I/N` of the selection")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
 	fs.StringVar(&f.markdown, "markdown", "", "also write the summary as Markdown to `file`, e.g. for a pull request comment")
+	fs.IntVar(&f.maxShards, "max-shards", 0, "also size a shard count for the selection: 0 when nothing is selected, else 1 to `N` (outputs shards and shard-matrix)")
+	fs.DurationVar(&f.shardTime, "shard-time", defaultShardTime, "with --max-shards: recorded test time to aim for per shard")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -1138,6 +1159,11 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := f.callerFlags.validate(); err != nil {
 		return 2, err
 	}
+	set := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	if err := f.validateShards(set); err != nil {
+		return 2, err
+	}
 	shardI, shardN, err := parseShard(f.shard)
 	if err != nil {
 		return 2, err
@@ -1146,11 +1172,27 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
+	all := f.all
+	if f.maxShards > 0 && !all {
+		// The shards are sized for what `smates run` will run in them: everything where
+		// it runs everything by default (the default branch on CI).
+		if full, branch := fullRunBranch(p.ci, p.repo, p.cfg.FullRunBranches); full {
+			p.logf("on %s (%s): sizing the shards for a full run, as `smates run` runs every test there", branch, p.ci.Name)
+			all = true
+		}
+	}
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
 	if err != nil {
 		return 1, err
 	}
 	applyShard(sel.res, shardI, shardN)
+	var shardLines []string
+	if f.maxShards > 0 {
+		n := shardCount(sel.res, f.maxShards, f.shardTime)
+		p.logf("%d shard(s) for this selection (--max-shards %d, about %s of recorded test time per shard)", n, f.maxShards, f.shardTime)
+		shardLines = shardOutputs(n)
+		sel.shards = &n
+	}
 	if sel.agentDec != nil && !sel.agentCache {
 		// Keep the agent's answer for the next run on the same change.
 		if err := p.store.Save(p.state); err != nil {
@@ -1179,7 +1221,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 0, enc.Encode(jsonSelection(sel))
 	case "github":
 		printSelection(p, sel, stderr, f.explain)
-		if err := writeGitHubOutputs(stdout, sel); err != nil {
+		if err := writeGitHubOutputs(stdout, sel, shardLines...); err != nil {
 			return 0, err
 		}
 		writeRunSummary(p, "", sum)
@@ -1199,11 +1241,13 @@ type jsonOut struct {
 	// Candidates describe the orphans for a calling agent that decides about them
 	// itself (--add, --orphans).
 	Candidates []orphanCandidate `json:"orphan_candidates"`
+	// Shards is the shard count `select --max-shards` sized (absent without it).
+	Shards *int `json:"shards,omitempty"`
 }
 
 func jsonSelection(sel *selection) jsonOut {
 	s, t := sel.res.Counts()
-	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates}
+	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates, Shards: sel.shards}
 	if out.Candidates == nil {
 		out.Candidates = []orphanCandidate{}
 	}
