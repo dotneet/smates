@@ -581,7 +581,9 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
-		if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
+		if w := noTraceWarning(b.units, r); w != "" {
+			p.logf("%s: %s", sr.Name, w)
+		} else if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
 		}
 		res := c.results[sr.Name]
@@ -670,6 +672,16 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 			}
 		}
 	}
+}
+
+// noTraceWarning warns about a recorded batch that passed while none of its units
+// left a trace or reported a result: they stay unrecorded and run again next time,
+// so selection stays safe, but it never learns what they depend on.
+func noTraceWarning(units []string, r *runner.RunResult) string {
+	if r.ExitCode != 0 || len(units) == 0 || len(r.Observations) > 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d test unit(s) ran and passed but left no trace, so they stay unrecorded and run again next time: %s", len(units), runner.NoTraceCauses)
 }
 
 // unreportedUnits returns the units of a failed run that nothing was observed for

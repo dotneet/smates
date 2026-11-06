@@ -169,11 +169,31 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		}
 		obs[id] = o
 	}
-	if untraced > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time", untraced))
+	if w := untracedWarning(untraced, len(attr.Units) > 0); w != "" {
+		warnings = append(warnings, w)
 	}
 	return obs, warnings, readsBy, nil
 }
+
+// untracedWarning explains the test files a runner reported as passed although they
+// left no trace (untraced): a process killed before it wrote its trace when other
+// test processes left one (traced), otherwise more likely a command that does not
+// pass smates' tracing environment on to the test processes or replays cached
+// results. Either way they will run again.
+func untracedWarning(untraced int, traced bool) string {
+	switch {
+	case untraced == 0:
+		return ""
+	case traced:
+		return fmt.Sprintf("%d test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time", untraced)
+	}
+	return fmt.Sprintf("%d test file(s) passed but none left a trace: %s; they will run again next time", untraced, NoTraceCauses)
+}
+
+// NoTraceCauses are the likely reasons a run that reported tests left no trace at all.
+const NoTraceCauses = "the suite command probably runs them through a wrapper that drops the tracing environment " +
+	"(NODE_OPTIONS, NODE_V8_COVERAGE, SMATES_*: a task runner such as turbo or nx, env -i, a container) or replays cached results; " +
+	"run the test runner directly (with root: set to its package) or pass that environment through"
 
 // reportedResults reads the per-file results runner reporters wrote into the trace
 // directory and the suite's JUnit report, which wins unless theirs is worse (fail beats
