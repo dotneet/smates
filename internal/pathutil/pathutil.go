@@ -190,11 +190,18 @@ func Match(globs []string, p string) bool {
 // IsVendored reports paths that are never test inputs we track (dependency trees,
 // caches, VCS metadata).
 func IsVendored(p string) bool {
-	for _, seg := range strings.Split(p, "/") {
+	// Segment by segment without splitting: selection asks for every dependency of
+	// every test.
+	for rest := p; ; {
+		seg, more, found := strings.Cut(rest, "/")
 		switch seg {
 		case "node_modules", ".git", "__pycache__", ".venv", ".smates", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox":
 			return true
 		}
+		if !found {
+			break
+		}
+		rest = more
 	}
 	return strings.HasSuffix(p, ".pyc")
 }

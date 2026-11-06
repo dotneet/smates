@@ -1,6 +1,10 @@
 package depkey
 
-import "testing"
+import (
+	"math/rand"
+	"strings"
+	"testing"
+)
 
 func TestKinds(t *testing.T) {
 	for _, c := range []struct {
@@ -99,8 +103,12 @@ func TestCovers(t *testing.T) {
 		{"a/b/c.go/x", false, CoverContent}, // inside a submodule at f
 		{"a/b/c.gox", false, CoverNone},     // a prefix ends at a path boundary
 	} {
-		if got := Covers(map[string]bool{c.key: true}, f, c.existenceChanged); got != c.want {
+		deps := map[string]bool{c.key: true}
+		if got := Covers(deps, f, c.existenceChanged); got != c.want {
 			t.Errorf("Covers(%q, %v) = %q, want %q", c.key, c.existenceChanged, got, c.want)
+		}
+		if got := NewCoverIndex(deps).Covers(f, c.existenceChanged); got != c.want {
+			t.Errorf("CoverIndex.Covers(%q, %v) = %q, want %q", c.key, c.existenceChanged, got, c.want)
 		}
 	}
 	// The strongest explanation wins.
@@ -149,5 +157,89 @@ func TestGoDeclarationKeys(t *testing.T) {
 	}
 	if got := Covers(map[string]bool{Sig("p/a.go", "F"): true}, "p/a.go", false); got != CoverDecls {
 		t.Errorf("a signature dependency: %q", got)
+	}
+}
+
+// parseReference is Parse without its fast path for keys with no "#": every check in
+// order.
+func parseReference(key string) (Kind, string) {
+	if id, ok := strings.CutPrefix(key, setPrefix); ok {
+		return KindSet, id
+	}
+	if name, ok := strings.CutPrefix(key, envPrefix); ok {
+		return KindEnv, name
+	}
+	if p, ok := strings.CutSuffix(key, declsSuffix); ok {
+		return KindDecls, p
+	}
+	if dir, ok := strings.CutSuffix(key, shapeSuffix); ok {
+		return KindShape, dir
+	}
+	if dir, _, ok := MethodsType(key); ok {
+		return KindMethods, dir
+	}
+	if i := strings.LastIndex(key, declInfix); i >= 0 {
+		return KindDecl, key[:i]
+	}
+	if i := strings.LastIndex(key, sigInfix); i >= 0 {
+		return KindSig, key[:i]
+	}
+	if p, ok := strings.CutSuffix(key, configSuffix); ok {
+		return KindConfig, p
+	}
+	if dir, ok := strings.CutSuffix(key, treeSuffix); ok {
+		return KindTree, dir
+	}
+	if p, ok := strings.CutSuffix(key, existenceSuffix); ok {
+		return KindExistence, p
+	}
+	if dir, ok := strings.CutSuffix(key, listingSuffix); ok {
+		return KindListing, dir
+	}
+	return KindContent, key
+}
+
+// TestParseFastPath checks Parse against every check in order over keys built from
+// every pair of the syntax's parts (with and without "#").
+func TestParseFastPath(t *testing.T) {
+	parts := []string{"", "a", "a/b.go", "#", "#decls", "/#shape", "/#methods:T", "#decl:F", "#sig:F", "#suite", "/**", "?", "/", "$", "@set:", "x#y", "#/"}
+	for _, a := range parts {
+		for _, b := range parts {
+			for _, c := range parts {
+				key := a + b + c
+				k, p := Parse(key)
+				wk, wp := parseReference(key)
+				if k != wk || p != wp {
+					t.Errorf("Parse(%q) = %v %q, want %v %q", key, k, p, wk, wp)
+				}
+			}
+		}
+	}
+}
+
+// TestCoverIndexMatchesCovers checks the index against the scan over sets mixing keys
+// that sort around the prefixes of f (a sibling with a longer name, "-" and "." which
+// sort before "/" and "#").
+func TestCoverIndexMatchesCovers(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	files := []string{"a/b/c.go", "a/b/c.go.bak", "a/b/c-go", "a/b/c.gox", "a/b/c", "a/b", "a", "go.mod", "a/b/c.go/sub"}
+	var pool []string
+	for _, f := range files {
+		pool = append(pool, f, Decls(f), Decl(f, "F"), Sig(f, "T.M"), Config(f), Listing(f), Existence(f), Tree(f), Shape(f), Methods(f, "T"), f+"-x", f+".x", f+"/x/y")
+	}
+	pool = append(pool, Env("A"), Set("suite:a"), Tree("."), Listing("."))
+	for i := 0; i < 3000; i++ {
+		deps := map[string]bool{}
+		for k := r.Intn(6); k >= 0; k-- {
+			deps[pool[r.Intn(len(pool))]] = true
+		}
+		x := NewCoverIndex(deps)
+		for _, f := range files {
+			for _, ex := range []bool{false, true} {
+				if got, want := x.Covers(f, ex), Covers(deps, f, ex); got != want {
+					t.Fatalf("CoverIndex.Covers(%q, %v) over %v = %q, want %q", f, ex, deps, got, want)
+				}
+			}
+		}
 	}
 }
