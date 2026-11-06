@@ -202,18 +202,65 @@ func allPkgArgs(rc *RunContext) []string {
 }
 
 // Units are package directories, or with granularity "func" top-level test functions
-// ("dir#TestName", see gofunc.go).
+// ("dir#TestName", see gofunc.go). A directory none of whose Go files the suite's
+// configuration compiles is no unit (see excludedPackageDirs).
 func (goTest) Units(s *Suite, testFiles []string) []string {
 	if funcGranularity(s) {
 		return funcUnits(s, testFiles)
 	}
-	seen := map[string]bool{}
+	seen := excludedPackageDirs(s, testFiles)
 	var out []string
 	for _, f := range testFiles {
 		d := path.Dir(f)
 		if !seen[d] {
 			seen[d] = true
 			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// excludedPackageDirs returns the directories of testFiles whose Go files build
+// constraints all exclude in the suite's configuration (//go:build lines, _GOOS/_GOARCH
+// file names, with the tags and platform of GOFLAGS, the command, the arguments passed
+// through and the env; go list decides, see excludedTestFiles). go test fails such a
+// directory ("build constraints exclude all Go files") without testing anything, and
+// ./... skips it. A directory stays a unit whenever any of its Go files may compile:
+// one of testFiles, or another .go file in it (a package whose tests alone are
+// constrained still compiles), or when it cannot be read or go list fails.
+func excludedPackageDirs(s *Suite, testFiles []string) map[string]bool {
+	ex := excludedTestFiles(s, testFiles)
+	if len(ex) == 0 {
+		return map[string]bool{}
+	}
+	cand := map[string]bool{}
+	for _, f := range testFiles {
+		if ex[f] {
+			cand[path.Dir(f)] = true
+		}
+	}
+	for _, f := range testFiles {
+		if !ex[f] {
+			delete(cand, path.Dir(f))
+		}
+	}
+	out := map[string]bool{}
+	for d := range cand {
+		entries, err := os.ReadDir(filepath.Join(s.RepoRoot, filepath.FromSlash(d)))
+		if err != nil {
+			continue
+		}
+		var goFiles []string
+		for _, e := range entries {
+			n := e.Name()
+			if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") {
+				continue // go ignores names starting with _ or .
+			}
+			goFiles = append(goFiles, path.Join(d, n))
+		}
+		gx := excludedTestFiles(s, goFiles)
+		if len(goFiles) > 0 && !slices.ContainsFunc(goFiles, func(f string) bool { return !gx[f] }) {
+			out[d] = true
 		}
 	}
 	return out

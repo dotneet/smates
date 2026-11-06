@@ -361,6 +361,13 @@ when the config is not literal. Derived patterns do not mark the suite narrowed:
 run still lets the runner discover its tests, so an approximation (a converted
 extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
 
+A Go package unit is the directory of a test file, unless build constraints exclude every
+Go file of that directory in the suite's configuration (`go list -find` with the suite's
+build flags, as for test functions; when go list fails, or any Go file of the directory
+may compile, it stays a unit): `go test` would fail such a directory ("build constraints
+exclude all Go files") and `./...` skips it. Widening `tests` to non-test files
+(`**/cmd/**/*.go`) makes packages without tests units that `go test` compiles.
+
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
 so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
@@ -647,8 +654,17 @@ with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, im
 mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
 back to the whole package when unresolvable). Python imports including relative, dynamic
 with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
-on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
-package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
+on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`,
+package directories or `.go` files named in test string literals (`go run ../../cmd/tool`),
+and the files that pin dependency versions: the module's `go.mod`/`go.sum` and the `go.mod`
+of its local `replace` targets, and in a `go.work` workspace `go.work`/`go.work.sum` plus
+the `go.mod`/`go.sum` of every module it `use`s and the `go.mod` of their local replace
+targets (minimal version selection picks one version per dependency across them all, so a
+`require` bump in a module a package never imports can change what it links; another
+module's `go.sum` counts because the go command verifies checksums against all of them, so
+a removed line can fail the build). A `go.work` whose directives do not parse, or that
+uses nothing, counts every module below its directory. These are content keys: any edit
+selects every test of the workspace.
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
 into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript

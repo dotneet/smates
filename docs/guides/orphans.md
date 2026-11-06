@@ -45,7 +45,8 @@ Each step handles what the earlier steps left over:
    suite's root, and no test imports it (directly or through other code) or executed it,
    then no test can be affected. Nothing runs, and the summary and the pull request
    comment list the file under "changes to untested code". Examples are a `main` package,
-   or a component without tests.
+   or a component without tests. (To compile Go packages without tests instead, see
+   [Go packages without tests](runners.md#go-packages-without-tests).)
 3. **The agent.** When an API key is set, the [LLM agent](agent.md) explores the
    repository with read-only tools. It then adds specific tests, requests a full run, or
    says the change affects no test. The agent can only *add* tests, so a wrong answer

@@ -175,8 +175,46 @@ directories listed, environment variables), via `go test -exec`. Node and Python
 processes a test starts are traced too. Build failures are attributed to their packages.
 `go.mod`, `go.sum`, `go.work` and `.tool-versions` are inputs.
 
+In a `go.work` workspace, Go picks one version of each dependency for all the modules
+the workspace uses, so a `require` bump in one module can change what another builds
+even when it never imports the first. Every Go file of the workspace therefore depends
+on the `go.mod` and `go.sum` of every module listed by `use`, and on the `go.mod` of
+each local `replace` target: a dependency bump in any of them selects every test of the
+workspace. A `go.work` smates cannot parse makes every module below it count.
+
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
+
+### Go packages without tests
+
+By default only directories with `_test.go` files are units, so a selective run never
+compiles a package without tests (a `main` package under `cmd/`): when a library it
+imports changes, the library's tests run but the `main` package is not built, and a
+change to the `main` package itself is [untested code](orphans.md). `smates run --all`
+does compile it (`go test ./...`). To compile such packages in selective runs too, widen
+the suite's `tests` to their files:
+
+```yaml
+suites:
+  - name: go
+    runner: go
+    tests: ["**/*_test.go", "**/cmd/**/*.go"]   # or ["**/*.go"] for every package
+```
+
+Each matching directory is then a unit: `go test ./cmd/app` compiles it and reports
+`[no test files]`, or fails it on a build error, and it depends on its static import
+closure like any package. It runs when a package it imports changes, or when its own
+files do. With `granularity: func` the directory becomes a compile check
+(`cmd/app#(build)`) with no function units. A directory whose Go files the suite's
+build constraints all exclude (`//go:build` lines, `_linux.go` names, with the tags of
+`GOFLAGS`, the command and arguments passed through) is no unit; when smates cannot tell
+(go list fails), it stays one.
+
+A package that compiles only after code generation fails like any build failure (exit
+1), not as an environment error: smates cannot tell a missing generated file from a real
+break. Generated files git ignores (dependency injection or mock code produced by a
+`make` step) make these units fail locally until you generate them. Run the generator
+first, or leave such packages out with `exclude:`.
 
 ## Custom commands
 
