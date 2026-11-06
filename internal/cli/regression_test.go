@@ -154,7 +154,7 @@ func TestWorkflowPatchLineEndings(t *testing.T) {
 			writeTree(t, g.dir, map[string]string{".github/workflows/ci.yml": content})
 			g.git("add", ".")
 			g.commit("ci")
-			patch, _ := workflowPatch(g.dir, workflowTestSteps(g.dir), []config.Suite{{Name: "go", Runner: "go", Root: "."}})
+			patch, _ := workflowPatch(g.dir, workflowTestSteps(g.dir), []config.Suite{{Name: "go", Runner: "go", Root: "."}}, "main")
 			if patch == "" {
 				t.Fatal("no patch")
 			}

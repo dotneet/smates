@@ -497,3 +497,64 @@ func TestPytestDefaultsCollectVendorAndTestdata(t *testing.T) {
 		}
 	}
 }
+
+// TestDiscoverVitestProjectFlag: a suite command that runs some projects with
+// --project gets the test files of those projects only, whenever smates can tell a
+// project is named otherwise; when it cannot, the project is kept.
+func TestDiscoverVitestProjectFlag(t *testing.T) {
+	projects := `export default defineConfig({ test: { projects: [
+  { test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+  { test: { name: { label: 'e2e', color: 'blue' }, include: ['e2e/**/*.ts'] } },
+  { test: { include: ['lib/**/*.js'] } },
+  { test: { name: 'ui', include: ['packages/p/**/*.test.ts'], browser: { enabled: true } } },
+] } })`
+	cfg := with(jsFiles, "vitest.config.ts", projects)
+	suite := func(cmd string) config.Suite { return config.Suite{Runner: "vitest", Command: cmd} }
+	runDiscoverCases(t, []discoverCase{
+		{
+			name: "one project", suite: suite("vitest run --project unit"), files: cfg,
+			source: "vitest.config.ts test.projects (3 projects) --project unit",
+			tests:  []string{"lib/x.test.js", "packages/p/src/p.test.ts", "src/__fixtures__/data.test.ts", "src/a.test.ts"},
+		},
+		{
+			name: "a project named by a label", suite: suite("vitest run --project=e2e"), files: cfg,
+			source: "vitest.config.ts test.projects (3 projects) --project e2e",
+			tests:  []string{"e2e/home.test.ts", "e2e/login.e2e.ts", "lib/x.test.js", "packages/p/src/p.test.ts"},
+		},
+		{
+			name: "several projects", suite: suite("vitest run --project unit --project e2e"), files: cfg,
+			source: "vitest.config.ts test.projects (4 projects) --project unit, e2e",
+			tests:  []string{"e2e/home.test.ts", "e2e/login.e2e.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "src/__fixtures__/data.test.ts", "src/a.test.ts"},
+		},
+		{
+			name: "a pattern keeps every project", suite: suite("vitest run --project 'u*'"), files: cfg,
+			source: "vitest.config.ts test.projects (4 projects) --project u*",
+			tests:  []string{"e2e/home.test.ts", "e2e/login.e2e.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "src/__fixtures__/data.test.ts", "src/a.test.ts"},
+		},
+		{
+			// The projects without a name may be the one: only those named otherwise go.
+			name: "a name no named project has", suite: suite("vitest run --project nope"), files: cfg,
+			source: "vitest.config.ts test.projects (2 projects) --project nope",
+			tests:  []string{"lib/x.test.js", "packages/p/src/p.test.ts"},
+		},
+		{
+			name: "a name no project has keeps every project", suite: suite("vitest run --project nope"),
+			files: with(jsFiles, "vitest.config.ts", `export default { test: { projects: [
+  { test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+  { test: { name: 'e2e', include: ['e2e/**/*.ts'] } },
+] } }`),
+			source: "vitest.config.ts test.projects (2 projects)", warn: "no project is named nope",
+			tests: []string{"e2e/home.test.ts", "e2e/login.e2e.ts", "src/__fixtures__/data.test.ts", "src/a.test.ts"},
+		},
+		{
+			name: "project files by name", suite: suite("vitest run --project unit"),
+			files: with(jsFiles, "vitest.config.ts", `export default { test: { projects: ['./vitest.unit.config.ts', './vitest.other.config.ts', './vitest.merged.config.ts'] } }`,
+				"vitest.unit.config.ts", `export default { test: { name: 'unit', include: ['src/**/*.test.ts'] } }`,
+				"vitest.other.config.ts", `export default { test: { name: 'other', include: ['e2e/**/*.ts'] } }`,
+				"vitest.merged.config.ts", `export default mergeConfig(base, { test: { name: 'merged', include: ['lib/**'] } })`),
+			source: "vitest.config.ts test.projects (2 projects) --project unit", warn: "vitest.merged.config.ts does not export an object literal",
+			tests: []string{"e2e/home.test.ts", "lib/x.test.js", "packages/p/src/p.test.ts", "packages/q/test/q.spec.ts",
+				"src/__fixtures__/data.test.ts", "src/a.test.ts", "src/b.spec.js"},
+		},
+	})
+}

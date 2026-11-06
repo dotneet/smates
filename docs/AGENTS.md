@@ -17,6 +17,10 @@ smates: FAILED 1 of 7 test unit(s) in 3.2s:
 smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 ```
 
+A passing summary ending in `; N skipped (not proven: they run again next time)` means
+N selected tests skipped themselves (a service that is not running, an environment
+gate) and did not check your change: say so when you report, or start what they need.
+
 Fix the code, rerun the printed `--only` command until it passes, then finish with a
 plain `smates run --output failures` (it reruns what failed plus anything newly
 affected). Do not run the whole test suite yourself: smates already picked what can break.
@@ -36,7 +40,8 @@ test result in a recorded run of any runner but `custom`; the other suites still
 are recorded, its tests stay selected) and a state that could not be saved (e.g. the
 shared state's lock is held); the summary is printed first. When tests also failed, the
 exit code is 1. `exit_code` in `--report` is 4 in these cases too (when tests failed, it
-is the runner's own exit code).
+is the runner's own exit code). So is a suite whose `requires` (a database, a browser)
+are not met here: the log names the check; its tests stay selected for a run where it is.
 
 ## Changes no test is known to depend on (orphans)
 
@@ -76,6 +81,8 @@ need tests belong in `ignore:`: `smates config add-ignore 'deploy/**'` (`--dry-r
   time (`--suite <name>`), or start the run in the background and read its report
   afterwards: `smates run --output failures --report smates-report.json` (per-test
   results and `exit_code`).
+- `--max-time 5m` starts no test batch that would end after 5 minutes; the tests left
+  out stay selected for a later run (not necessarily first; CI runs them all).
 
 ## Do not
 

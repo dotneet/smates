@@ -18,7 +18,7 @@
 | [`smates config`](#smates-config) | `smates.yml` を安全に編集する |
 | [`smates guide`](#smates-guide) | コーディングエージェント向けのガイドを表示する |
 | [`smates state`](#smates-state) | 記録されたステートの確認・移動・削除 |
-| [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code の Stop フックを設定する |
+| [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code や Codex の Stop フックを設定する |
 | [`smates version`](#smates-version-and-help) | バージョンを表示する |
 
 各コマンドのフラグは `smates <command> -h` で確認できます（終了コード 0）。`config`、`state`、`hook` ではサブコマンドの一覧も表示されます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数の前にも後ろにも置けます（`smates why src/a.ts --format json`）。`--` 以降はフラグとして扱いません。`run`、`select`、`watch` では、`--` より後ろの引数はテストランナーに渡されます。
@@ -53,21 +53,22 @@ smates run [flags] [-- runner args]
 |---|---|---|---|
 | `--all` | | オフ | すべてのテストを実行し、記録されたステートを書き直します。 |
 | `--select` | | オフ | デフォルトでは全件実行になる場面（CI のデフォルトブランチ）でもテストを選択します。 |
-| `--base` | rev | 自動 | まだ記録のないテストを比較する git リビジョン。デフォルトはプルリクエストのマージ先またはデフォルトブランチとのマージベースです。 |
+| `--base` | rev | 自動 | まだ記録のないテストを比較する git リビジョン。デフォルトはプルリクエストのマージ先またはデフォルトブランチとのマージベースです。CI では、`--base` を指定しない限り、そうしたテストは新しいテストとして実行されます。 |
 | `--explain` | | オフ | 各テストが選択された理由を表示します（`[changed: src/price.ts]`）。 |
 | `--only` | `SUITE:UNIT` | | このテストユニットだけを実行し、通常どおり記録します。複数指定できます。ほかのテストや変更は次回の実行に持ち越されます。 |
 | `--add` | `SUITE:UNIT` | | このテストも実行します。ユニットにはテストファイルのパスも使えます。そのユニットを持つスイートが 1 つだけなら `SUITE:` は省略できます。複数指定できます。テストを外すことはありません。どのテストにも一致しない名前は終了コード 2 になります。 |
 | `--orphans` | `agent`、`full`、`skip` | `smates.yml` の `orphans:` | どのテストにも紐づかない変更の扱いを、この実行に限って指定します。エージェントに尋ねる、影響しうるスイートを丸ごと実行する、ポリシーを適用しない（明示的なオプトアウト）のいずれかです。[どのテストにも紐づかない変更](../guides/orphans.md) を参照してください。 |
 | `--no-agent` | | オフ | エージェントを呼びません。紐づかない変更には影響しうるスイートを丸ごと実行し、失敗の説明も行いません。 |
 | `--no-record` | | オフ | トレースせず、ステートも更新せずに実行します。 |
-| `--shadow` | | オフ | すべてのテストを実行し、選択していたら見逃していた失敗テストを報告します。[シャドーモード](../guides/trust.md#shadow-mode) を参照してください。 |
-| `--shard` | `I/N` | | 選択されたテストのうち、`N` 分割した `I` 番目のシャードを実行します。テストはスイートとテスト ID の安定したハッシュでシャードに割り当てられます。シャード実行ではエージェントを呼びません。 |
+| `--shadow` | | オフ | すべてのテストを実行し、選択していたら見逃していた失敗テストを報告します。`--shard` と一緒なら、そのシャードが担当するテストをすべて実行します。[シャドーモード](../guides/trust.md#shadow-mode) を参照してください。 |
+| `--shard` | `I/N` | | 選択されたテストのうち、`N` 分割した `I` 番目のシャードを実行します。テストはスイートとテスト ID の安定したハッシュでシャードに割り当てられます。割り当ては `N` によって変わるので、1 回の実行の全シャードは同じ `N` を使います。シャード実行ではエージェントを呼びません。 |
 | `--fail-fast` | | オフ | あるバッチが失敗したら、それ以降のバッチを開始しません。テストは失敗しそうなものから順に実行されます。 |
 | `--output` | `full`、`failures` | `$SMATES_OUTPUT`、なければ `full` | `full` はランナーの出力をそのまま流します。`failures` は失敗したテストの出力だけを表示し、最後にそれらを再実行するコマンド付きの短いまとめを出します。`agent` は `failures` の別名として受け付けます。 |
 | `--report` | file | | JSON のレポート（選択結果、テストごとの結果、シャドーモードでの見逃し、`exit_code`）を `file` に書き出します。`-` を指定すると stdout に書き、ほかの出力はすべて stderr に回します。 |
 | `--markdown` | file | | まとめを Markdown で `file` に書き出します（上書き）。プルリクエストのコメント用です。 |
 | `--summary` | file | GitHub Actions では `$GITHUB_STEP_SUMMARY` | Markdown のまとめを `file` に追記します。 |
 | `--budget` | duration | `90s` | 選択されたテストの記録済み所要時間の合計がこれを超えると、実行前に分割方法を表示します。`0` で無効になります。 |
+| `--max-time` | duration | `0`（上限なし） | 記録済み所要時間から見て、これより後に終わるバッチは開始しません。外れたテストは選択されたまま次の実行に残ります。[時間の上限](#time-limit) を参照してください。 |
 | `--dry-run` | | オフ | ランナーのコマンドを実行せずに表示します。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
@@ -75,7 +76,7 @@ smates run [flags] [-- runner args]
 次の組み合わせはエラー（終了コード 2）になります。
 
 - `--only` と `--all`、`--shadow`、`--add`、`--orphans`
-- `--shadow` と `--shard`、`--fail-fast`
+- `--shadow` と `--fail-fast`、`--max-time`
 - `--dry-run` と `--report`、`--markdown`、`--summary`（代わりに `smates select --format json|markdown` を使います）
 
 `--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行ではテストを成功として記録しません。常に使うフラグはスイートの `command` に書いてください。
@@ -83,13 +84,28 @@ smates run [flags] [-- runner args]
 ??? note "詳細: `--output failures` の出力内容"
     ランナーのバッチごとに出力をバッファし、バッチが失敗したときだけ表示します。失敗したテストごとの出力を報告できるランナー（vitest、jest、pytest、`go test`、JUnit）ではその部分だけを、それ以外ではバッチの出力を最大 200 行（先頭 30 行と末尾 170 行）表示します。smates 自身の進捗行は省略されます。出力のないまま 30 秒経つと `smates: still running <suite> (...)` を表示します。間隔は `SMATES_HEARTBEAT` で変えられます。[コーディングエージェントから使う](../guides/coding-agents.md) を参照してください。
 
+#### 時間の上限 { #time-limit }
+
+`--max-time 8m` を付けると、実行をおよそ 8 分以内に収めます。
+
+- 各スイートのテストを、記録済みの所要時間をもとに、上限のおよそ 4 分の 1 ずつのバッチに分けます。最後の成功、失敗、スキップが 0 ミリ秒より長い所要時間で記録されたテストを、測られたものとして数えます。それ以外のテスト（記録がない、別の結果で記録された、0 ミリ秒で記録された）は、そのスイートの測られたテストの平均として数えます。そのため、ランナーがすべてのテストを 0 ミリ秒と報告するスイートは、所要時間がまったく記録されていないことになります。所要時間がまったく記録されていないスイートは 1 つのバッチのままで、使った時間が上限の半分未満のときだけ開始します。記録された所要時間にはテストバイナリのコンパイルとリンクが含まれないので、バッチがビルドする Go のパッケージごとに 1 秒を加えます。
+- バッチはいつもどおり失敗しそうなものから順に開始します。各バッチの前に、上限より後に終わるかを確かめます。見積もりには、実行したバッチが見積もりより長くかかった時間の、バッチあたりの平均を加えます（ランナーの起動やビルドは、短いバッチでも長いバッチでもほぼ同じ時間がかかるためです）。同じスイートのバッチの平均を使い、スイートの最初のバッチではすべてのスイートの平均を使います。requires は先に確かめます。満たされない requires で一部のユニットが外れたバッチは実行するユニットで見積もり、ユニットが 1 つも残らないバッチは上限の判定に数えません（次のバッチを確かめます）。上限より後に終わるなら、それ以降は何も開始しません。
+- 最初のバッチは必ず開始するので、どの実行でも少しは進みます。実行中のバッチを止めることはありません。
+- 外れたテストは実行も記録もされず、選択されたまま残ります。後の実行は通常の順序（優先度、次に記録された実行時間の短い順）で実行するので、新しい変更がほかのテストを選択し続けると、長いテストはまた外れることがあります。CI ではすべて実行します。ログ、サマリー（`Time limit`）、レポート（`max_time_reached`、`not_run`）に表示されます。
+
+実行したものがすべて成功すれば、終了コードは 0 です。CI でマージの可否を決めるのには `--max-time` を使わないでください。外れたテストは実行されていません。Claude Code と Codex の Stop フックは、デフォルトで `--max-time 8m` を使います（[git フック](../guides/git-hooks.md#claude-code-stop-hook) を参照）。
+
+#### 前提条件を満たさないスイート { #unmet-requires }
+
+[`requires`](configuration.md#requires) を満たさないスイートのユニットは開始しません。選択されたまま残り、記録もされません。ログには失敗したチェックがそれぞれ表示されます。テストが失敗していなければ終了コードは 4、失敗していれば 1 です。レポートでは、チェックが `unmet_requires` に、ユニットが `not_run` に入ります。
+
 ### smates select { #smates-select }
 
 ```bash
 smates select [flags]
 ```
 
-何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。
+何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。[全件実行するブランチ](configuration.md#top-level-keys)への push のビルドでは、`smates run` がそこで全テストを実行するので、全テストを選択します。ジョブをゲートする出力（`skip`、`suites`）が、ステートを更新する全件実行をスキップさせることはありません。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -101,6 +117,8 @@ smates select [flags]
 | `--orphans` | `agent`、`full`、`skip` | `smates.yml` の `orphans:` | `run` と同じです。 |
 | `--no-agent` | | オフ | エージェントを呼びません。 |
 | `--shard` | `I/N` | | 選択結果のうち `I/N` のシャード分だけを対象にします。 |
+| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。全件実行するブランチへの push のビルドでは、選択と同じく全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
+| `--shard-time` | 期間 | `10m` | `--max-shards` のとき: 1 シャードあたりの記録済みテスト時間の目安。実行時間が記録されていない選択済みテストはスイートの中央値として数えます。選択されたテストがあり、実行時間が 1 つも記録されていないスイートがあれば `N` になります。 |
 | `--markdown` | file | | Markdown のまとめを `file` にも書き出します。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
@@ -109,8 +127,8 @@ smates select [flags]
 |---|---|
 | `text` | 選択されたテスト ID を 1 行に 1 つ。選択のまとめは stderr に出ます。 |
 | `files` | 選択されたテスト ID を 1 行に 1 つ。stderr には何も出ません。 |
-| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断。 |
-| `github` | `selected`、`total`、`run-all`、`skip`、`tests` をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。 |
+| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断、`--max-shards` のときは `shards`。 |
+| `github` | `selected`、`total`、`run-all`、`skip`、`tests`、`suites`（`--max-shards` のときは `shards` と `shard-matrix` も）をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。[出力](../ci/github-actions.md#outputs) を参照してください。 |
 | `markdown` | プルリクエストのコメントに使う Markdown のまとめ。 |
 
 ### smates watch { #smates-watch }
@@ -175,14 +193,18 @@ smates doctor [flags]
 |---|---|
 | `git-installed`、`repository`、`project-load`、`config` | git が `PATH` にあり、リポジトリと `smates.yml` を読み込めること |
 | `suites-detected`、`suite-units` | スイートがあり、それぞれにテストファイルが一致すること |
+| `suite-not-detected` | `smates.yml` がないとき、テストランナーを設定している（vitest や jest の設定ファイル、プロジェクトごとの `vitest.*.config.*`、vitest を import するか `test` を設定する `vite.config.*`。ただの Vite アプリは含みません）のにスイートにならなかったパッケージ（smates が見つけられるテストファイルがない）。`smates init` も同じ注意を出します |
 | `suite-tests-source`、`suite-test-discovery` | テストのパターンの出どころと、smates が読めなかったランナー設定 |
 | `suite-launcher`、`suite-dependencies-installed` | スイートのコマンドを起動できること、`node_modules` がインストールされていること |
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
 | `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
+| `suite-rule-reaches` | `reaches` を持つルールごとに適用されるテストユニットの数。1 つにも適用されないルールは警告 |
 | `state-recorded` | 記録されたステートがあるか、どのコミットのものか |
+| `state-skipped` | 前回の実行で自分をスキップしたテストユニット（未証明なので、成功するまで毎回実行される） |
 | `agent`、`ci` | エージェントが使えるか、検出した CI と、デフォルトで全件実行になるか |
 | `workflow-test-step` | smates を使わずにテストを実行している GitHub ワークフローのステップ |
+| `workflow-no-seed` | smates を pull request でしか実行せず、同じ `cache-key` でデフォルトブランチ上に実行するワークフローもない GitHub ワークフロー（pull request の出発点になるステートを誰も記録しない） |
 
 フラグ: `--format text|json` と [共通フラグ](#common-flags)。
 
@@ -249,11 +271,11 @@ smates orphans --apply [--dry-run]
 smates init [flags]
 ```
 
-リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
+リポジトリのスイートを検出して `smates.yml` を書き出し、`.gitignore` に `.smates/` を追加します。Go スイートのテストの実行のしかたを変える `go test` のフラグ（`-p`、`-tags`、`-race`、`-timeout`）は、そのスイートを実行するワークフローのステップや Makefile のテストターゲットが使っていれば、スイートの `command:` に入ります（`-tags` は、スイートの単体テストをすべて実行するものがすべて一致するときだけです。[既存のワークフローを切り替える](../ci/github-actions.md#switch-existing-workflows) を参照してください）。それらのステップが設定する環境変数はコメントとしてだけ書き出します。すでに smates を実行するワークフローがあれば、`--github` は 2 つ目を書きません（`--force` を除く）。既存の設定は `--force` なしでは上書きしません。既存の設定がある状態で `--github` や `--agents-md` を指定すると、その部分だけを実行します。[クイックスタート](../getting-started/quickstart.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
-| `--github` | | オフ | `.github/workflows/smates.yml` も書き出します。既存のワークフローがすでにテストを実行している場合は、代わりにそのテストステップを smates に置き換えるパッチを表示します。 |
+| `--github` | | オフ | `.github/workflows/smates.yml` も書き出します。既存のワークフローがすでにテストを実行している場合は、代わりにそのテストステップを smates に置き換えるパッチを表示します（[パッチの内容](../ci/github-actions.md#switch-existing-workflows)）。 |
 | `--patch` | file | 表示する | `--github` と併用し、そのパッチを `file` に書き出します（`git apply` 用）。 |
 | `--agents-md` | | オフ | コーディングエージェント向けの短い smates の節を `AGENTS.md`（または `CLAUDE.md`）に追加します。 |
 | `--force` | | オフ | 既存の `smates.yml` を上書きします。 |
@@ -320,7 +342,7 @@ smates state clear
 |---|---|
 | `show` | ステートの場所（共有か、どこからシードされたか）、記録したコミット、スナップショットの大きさ、スイートごとの件数を表示します。 |
 | `path` | ステートファイルのパスを表示します。 |
-| `pull` | git の ref からステートを取得して保存します。`--ref` がなければ `refs/smates/state/<branch>`、次にデフォルトブランチの ref を試します。`state_shared: true` では取得したエントリをマージします。 |
+| `pull` | git の ref からステートを取得して保存します。`--ref` がなければ `refs/smates/state/<branch>`、次にマージリクエストやプルリクエストの対象ブランチ（CI が報告するときのベースブランチ）の ref、次にデフォルトブランチの ref を試します。`state_shared: true` では取得したエントリをマージします。 |
 | `push` | ステートを専用のコミットとして、リモートの `refs/smates/state/<branch>`（または `--ref`）に push します（強制 push、フックは実行されません）。 |
 | `merge` | 指定したステートファイルをステート（または `-o file`）にマージします。 |
 | `clear` | ステートを削除します。リンクされた worktree では以後シードされません。`state_shared: true` ではすべての worktree のステートが消えます。 |
@@ -344,27 +366,29 @@ smates state clear
 ```bash
 smates hook install [--hook pre-push|pre-commit] [--append] [--agent] [-- run flags]
 smates hook install --claude [--user] [--agent] [-- run flags]
-smates hook uninstall [--hook ...] | [--claude [--user]]
+smates hook install --codex [--agent] [-- run flags]
+smates hook uninstall [--hook ...] | [--claude [--user]] | [--codex]
 smates hook status
 ```
 
-`install` は `smates run --no-agent`（と `--` 以降の run のフラグ）を実行する git フックを書き出し、選択されたテストが失敗したら push やコミットを止めます。`--claude` を付けると、代わりに `.claude/settings.json` に Stop フックを追加します。`uninstall` は smates が書いた部分だけを取り除きます。`status` は git フックと Claude Code のフックを表示します。[git フックと Claude Code](../guides/git-hooks.md) を参照してください。
+`install` は `smates run --no-agent`（と `--` 以降の run のフラグ）を実行する git フックを書き出し、選択されたテストが失敗したら push やコミットを止めます。`--claude` を付けると代わりに `.claude/settings.json` に、`--codex` を付けると `.codex/hooks.json` に Stop フックを追加します。`uninstall` は smates が書いた部分だけを取り除きます。`status` は git フックと、Claude Code と Codex のフックを表示します。[git フックと Claude Code](../guides/git-hooks.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
-| `--hook` | `pre-push`、`pre-commit` | `pre-push` | 対象の git フック。`--claude` とは併用できません。 |
-| `--append` | | オフ | `install`: 既存のフックスクリプトの末尾に smates を追加します。`--claude` とは併用できません。 |
+| `--hook` | `pre-push`、`pre-commit` | `pre-push` | 対象の git フック。`--claude`、`--codex` とは併用できません。 |
+| `--append` | | オフ | `install`: 既存のフックスクリプトの末尾に smates を追加します。`--claude`、`--codex` とは併用できません。 |
 | `--agent` | | オフ | `install`: フックからエージェントを呼べるようにします（指定しなければ `--no-agent` を渡します）。 |
 | `--claude` | | オフ | git フックの代わりに、`.claude/settings.json` の Claude Code Stop フックを対象にします。 |
+| `--codex` | | オフ | git フックの代わりに、`.codex/hooks.json` の Codex Stop フックを対象にします。`--claude`、`--user` とは併用できません。 |
 | `--user` | | オフ | `--claude` と併用し、`~/.claude/settings.json` を使います（`smates.yml` のあるすべてのプロジェクトで有効）。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
 
-インストールされたフックは、次の 2 つの内部サブコマンドを呼びます。通常、自分で実行することはありません。
+インストールされたフックは、次の内部サブコマンドを呼びます。通常、自分で実行することはありません。
 
-- `smates hook run pre-push|pre-commit [-- run flags]`: git フックが実行するもの。
-- `smates hook claude-stop [--require-config] [-- run flags]`: Claude Code の Stop フックが実行するもの（`--output failures` が暗黙に付きます）。テストが失敗すると `{"decision": "block", ...}` を表示して 0 で終了し、smates 自身のエラーでは 1 で終了します。
+- `smates hook run pre-push|pre-commit [-- run flags]`: git フックが実行するもの。満たされない [`requires`](configuration.md#requires) で外れたテストでは push やコミットを止めません。それらについて 1 行表示し、0 で終了します（CI のために選択されたまま残ります）。
+- `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`: Claude Code と Codex の Stop フックが実行するもの（`--output failures --max-time 8m` が暗黙に付きます。run のフラグに `--max-time` があればそちらが優先され、`--shadow` があれば付けません）。テストが失敗すると `{"decision": "block", ...}` を表示して 0 で終了し、smates 自身のエラーでは 1 で終了します。時間の上限や満たされない [`requires`](configuration.md#requires) で外れたテストではブロックしません。それらについて stderr に 1 行表示し、0 で終了します。
 
-どちらも、`SMATES_SKIP_HOOK` が `0` と `false` 以外の値に設定されていれば何もしません。
+いずれも、`SMATES_SKIP_HOOK` が `0` と `false` 以外の値に設定されていれば何もしません。
 
 ## 関連項目 { #see-also }
 

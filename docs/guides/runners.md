@@ -39,6 +39,58 @@ smates adds a reporter next to yours for per-file results. When you configure
 `reporters` yourself, it does not add one, and a failing run then marks every recorded
 file failed.
 
+Vitest and Vite configuration files in the suite directory (`vitest.config.*`,
+`vite.config.*`, per-project files such as `vitest.e2e.config.ts` or
+`vite.storybook.config.ts`, and
+`vitest.workspace.*`) are inputs of every test. The files a configuration loads by
+name, such as `setupFiles`, `globalSetup`, local Vite plugins and alias targets, and
+whatever they import, are never treated as untested code: a change to one goes to the
+[orphan policy](orphans.md) unless a test depends on it.
+
+### Browser mode and Storybook
+
+A vitest project that runs its tests in a browser (`test.browser`) or with Storybook's
+Vitest plugin (`storybookTest()` from `@storybook/addon-vitest`) is read like any other,
+with two differences.
+
+- **Stories are tests.** The plugin reads the stories of the Storybook configuration
+  directory, and so does smates: the `configDir` option of the plugin (a literal, or
+  `path.join` / `path.resolve` of `__dirname`, `import.meta.dirname` or `dirname`),
+  else `.storybook`. Like Storybook, smates resolves a literal and the default against
+  the directory Vitest runs in (the suite root), and the `path.join` forms against the
+  file's directory; a project file elsewhere whose directory is resolved that way gets
+  stories that are never trusted (see below). It reads the `stories` of its
+  `main.*` (strings, directories and `{ directory, files }` specifiers; MDX pages are
+  not tests). This works when the Vitest configuration itself cannot be read
+  (`mergeConfig(...)`), so a package whose only tests are stories gets a suite. When
+  the stories cannot be read, smates takes every `*.stories.*` file under the project
+  and, because those are a guess, runs the whole suite whenever one of them is
+  selected; `smates list` and `smates doctor` say so.
+- **Nothing in the browser is traced.** After every run such a test's outcome is
+  unknown, so it runs again next time. Set `trust_browser_passes: true` on the suite
+  to record its passes instead, with what smates knows statically: the test's import
+  closure, what the Vitest configuration loads (setup files, plugins, alias targets),
+  and for a story the configuration directory, the import closures of its `preview.*`
+  and `main.*`, and the `staticDirs` of `main.*`. A change to any of them selects the
+  test again. A story is never trusted when its known dependencies include an import
+  smates cannot resolve (an alias only Vite's configuration knows, a virtual module), or
+  when `main.*` sets `viteFinal` or `previewAnnotations` or names a local addon or
+  preset, which may load files smates cannot follow. An addon or framework counts as a
+  package only when it is a package name, written as a string or resolved by
+  `getAbsolutePath(...)` or `require.resolve(...)`; any path (`./preset`,
+  `path.join(__dirname, "..", "preset")`, a template literal) or other expression
+  counts as local, and so does an `{ name, options }` object with a `...spread`, which
+  may override the name or bring options holding paths. smates reports the stories it does
+  not trust, and why, when it records them. Check the
+  setting with `smates run --shadow` before relying on it; see
+  [Limitations](../reference/limitations.md#what-tracing-reaches).
+
+A suite command that runs some projects with `--project <name>` gets the test files of
+those projects. A project whose name smates cannot read (no literal `test.name`, so
+Vitest names it after its package or directory), a browser project and every project
+when the name is a pattern are kept, so that no test of a project the command runs is
+left out.
+
 ### jest
 
 Jest workers run many files each, which would merge their dependencies. While
@@ -175,8 +227,67 @@ directories listed, environment variables), via `go test -exec`. Node and Python
 processes a test starts are traced too. Build failures are attributed to their packages.
 `go.mod`, `go.sum`, `go.work` and `.tool-versions` are inputs.
 
+In a `go.work` workspace, Go picks one version of each dependency for all the modules
+the workspace uses, so a `require` bump in one module can change what another builds
+even when it never imports the first. Every Go file of the workspace therefore depends
+on the `go.mod` and `go.sum` of every module listed by `use`, and on the `go.mod` of
+each local `replace` target: a dependency bump in any of them selects every test of the
+workspace. A `go.work` smates cannot parse makes every module below it count. Go uses
+the `go.work` nearest the directory it runs in, so a file counts the pins of every
+`go.work` at or above it (a nested `svc/go.work` and the root's). A `go.work` that
+`GOWORK` names elsewhere (in the suite's `env:` or smates' environment) has its pins
+made inputs of every test of the suite. `GOWORK=auto` is the same as leaving it unset:
+the nearest `go.work` is used, and the nested modules it lists stay in the suite.
+
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
+
+### Go packages without tests
+
+By default only directories with `_test.go` files are units, so a selective run never
+compiles a package without tests (a `main` package under `cmd/`): when a library it
+imports changes, the library's tests run but the `main` package is not built, and a
+change to the `main` package itself is [untested code](orphans.md). `smates run --all`
+does compile it (`go test ./...`). To compile such packages in selective runs too, widen
+the suite's `tests` to their files:
+
+```yaml
+suites:
+  - name: go
+    runner: go
+    tests: ["**/*_test.go", "**/cmd/**/*.go"]   # or ["**/*.go"] for every package
+```
+
+Each matching directory is then a unit: `go test ./cmd/app` compiles it and reports
+`[no test files]`, or fails it on a build error, and it depends on its static import
+closure like any package. smates records `[no test files]` as a pass (with `go test
+-json` too), so the unit runs when a package it imports changes, or when its own files
+do. With `granularity: func` the directory becomes a compile check (`cmd/app#(build)`)
+with no function units. A directory whose Go files the suite's build constraints all
+exclude (`//go:build` lines, `_linux.go` names, with the tags of `GOFLAGS`, the command
+and arguments passed through) is no unit. When smates cannot tell, it stays one: go list
+fails, or the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
+`sh -c "..."`) or passes words after `--`, where tags reach go test unseen. When go test
+then reports "build constraints exclude all Go files" for such a directory, that is no
+test failure: the unit is recorded as a skip (its test functions too, with `granularity:
+func`). The run exits 0 only when smates can tell nothing else failed: the command exits
+with go test's own code 1 (`make` exits 2 when a recipe fails), go test's summary lines
+(plain, or the events of `go test -json`) reach smates and report every other package as
+passing or without test files, and each `[setup failed]` of the directory follows such a
+report. Output a wrapper reformats (gotestsum's own lines) or another exit code keeps
+the run failing. A wrapper that runs go test again with the tag compiles the directory,
+and a test or build that fails there fails the run. A directory whose test files the configuration all leaves out (a tag in
+`GOFLAGS`, a `_linux_test.go` name on another platform) reports `[no test files]` too,
+but it is recorded as a skip, not a pass, so it runs again on the next run: the
+environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
+and the platform are no dependencies, and a configuration that compiles those tests
+must run them.
+
+A package that compiles only after code generation fails like any build failure (exit
+1), not as an environment error: smates cannot tell a missing generated file from a real
+break. Generated files that git ignores (code produced by a generator step) make these
+units fail locally until you generate them. Run the generator first, or leave such
+packages out with `exclude:`.
 
 ## Custom commands
 

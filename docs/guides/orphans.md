@@ -45,7 +45,8 @@ Each step handles what the earlier steps left over:
    suite's root, and no test imports it (directly or through other code) or executed it,
    then no test can be affected. Nothing runs, and the summary and the pull request
    comment list the file under "changes to untested code". Examples are a `main` package,
-   or a component without tests.
+   or a component without tests. (To compile Go packages without tests instead, see
+   [Go packages without tests](runners.md#go-packages-without-tests).)
 3. **The agent.** When an API key is set, the [LLM agent](agent.md) explores the
    repository with read-only tools. It then adds specific tests, requests a full run, or
    says the change affects no test. The agent can only *add* tests, so a wrong answer
@@ -73,9 +74,12 @@ of steps 3 and 4: see [Letting the calling agent decide](coding-agents.md#lettin
 ??? note "Details: what step 2 does not count as untested code"
     Tool configuration written as code (`vite.config.ts`, `setup.py`, test setup files,
     `.d.ts`), files under `testdata/`, `fixtures/` or `__mocks__/`, and files a suite
-    excludes all go on to step 3. So do files under the root of a suite that has a test
-    with no recorded run yet. Without a recorded state, smates knows only imports, so
-    step 2 skips nothing.
+    excludes all go on to step 3. So do the files a Vitest or Jest configuration loads
+    by name and what they import: setup files, Vite plugins, alias targets, any file a
+    string in the configuration names. So do files under the root of a suite that has a
+    test with no recorded run yet, or whose configuration may run tests in a browser
+    (Vitest's browser mode, Storybook), where nothing is traced. Without a recorded
+    state, smates knows only imports, so step 2 skips nothing.
 
     Code that *another process* runs (a server an end-to-end suite talks to) also looks
     untested. Declare it with `depends_on` or `rules`, so its tests are selected; see

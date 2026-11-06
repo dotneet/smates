@@ -24,7 +24,8 @@ The state is one file. Any storage works, as long as you follow three rules:
 
 1. **Restore before, save after**, and save even when tests failed (failed tests are
    then re-selected). Keep the tests' exit code as the job's exit code.
-2. **Restore the branch's own state first, else the default branch's.** Any state is
+2. **Restore the branch's own state first, else its target (base) branch's, else the
+   default branch's.** Any state is
    safe to start from, because an entry only lets a test be skipped when all of its
    inputs are byte-identical to the run that recorded it; the fallback order only
    maximizes reuse.
@@ -38,7 +39,8 @@ Two ways to do that:
   CircleCI). No credentials needed.
 - **A git ref** with `smates state pull` / `smates state push` (any CI, also local
   machines). `push` stores the file under `refs/smates/state/<branch>` in the
-  repository; `pull` fetches the current branch's ref and falls back to the default
+  repository; `pull` fetches the current branch's ref and falls back to the ref of the
+  branch a merge or pull request targets (when the CI reports it), then to the default
   branch's. Pushing needs credentials with write access to the repository, so by
   default only the default branch pushes; every pipeline pulls.
 
@@ -216,7 +218,8 @@ pipeline {
 ```
 
 Workspaces on persistent agents keep `.smates/` between builds of the same branch,
-which already gives per-branch reuse; `state pull` adds the default branch's state.
+which already gives per-branch reuse; `state pull` adds the target branch's or the
+default branch's state.
 
 ## Per-branch state in a git ref (optional)
 
@@ -224,7 +227,7 @@ If pull requests are trusted (no fork contributions) and have push credentials, 
 every branch push its own state, not only the default branch:
 
 ```sh
-smates state pull || true   # refs/smates/state/<branch>, else the default branch's
+smates state pull || true   # refs/smates/state/<branch>, else the target's, else the default branch's
 status=0
 smates run || status=$?
 smates state push           # refs/smates/state/<branch>
@@ -232,5 +235,6 @@ exit "$status"
 ```
 
 No extra logic is needed for the fallback: `smates state pull` tries the branch's ref
-first and the default branch's ref next. Delete a branch's ref when the branch is
+first, then the ref of the branch a merge or pull request targets, then the default
+branch's ref. Delete a branch's ref when the branch is
 merged: `git push origin --delete refs/smates/state/<branch>`.

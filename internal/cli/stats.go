@@ -200,6 +200,7 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 		Since: f.since, Branch: f.branch, ByMode: map[string]int{}, BySource: map[string]int{},
 		Orphans: orphanStats{ByHandling: map[string]int{}},
 	}
+	escapeRuns := map[string]bool{} // sharded shadow runs counted with misses
 	for _, r := range st.Runs {
 		if !f.keep(r) {
 			continue
@@ -226,12 +227,23 @@ func aggregateStats(st *state.State, f statsFilter, now time.Time) *statsReport 
 		if r.Shadow {
 			rep.ByMode["shadow"]++
 			s := &rep.Shadow
-			s.Runs++
+			// A sharded shadow run is one run: its shards' records add up its failures
+			// and escapes, its first shard counts it, and it has misses once, whichever
+			// shards found them (its shards share the commit, branch and shard count).
+			if r.Shard == "" || strings.HasPrefix(r.Shard, "1/") {
+				s.Runs++
+			}
 			s.Failed += r.Failed
 			s.Escapes += r.Escapes
 			s.Possible += r.Possible
 			if r.Escapes > 0 {
-				s.RunsWithEscapes++
+				_, n, _ := strings.Cut(r.Shard, "/")
+				if key := r.Commit + "\x00" + r.Branch + "\x00" + n; r.Shard == "" || !escapeRuns[key] {
+					s.RunsWithEscapes++
+					if r.Shard != "" {
+						escapeRuns[key] = true
+					}
+				}
 			}
 		} else {
 			rep.ByMode[r.Mode]++

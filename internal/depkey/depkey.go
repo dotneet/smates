@@ -36,6 +36,7 @@ package depkey
 
 import (
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -197,6 +198,10 @@ func Parse(key string) (Kind, string) {
 	if name, ok := strings.CutPrefix(key, envPrefix); ok {
 		return KindEnv, name
 	}
+	// Every kind below up to KindTree has a "#" in its key; most keys are plain paths.
+	if strings.IndexByte(key, '#') < 0 {
+		return parsePath(key)
+	}
 	if p, ok := strings.CutSuffix(key, declsSuffix); ok {
 		return KindDecls, p
 	}
@@ -215,6 +220,12 @@ func Parse(key string) (Kind, string) {
 	if p, ok := strings.CutSuffix(key, configSuffix); ok {
 		return KindConfig, p
 	}
+	return parsePath(key)
+}
+
+// parsePath is Parse for a key that is no set, variable, Go declaration or settings
+// key.
+func parsePath(key string) (Kind, string) {
 	if dir, ok := strings.CutSuffix(key, treeSuffix); ok {
 		return KindTree, dir
 	}
@@ -285,6 +296,54 @@ func (k Kind) Cover() CoverKind {
 // submodule, recorded as one entry for its commit, is explained by tests that read
 // files inside it.
 func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
+	return covers(deps, f, existenceChanged, func(decl, sig, prefix string) (bool, bool) {
+		below := false
+		for d := range deps {
+			if strings.HasPrefix(d, decl) || strings.HasPrefix(d, sig) {
+				return true, below
+			}
+			below = below || strings.HasPrefix(d, prefix)
+		}
+		return false, below
+	})
+}
+
+// CoverIndex answers Covers for one dependency set, many times: the keys that start
+// with a prefix are found by binary search instead of a scan of the set.
+type CoverIndex struct {
+	deps map[string]bool
+	keys []string // sorted
+}
+
+// NewCoverIndex indexes deps, which must not change while the index is used.
+func NewCoverIndex(deps map[string]bool) *CoverIndex {
+	keys := make([]string, 0, len(deps))
+	for k := range deps {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return &CoverIndex{deps: deps, keys: keys}
+}
+
+// Len returns the number of keys indexed.
+func (x *CoverIndex) Len() int { return len(x.keys) }
+
+// Covers is Covers over the indexed set.
+func (x *CoverIndex) Covers(f string, existenceChanged bool) CoverKind {
+	return covers(x.deps, f, existenceChanged, func(decl, sig, prefix string) (bool, bool) {
+		return x.hasPrefix(decl) || x.hasPrefix(sig), x.hasPrefix(prefix)
+	})
+}
+
+// hasPrefix reports whether some key starts with p: the first key not before p does.
+func (x *CoverIndex) hasPrefix(p string) bool {
+	i, _ := slices.BinarySearch(x.keys, p)
+	return i < len(x.keys) && strings.HasPrefix(x.keys[i], p)
+}
+
+// covers is Covers, with scan telling whether some key starts with a declaration
+// prefix of f (decl or sig) and whether one is below f (prefix).
+func covers(deps map[string]bool, f string, existenceChanged bool, scan func(decl, sig, prefix string) (declared, below bool)) CoverKind {
 	for _, k := range []Kind{KindContent, KindConfig, KindDecls} {
 		if deps[Make(k, f)] {
 			return k.Cover()
@@ -293,13 +352,9 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
 	if strings.HasSuffix(f, ".go") && deps[Shape(path.Dir(f))] {
 		return CoverDecls // a Go file of a package whose shape the test depends on
 	}
-	prefix, decl, sig := f+"/", f+declInfix, f+sigInfix
-	below := false
-	for d := range deps {
-		if strings.HasPrefix(d, decl) || strings.HasPrefix(d, sig) {
-			return CoverDecls
-		}
-		below = below || strings.HasPrefix(d, prefix)
+	declared, below := scan(f+declInfix, f+sigInfix, f+"/")
+	if declared {
+		return CoverDecls
 	}
 	if existenceChanged {
 		if deps[Listing(path.Dir(f))] {

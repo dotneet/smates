@@ -6,7 +6,9 @@
 // compiled file of each package it imports (resolved through the repository's go.mod
 // files, or through vendor/ when the module or workspace vendors its dependencies), on
 // the files its //go:embed directives name, and on the go.mod/go.sum (and
-// go.work/go.work.sum, vendor/modules.txt) that pin its module's dependency versions.
+// go.work/go.work.sum, vendor/modules.txt) that pin its module's dependency versions:
+// in a go.work workspace, those of every module the workspace uses, since minimal
+// version selection picks one version per dependency across all of them.
 // The result over-approximates what `go build` would read: build constraints are not
 // evaluated, so files for every GOOS/GOARCH and tag combination are included.
 package golang
@@ -81,13 +83,19 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 		}
 	}
 
-	// Dependency versions of the enclosing module and workspace, and the manifest of
-	// their vendor directories.
+	// Dependency versions of the enclosing module and workspace (with the other go.mod
+	// and go.sum files minimal version selection reads for them, see workPins), and the
+	// manifest of their vendor directories.
 	if m, ok := enclosing(dir, ix.modDirs); ok {
 		out = append(out, joinRel(m, "go.mod"), joinRel(m, "go.sum"))
+		out = append(out, ix.modPins[m]...)
 	}
-	if w, ok := enclosing(dir, ix.workDirs); ok {
+	// Every go.work at or above the file counts, not only the nearest: the go command
+	// takes the one nearest its working directory (the suite's, which may be above a
+	// nested go.work), so which workspace governs MVS for this file is not known here.
+	for _, w := range enclosingAll(dir, ix.workDirs) {
 		out = append(out, joinRel(w, "go.work"), joinRel(w, "go.work.sum"))
+		out = append(out, ix.workPins[w]...)
 	}
 	for _, v := range ix.vendorDirs(dir) {
 		out = append(out, joinRel(v, "modules.txt"))
@@ -325,6 +333,20 @@ func enclosing(dir string, set map[string]bool) (string, bool) {
 		}
 		if dir == "" {
 			return "", false
+		}
+		dir = dirOf(dir)
+	}
+}
+
+// enclosingAll returns every directory at or above dir that is in set, nearest first.
+func enclosingAll(dir string, set map[string]bool) []string {
+	var out []string
+	for {
+		if set[dir] {
+			out = append(out, dir)
+		}
+		if dir == "" {
+			return out
 		}
 		dir = dirOf(dir)
 	}

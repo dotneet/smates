@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"path"
 	"regexp"
 	"strings"
 
@@ -54,6 +55,89 @@ func nestedCommands(script string) [][]string {
 	}
 	walk(script, 0)
 	return out
+}
+
+// scriptClosure returns script and the package scripts it runs, recursively (npm run
+// x, npm test, pnpm [run] x, yarn [run] x, bun run x, bun x; bun test is bun's test
+// runner, not the script test).
+func scriptClosure(scripts map[string]string, script string) []string {
+	out := []string{script}
+	seen := map[string]bool{}
+	var walk func(s string, depth int)
+	walk = func(s string, depth int) {
+		if depth > 3 {
+			return
+		}
+		for _, cmd := range nestedCommands(s) {
+			for i, w := range cmd {
+				pm := path.Base(w)
+				if pm != "npm" && pm != "pnpm" && pm != "yarn" && pm != "bun" {
+					continue
+				}
+				j := i + 1
+				for j < len(cmd) && strings.HasPrefix(cmd[j], "-") {
+					j++
+				}
+				if j >= len(cmd) {
+					continue
+				}
+				viaRun := cmd[j] == "run" || cmd[j] == "run-script"
+				if viaRun {
+					j++
+					for j < len(cmd) && strings.HasPrefix(cmd[j], "-") {
+						j++
+					}
+					if j >= len(cmd) {
+						continue
+					}
+				}
+				name := cmd[j]
+				switch {
+				case pm == "bun" && name == "test" && !viaRun:
+					continue // bun's own test runner
+				case pm == "npm" && !viaRun && name != "test" && name != "t":
+					continue // npm runs only test (and start, stop, restart) without run
+				}
+				if name == "t" {
+					name = "test"
+				}
+				if body, ok := scripts[name]; ok && !seen[name] {
+					seen[name] = true
+					out = append(out, body)
+					walk(body, depth+1)
+				}
+			}
+		}
+	}
+	walk(script, 0)
+	return out
+}
+
+// runsJest reports whether an npm script invokes jest as a command (jest,
+// node_modules/.bin/jest, npx jest, node .../jest/bin/jest.js), not a word that only
+// contains "jest" (a script named test:jest-compat, ts-jest).
+func runsJest(script string) bool {
+	for _, cmd := range nestedCommands(script) {
+		for _, w := range cmd {
+			if b := path.Base(w); b == "jest" || b == "jest.js" && strings.Contains(w, "jest/bin/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runsBunTest reports whether an npm script runs bun's test runner (bun test), not a
+// package script whose name starts with test (bun test:unit).
+func runsBunTest(script string) bool {
+	for _, cmd := range nestedCommands(script) {
+		for i := 0; i+1 < len(cmd); i++ {
+			if path.Base(cmd[i]) == "bun" && cmd[i+1] == "test" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // craTest finds the `<bin> test` invocation of a Create React App wrapper in an npm

@@ -74,6 +74,36 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 - **予算。** 選択したテストの記録済み所要時間の合計が `--budget`（既定 `90s`、`0` で無効）を超えると、
   `smates run` は最初に実行の分け方を表示します。スイートを 1 つずつ実行する（`--suite <name>`）か、
   `--report smates-report.json` を付けてバックグラウンドで実行し、あとでレポートを読む方法です。
+- **時間の上限。** `--max-time 5m` を付けると、記録済みの所要時間から見て 5 分より後に終わるバッチは
+  開始しません。外れたテストは選択されたまま残り、後の実行で通常の順序で実行されます（CI ではすべて実行します）。
+  [時間の上限](../reference/cli.md#time-limit) を参照してください。
+
+## エージェントの環境で実行できないテスト { #tests-the-agents-environment-cannot-run }
+
+エージェントは、一部のテストが必要とするデータベース、ブラウザ、サービスのない worktree や
+サンドボックスで作業することがよくあります。そこではそれらのテストが、変更とは関係のない理由で
+失敗します。必要なものを [`requires`](../reference/configuration.md#requires) で宣言してください。
+
+```yaml
+suites:
+  - name: api
+    runner: go
+    requires:
+      - tcp: 127.0.0.1:5432
+        tests: ["internal/store/**"]   # データベースが必要なのはこれらのパッケージだけ
+```
+
+そのポートで何も待ち受けていなければ、`smates run` はそれらのテストを開始しません。スイートの
+ほかのテストはいつもどおり実行されます。外れたテストは記録されずに選択されたまま残るので、
+データベースが動いている実行（または CI）で実行されます。ログには失敗したチェックが表示され、
+ほかのテストが失敗していなければ終了コードは 4 になります。
+
+## Stop フック { #stop-hooks }
+
+`smates hook install --claude` と `smates hook install --codex` は、エージェントがターンを終えるたびに
+影響するテストを実行し、失敗があれば作業を続けさせる Stop フックを追加します。`requires` やフックの
+時間の上限（既定 8 分）で外れたテストではブロックしません。
+[git フックと Claude Code](git-hooks.md#claude-code-stop-hook) を参照してください。
 
 ## 終了コード { #exit-codes }
 
@@ -85,7 +115,7 @@ smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 | 1 | テストが失敗した | コード（またはテスト）を直す |
 | 2 | 使い方の誤り（どのテストにも一致しない `--add` を含む） | コマンドラインを直す |
 | 3 | 設定の誤り | `smates.yml` を直す（`smates config ...`）、または `--suite`/`--only` の名前を直す（`smates list`） |
-| 4 | 環境の問題（起動できないランナー、git がない、ステートを保存できない など） | `smates doctor --format json` を実行する。失敗したチェックごとに `fix` があります |
+| 4 | 環境の問題（起動できないランナー、git がない、ステートを保存できない、スイートの `requires` を満たさない など） | `smates doctor --format json` を実行する。失敗したチェックごとに `fix` があります。`requires` の場合、テストは満たされる実行のために選択されたまま残ります |
 
 3 や 4 をテストの失敗として扱わないでください。セットアップを直してから再実行します。テストも失敗して
 いた場合、終了コードは 1 です。すべてのケースは [終了コード](../reference/exit-codes.md) を参照して

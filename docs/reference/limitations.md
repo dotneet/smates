@@ -14,10 +14,26 @@ Workaround: declare the server's code with `depends_on` or `serves`. See
 
 **Data outside the repository.** What a test reads from databases or external services
 is not tracked. Workaround: declare the files it depends on with `rules` or `inputs`,
-or let such changes reach the agent as [orphans](../guides/orphans.md).
+or let such changes reach the agent as [orphans](../guides/orphans.md). For a schema
+applied before the tests run, a rule with `reaches` gives the migrations to the tests
+that import the database helper; a test that connects in a way the rule does not name
+is then not run for a migration change (see
+[Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database)).
 
-**Code that runs in a browser.** Code executed in a browser (vitest browser mode,
-Playwright) is covered by the static import graph only.
+**Code that runs in a browser.** Tracing does not reach into a browser. A vitest test
+that runs only in a browser (browser mode, a Storybook story run by Storybook's Vitest
+plugin) leaves no trace, so after every run its outcome is unknown and it runs again
+next time, whatever changed. With `trust_browser_passes: true` on the suite, a pass the
+reporter gives is recorded instead, with the dependencies smates knows statically: the
+test's import closure, what the Vitest configuration loads (setup files, plugins, alias
+targets), and for a story the Storybook configuration directory, the import closures of
+`preview.*` and `main.*`, and the `staticDirs`. What the browser loads beyond that (a
+module reached through an alias only Vite's configuration resolves, a fetched fixture, a
+CSS `@import`) is missed: a story whose known dependencies include an import smates
+cannot resolve, or whose `main.*` sets `viteFinal` or `previewAnnotations` or names a
+local addon (any addon or framework that is not a package name, as a string or through
+`getAbsolutePath(...)` or `require.resolve(...)`), is never trusted. Code a Playwright end-to-end test drives in a browser is
+covered as [a server](../guides/servers.md).
 
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands
 are analyzed from their command line. A command smates cannot see into (`make`, a
@@ -48,10 +64,22 @@ imports too whenever the run may check types: a suite command that does not run
 `vitest` (or `bun test`) directly (`npm test`, a `&&` chain), any mention of
 `typecheck`, `tsc` and similar in the command, the arguments after `--` or the suite
 `env`, a `typecheck` setting (or those compiler options) in a vitest/vite config of the
-suite or a file it imports, a vitest config smates cannot fully see (a workspace file,
-`projects:`, `workspace:` or `extends:` naming other configs by path, an import of a
-package other than vitest, vite, their official plugins and Node's builtins, such as a
-shared preset), and `*.test-d.*` / `*.spec-d.*` files in the suite. jest
+suite or a file it imports, a vitest config smates cannot fully see, and `*.test-d.*` /
+`*.spec-d.*` files in the suite. A config is fully seen when every config it names is
+too: `test.projects` may list config files by literal path (no glob, no directory) and
+inline projects with `extends: true`, but a workspace file, `workspace:`, any other
+`extends:`, or projects inside `mergeConfig(...)` are not seen. It may import vitest,
+vite, their official plugins, `@tailwindcss/vite`, Node's builtins, packages the static
+analysis resolves to the source of the workspace package of that name (whose files are
+then checked too; a declaration file, a manual mock or a tsconfig path to another file
+does not count), and any
+package for its types only (`import type`), but not another package such as a shared
+preset. Storybook's Vitest plugin is seen when it is `@storybook/addon-vitest` 10 or
+later, its configuration directory can be told, and that directory's `main.*` sets no
+`viteFinal` and no `typescript` options and names only Storybook's own addons (docs,
+a11y, links, themes, onboarding, vitest) and the `react-vite`, `html-vite` or
+`web-components-vite` framework; `STORYBOOK_COMPONENT_PATHS` in the suite `env` counts as
+a mention. jest
 (ts-jest reports type errors), `node --test` and custom suites always keep them. Tests
 recorded by an earlier smates version keep the dependency until they are recorded again.
 Type checking is not a test run: keep `tsc` (or your type checker) in CI.
@@ -90,6 +118,18 @@ See [Environment variables](../guides/environment.md).
 For Python, data a module reads at import time or behind a cache belongs to that
 module.
 
+**Go dependency files count as a whole.** Any change to a `go.mod` or `go.sum` selects
+every test of its module and of the modules importing it; in a `go.work` workspace, a
+change to `go.work`, `go.work.sum` or the `go.mod`/`go.sum` of any module it uses
+selects every test of the workspace, even when the bumped dependency is linked by few
+of them. See [Go](../guides/runners.md#go).
+
+**Go packages without tests** are not compiled by a selective run: when a library
+changes, the tests importing it run, but a `main` package importing it is not built, and
+a change to such a package itself is [untested code](../guides/orphans.md).
+Workaround: widen the suite's `tests` to their files, see
+[Go packages without tests](../guides/runners.md#go-packages-without-tests).
+
 **Go test functions** (`granularity: func`):
 
 - Recording costs one process per test function, so the default branch's full runs get
@@ -119,6 +159,20 @@ See [Go test functions](../guides/go-test-functions.md).
 **Runner arguments may filter tests.** Arguments passed through to the runner
 (`smates run -- -t name`) may skip tests, so such runs never record a test as passed.
 Workaround: put permanent flags in the suite's `command`.
+
+**A skipped test counts as passed, except for Go test functions.** A Go test function
+recorded in its own process (`granularity: func`) that skips itself is recorded as not
+proven and runs again (see [Skipped tests](../guides/go-test-functions.md#skipped-tests)).
+Everywhere else a skip is a pass: a Go package whose tests all skip under
+`granularity: package` (or recorded as a whole under `granularity: func` without `-v` or
+`-json`, which print each function's skip), a pytest `skip`/`xfail`, a vitest or jest file
+whose tests all skip. Such a test is not run again until its dependencies change, unless
+the gate is an environment variable it reads (a dependency) or a file it probes.
+Workaround: list it in `volatile`, or set `max_age`.
+
+**Time is not tracked.** A test whose outcome depends on the date or the clock is not
+selected when only the time changes. Workaround: list it in `volatile` (it runs every
+time), or set `max_age` so recorded runs expire.
 
 **Jest** occasionally runs two files back to back in one worker even when recycling
 workers. Their dependencies are then merged: still correct, but less precise.

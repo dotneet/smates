@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -16,6 +18,67 @@ import (
 
 // goTestLineRe matches the result line of a top-level test (subtests are indented).
 var goTestLineRe = regexp.MustCompile(`^--- (PASS|FAIL|SKIP): (\S+) \(`)
+
+// verboseFlags returns the -test.* flags of a test binary with -test.v=true added
+// unless they already make it print the result line of every test (-test.v true, or
+// test2json, whose framing funcOutcome reads too): without it a skipped test prints
+// nothing a passing one does not.
+func verboseFlags(flags []string) []string {
+	verbose := false
+	for _, f := range flags {
+		name, val, has := strings.Cut(strings.TrimLeft(f, "-"), "=")
+		if name != "test.v" {
+			continue
+		}
+		on, err := strconv.ParseBool(val)
+		verbose = !has || val == "test2json" || err == nil && on // the last one wins
+	}
+	if verbose {
+		return flags
+	}
+	return append(slices.Clone(flags), "-test.v=true")
+}
+
+// funcOutcome reads the verbose output (verboseFlags) of a test binary that ran the
+// top-level test function name alone and exited 0: state.Pass when it reported the
+// function passing; state.Skip when the function skipped itself (in any iteration of
+// -test.count) or never started (a TestMain that exits before m.Run); state.Unknown
+// when the output does not say. Lines are matched anywhere, after test2json's framing
+// byte is dropped: output a test printed without a final newline precedes its result
+// on the same line. Text a test prints that looks like a skip can only make it run
+// again.
+func funcOutcome(out []byte, name string) string {
+	run, pass, skip := false, false, false
+	start := "=== RUN   " + name
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimRight(strings.ReplaceAll(l, test2jsonMark, ""), "\r")
+		if i := strings.Index(l, start); i >= 0 && strings.TrimSpace(l[i+len(start):]) == "" {
+			run = true
+		}
+		skip = skip || strings.Contains(l, "--- SKIP: "+name+" (")
+		pass = pass || strings.Contains(l, "--- PASS: "+name+" (")
+	}
+	switch {
+	case !run || skip:
+		return state.Skip
+	case pass:
+		return state.Pass
+	}
+	return state.Unknown
+}
+
+// test2jsonMark is the byte -test.v=test2json puts before the lines test2json reads.
+const test2jsonMark = "\x16"
+
+// worseOutcome is the outcome of a test reported more than once (-count=N): a failure
+// in any iteration, else a skip in any (not proven), else a pass.
+func worseOutcome(prev, cur string) string {
+	rank := map[string]int{state.Pass: 1, state.Skip: 2, state.Fail: 3}
+	if rank[prev] > rank[cur] {
+		return prev
+	}
+	return cur
+}
 
 // goOutcomes reads per-function outcomes from go test output: the result lines go test
 // prints for failing tests (and, with -v, for every test), the per-package summary
@@ -91,6 +154,9 @@ func (g *goOutcomes) line(l string) {
 			g.pending = map[string]string{}
 		}
 		st := state.Pass
+		if m[1] == "SKIP" {
+			st = state.Skip
+		}
 		if m[1] == "FAIL" {
 			st = state.Fail
 			if g.failOut == nil {
@@ -100,11 +166,8 @@ func (g *goOutcomes) line(l string) {
 		} else {
 			g.cur = ""
 		}
-		// With -count=N a test reports once per iteration: one that failed in any
-		// of them failed.
-		if g.pending[m[2]] != state.Fail {
-			g.pending[m[2]] = st
-		}
+		// With -count=N a test reports once per iteration.
+		g.pending[m[2]] = worseOutcome(g.pending[m[2]], st)
 		return
 	}
 	if m := goSummaryRe.FindStringSubmatch(l); m != nil {
@@ -163,8 +226,9 @@ func (g *goOutcomes) event(ev goTestEvent) {
 	if strings.Contains(ev.Test, "/") {
 		return
 	}
-	// With -count=N a test reports once per iteration: one that failed in any of them
-	// failed, and keeps the output of that iteration.
+	// With -count=N a test reports once per iteration (worseOutcome); one that failed
+	// keeps the output of that iteration. (A package-level skip, above, is a package
+	// with no test files: a pass.)
 	failed := p.tests[ev.Test] == state.Fail
 	switch ev.Action {
 	case "output":
@@ -173,12 +237,24 @@ func (g *goOutcomes) event(ev goTestEvent) {
 		}
 	case "pass", "skip":
 		if !failed {
-			p.tests[ev.Test] = state.Pass
+			st := state.Pass
+			if ev.Action == "skip" {
+				st = state.Skip
+			}
+			p.tests[ev.Test] = worseOutcome(p.tests[ev.Test], st)
 			delete(p.fails, ev.Test)
 		}
 	case "fail":
 		p.tests[ev.Test] = state.Fail
 	}
+}
+
+// buildFailed reports whether package ip failed to build (none of its tests ran).
+func (g *goOutcomes) buildFailed(ip string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p := g.pkgs[ip]
+	return p != nil && ip != "" && p.build
 }
 
 // status returns the outcome of test name in package ip: reported for the test

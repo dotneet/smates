@@ -618,8 +618,26 @@ func TestObserveUntracedResults(t *testing.T) {
 	if b := obs["b.test.ts"]; b == nil || b.Status != state.Fail {
 		t.Errorf("untraced failure stays a failure: %+v", b)
 	}
-	if len(warns) != 1 {
+	if len(warns) != 1 || !strings.Contains(warns[0], "none left a trace") {
 		t.Errorf("warnings %v", warns)
+	}
+}
+
+func TestUntracedWarning(t *testing.T) {
+	for _, c := range []struct {
+		untraced int
+		traced   bool
+		want     string // a substring ("" = no warning)
+	}{
+		{0, false, ""},
+		{0, true, ""},
+		{2, true, "their process was likely killed"},
+		{2, false, "wrapper that drops the tracing environment"},
+	} {
+		got := untracedWarning(c.untraced, c.traced)
+		if c.want == "" && got != "" || !strings.Contains(got, c.want) {
+			t.Errorf("untracedWarning(%d, %v) = %q, want %q", c.untraced, c.traced, got, c.want)
+		}
 	}
 }
 

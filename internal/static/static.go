@@ -34,12 +34,18 @@ type Graph struct {
 	// something only for its types, their direct dependencies left once type-only
 	// imports are erased (absent: direct).
 	runtime map[string][]string
-	langs   []host.Analyzer
+	// unresolved memoizes Unresolved.
+	unresolved map[string][]string
+	langs      []host.Analyzer
+
+	// closers compute Closure and RuntimeClosure (see closer), built on first use.
+	closersOnce sync.Once
+	closers     [2]*closer
 }
 
 // New creates a graph over the given set of repo files.
 func New(root string, files []string, opts Options) *Graph {
-	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}, runtime: map[string][]string{}}
+	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}, runtime: map[string][]string{}, unresolved: map[string][]string{}}
 	for _, f := range files {
 		g.files[f] = true
 	}
@@ -129,9 +135,64 @@ func (g *Graph) deps(p string) (direct, runtime []string) {
 	return d, r
 }
 
-// Closure returns the transitive dependencies of the start files, including them.
+// Analyzes reports whether an analyzer reads one of the paths. When none does, their
+// closure is the paths themselves and tells nothing about what they reach.
+func (g *Graph) Analyzes(paths ...string) bool {
+	for _, p := range paths {
+		for _, l := range g.langs {
+			if l.Handles(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Unresolved returns the specifiers of p's imports that resolve to no repository file
+// nor to anything installed (see host.ResolveReporter; nil for languages whose
+// analyzer does not tell): an alias only a bundler's configuration knows, a virtual
+// module, a missing file. The static closure of p may then miss what they load.
+func (g *Graph) Unresolved(p string) []string {
+	g.mu.Lock()
+	u, ok := g.unresolved[p]
+	g.mu.Unlock()
+	if ok {
+		return u
+	}
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if rr, ok := l.(host.ResolveReporter); ok {
+			u = rr.Unresolved(p, g.Read(p))
+		}
+		break
+	}
+	g.mu.Lock()
+	g.unresolved[p] = u
+	g.mu.Unlock()
+	return u
+}
+
+// Resolve returns the repository files a module specifier imported from file p
+// resolves to (see host.Resolver; nil for languages whose analyzer does not tell).
+func (g *Graph) Resolve(p, spec string) []string {
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if r, ok := l.(host.Resolver); ok {
+			return r.Resolve(p, spec)
+		}
+		return nil
+	}
+	return nil
+}
+
+// Closure returns the transitive dependencies of the start files, including them,
+// sorted.
 func (g *Graph) Closure(start ...string) []string {
-	return g.closure(g.Direct, start)
+	return g.closer(false).closure(start)
 }
 
 // RuntimeClosure returns the transitive dependencies of the start files through the
@@ -139,52 +200,62 @@ func (g *Graph) Closure(start ...string) []string {
 // including the start files: what running them loads, for a runner that strips
 // types without checking them.
 func (g *Graph) RuntimeClosure(start ...string) []string {
-	return g.closure(g.RuntimeDirect, start)
+	return g.closer(true).closure(start)
 }
 
-func (g *Graph) closure(direct func(string) []string, start []string) []string {
-	seen := map[string]bool{}
-	stack := append([]string{}, start...)
-	for len(stack) > 0 {
-		p := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		for _, d := range direct(p) {
-			if !seen[d] {
-				stack = append(stack, d)
-			}
-		}
+// closer returns the closure engine over Direct, or over RuntimeDirect: a type-only
+// import can split a cycle, so the two have components of their own.
+func (g *Graph) closer(runtime bool) *closer {
+	g.closersOnce.Do(func() {
+		g.closers[0] = newCloser(g.files, g.Direct)
+		g.closers[1] = newCloser(g.files, g.RuntimeDirect)
+	})
+	if runtime {
+		return g.closers[1]
 	}
-	out := make([]string, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
+	return g.closers[0]
 }
 
-// Warm resolves direct dependencies of the files in parallel (closure computation
-// afterwards is then memory-only).
+// Warm resolves the direct dependencies of the files and of everything they reach, in
+// parallel (closure computation afterwards is then memory-only).
 func (g *Graph) Warm(paths []string) {
-	var wg sync.WaitGroup
-	ch := make(chan string)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for p := range ch {
-				g.Direct(p)
-			}
-		}()
-	}
+	seen := make(map[string]bool, len(paths))
+	var frontier []string
 	for _, p := range paths {
-		ch <- p
+		if !seen[p] {
+			seen[p] = true
+			frontier = append(frontier, p)
+		}
 	}
-	close(ch)
-	wg.Wait()
+	for len(frontier) > 0 {
+		deps := make([][]string, len(frontier))
+		var wg sync.WaitGroup
+		ch := make(chan int)
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range ch {
+					deps[j] = g.Direct(frontier[j])
+				}
+			}()
+		}
+		for j := range frontier {
+			ch <- j
+		}
+		close(ch)
+		wg.Wait()
+		var next []string
+		for _, ds := range deps {
+			for _, d := range ds {
+				if !seen[d] {
+					seen[d] = true
+					next = append(next, d)
+				}
+			}
+		}
+		frontier = next
+	}
 }
 
 func dedupe(in []string, self string) []string {

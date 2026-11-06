@@ -56,6 +56,7 @@ func TestDependsOnErrors(t *testing.T) {
 		"    depends_on: [{paths: [\"../x\"]}]\n":             "relative to the repository root",
 		"    depends_on: [{suite: api, tests: [\"[\"]}]\n":    "bad glob",
 		"    depends_on: [{suite: api, deps: [x]}]\n":         "not found",
+		"    depends_on: [[api]]\n":                           "a depends_on or serves entry is a suite name or a mapping",
 		"    serves: [\"\"]\n":                                "bad glob",
 		"    serves: [\"/srv/**\"]\n":                         "relative to the repository root",
 		"    serves: ['backend\\**']\n":                       "use / as the path separator",

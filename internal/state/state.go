@@ -30,6 +30,9 @@ const (
 	Pass    = "pass"
 	Fail    = "fail"
 	Unknown = "unknown"
+	// Skip: the test skipped itself (or did not run although its process passed): it
+	// did not fail, but its pass is not proven, so it runs again.
+	Skip = "skip"
 )
 
 // State is the in-memory form.

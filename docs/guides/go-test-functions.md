@@ -164,6 +164,9 @@ checks, for the changed package and the packages importing it. The check carries
 build failure; the functions keep their recorded outcomes, so after a fix only the
 checks run again.
 
+A package without tests has no check unless the suite's `tests` globs reach its files:
+see [Go packages without tests](runners.md#go-packages-without-tests).
+
 ## How selected functions run
 
 When not recording, selected functions run with one `go test` per group of packages:
@@ -230,6 +233,48 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+```
+
+## Skipped tests
+
+A test that skips itself did not fail, but it did not prove anything either: a test
+that skips when a database is unreachable would otherwise count as passed on a laptop
+without one, and not run again until its code changes. So while recording, smates runs
+each function's process with `-test.v` (unless the command already sets it) and reads
+the function's result line:
+
+- `--- PASS` records a pass;
+- `--- SKIP` at the top level, in any iteration of `-count`, records `skip`;
+- no `=== RUN` line for the function records `skip` too: a `TestMain` that exits 0
+  before `m.Run()` ran nothing;
+- output that says neither records `unknown`.
+
+A skipped function is selected again on the next run (reason `unproven`, "skipped last
+run: not proven to pass"), as an unknown one is (reason `failed`), until it passes. A subtest that skips under a
+passing function is a pass. The run itself passes, and its outcome line counts them:
+
+```text
+smates: PASSED 12 of 12 selected test unit(s) (240 in total) in 3.1s; 2 skipped (not proven: they run again next time)
+```
+
+A test that always skips (a `-short` gate, an integration test whose service is never
+up) therefore runs every time; it is cheap, and `smates doctor` lists the units that
+skipped in their last run (`state-skipped`). A skip only counts like this per
+function. A package recorded as a whole under `granularity: func` records each
+function's skip too when go test prints it (`-v` or `-json` in the suite's command),
+and the package's result otherwise; a `granularity: package` suite always records the
+package's result (see [Limitations](../reference/limitations.md)).
+
+Tests whose outcome depends on something smates does not track, such as the date,
+can be listed in `volatile` (they run every time), and `max_age` makes every recorded
+run expire after a while:
+
+```yaml
+  - name: api
+    runner: go
+    granularity: func
+    volatile: ["internal/clock#TestToday"]   # unit, package or test file globs
+    max_age: 168h
 ```
 
 ## Test flags

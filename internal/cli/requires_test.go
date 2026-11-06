@@ -1,0 +1,706 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
+)
+
+// --max-time cuts each batch by recorded durations, in the order the units start.
+func TestPlanMaxTime(t *testing.T) {
+	sec := int64(1000)
+	recorded := &selector.Suite{Name: "go", Suite: &runner.Suite{Suite: config.Suite{Name: "go"}}, Tests: []*selector.Test{
+		{ID: "pkg/c", Selected: true, Reason: selector.ReasonChanged, Duration: 40 * sec},
+		{ID: "pkg/a", Selected: true, Reason: selector.ReasonChanged, Duration: 20 * sec},
+		{ID: "pkg/d", Selected: true, Reason: selector.ReasonChanged, Duration: 10 * sec},
+		{ID: "pkg/b", Selected: true, Reason: selector.ReasonChanged, Duration: 30 * sec},
+		{ID: "pkg/huge", Selected: true, Reason: selector.ReasonChanged, Duration: 300 * sec},
+		{ID: "pkg/new", Selected: true, Reason: selector.ReasonNew}, // estimated at the mean
+		{ID: "pkg/failed", Selected: true, Reason: selector.ReasonFailed, Duration: 5 * sec},
+		{ID: "pkg/idle", Reason: selector.ReasonUnaffected, Duration: 4 * sec},
+	}}
+	cold := &selector.Suite{Name: "web", Suite: &runner.Suite{Suite: config.Suite{Name: "web"}}, Tests: []*selector.Test{
+		{ID: "a.test.ts", Selected: true, Reason: selector.ReasonNew},
+		{ID: "b.test.ts", Selected: true, Reason: selector.ReasonNew},
+	}}
+	res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{recorded, cold}}
+	entries := map[string]*state.Entry{}
+	for _, tt := range recorded.Tests {
+		if tt.ID != "pkg/new" {
+			entries[tt.ID] = &state.Entry{Status: state.Pass}
+		}
+	}
+	entries["pkg/failed"].Status = state.Fail
+	st := &state.State{Suites: map[string]*state.Suite{"go": {Tests: entries}}}
+	prioritize(res, st, nil)
+
+	type step struct {
+		suite   string
+		units   []string
+		est     time.Duration
+		unknown bool
+	}
+	// The mean of go's recorded durations: (40+20+10+30+300+5+4)/7 s.
+	mean := (409 * time.Second) / 7
+	for _, tc := range []struct {
+		name     string
+		maxTime  time.Duration
+		failFast bool
+		want     []step
+	}{
+		{"no limit", 0, false, []step{
+			{"go", []string{"pkg/failed", "pkg/d", "pkg/a", "pkg/b", "pkg/c", "pkg/huge", "pkg/new"}, 0, false},
+			{"web", []string{"a.test.ts", "b.test.ts"}, 0, false},
+		}},
+		// A quarter of 4m per batch; a unit longer than that runs alone; a suite without
+		// recorded durations stays in one batch of unknown duration.
+		{"4m", 4 * time.Minute, false, []step{
+			{"go", []string{"pkg/failed", "pkg/d", "pkg/a"}, 35 * time.Second, false},
+			{"go", []string{"pkg/b"}, 30 * time.Second, false},
+			{"go", []string{"pkg/c"}, 40 * time.Second, false},
+			{"go", []string{"pkg/huge"}, 300 * time.Second, false},
+			{"go", []string{"pkg/new"}, mean, false},
+			{"web", []string{"a.test.ts", "b.test.ts"}, 0, true},
+		}},
+		{"20m: everything in one batch per suite", 20 * time.Minute, false, []step{
+			{"go", []string{"pkg/failed", "pkg/d", "pkg/a", "pkg/b", "pkg/c"}, 105 * time.Second, false},
+			{"go", []string{"pkg/huge"}, 300 * time.Second, false},
+			{"go", []string{"pkg/new"}, mean, false},
+			{"web", []string{"a.test.ts", "b.test.ts"}, 0, true},
+		}},
+		{"with --fail-fast, priorities first", 4 * time.Minute, true, []step{
+			{"go", []string{"pkg/failed"}, 5 * time.Second, false},
+			{"go", []string{"pkg/d", "pkg/a", "pkg/b"}, 60 * time.Second, false},
+			{"go", []string{"pkg/c"}, 40 * time.Second, false},
+			{"go", []string{"pkg/huge"}, 300 * time.Second, false},
+			{"go", []string{"pkg/new"}, mean, false},
+			{"web", []string{"a.test.ts", "b.test.ts"}, 0, true},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &cycle{p: &project{state: st}, f: &runFlags{maxTime: tc.maxTime, failFast: tc.failFast}, sel: &selection{res: res}}
+			var got []step
+			for _, b := range c.plan() {
+				if b.full {
+					t.Errorf("%s: a partial selection is not a full run", b.sr.Name)
+				}
+				got = append(got, step{b.sr.Name, b.units, b.est, b.unknown})
+			}
+			if tc.maxTime == 0 {
+				for i := range got {
+					got[i].est, got[i].unknown = 0, false
+				}
+			}
+			if !slices.EqualFunc(got, tc.want, func(a, b step) bool {
+				return a.suite == b.suite && slices.Equal(a.units, b.units) && a.est == b.est && a.unknown == b.unknown
+			}) {
+				t.Errorf("plan\n got %v\nwant %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A full run cut by --max-time passes explicit units to every batch; one that fits in a
+// single batch stays a full run.
+func TestPlanMaxTimeFullRun(t *testing.T) {
+	sr := &selector.Suite{Name: "go", All: true, Suite: &runner.Suite{Suite: config.Suite{Name: "go"}}, Tests: []*selector.Test{
+		{ID: "pkg/a", Selected: true, Reason: selector.ReasonAll, Duration: 60000},
+		{ID: "pkg/b", Selected: true, Reason: selector.ReasonAll, Duration: 60000},
+	}}
+	res := &selector.Result{Mode: selector.ModeAll, Suites: []*selector.Suite{sr}}
+	st := &state.State{Suites: map[string]*state.Suite{"go": {Tests: map[string]*state.Entry{"pkg/a": {Status: state.Pass}, "pkg/b": {Status: state.Pass}}}}}
+	prioritize(res, st, nil)
+	for _, tc := range []struct {
+		maxTime time.Duration
+		batches int
+		full    bool
+	}{{4 * time.Minute, 2, false}, {time.Hour, 1, true}} {
+		c := &cycle{p: &project{state: st}, f: &runFlags{maxTime: tc.maxTime}, sel: &selection{res: res}, runAll: true}
+		plan := c.plan()
+		if len(plan) != tc.batches || slices.ContainsFunc(plan, func(b *batch) bool { return b.full != tc.full }) {
+			t.Errorf("--max-time %s: %d batches (full %v), want %d (full %v)", tc.maxTime, len(plan), plan[0].full, tc.batches, tc.full)
+		}
+	}
+}
+
+func TestOverTime(t *testing.T) {
+	type ran struct {
+		suite     string
+		est, wall time.Duration
+	}
+	for _, tc := range []struct {
+		name    string
+		maxTime time.Duration
+		started bool
+		elapsed time.Duration
+		suite   string
+		est     time.Duration
+		unknown bool
+		ran     []ran // batches that ran before, through addRan
+		want    bool
+	}{
+		{name: "no limit", started: true, elapsed: time.Hour, est: time.Hour},
+		{name: "the first batch always starts", maxTime: time.Minute, est: time.Hour},
+		{name: "the first batch of unknown duration starts", maxTime: time.Minute, unknown: true},
+		{name: "fits", maxTime: time.Minute, started: true, elapsed: 20 * time.Second, est: 30 * time.Second},
+		{name: "would end after the limit", maxTime: time.Minute, started: true, elapsed: 40 * time.Second, est: 30 * time.Second, want: true},
+		{name: "the limit has passed", maxTime: time.Minute, started: true, elapsed: 2 * time.Minute, want: true},
+		{name: "unknown duration within the first half", maxTime: time.Hour, started: true, elapsed: 29 * time.Minute, unknown: true},
+		{name: "unknown duration after half the time", maxTime: time.Hour, started: true, elapsed: 30 * time.Minute, unknown: true, want: true},
+		// A long batch that took 60s more than its 30s: the next 30s batch is counted
+		// as 90s, which does not fit.
+		{name: "a long batch that overran: estimates grow", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 90 * time.Second}}, want: true},
+		{name: "faster than estimated: no shrinking", maxTime: time.Minute, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 10 * time.Second}}},
+		{name: "faster than estimated still counts against an overrun", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 30 * time.Second, 90 * time.Second}, {"go", 30 * time.Second, 10 * time.Second}}},
+		// Must start: a tiny batch whose startup took 3s says the next batch takes 3s
+		// more, not 30 times its estimate.
+		{name: "a tiny batch with startup overrun, then a long batch", maxTime: 8 * time.Minute, started: true, elapsed: 4 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 100 * time.Millisecond, 3 * time.Second}}},
+		{name: "the same suite: startup overrun, then a long batch", maxTime: 8 * time.Minute, started: true, elapsed: 4 * time.Second,
+			suite: "a", est: 30 * time.Second, ran: []ran{{"a", 100 * time.Millisecond, 3 * time.Second}}},
+		// A suite's own overrun wins over another suite's.
+		{name: "another suite's overrun does not apply once the suite has its own", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 10 * time.Second, 80 * time.Second}, {"b", 10 * time.Second, 10 * time.Second}}},
+		{name: "a suite's first batch takes the overrun of the others", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "b", est: 30 * time.Second, ran: []ran{{"a", 10 * time.Second, 80 * time.Second}}, want: true},
+		{name: "batches of unknown duration do not count", maxTime: 100 * time.Second, started: true, elapsed: 20 * time.Second,
+			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 0, 90 * time.Second}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}}
+			if tc.started {
+				c.started["go"] = []string{"pkg/a"}
+			}
+			for _, r := range tc.ran {
+				c.addRan(&batch{sr: &selector.Suite{Name: r.suite}, est: r.est}, r.wall)
+			}
+			b := &batch{est: tc.est, unknown: tc.unknown}
+			if tc.suite != "" {
+				b.sr = &selector.Suite{Name: tc.suite}
+			}
+			if got := c.overTime(b); got != tc.want {
+				t.Errorf("overTime = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A batch partly deferred by unmet requirements is re-estimated from the units it keeps,
+// so the overrun measured on them is not hidden by the estimate of units that never ran.
+func TestDeferUnmetReestimates(t *testing.T) {
+	sec := int64(1000)
+	sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Root: ".", Requires: []config.Requirement{
+		{File: "missing-file-for-the-test", Tests: []string{"db/**"}},
+	}}}, Tests: []*selector.Test{
+		{ID: "db/a.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 90 * sec},
+		{ID: "ui/b.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 10 * sec},
+	}}
+	res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr}}
+	st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: map[string]*state.Entry{
+		"db/a.test.ts": {Status: state.Pass, DurationMs: 90 * sec}, "ui/b.test.ts": {Status: state.Pass, DurationMs: 10 * sec},
+	}}}}
+	prioritize(res, st, nil)
+	repo := t.TempDir()
+	c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: repo}, log: io.Discard}, f: &runFlags{maxTime: time.Hour}, sel: &selection{res: res},
+		checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+	plan := c.plan()
+	if len(plan) != 1 || plan[0].est != 100*time.Second {
+		t.Fatalf("plan %+v", plan)
+	}
+	b := plan[0]
+	if c.deferUnmet(context.Background(), b) {
+		t.Fatal("everything deferred")
+	}
+	if !slices.Equal(b.units, []string{"ui/b.test.ts"}) || b.est != 10*time.Second {
+		t.Fatalf("kept %v est %s, want [ui/b.test.ts] 10s", b.units, b.est)
+	}
+	// The 10s that ran took 30s: a later 30s batch is counted as 50s.
+	c.addRan(b, 30*time.Second)
+	c.start, c.started = time.Now().Add(-40*time.Second), map[string][]string{"s": {"ui/b.test.ts"}}
+	c.f.maxTime = 85 * time.Second
+	if !c.overTime(&batch{sr: sr, est: 30 * time.Second}) {
+		t.Error("a later batch was not grown by the overrun of the units that ran")
+	}
+}
+
+// TestAdmitMaxTimeAfterRequires: --max-time is checked against the units of a batch
+// that run, after those whose requirements are unmet are deferred. Units that never
+// start must not stop the run (a cheaper batch after them still starts); units that
+// run and do not fit still cap it.
+func TestAdmitMaxTimeAfterRequires(t *testing.T) {
+	sec := int64(1000)
+	for _, tc := range []struct {
+		name      string
+		tests     map[string]int64 // unit of suite s -> seconds
+		admitS    bool             // suite s's batch starts
+		capped    bool
+		admitNext bool // the 5s batch of suite t after it starts
+		unmet     []string
+	}{
+		// Must keep running: nothing of the batch would start.
+		{"all units unmet, over the limit in all", map[string]int64{"db/a.test.ts": 90}, false, false, true, []string{"db/a.test.ts"}},
+		{"kept units fit", map[string]int64{"db/a.test.ts": 90, "ui/b.test.ts": 5}, true, false, true, []string{"db/a.test.ts"}},
+		{"kept units do not fit", map[string]int64{"db/a.test.ts": 40, "ui/b.test.ts": 75}, false, true, false, []string{"db/a.test.ts"}},
+		{"nothing unmet, over the limit", map[string]int64{"ui/b.test.ts": 75}, false, true, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqs := []config.Requirement{{File: "missing-file-for-the-test", Tests: []string{"db/**"}}}
+			sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Root: ".", Requires: reqs}}}
+			next := &selector.Suite{Name: "t", Suite: &runner.Suite{Suite: config.Suite{Name: "t", Root: "."}}, Tests: []*selector.Test{
+				{ID: "t/c.test.ts", Selected: true, Reason: selector.ReasonChanged, Duration: 5 * sec},
+			}}
+			st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: map[string]*state.Entry{}}, "t": {Tests: map[string]*state.Entry{
+				"t/c.test.ts": {Status: state.Pass, DurationMs: 5 * sec},
+			}}}}
+			for id, d := range tc.tests {
+				sr.Tests = append(sr.Tests, &selector.Test{ID: id, Selected: true, Reason: selector.ReasonChanged, Duration: d * sec})
+				st.Suites["s"].Tests[id] = &state.Entry{Status: state.Pass, DurationMs: d * sec}
+			}
+			slices.SortFunc(sr.Tests, func(a, b *selector.Test) int { return strings.Compare(a.ID, b.ID) })
+			res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr, next}}
+			prioritize(res, st, nil)
+			c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: t.TempDir()}, log: io.Discard}, f: &runFlags{maxTime: 8 * time.Minute}, sel: &selection{res: res},
+				checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+			plan := c.plan()
+			slices.SortStableFunc(plan, func(a, b *batch) int { return strings.Compare(a.sr.Name, b.sr.Name) })
+			if len(plan) != 2 {
+				t.Fatalf("plan %+v", plan)
+			}
+			// Another suite's batch already ran; 7 of the 8 minutes are gone.
+			c.start, c.started = time.Now().Add(-7*time.Minute), map[string][]string{"other": {"x"}}
+			if got := c.admit(context.Background(), plan[0], plan); got != tc.admitS {
+				t.Errorf("suite s admitted %v, want %v (units %v, est %s)", got, tc.admitS, plan[0].units, plan[0].est)
+			}
+			if c.capped != tc.capped {
+				t.Errorf("capped %v, want %v", c.capped, tc.capped)
+			}
+			if got := c.admit(context.Background(), plan[1], plan[1:]); got != tc.admitNext {
+				t.Errorf("suite t admitted %v, want %v", got, tc.admitNext)
+			}
+			if !slices.Equal(c.unmet["s"], tc.unmet) {
+				t.Errorf("unmet %v, want %v", c.unmet["s"], tc.unmet)
+			}
+		})
+	}
+}
+
+func TestParseRunFlagsMaxTime(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string // error substring; "" = valid
+	}{
+		{[]string{"--max-time", "8m"}, ""},
+		{[]string{"--max-time", "0"}, ""},
+		{[]string{"--max-time", "8m", "--fail-fast", "--shard", "1/2"}, ""},
+		{[]string{"--max-time", "-1s"}, "must not be negative"},
+		{[]string{"--max-time", "soon"}, "invalid value"},
+		{[]string{"--max-time", "8m", "--shadow"}, "--max-time"},
+	} {
+		_, err := parseRunFlags(tc.args, &bytes.Buffer{})
+		var ue usageError
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%v: %v", tc.args, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want) || !errors.As(err, &ue)):
+			t.Errorf("%v: %v, want a usage error with %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+// requiresFixture is outputFixture with the suites good and bad, recorded by a full
+// run, and then the given requires entries (YAML flow sequence items) added to good.
+func requiresFixture(t *testing.T, requires string) (dir string, write func(rel, content string), run func(args ...string) (int, string, string)) {
+	t.Helper()
+	dir, write, run = outputFixture(t)
+	cmd := `sh -c 'rc=0; [ $# -gt 0 ] || set -- %s/*_check.py; for f; do python3 "$f" || rc=1; done; exit $rc' sh`
+	config := func(requires string) string {
+		return "version: 1\norphans: ignore\nsuites:\n" +
+			"  - name: good\n    runner: custom\n    tests: [\"good/*_check.py\"]\n    command: " + strings.ReplaceAll(cmd, "%s", "good") + "\n" +
+			"    requires: [" + requires + "]\n" +
+			"  - name: bad\n    runner: custom\n    tests: [\"bad/*_check.py\"]\n    command: " + strings.ReplaceAll(cmd, "%s", "bad") + "\n"
+	}
+	write("smates.yml", config(""))
+	write("good/e_check.py", "import sys\nsys.path.insert(0, 'src')\nimport common\n")
+	if code, _, errs := run("run", "--all"); code != 0 {
+		t.Fatalf("baseline: %d\n%s", code, errs)
+	}
+	write("smates.yml", config(requires))
+	return dir, write, run
+}
+
+type runReport struct {
+	Results       map[string]map[string]string `json:"results"`
+	NotRun        map[string][]string          `json:"not_run"`
+	ExitCode      int                          `json:"exit_code"`
+	MaxTime       bool                         `json:"max_time_reached"`
+	UnmetRequires map[string][]string          `json:"unmet_requires"`
+}
+
+func readReport(t *testing.T, path string) runReport {
+	t.Helper()
+	var rep runReport
+	data, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(data, &rep)
+	}
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	return rep
+}
+
+// Units whose requirements are not met do not run, are never recorded (as passed or
+// otherwise) and are selected again next time; a check that cannot tell counts as unmet.
+func TestRunRequires(t *testing.T) {
+	t.Setenv("SMATES_REQ_DB", "")
+	cases := []struct {
+		name     string
+		requires string
+		failBad  bool     // a test of the other suite fails too
+		code     int      // exit code
+		deferred []string // good's units left out
+		log      string
+	}{
+		{"env unset", "{env: SMATES_REQ_DB}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "requires env SMATES_REQ_DB ($SMATES_REQ_DB is not set)"},
+		{"env unset, other tests fail", "{env: SMATES_REQ_DB}", true, ExitFailed, []string{"good/a_check.py", "good/e_check.py"}, "requirements not met"},
+		{"env set", "{env: PATH}", false, 0, nil, ""},
+		{"file missing", "{file: .env.test}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "no file matches"},
+		{"file present", "{file: src/common.py}", false, 0, nil, ""},
+		{"cmd fails", "{cmd: 'exit 3'}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "exit status 3"},
+		{"cmd not found", "{cmd: smates-no-such-check-x9}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "exit status 127"},
+		{"cmd times out", "{cmd: 'sleep 30', timeout: 200ms}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "did not finish within 200ms"},
+		{"cmd passes", "{cmd: 'test -f good/a_check.py'}", false, 0, nil, ""},
+		{"tcp closed", "{tcp: '127.0.0.1:1', timeout: 200ms}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "nothing accepts connections on 127.0.0.1:1"},
+		// Only the units the tests globs select are left out.
+		{"narrowed to some tests", "{env: SMATES_REQ_DB, tests: ['good/e_*.py']}", false, ExitEnv, []string{"good/e_check.py"}, "1 test unit(s) not run"},
+		{"narrowed to no selected test", "{env: SMATES_REQ_DB, tests: ['good/none_*.py']}", false, 0, nil, ""},
+		{"one of two unmet", "{env: PATH}, {env: SMATES_REQ_DB}", false, ExitEnv, []string{"good/a_check.py", "good/e_check.py"}, "requires env SMATES_REQ_DB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, write, run := requiresFixture(t, tc.requires)
+			write("src/common.py", "X = 1  # changed\n")
+			if tc.failBad {
+				write("bad/c_check.py", "assert False\n")
+			}
+			report := filepath.Join(dir, "r.json")
+			code, _, errs := run("run", "--report", report)
+			if code != tc.code || !strings.Contains(errs, tc.log) {
+				t.Fatalf("exit %d, want %d (log %q)\n%s", code, tc.code, tc.log, errs)
+			}
+			rep := readReport(t, report)
+			if got := rep.NotRun["good"]; !slices.Equal(sorted(got), tc.deferred) {
+				t.Errorf("not run %v, want %v", got, tc.deferred)
+			}
+			for _, u := range tc.deferred {
+				if _, ok := rep.Results["good"][u]; ok {
+					t.Errorf("%s has a result: %v", u, rep.Results["good"])
+				}
+			}
+			if (len(tc.deferred) > 0) != (len(rep.UnmetRequires["good"]) > 0) {
+				t.Errorf("unmet_requires %v", rep.UnmetRequires)
+			}
+			// Must keep: the units left out are selected again; what ran is not.
+			code, out, errs := run("select", "--format", "files")
+			want := slices.Clone(tc.deferred)
+			if tc.failBad {
+				// The custom runner reports no per-file status: the failing batch's
+				// units are all selected again.
+				want = append(want, "bad/b_check.py", "bad/c_check.py")
+			}
+			if got := strings.Fields(out); code != 0 || !slices.Equal(sorted(got), sorted(want)) {
+				t.Errorf("selected next time %v, want %v\n%s", got, want, errs)
+			}
+		})
+	}
+}
+
+func sorted(s []string) []string {
+	s = slices.Clone(s)
+	slices.Sort(s)
+	return s
+}
+
+// Unmet requirements leave the snapshot's view of the suite unchanged: an orphan its
+// policy runs the suite for is seen again until the suite has run.
+func TestRunRequiresKeepsOrphansUnseen(t *testing.T) {
+	t.Setenv("SMATES_REQ_DB", "")
+	dir, write, run := requiresFixture(t, "{env: SMATES_REQ_DB}")
+	write("smates.yml", strings.Replace(readFile(t, filepath.Join(dir, "smates.yml")), "orphans: ignore", "orphans: all", 1))
+	write("Dockerfile", "FROM scratch\n")
+	if code, _, errs := run("run", "--no-agent"); code != ExitEnv {
+		t.Fatalf("run: exit %d\n%s", code, errs)
+	}
+	code, out, errs := run("select", "--no-agent", "--format", "files")
+	if code != 0 || !strings.Contains(out, "good/a_check.py") || !strings.Contains(out, "good/e_check.py") {
+		t.Errorf("the orphan must still select good: %d %q\n%s", code, out, errs)
+	}
+	t.Setenv("SMATES_REQ_DB", "postgres://localhost/test")
+	if code, _, errs := run("run", "--no-agent"); code != 0 {
+		t.Fatalf("run with the requirement met: exit %d\n%s", code, errs)
+	}
+	if code, out, errs := run("select", "--no-agent", "--format", "files"); code != 0 || out != "" {
+		t.Errorf("after the run: %d %q\n%s", code, out, errs)
+	}
+}
+
+// --max-time stops starting batches; what did not start stays selected, nothing is
+// recorded for it, and the run exits 0 when what ran passed.
+func TestRunMaxTime(t *testing.T) {
+	dir, write, run := outputFixture(t)
+	write("smates.yml", customSuites("ignore", "", "good", "bad"))
+	if code, _, errs := run("run", "--all"); code != 0 {
+		t.Fatalf("baseline: %d\n%s", code, errs)
+	}
+	write("src/common.py", "X = 1  # changed\n") // selects good/a_check.py and bad/b_check.py
+	report := filepath.Join(dir, "r.json")
+	md := filepath.Join(dir, "summary.md")
+	code, _, errs := run("run", "--max-time", "1ns", "--report", report, "--markdown", md)
+	if code != 0 || !strings.Contains(errs, "--max-time 1ns: starting no further test batch (1 selected unit(s) left") ||
+		!strings.Contains(errs, "--max-time left 1 selected unit(s) not started") {
+		t.Fatalf("exit %d\n%s", code, errs)
+	}
+	rep := readReport(t, report)
+	if !rep.MaxTime || len(rep.Results) != 1 || countUnits(rep.NotRun) != 1 || len(rep.UnmetRequires) != 0 {
+		t.Errorf("report %+v", rep)
+	}
+	if s, _ := os.ReadFile(md); !strings.Contains(string(s), "**Time limit:** 1 selected test unit not started within --max-time 1ns") {
+		t.Errorf("summary:\n%s", s)
+	}
+	var left string
+	for s, u := range rep.NotRun {
+		left = s + "/" + strings.TrimPrefix(u[0], s+"/")
+	}
+	// Must keep: the unit left out is selected again; the one that ran is not.
+	code, out, errs := run("select", "--format", "files")
+	if code != 0 || strings.TrimSpace(out) != left {
+		t.Errorf("selected next time %q, want %q\n%s", out, left, errs)
+	}
+	if code, _, errs := run("run"); code != 0 || !strings.Contains(errs, "ran 1 of") {
+		t.Errorf("next run: %d\n%s", code, errs)
+	}
+	if code, out, _ := run("select", "--format", "files"); code != 0 || out != "" {
+		t.Errorf("after both runs: %d %q", code, out)
+	}
+}
+
+// A failing batch within --max-time still fails the run, and --output failures says
+// what the limit left out.
+func TestRunMaxTimeFailures(t *testing.T) {
+	_, write, run := outputFixture(t)
+	write("smates.yml", customSuites("ignore", "", "bad", "good"))
+	if code, _, errs := run("run", "--all"); code != 0 {
+		t.Fatalf("baseline: %d\n%s", code, errs)
+	}
+	write("src/common.py", "X = 2\n") // bad/b_check.py fails
+	code, _, errs := run("run", "--max-time", "1ns", "--output", "failures")
+	if code != ExitFailed || !strings.Contains(errs, "(--max-time left 1 selected test unit(s) not started)") {
+		t.Errorf("exit %d\n%s", code, errs)
+	}
+	write("src/common.py", "X = 1  # changed\n")
+	code, _, errs = run("run", "--max-time", "1ns", "--output", "failures")
+	if code != 0 || !strings.Contains(errs, "smates: PASSED") || !strings.Contains(errs, "--max-time left") {
+		t.Errorf("passing: exit %d\n%s", code, errs)
+	}
+}
+
+// The coding agent hooks do not block on units left for later: one line on stderr,
+// exit 0, and the units stay selected. Failing tests still block, and another
+// environment error is still reported.
+func TestAgentStopHookDefers(t *testing.T) {
+	t.Setenv("SMATES_REQ_DB", "")
+	for _, a := range []agentHook{claudeHook, codexHook} {
+		t.Run(a.name, func(t *testing.T) {
+			dir, write, run := requiresFixture(t, "{env: SMATES_REQ_DB}")
+			sub := strings.TrimPrefix(a.marker, "smates hook ")
+			stop := func(args ...string) (int, string, string) {
+				t.Helper()
+				in, _ := json.Marshal(map[string]any{"hook_event_name": "Stop", "stop_hook_active": false, "cwd": dir})
+				var out, errb bytes.Buffer
+				code, err := cmdHook(context.Background(), append([]string{sub, "--", "--no-agent"}, args...), bytes.NewReader(in), &out, &errb)
+				if err != nil {
+					t.Fatalf("%s: %v", sub, err)
+				}
+				return code, out.String(), errb.String()
+			}
+			write("src/common.py", "X = 1  # changed\n")
+			code, out, errs := stop()
+			if code != 0 || out != "" || strings.Count(errs, "\n") != 1 ||
+				!strings.Contains(errs, "smates: selected test units left for a later run (they stay selected): 2 of good, which needs env SMATES_REQ_DB") {
+				t.Fatalf("unmet requires: %d %q %q", code, out, errs)
+			}
+			if code, sel, _ := run("select", "--format", "files"); code != 0 || !strings.Contains(sel, "good/a_check.py") {
+				t.Errorf("must keep: %q", sel)
+			}
+			// --max-time among the run flags wins over the hook's default.
+			write("src/common.py", "X = 1  # changed again\n")
+			t.Setenv("SMATES_REQ_DB", "x")
+			code, out, errs = stop("--max-time", "1ns")
+			if code != 0 || out != "" || !strings.Contains(errs, "by --max-time 1ns") {
+				t.Errorf("--max-time: %d %q %q", code, out, errs)
+			}
+			// --shadow takes no limit: the hook adds none (it used to fail every Stop).
+			if code, _, errs := stop("--shadow"); strings.Contains(errs, "cannot be combined") || code != 0 {
+				t.Errorf("--shadow: %d %q", code, errs)
+			}
+			t.Setenv("SMATES_REQ_DB", "")
+			// Failing tests still block, with the units left out in the reason.
+			write("src/common.py", "X = 2\n")
+			code, out, _ = stop()
+			var dec struct{ Decision, Reason string }
+			if code != 0 || json.Unmarshal([]byte(out), &dec) != nil || dec.Decision != "block" || !strings.Contains(dec.Reason, "requires env SMATES_REQ_DB") {
+				t.Errorf("failing: %d %q", code, out)
+			}
+			// A runner that cannot start is still an error shown to the user.
+			write("src/common.py", "X = 1\n")
+			write("pt/test_x.py", "def test_x():\n    pass\n")
+			write("smates.yml", readFile(t, filepath.Join(dir, "smates.yml"))+
+				"  - name: pt\n    runner: pytest\n    tests: [\"pt/test_*.py\"]\n    command: sh -c 'smates-no-such-pytest-x8' sh\n")
+			code, out, errs = stop()
+			if code != 1 || out != "" || !strings.Contains(errs, a.name+" Stop hook): pt: the runner exited with code 127") ||
+				!strings.Contains(errs, "requirements not met") {
+				t.Errorf("runner error: %d %q %q", code, out, errs)
+			}
+		})
+	}
+}
+
+func TestHasRunFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		name string
+		want bool
+	}{
+		{[]string{"--max-time", "0"}, "max-time", true},
+		{[]string{"-max-time=5m"}, "max-time", true},
+		{[]string{"--shadow"}, "shadow", true},
+		{[]string{"--shadow=false"}, "shadow", true},
+		{[]string{"--suite", "max-time"}, "max-time", false},
+		{[]string{"--", "--shadow"}, "shadow", false}, // the runner's argument
+		{nil, "shadow", false},
+	} {
+		if got := hasRunFlag(tc.args, tc.name); got != tc.want {
+			t.Errorf("%v %s: %v, want %v", tc.args, tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPlanMaxTimeEstimates: entries recorded without a measured duration (an inferred
+// unknown from a failing batch, 0 ms) are not taken as quick units, nor pull the
+// suite's mean down; many short Go packages split into several batches, since each
+// package costs a build that recorded durations leave out.
+func TestPlanMaxTimeEstimates(t *testing.T) {
+	sec := int64(1000)
+	type unit struct {
+		id     string
+		dur    int64
+		status string // "" = no entry
+	}
+	type want struct {
+		batches int
+		unknown bool    // the first batch is of unknown duration
+		est     float64 // seconds, the first batch's estimate (when known)
+	}
+	cases := []struct {
+		name   string
+		runner string
+		units  []unit
+		want   want
+	}{
+		{"unmeasured entries count at the measured mean", "", []unit{
+			{"a", 60 * sec, state.Pass}, {"b", 0, state.Unknown}, {"c", 0, state.Unknown}, {"d", 0, state.Unknown},
+		}, want{4, false, 60}},
+		{"only unmeasured entries: unknown duration", "", []unit{
+			{"a", 0, state.Unknown}, {"b", 0, state.Unknown},
+		}, want{1, true, 0}},
+		{"an inferred unknown with an old duration is not measured", "", []unit{
+			{"a", 60 * sec, state.Pass}, {"b", 1, state.Unknown}, {"c", 1, state.Unknown},
+		}, want{3, false, 60}},
+		{"short go packages pay for their build", "go", func() []unit {
+			var us []unit
+			for i := range 200 {
+				us = append(us, unit{fmt.Sprintf("pkg/p%03d", i), 50, state.Pass})
+			}
+			return us
+		}(), want{4, false, 57 * 1.05}},
+		{"functions of one go package build it once", "go", []unit{
+			{"pkg/a#TestA", 10 * sec, state.Pass}, {"pkg/a#TestB", 10 * sec, state.Pass}, {"pkg/a#(build)", 10 * sec, state.Pass},
+		}, want{1, false, 31}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := &selector.Suite{Name: "s", Suite: &runner.Suite{Suite: config.Suite{Name: "s", Runner: tc.runner}}}
+			entries := map[string]*state.Entry{}
+			for _, u := range tc.units {
+				sr.Tests = append(sr.Tests, &selector.Test{ID: u.id, Selected: true, Reason: selector.ReasonChanged, Duration: u.dur})
+				if u.status != "" {
+					entries[u.id] = &state.Entry{Status: u.status, DurationMs: u.dur}
+				}
+			}
+			res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr}}
+			st := &state.State{Suites: map[string]*state.Suite{"s": {Tests: entries}}}
+			prioritize(res, st, nil)
+			c := &cycle{p: &project{state: st}, f: &runFlags{maxTime: 4 * time.Minute}, sel: &selection{res: res}}
+			plan := c.plan()
+			got := want{len(plan), plan[0].unknown, plan[0].est.Seconds()}
+			if got.batches != tc.want.batches || got.unknown != tc.want.unknown || !tc.want.unknown && math.Abs(got.est-tc.want.est) > 1 {
+				t.Errorf("plan %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitHookDefers: a git hook does not stop the push or commit when the only units
+// left out need what this machine lacks (unmet requires): they stay selected for CI. A
+// failing test still stops it, and is named as the reason.
+func TestGitHookDefers(t *testing.T) {
+	t.Setenv("SMATES_REQ_DB", "")
+	t.Setenv("SMATES_SKIP_HOOK", "")
+	for _, kind := range []string{"pre-push", "pre-commit"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, write, run := requiresFixture(t, "{env: SMATES_REQ_DB}")
+			hook := func() (int, string) {
+				t.Helper()
+				var out, errb bytes.Buffer
+				code, err := cmdHook(context.Background(), []string{"run", kind, "--", "-C", dir, "--no-agent"}, strings.NewReader(""), &out, &errb)
+				if err != nil {
+					errb.WriteString(err.Error())
+				}
+				return code, errb.String()
+			}
+			write("src/common.py", "X = 1  # changed\n")
+			code, errs := hook()
+			if code != 0 || !strings.Contains(errs, "left for a later run") || strings.Contains(errs, "stopped by") {
+				t.Errorf("unmet requires only: %d\n%s", code, errs)
+			}
+			if code, sel, _ := run("select", "--format", "files"); code != 0 || !strings.Contains(sel, "good/") {
+				t.Errorf("must keep: %q", sel)
+			}
+			// Unmet requires and a failing test: stopped, by the failing test.
+			write("src/common.py", "X = 2\n")
+			code, errs = hook()
+			if code != ExitFailed || !strings.Contains(errs, "stopped by failing tests") {
+				t.Errorf("unmet requires and a failure: %d\n%s", code, errs)
+			}
+		})
+	}
+}

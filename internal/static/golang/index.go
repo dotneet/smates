@@ -34,6 +34,11 @@ type index struct {
 	modDirs  map[string]bool     // directories containing a go.mod
 	workDirs map[string]bool     // directories containing a go.work
 	vendored map[string]bool     // directories containing a vendor/modules.txt
+	// modPins and workPins map a module or workspace directory to the other go.mod and
+	// go.sum files whose content pins the dependency versions of its builds (see
+	// workPins).
+	modPins  map[string][]string
+	workPins map[string][]string
 }
 
 // vendorDirs returns the vendor directories `go build` may read for code in dir: the
@@ -74,6 +79,8 @@ func (a *Analyzer) buildIndex() *index {
 		modDirs:  map[string]bool{},
 		workDirs: map[string]bool{},
 		vendored: map[string]bool{},
+		modPins:  map[string][]string{},
+		workPins: map[string][]string{},
 	}
 	var mods, works []string
 	for f := range a.h.Files() {
@@ -126,18 +133,89 @@ func (a *Analyzer) buildIndex() *index {
 	// Sorted so that module directory lists are deterministic.
 	sort.Strings(mods)
 	sort.Strings(works)
+	modReplaces := map[string][]string{} // module directory -> its local replace targets
 	for _, f := range mods {
 		dir := dirOf(f)
 		mf := parseModFile(a.h.Read(f))
 		if mf.module != "" {
 			ix.addModule(mf.module, dir)
 		}
-		a.addReplaces(ix, dir, mf.replaces)
+		modReplaces[dir] = a.addReplaces(ix, dir, mf.replaces)
+		ix.modPins[dir] = goModFiles(modReplaces[dir])
 	}
 	for _, f := range works {
-		a.addReplaces(ix, dirOf(f), parseModFile(a.h.Read(f)).replaces)
+		dir := dirOf(f)
+		wf := parseModFile(a.h.Read(f))
+		reps := a.addReplaces(ix, dir, wf.replaces)
+		ix.workPins[dir] = a.workPins(ix, dir, wf, reps, modReplaces)
 	}
 	return ix
+}
+
+// Which go.mod and go.sum files pin the dependency versions of a build.
+//
+// Minimal version selection (MVS) reads the requirements of the main modules and of
+// every module in the build list, so a require bump in a go.mod whose packages a file
+// never imports can still change the version of a third-party module that file's
+// package links. Besides its own module's go.mod and go.sum (added by Deps), a Go file
+// therefore depends on:
+//
+//   - outside a workspace, the go.mod of each local directory its module's go.mod
+//     replaces a module with (the replacement's requirements take part in MVS);
+//   - in a go.work workspace, where MVS picks one version per module across all used
+//     modules, the go.mod and go.sum of every module the go.work uses, and the go.mod of
+//     each local replace target of the go.work or of those modules (their replace
+//     directives all apply).
+//
+// The other used modules' go.sum files count although a checksum by itself does not
+// change what is compiled: in workspace mode the go command verifies every module
+// against the go.sum files of all used modules plus go.work.sum, so a line removed or
+// altered in module B's go.sum can fail module C's build ("missing go.sum entry",
+// "checksum mismatch"), and a content key cannot tell such an edit from a harmless
+// one. A go.sum edit nearly always comes with a go.mod edit, which selects the same
+// tests anyway. A replace target's own go.sum is never read and is left out.
+//
+// A go.work whose directives cannot be parsed, or that uses no module, pins every
+// go.mod and go.sum below its directory: which modules it means to use is unknown.
+
+// workPins returns the pinning files of the go.work workspace in dir: wf is its parsed
+// content, reps its local replace targets, modReplaces those of each module.
+func (a *Analyzer) workPins(ix *index, dir string, wf modFile, reps []string, modReplaces map[string][]string) []string {
+	var used []string
+	if wf.malformed || len(wf.uses) == 0 {
+		for m := range ix.modDirs {
+			if under(m, dir) {
+				used = append(used, m)
+			}
+		}
+		sort.Strings(used)
+	} else {
+		for _, u := range wf.uses {
+			if m, ok := a.localDir(dir, u, false); ok {
+				used = append(used, m)
+			}
+		}
+	}
+	var out []string
+	for _, m := range used {
+		out = append(out, joinRel(m, "go.mod"), joinRel(m, "go.sum"))
+		reps = append(reps, modReplaces[m]...)
+	}
+	return append(out, goModFiles(reps)...)
+}
+
+// goModFiles returns the go.mod path of each directory.
+func goModFiles(dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, joinRel(d, "go.mod"))
+	}
+	return out
+}
+
+// under reports whether the repo-relative path p is dir or below it.
+func under(p, dir string) bool {
+	return dir == "" || p == dir || strings.HasPrefix(p, dir+"/")
 }
 
 func (ix *index) addModule(modPath, dir string) {
@@ -149,51 +227,81 @@ func (ix *index) addModule(modPath, dir string) {
 	ix.modules[modPath] = append(ix.modules[modPath], dir)
 }
 
-// addReplaces maps replaced module paths to local directories inside the repository.
-func (a *Analyzer) addReplaces(ix *index, dir string, reps []replace) {
+// addReplaces maps replaced module paths to local directories inside the repository
+// and returns those directories.
+func (a *Analyzer) addReplaces(ix *index, dir string, reps []replace) []string {
+	var out []string
 	for _, r := range reps {
-		var target string
-		switch {
-		case strings.HasPrefix(r.new, "./"), strings.HasPrefix(r.new, "../"):
-			target = path.Join(dir, r.new)
-		case filepath.IsAbs(r.new) || strings.HasPrefix(r.new, "/"):
-			rel, err := filepath.Rel(a.h.Root(), filepath.FromSlash(r.new))
-			if err != nil {
-				continue
-			}
-			target = filepath.ToSlash(rel)
-		default:
-			continue // module-path replacement: external
-		}
-		if t, ok := cleanRel(target); ok && !excluded(t) {
+		if t, ok := a.localDir(dir, r.new, true); ok {
 			ix.addModule(r.old, t)
+			out = append(out, t)
 		}
 	}
+	return out
+}
+
+// localDir resolves a directory p named by the go.mod or go.work in dir to a
+// repo-relative directory, reporting false when it is outside the repository. A
+// replace target (replace: true) is a directory only when it is . or .., starts with
+// ./ or ../, or is absolute, anything else being a module path; a use path is always a
+// directory, relative to dir unless absolute. Backslashes (a file written on Windows)
+// count as separators.
+func (a *Analyzer) localDir(dir, p string, replace bool) (string, bool) {
+	p = strings.ReplaceAll(p, `\`, "/")
+	var target string
+	switch {
+	case filepath.IsAbs(p) || strings.HasPrefix(p, "/"):
+		rel, err := filepath.Rel(a.h.Root(), filepath.FromSlash(p))
+		if err != nil {
+			return "", false
+		}
+		target = filepath.ToSlash(rel)
+	case !replace, p == ".", p == "..", strings.HasPrefix(p, "./"), strings.HasPrefix(p, "../"):
+		target = path.Join(dir, p)
+	default:
+		return "", false // module-path replacement: external
+	}
+	t, ok := cleanRel(target)
+	if !ok || excluded(t) {
+		return "", false
+	}
+	return t, true
 }
 
 // modFile is the subset of a go.mod / go.work file the analyzer needs.
 type modFile struct {
 	module   string
 	replaces []replace
+	uses     []string // go.work use directives: module directories as written
+	// malformed is set when a line could not be parsed: an unterminated quote or
+	// block, a stray ")", or a module, replace or use directive of the wrong shape.
+	malformed bool
 }
 
 // replace is one replace directive: old module path => new module path or directory.
 type replace struct{ old, new string }
 
-// parseModFile extracts the module path and replace directives from go.mod or go.work
-// content. It tolerates malformed input, skipping lines it does not understand.
+// parseModFile extracts the module path and the replace and use directives from
+// go.mod or go.work content. It tolerates malformed input, skipping (and noting, in
+// malformed) lines it does not understand.
 func parseModFile(data []byte) modFile {
 	var mf modFile
 	var block string // verb of the enclosing "verb (" block, if any
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		fields := modFields(sc.Text())
+		fields, ok := modFields(sc.Text())
+		if !ok {
+			mf.malformed = true
+		}
 		if len(fields) == 0 {
 			continue
 		}
 		if block != "" {
 			if fields[0] == ")" {
+				if len(fields) > 1 {
+					mf.malformed = true
+				}
 				block = ""
 				continue
 			}
@@ -206,12 +314,28 @@ func parseModFile(data []byte) modFile {
 		case "module":
 			if len(fields) >= 2 {
 				mf.module = fields[1]
+			} else {
+				mf.malformed = true
 			}
 		case "replace":
 			if r, ok := parseReplace(fields[1:]); ok {
 				mf.replaces = append(mf.replaces, r)
+			} else {
+				mf.malformed = true
 			}
+		case "use":
+			// One directory per directive: "use ( ./a )" on one line is not valid.
+			if len(fields) == 2 && fields[1] != "(" && fields[1] != ")" {
+				mf.uses = append(mf.uses, fields[1])
+			} else {
+				mf.malformed = true
+			}
+		case "(", ")":
+			mf.malformed = true
 		}
+	}
+	if block != "" || sc.Err() != nil {
+		mf.malformed = true
 	}
 	return mf
 }
@@ -227,23 +351,23 @@ func parseReplace(f []string) (replace, bool) {
 }
 
 // modFields splits a go.mod line into tokens, dropping // comments and unquoting
-// quoted tokens.
-func modFields(line string) []string {
-	var out []string
+// quoted tokens. ok is false when a quoted token is unterminated or invalid; the
+// tokens before it are returned.
+func modFields(line string) (out []string, ok bool) {
 	for {
 		line = strings.TrimLeft(line, " \t\r")
 		if line == "" || strings.HasPrefix(line, "//") {
-			return out
+			return out, true
 		}
 		switch line[0] {
 		case '"', '`':
 			end := quotedEnd(line)
 			if end < 0 {
-				return out
+				return out, false
 			}
 			s, err := strconv.Unquote(line[:end])
 			if err != nil {
-				return out
+				return out, false
 			}
 			out = append(out, s)
 			line = line[end:]

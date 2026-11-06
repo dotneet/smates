@@ -47,19 +47,22 @@ type hookTarget struct {
 const hookCommands = `usage: smates hook install [flags] [-- run flags]  run the affected tests from a git hook
        smates hook uninstall [flags]               remove what install wrote
        smates hook status [flags]                  show whether the hooks are installed
-  --claude installs, removes or shows a Claude Code Stop hook instead of a git hook.
-  The installed hooks call 'smates hook run pre-push|pre-commit' and 'smates hook claude-stop'.`
+  --claude installs, removes or shows a Claude Code Stop hook instead of a git hook,
+  --codex a Codex Stop hook. The installed hooks call 'smates hook run pre-push|pre-commit',
+  'smates hook claude-stop' and 'smates hook codex-stop'.`
 
 func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
-		return 2, usageError{errors.New("usage: smates hook install|uninstall|status [--claude]|run|claude-stop")}
+		return 2, usageError{errors.New("usage: smates hook install|uninstall|status [--claude|--codex]|run|claude-stop|codex-stop")}
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "run":
 		return hookRun(ctx, rest, stdin, stdout, stderr)
 	case "claude-stop":
-		return hookClaudeStop(ctx, rest, stdin, stdout, stderr)
+		return hookAgentStop(ctx, claudeHook, rest, stdin, stdout, stderr)
+	case "codex-stop":
+		return hookAgentStop(ctx, codexHook, rest, stdin, stdout, stderr)
 	}
 	help := isHelp(sub)
 	if !help && !slices.Contains([]string{"install", "uninstall", "status"}, sub) {
@@ -75,6 +78,7 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		c.BoolVar(useAgent, "agent", false, "install: let the hook call the agent for unattributed changes")
 	}
 	claude := c.Bool("claude", false, "a Claude Code Stop hook in .claude/settings.json instead of a git hook")
+	codex := c.Bool("codex", false, "a Codex Stop hook in .codex/hooks.json instead of a git hook")
 	user := c.Bool("user", false, "with --claude: in ~/.claude/settings.json (every project with a smates.yml)")
 	if help {
 		printGroupHelp(stdout, hookCommands, c)
@@ -84,10 +88,17 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err != nil {
 		return 2, err
 	}
+	if *claude && *codex {
+		return 2, usageError{errors.New("--claude and --codex cannot be combined (install each hook on its own)")}
+	}
 	if *user && !*claude {
 		return 2, usageError{errors.New("--user applies to --claude")}
 	}
-	if *claude {
+	if *claude || *codex {
+		a := claudeHook
+		if *codex {
+			a = codexHook
+		}
 		var bad []string
 		c.Visit(func(f *flag.Flag) {
 			if f.Name == "hook" || f.Name == "append" {
@@ -95,9 +106,9 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 			}
 		})
 		if len(bad) > 0 {
-			return 2, usageError{fmt.Errorf("%s applies to git hooks, not --claude", strings.Join(bad, " and "))}
+			return 2, usageError{fmt.Errorf("%s applies to git hooks, not %s", strings.Join(bad, " and "), a.flag)}
 		}
-		return claudeHookCmd(sub, *dir, *user, *useAgent, runArgs, stdout)
+		return agentHookCmd(a, sub, *dir, *user, *useAgent, runArgs, stdout)
 	}
 	if !slices.Contains(hookKinds, *kind) {
 		return 2, usageError{fmt.Errorf("unsupported --hook %q (want %s)", *kind, strings.Join(hookKinds, " or "))}
@@ -126,13 +137,13 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		err = uninstallHook(h, stdout)
 	case "status":
 		if err = hookStatus(h, stdout); err == nil {
-			claudeHookStatus(repo, stdout)
+			agentHookStatus(repo, stdout)
 		}
 	default:
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}
 	if err != nil {
-		return 1, err
+		return hookSetupError(err)
 	}
 	return 0, nil
 }
@@ -447,14 +458,30 @@ func hookRun(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		os.Unsetenv(v)
 	}
 	f.dir = repo.Root
+	var deferred string
+	f.deferred = func(line string) { deferred = line }
 	code, err := runCycle(ctx, f, stdout, stderr, nil)
 	code = testsExitCode(code)
+	var re requiresError
+	if code == 0 && errors.As(err, &re) {
+		// Units left for later because this machine lacks what they require (unmet
+		// requires): no test failed, and they stay selected (CI runs them). Blocking
+		// would block every later push from this machine, as the Stop hooks would.
+		if deferred != "" {
+			fmt.Fprintln(stderr, deferred)
+		}
+		return 0, nil
+	}
 	if code != 0 || err != nil {
 		skip := "git push --no-verify"
 		if kind == "pre-commit" {
 			skip = "git commit --no-verify"
 		}
-		fmt.Fprintf(stderr, "smates: %s stopped by failing tests (skip once with `%s` or SMATES_SKIP_HOOK=1)\n", kind, skip)
+		why := "failing tests"
+		if code == 0 {
+			why = "a problem running the tests"
+		}
+		fmt.Fprintf(stderr, "smates: %s stopped by %s (skip once with `%s` or SMATES_SKIP_HOOK=1)\n", kind, why, skip)
 	}
 	return code, err
 }

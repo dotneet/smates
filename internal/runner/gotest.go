@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,7 @@ func (g goTest) Defaults(repo *gitx.Repo, root string) Defaults {
 // depends on GOWORK in its env:.
 func (goTest) DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults {
 	exclude := []string{"**/testdata/**", "**/vendor/**", "**/_*/**", "**/.*/**"}
+	inputs := []string{"go.mod", "go.sum", "/go.work", "/go.work.sum", "/.tool-versions"}
 	if repo != nil {
 		// Packages of a nested module are not the suite's: go test of the outer module
 		// cannot build them (and ./... skips them), unless the go.work workspace has them.
@@ -45,21 +47,121 @@ func (goTest) DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults {
 		for _, m := range nested {
 			exclude = append(exclude, m+"/**")
 		}
+		inputs = append(inputs, goWorkEnvPins(repo.Root, dir, goWorkEnv(c.Env))...)
 	}
 	return Defaults{
 		Tests:   []string{"**/*_test.go"},
 		Exclude: exclude,
-		Inputs:  []string{"go.mod", "go.sum", "/go.work", "/go.work.sum", "/.tool-versions"},
+		Inputs:  inputs,
 		Command: "go test",
 	}
 }
 
-// goWorkEnv is the GOWORK go test sees with the suite's env: on top of smates' own.
+// goWorkEnvPins returns, as repository-rooted input patterns ("/a/go.mod"), the files
+// pinning the dependency versions of the go.work workspace that $GOWORK (gowork) names:
+// the go.work and its go.work.sum, the go.mod and go.sum of each module it uses, and
+// the go.mod of each local replace target of the go.work or of those modules. Static
+// analysis finds a workspace only from the go.work files at or above each file, so a
+// go.work elsewhere (ci/go.work) would govern minimal version selection unseen. None
+// without GOWORK, with GOWORK=off, or for files outside the repository. dir is the
+// suite directory, against which a relative GOWORK resolves.
+func goWorkEnvPins(root, dir, gowork string) []string {
+	gowork = goWorkPath(gowork)
+	if gowork == "" || gowork == "off" {
+		return nil
+	}
+	file := gowork
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(dir, file)
+	}
+	var out []string
+	add := func(abs string) {
+		if rel, ok := pathutil.Rel(root, abs); ok && !slices.Contains(out, "/"+rel) {
+			out = append(out, "/"+rel)
+		}
+	}
+	add(file)
+	add(filepath.Join(filepath.Dir(file), "go.work.sum"))
+	replaces := localReplaces(file)
+	mods := make([]string, 0, len(goWorkModules(root, dir, file)))
+	for m := range goWorkModules(root, dir, file) {
+		mods = append(mods, m)
+	}
+	slices.Sort(mods)
+	for _, m := range mods {
+		add(filepath.Join(m, "go.mod"))
+		add(filepath.Join(m, "go.sum"))
+		replaces = append(replaces, localReplaces(filepath.Join(m, "go.mod"))...)
+	}
+	for _, r := range replaces {
+		add(filepath.Join(r, "go.mod"))
+	}
+	return out
+}
+
+// localReplaces returns the local directories (absolute) the replace directives of a
+// go.mod or go.work file point at: targets that are ".", "..", start with "./" or
+// "../", or are absolute (anything else is a module path).
+func localReplaces(file string) []string {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	block := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0:
+			continue
+		case block && f[0] == ")":
+			block = false
+			continue
+		case !block && len(f) >= 2 && f[0] == "replace" && f[1] == "(":
+			block = true
+			continue
+		case !block && f[0] == "replace":
+			f = f[1:]
+		case !block:
+			continue
+		}
+		i := slices.Index(f, "=>")
+		if i < 0 || i+1 >= len(f) {
+			continue
+		}
+		t := strings.ReplaceAll(strings.Trim(f[i+1], `"`), `\`, "/")
+		if !(t == "." || t == ".." || strings.HasPrefix(t, "./") || strings.HasPrefix(t, "../") || filepath.IsAbs(t)) {
+			continue
+		}
+		p := filepath.FromSlash(t)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(file), p)
+		}
+		out = append(out, filepath.Clean(p))
+	}
+	return out
+}
+
+// goWorkEnv is the GOWORK go test sees with the suite's env: on top of smates' own,
+// normalized by goWorkPath.
 func goWorkEnv(env map[string]string) string {
 	if v, ok := env["GOWORK"]; ok {
-		return v
+		return goWorkPath(v)
 	}
-	return os.Getenv("GOWORK")
+	return goWorkPath(os.Getenv("GOWORK"))
+}
+
+// goWorkPath normalizes a $GOWORK value: "" when go searches for a go.work in the
+// directory and its parents (unset, or "auto", which go treats the same), "off" for
+// none, and the file it names otherwise.
+func goWorkPath(gowork string) string {
+	if gowork == "auto" {
+		return ""
+	}
+	return gowork
 }
 
 // nestedGoModules finds the Go modules below the suite directory dir (absolute), as
@@ -138,9 +240,10 @@ func goModDirs(repo *gitx.Repo, dir string) []string {
 }
 
 // goWorkModules returns the module directories (absolute) of the go.work file go uses
-// in dir: $GOWORK, or the first go.work found in dir or its parents up to root (none
-// with GOWORK=off).
+// in dir: $GOWORK, or the first go.work found in dir or its parents up to root (with
+// GOWORK unset or "auto"; none with GOWORK=off).
 func goWorkModules(root, dir, gowork string) map[string]bool {
+	gowork = goWorkPath(gowork)
 	file := ""
 	switch {
 	case gowork == "off":
@@ -202,18 +305,65 @@ func allPkgArgs(rc *RunContext) []string {
 }
 
 // Units are package directories, or with granularity "func" top-level test functions
-// ("dir#TestName", see gofunc.go).
+// ("dir#TestName", see gofunc.go). A directory none of whose Go files the suite's
+// configuration compiles is no unit (see excludedPackageDirs).
 func (goTest) Units(s *Suite, testFiles []string) []string {
 	if funcGranularity(s) {
 		return funcUnits(s, testFiles)
 	}
-	seen := map[string]bool{}
+	seen := excludedPackageDirs(s, testFiles)
 	var out []string
 	for _, f := range testFiles {
 		d := path.Dir(f)
 		if !seen[d] {
 			seen[d] = true
 			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// excludedPackageDirs returns the directories of testFiles whose Go files build
+// constraints all exclude in the suite's configuration (//go:build lines, _GOOS/_GOARCH
+// file names, with the tags and platform of GOFLAGS, the command, the arguments passed
+// through and the env; go list decides, see excludedTestFiles). go test fails such a
+// directory ("build constraints exclude all Go files") without testing anything, and
+// ./... skips it. A directory stays a unit whenever any of its Go files may compile:
+// one of testFiles, or another .go file in it (a package whose tests alone are
+// constrained still compiles), or when it cannot be read or go list fails.
+func excludedPackageDirs(s *Suite, testFiles []string) map[string]bool {
+	ex := excludedTestFiles(s, testFiles)
+	if len(ex) == 0 {
+		return map[string]bool{}
+	}
+	cand := map[string]bool{}
+	for _, f := range testFiles {
+		if ex[f] {
+			cand[path.Dir(f)] = true
+		}
+	}
+	for _, f := range testFiles {
+		if !ex[f] {
+			delete(cand, path.Dir(f))
+		}
+	}
+	out := map[string]bool{}
+	for d := range cand {
+		entries, err := os.ReadDir(filepath.Join(s.RepoRoot, filepath.FromSlash(d)))
+		if err != nil {
+			continue
+		}
+		var goFiles []string
+		for _, e := range entries {
+			n := e.Name()
+			if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") {
+				continue // go ignores names starting with _ or .
+			}
+			goFiles = append(goFiles, path.Join(d, n))
+		}
+		gx := excludedTestFiles(s, goFiles)
+		if len(goFiles) > 0 && !slices.ContainsFunc(goFiles, func(f string) bool { return !gx[f] }) {
+			out[d] = true
 		}
 	}
 	return out
@@ -283,14 +433,30 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	if out != nil {
 		sub.Stdout = io.MultiWriter(rc.Stdout, failed, out)
 	}
+	// go test prints why a package could not be set up on stderr.
+	setup := &buildFailures{}
+	sub.Stderr = setup
+	if rc.Stderr != nil {
+		sub.Stderr = io.MultiWriter(rc.Stderr, setup)
+	}
 	code, err := runAll(ctx, &sub, extra, testArgs, env)
-	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
+	failed.addExcluded(setup)
+	if err == nil && !all && failed.onlyExcluded(rc, units, code) {
+		code = 0
+	}
+	res := &RunResult{ExitCode: code, Duration: time.Since(start), excluded: failed.excludedUnits(rc, units)}
 	if err != nil {
 		return res, err
 	}
+	// Package units run as such get a skip for a package whose Go files build
+	// constraints all exclude, or whose test files they all exclude (see skipped).
+	asPackages := out == nil && run == ""
 	if !rc.Record {
 		if rc.TraceDir != "" {
 			res.Observations = failed.observations(rc)
+			if asPackages {
+				failed.addSkipped(rc, units, res)
+			}
 		}
 		return res, nil
 	}
@@ -325,11 +491,29 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 			o.Status = st
 		}
 	}
+	// A package unit without test files ("?  pkg [no test files]") builds no test
+	// binary and leaves no trace; go test compiled it, so it passed, and its
+	// dependencies are the known ones (its static closure), as for a compile check.
+	// Only for package units run as such: under granularity func (out set, or a -run
+	// filter) a package-level pass must not stand in for functions that never ran.
+	// A directory that has test files which this configuration did not compile is a
+	// skip instead (see skipped).
+	for _, u := range units {
+		if !asPackages {
+			break
+		}
+		if ip := failed.key(rc, u); ip != "" && failed.noTests[ip] && res.Observations[u] == nil && !failed.paths[ip] && !failed.skipped(rc, u) {
+			res.Observations[u] = &Observation{Files: map[string]bool{}, Status: state.Pass}
+		}
+	}
+	if asPackages {
+		failed.addSkipped(rc, units, res)
+	}
 	addCoverPkgDeps(ctx, rc, res)
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		for _, u := range units {
 			ip := failed.key(rc, u)
-			if ip == "" {
+			if ip == "" || failed.onlyExcl(ip) {
 				continue
 			}
 			if failed.paths[ip] {
@@ -455,6 +639,11 @@ func resolvedDir(dir string) string {
 // Also matches the JSON-escaped form printed by go test -json ("FAIL\\tpkg [build failed]").
 var buildFailedRe = regexp.MustCompile(`FAIL(?:\\t|\s)+([^\s\\]+)\s+\[(?:build|setup) failed\]`)
 
+// excludedAllRe matches go's "package <import path>: build constraints exclude all Go
+// files in <dir>" (plain, or inside a JSON string). A package that imports such a
+// package prints an "imports" chain before the colon instead, and does not match.
+var excludedAllRe = regexp.MustCompile(`package ([^\s:"\\]+): build constraints exclude all Go files in `)
+
 // goSummaryRe matches the line go test prints when a package finishes.
 var goSummaryRe = regexp.MustCompile(`^(ok|FAIL|\?)\s+(\S+)(\s|$)`)
 
@@ -471,22 +660,73 @@ type buildFailures struct {
 	pending []byte
 	output  map[string]string // import path -> failure output (bounded)
 	status  map[string]string // import path -> state.Pass / state.Fail
+	noTests map[string]bool   // import paths go test reported "[no test files]" for
+	// excluded counts, per import path, go's messages that build constraints exclude
+	// all its Go files in the flags go test actually got: go test fails such a package
+	// ("[setup failed]") without testing anything. smates keeps such a directory as a
+	// unit whenever it cannot see those flags (a wrapper command), so this is no test
+	// failure, as long as each of its failures is one of those (see onlyExcl).
+	excluded map[string]int
+	setups   map[string]int  // import path -> "FAIL <ip> [setup failed]" lines
+	failures map[string]bool // import paths with a FAIL line of another kind (a test failed, [build failed])
+}
+
+// goPackageEvent is the part of a go test -json event smates reads here: a package
+// that finished without tests (Action "skip" with no Test), and the output lines
+// (Action "output"), which carry the summary lines of plain output.
+type goPackageEvent struct {
+	Action  string
+	Package string
+	Test    string
+	Output  string
 }
 
 // collect accumulates one output line, attributing it to the package whose summary
-// line follows.
+// line follows. The events of go test -json count as the lines they carry.
 func (b *buildFailures) collect(line []byte) {
+	if bytes.HasPrefix(line, []byte("{")) {
+		var ev goPackageEvent
+		if json.Unmarshal(line, &ev) == nil && ev.Action != "" {
+			switch {
+			case ev.Action == "skip" && ev.Test == "" && ev.Package != "":
+				b.noTest(ev.Package)
+			case ev.Action == "output" && ev.Package != "":
+				for l := range strings.SplitSeq(strings.TrimSuffix(ev.Output, "\n"), "\n") {
+					b.plain([]byte(strings.TrimRight(l, "\r")))
+				}
+			}
+			return
+		}
+	}
+	b.plain(line)
+}
+
+// plain accumulates one line of go test's plain output (see collect).
+func (b *buildFailures) plain(line []byte) {
 	if m := goSummaryRe.FindSubmatch(line); m != nil {
 		if b.status == nil {
 			b.status = map[string]string{}
 		}
 		switch string(m[1]) {
+		case "?":
+			b.noTest(string(m[2]))
 		case "ok":
 			if b.status[string(m[2])] != state.Fail {
 				b.status[string(m[2])] = state.Pass
 			}
 		case "FAIL":
 			b.status[string(m[2])] = state.Fail
+			if bytes.HasSuffix(bytes.TrimSpace(line), []byte("[setup failed]")) {
+				if b.setups == nil {
+					b.setups = map[string]int{}
+				}
+				b.setups[string(m[2])]++
+			} else {
+				if b.failures == nil {
+					b.failures = map[string]bool{}
+				}
+				b.failures[string(m[2])] = true
+			}
 		}
 		if string(m[1]) == "FAIL" && len(bytes.TrimSpace(b.pending)) > 0 {
 			if b.output == nil {
@@ -505,6 +745,14 @@ func (b *buildFailures) collect(line []byte) {
 	}
 }
 
+// noTest notes that package ip has no test files: go test compiled it and ran nothing.
+func (b *buildFailures) noTest(ip string) {
+	if b.noTests == nil {
+		b.noTests = map[string]bool{}
+	}
+	b.noTests[ip] = true
+}
+
 func (b *buildFailures) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -513,6 +761,12 @@ func (b *buildFailures) Write(p []byte) (int, error) {
 		i := bytes.IndexByte(b.buf, '\n')
 		if i < 0 {
 			break
+		}
+		if m := excludedAllRe.FindSubmatch(b.buf[:i]); m != nil {
+			if b.excluded == nil {
+				b.excluded = map[string]int{}
+			}
+			b.excluded[string(m[1])]++
 		}
 		if m := buildFailedRe.FindSubmatch(b.buf[:i]); m != nil {
 			if b.paths == nil {
@@ -538,7 +792,7 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 	for _, u := range rc.Units {
 		ip := b.key(rc, u)
 		st, ok := b.status[ip]
-		if ip == "" || !ok {
+		if ip == "" || !ok || b.onlyExcl(ip) {
 			continue
 		}
 		o := &Observation{Files: map[string]bool{}, Status: st}
@@ -550,12 +804,158 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 	return obs
 }
 
+// addExcluded adds the packages o saw excluded by build constraints (o read another
+// stream of the same run).
+func (b *buildFailures) addExcluded(o *buildFailures) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ip, n := range o.excluded {
+		if b.excluded == nil {
+			b.excluded = map[string]int{}
+		}
+		b.excluded[ip] += n
+	}
+	for ip, n := range o.setups {
+		if b.setups == nil {
+			b.setups = map[string]int{}
+		}
+		b.setups[ip] += n
+	}
+	for ip := range o.failures {
+		if b.failures == nil {
+			b.failures = map[string]bool{}
+		}
+		b.failures[ip] = true
+	}
+}
+
+// onlyExcl reports whether package ip failed only because build constraints exclude
+// all its Go files: go test said so at least once for each "[setup failed]" line of it,
+// and printed no other FAIL line for it. A wrapper running go test more than once (with
+// other tags the second time) may compile it and see a test fail or the build break:
+// that failure stands. The caller holds b.mu or owns b.
+func (b *buildFailures) onlyExcl(ip string) bool {
+	return ip != "" && b.excluded[ip] > 0 && !b.failures[ip] && b.setups[ip] <= b.excluded[ip]
+}
+
+// excludedUnits returns the package directories of units onlyExcl says of.
+func (b *buildFailures) excludedUnits(rc *RunContext, units []string) map[string]bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out map[string]bool
+	for _, u := range units {
+		if b.onlyExcl(b.key(rc, u)) {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[u] = true
+		}
+	}
+	return out
+}
+
+// onlyExcluded reports whether go test's exit code (code) of a run of the package
+// directories units is explained by packages whose Go files build constraints all
+// exclude: it is 1 (go test's own code; make, for one, exits 2 when a recipe fails),
+// every failure of at least one package is that (onlyExcl), and go test reported every
+// other one as passing or without test files, in its plain summary lines or in the
+// events of go test -json. Output it cannot read that way (a wrapper such as gotestsum
+// reformatting it, a step after go test) leaves a package unaccounted for, and the code
+// stands.
+func (b *buildFailures) onlyExcluded(rc *RunContext, units []string, code int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if code != 1 || len(b.excluded) == 0 || len(units) == 0 {
+		return false
+	}
+	accounted := map[string]bool{}
+	for _, u := range units {
+		ip := b.key(rc, u)
+		switch {
+		case ip == "":
+			return false
+		case b.onlyExcl(ip):
+		case b.excluded[ip] > 0:
+			return false // it also failed for real
+		case b.status[ip] == state.Pass || b.noTests[ip] && b.status[ip] != state.Fail:
+		default:
+			return false
+		}
+		accounted[ip] = true
+	}
+	for ip, st := range b.status {
+		if st == state.Fail && !b.onlyExcl(ip) {
+			return false
+		}
+	}
+	for ip := range b.paths {
+		if !b.onlyExcl(ip) || !accounted[ip] {
+			return false
+		}
+	}
+	return true
+}
+
+// skipped reports whether the package directory unit u ran no test because the build
+// configuration go test got left its tests out: build constraints exclude all its Go
+// files, or it reported "[no test files]" while the directory has *_test.go files (a
+// //go:build tag, a _linux_test.go name). Its tests did not pass, so it is not recorded
+// as a pass: another configuration sharing the state (GOFLAGS, GOOS, GOARCH or
+// CGO_ENABLED of the environment, go env -w, a newer toolchain, another platform) may
+// compile and fail them, and none of that is a dependency of the unit.
+func (b *buildFailures) skipped(rc *RunContext, u string) bool {
+	ip := b.key(rc, u)
+	if ip == "" {
+		return false
+	}
+	if b.onlyExcl(ip) {
+		return true
+	}
+	return b.noTests[ip] && hasTestFiles(filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
+}
+
+// addSkipped records a skip for each unit of units that skipped says ran no test
+// because of the build configuration (and that nothing else was observed for).
+func (b *buildFailures) addSkipped(rc *RunContext, units []string, res *RunResult) {
+	for _, u := range units {
+		if !b.skipped(rc, u) {
+			continue
+		}
+		if o := res.Observations[u]; o != nil && (o.Status == state.Fail || len(o.Files) > 0) {
+			continue
+		}
+		if res.Observations == nil {
+			res.Observations = map[string]*Observation{}
+		}
+		res.Observations[u] = &Observation{Files: map[string]bool{}, Status: state.Skip}
+	}
+}
+
+// hasTestFiles reports whether directory dir has a *_test.go file go would read (not
+// one whose name starts with "_" or "."); a directory that cannot be read counts as
+// having one.
+func hasTestFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() && strings.HasSuffix(n, "_test.go") && !strings.HasPrefix(n, "_") && !strings.HasPrefix(n, ".") {
+			return true
+		}
+	}
+	return false
+}
+
 // key is the name go test printed for the package directory unit u in its summary and
 // build failure lines: its import path (in the module of its own directory, which in a
 // workspace is not the suite's), or the relative argument naming it when go test could
 // not resolve that ("FAIL ./x [setup failed]").
 func (b *buildFailures) key(rc *RunContext, u string) string {
-	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" {
+	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" || b.noTests[arg] || b.excluded[arg] > 0 {
 		return arg
 	}
 	return dirImportPath(rc.Repo.Root, u)

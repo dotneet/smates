@@ -65,7 +65,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 | ランナー | 読み取る場所 | 対応するオプション |
 |---|---|---|
 | `jest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `jest.config.{js,ts,mjs,cjs,mts,cts,json}` または `package.json` の `"jest"`（jest と同じく最も近い `package.json` で止まる） | `rootDir`、`roots`、`testMatch`（`?(x)` や `+(spec\|test)` などの micromatch の extglob は変換し、`!` パターンは除外として扱う）、`testRegex`、`testPathIgnorePatterns`（`<rootDir>` は置換） |
-| `vitest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `vitest.config.*` / `vite.config.*` | `root`、`test.root`、`test.dir`、`test.include`、`test.exclude`（`...configDefaults.exclude` も解釈）、プロジェクト（`test.projects`、`test.workspace`、`vitest.workspace.*`） |
+| `vitest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `vitest.config.*` / `vite.config.*` | `root`、`test.root`、`test.dir`、`test.include`、`test.exclude`（`...configDefaults.exclude` も解釈）、プロジェクト（`test.projects`、`test.workspace`、`vitest.workspace.*`。コマンドの `--project` で絞り込み）、Storybook の Vitest プラグインのストーリー（[ブラウザモードと Storybook](runners.md#browser-mode-and-storybook) を参照） |
 | `pytest` | スイートの root から上へ向かって最初に見つかる `pytest.ini`、`.pytest.ini`、`pyproject.toml`（`[tool.pytest.ini_options]` / `[tool.pytest]`）、`tox.ini`（`[pytest]`）、`setup.cfg`（`[tool:pytest]`） | `python_files`、`norecursedirs`。`testpaths` はそのファイルがスイートの root にあるときだけ（pytest も rootdir で起動したときだけ使うため） |
 | `unittest` | `python -m unittest discover …` コマンドの `-s`/`-p`/`-t` | 既定はスイートの root 以下の `test*.py` |
 | `go` | `testdata/` と `vendor/` を除く `**/*_test.go` | スイートの中に入れ子になったモジュールは、`go.work` のワークスペースに含まれるときだけそのスイートに属する |
@@ -116,9 +116,25 @@ smates は選択したテストファイルをコマンドの末尾に追加し�
 ```
 
 - `inputs`: スイートのすべてのテストが依存する glob です。スイートの root からの相対パスで、先頭に `/` を付けるとリポジトリルートからの相対パスになります。ロックファイル、マニフェスト、ランナー自身の設定ファイルは既定で inputs に入っています。
-- `rules`: 一部のテストだけの依存です。`tests` はスイートの root からの相対 glob、`deps` はリポジトリルートからの相対 glob です。
+- `rules`: 一部のテストだけの依存です。`tests` はスイートの root からの相対 glob、`deps` はリポジトリルートからの相対 glob です。`reaches` を使うと、置き場所ではなく import するものでテストを選べます（次の節）。
 
 ネットワーク越しにテストがアクセスするサーバーは別のケースです。そのコードは `depends_on` か `serves` で宣言します（[サーバーを叩くテスト](servers.md) を参照）。
+
+### データベースを使うテスト { #tests-backed-by-a-database }
+
+データベースのスキーマは、たいていテストの前に別のステップ（`make migrate` や CI のジョブ）でマイグレーションツールが適用します。テストデータも同じように投入されることがあります。テストのプロセスはそれらのファイルを読まないので、マイグレーションの変更は [オーファン](orphans.md) になります。エージェントが判断するか、スイート全体が実行されます。パスの glob で「データベースを使うテスト」を表すのは難しく、使わないテストと同じ場所に並んでいます。共通しているのは接続に使うヘルパーを import していることなので、そのヘルパーを `reaches` で指定します。
+
+```yaml
+  - name: go
+    runner: go
+    rules:
+      - reaches: ["internal/testdb/**", "$APP_DB_*"]
+        deps: ["db/migrations/**", "db/seeds/**"]
+```
+
+静的 import の閉包が `internal/testdb/` に届くテスト（直接、別のヘルパー経由、または同じ Go パッケージのほかのテストファイルから）と、前回記録した実行で `APP_DB_*` に一致する変数を読んだテストが、マイグレーションとシードデータを依存として得ます。するとマイグレーションの変更はそれらのテストを選び、オーファンではなくなります。
+
+リストを漏れなく書く必要があるのはこのためです。別の方法で接続するテスト（自前の `sql.Open`、ルールが挙げていないヘルパー、子プロセス）は deps を得ず、マイグレーションがカバーされた後はその変更でも実行されません。ヘルパーをすべて挙げ、接続が読む変数も加えてください。その変数を読むテストは、glob に一致するものを何も import していなくても残ります（Go が記録しない `TestMain` や `init` での読み取りや、設定ローダーによる読み取りでも、ソースに変数名があれば十分です。`envconfig.Process("APP", ...)` や `env_prefix="APP_"` のように、文字列リテラルに変数名の接頭辞があっても同じです）。それ以外の方法で名前を組み立てるローダーには気づかないので、そうしたテストは `tests:` で指定してください。ランナーがすべてのテストのために読み込むセットアップファイル（Vitest の `setupFiles`、`jest.config.*` または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル）は、すべてのテストが import するものとして扱います。smates が判断できないときはルールを適用します。静的解析が無効なとき、テストのファイルを読むアナライザがないとき（シェルのテスト）、JavaScript や TypeScript で smates が解決できないもの（バンドラのエイリアス）をテストやセットアップファイルが import するとき、ランナーの設定を読めないとき（パースできない JSON ファイル）、そして `$NAME` の項目でテストがまだ一度も実行されていないとき、変数が `env_ignore` にあるとき、またはランナーにかかわらずテストのソースを読めないときです。Python、Go、Java で smates が解決できない import には気づきません。`sys.path` 経由でヘルパーを見つける Python のテストは、そのヘルパーに届くものとして扱われないので、そうしたテストは `tests:` で指定してください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールや、どのファイルにも一致しない glob（誤記、ディレクトリではなく import パス）を警告します。
 
 ## 環境変数を設定する { #set-environment-variables }
 
@@ -208,6 +224,7 @@ full_run_branches: [main, release]
 | トップレベルの `env_track` | すべてのテストが再実行される |
 | 別のスイートのエントリ | このスイートには影響しない |
 | `ignore`、`orphans`、`untested`、`agent`、`flaky`、トップレベルの `env_ignore` | 何も実行されない |
+| スイートの `volatile` や `max_age` | それらが選ぶユニットだけ（テストをいつ実行するかを決めるだけで、どう実行するかは変えない） |
 | `inputs` または `rules` | 追加したファイルが新しい依存になり、それを得たテストが 1 回実行される |
 
 smates が補う既定値（検出したコマンドやテストの glob）はハッシュに含まれません。既定値はマシンに依存する（たとえば virtualenv があるかどうか）ため、含めると CI で記録したステートをノート PC で使ったときにすべてのスイートが再実行されてしまいます。`smates.yml` 自体を読むテストは、他のファイルと同じくその内容に依存します。

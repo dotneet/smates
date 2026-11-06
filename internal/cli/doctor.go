@@ -5,13 +5,18 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/detect"
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // Doctor check statuses.
@@ -117,6 +122,10 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkOK, "config", "config %s", p.cfg.Path)
 	} else {
 		r.add(checkWarn, "config", "no smates.yml: using auto-detected suites (run `smates init` to pin them)").fix(doctorFix{Command: "smates init"})
+		_, notes := detect.Detect(p.repo, p.files)
+		for _, n := range notes {
+			r.add(checkWarn, "suite-not-detected", "%s", n).fix(doctorFix{Doc: docURL + "guides/configuration/#which-files-are-tests"})
+		}
 	}
 	if len(p.suites) == 0 {
 		r.add(checkFail, "suites-detected", "no test suites detected").fix(doctorFix{Command: "smates init", Doc: docURL + "guides/configuration/"})
@@ -139,6 +148,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "guides/servers/"})
 		}
+		doctorRuleReach(p, s, len(units), r)
 		runners[s.Runner] = true
 	}
 	tool := func(name string, args ...string) string {
@@ -192,6 +202,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		for _, s := range p.state.Suites {
 			n += len(s.Tests)
 		}
+		doctorSkipped(p, r)
 		if p.state.Created.IsZero() {
 			// Shared state without a snapshot of this worktree yet.
 			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, no snapshot in this worktree yet (the next run records one)", p.statePath, n)
@@ -211,6 +222,50 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkOK, "ci", "CI %s, branch %q, pull request %t, full run by default: %t", ci.Name, b, ci.PullRequest, full)
 	}
 	return r
+}
+
+// doctorRuleReach reports how many of the units of suite s each of its rules with
+// reaches applies to. One that applies to none is likely a glob that names no helper
+// the tests import: its deps are then no test's dependencies, and a change to them is
+// an orphan (as without the rule), but once one unit matches, the units that do not are
+// skipped on such a change.
+func doctorRuleReach(p *project, s *runner.Suite, units int, r *doctorReport) {
+	counts := selector.RuleReach(p.cfg, s, p.files, p.graph, p.state.Suites[s.Name])
+	unmatched := selector.UnmatchedReaches(s, p.files)
+	for _, i := range slices.Sorted(maps.Keys(counts)) {
+		rule := s.Rules[i]
+		subject := fmt.Sprintf("%s: rules[%d]", s.Name, i)
+		if n := counts[i]; n == 0 {
+			r.add(checkWarn, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to no test unit: no test's static imports reach a file its globs match, and no recorded test read a variable it names; check the globs, and name every helper the tests use the dependency through (a change to %s stays an orphan meanwhile)", s.Name, i, strings.Join(rule.Reaches, ", "), strings.Join(rule.Deps, ", ")).about(subject).
+				fix(doctorFix{Doc: docURL + "reference/configuration/#rules"})
+		} else if globs := unmatched[i]; len(globs) > 0 {
+			// The rule applies through its other globs, so the deps are no orphan:
+			// units that use them only through what these meant to name lose them.
+			r.add(checkWarn, "suite-rule-reaches", "suite %s: rules[%d] applies to %d of %d test units, but its reaches %s match no file of the repository: tests that use %s only through what they meant to name are skipped when it changes; fix the globs (a directory needs no /**, an import path is not a glob)", s.Name, i, n, units, strings.Join(globs, ", "), strings.Join(rule.Deps, ", ")).about(subject).
+				fix(doctorFix{Doc: docURL + "reference/configuration/#rules"})
+		} else {
+			r.add(checkOK, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to %d of %d test units", s.Name, i, strings.Join(rule.Reaches, ", "), n, units).about(subject)
+		}
+	}
+}
+
+// doctorSkipped lists the units that skipped themselves in their last recorded run:
+// they are not proven to pass, so they run every time until they pass (a test that
+// always skips, behind a missing service, a flag or an environment variable).
+func doctorSkipped(p *project, r *doctorReport) {
+	var units []string
+	for _, name := range slices.Sorted(maps.Keys(p.state.Suites)) {
+		for _, u := range slices.Sorted(maps.Keys(p.state.Suites[name].Tests)) {
+			if p.state.Suites[name].Tests[u].Status == state.Skip {
+				units = append(units, name+": "+u)
+			}
+		}
+	}
+	if len(units) == 0 {
+		return
+	}
+	r.add(checkWarn, "state-skipped", "%d test unit(s) skipped themselves in their last run and run again every time until they pass (not proven): %s", len(units), strings.Join(limit(units, 10), ", ")).
+		fix(doctorFix{Doc: docURL + "guides/go-test-functions/#skipped-tests"})
 }
 
 // installCommand is the command installing the JS dependencies of a suite rooted at
@@ -313,15 +368,33 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 				fix(doctorFix{Config: &configFix{Key: "suites." + suiteOf(cs, e.ReadBy) + ".env." + e.Name, Value: e.Example}})
 		}
 	}
-	for _, st := range workflowTestSteps(p.repo.Root) {
+	wfSteps := workflowTestSteps(p.repo.Root)
+	patchSuites := cs
+	if p.cfg.Path == "" {
+		// Without smates.yml, `smates init --github --patch` writes one first, whose
+		// suite commands keep the go test flags the workflows and Makefiles pass: judge
+		// the steps against those commands.
+		patchSuites = slices.Clone(cs)
+		carryGoFlags(patchSuites, makefileHints(p.repo.Root, patchSuites), makeGoVotes(p.repo.Root, patchSuites), wfSteps, io.Discard)
+	}
+	for _, st := range wfSteps {
 		subject := st.File + ":" + st.Job + ":" + st.Step
-		if st.Skip != "" {
-			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, st.Skip).about(subject).
+		if names, why := stepPatch(st, patchSuites); why != "" && (st.Skip != "" || len(names) > 0) {
+			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, why).about(subject).
 				fix(doctorFix{Doc: docURL + "ci/github-actions/"})
 			continue
 		}
 		r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates).about(subject).
 			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/"})
+	}
+	def := defaultBranch(p.repo)
+	for _, g := range smatesSeedGaps(p.repo.Root, def) {
+		keys := ""
+		if len(g.Keys) > 1 || g.Keys[0] != "" {
+			keys = " (cache-key " + strings.Join(g.Keys, ", ") + ")"
+		}
+		r.add(checkWarn, "workflow-no-seed", "%s runs smates only on pull requests, and no workflow runs it on %s%s: nothing records the state pull requests start from, so the first run of each one starts cold; add `push: branches: [%s]` and/or a nightly `schedule:` to its on: (`smates init --github --patch smates.patch` writes that patch)", g.File, def, keys, def).about(g.File).
+			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/#seed-the-state"})
 	}
 }
 

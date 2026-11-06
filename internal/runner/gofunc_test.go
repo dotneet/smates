@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -108,7 +109,7 @@ func TestGoOutcomesPlain(t *testing.T) {
 		{"example.com/m/broken", "TestB", state.Fail, false, true},
 		{"example.com/m/slow", "TestSlow", state.Unknown, true, true},
 		{"example.com/m/verbose", "TestV", state.Pass, false, true},
-		{"example.com/m/verbose", "TestSkip", state.Pass, false, true},
+		{"example.com/m/verbose", "TestSkip", state.Skip, false, true}, // skipped itself: not proven
 		{"example.com/m/other", "TestX", "", false, false},
 	} {
 		st, inf, ran := g.status(c.ip, c.name)
@@ -229,6 +230,36 @@ func TestParseGoFlags(t *testing.T) {
 	for _, cmd := range []string{"go test -run TestX", "go test -c", "go test -test.run=X", "gotestsum --", "make test", "go vet"} {
 		if g := parseGoFlags(goRC(t, cmd, nil)); g.why == "" {
 			t.Errorf("%q: per-function recording should not be possible", cmd)
+		}
+	}
+}
+
+func TestParseGoTestArgs(t *testing.T) {
+	type arg struct {
+		name, value string
+		words       int
+	}
+	cases := []struct {
+		words   []string
+		oneWord bool
+		want    []arg
+		tail    []string
+	}{
+		{[]string{"-p", "1", "-race", "./..."}, false, []arg{{"p", "1", 2}, {"race", "", 1}, {"", "", 1}}, nil},
+		{[]string{"-tags=a,b", "-test.run", "X", "-count", "1"}, false, []arg{{"tags", "a,b", 1}, {"test.run", "X", 2}, {"count", "1", 2}}, nil},
+		{[]string{"-v", "./...", "-args", "-update", "x"}, false, []arg{{"v", "", 1}, {"", "", 1}}, []string{"-update", "x"}},
+		{[]string{"-p", "-timeout=5m"}, true, []arg{{"p", "", 1}, {"timeout", "5m", 1}}, nil},
+		{[]string{"-timeout"}, false, []arg{{"timeout", "", 1}}, nil},
+		{[]string{"--", "-"}, false, []arg{{"", "", 1}, {"", "", 1}}, nil},
+	}
+	for _, c := range cases {
+		args, tail := ParseGoTestArgs(c.words, c.oneWord)
+		var got []arg
+		for _, a := range args {
+			got = append(got, arg{a.Name, a.Value, len(a.Words)})
+		}
+		if !reflect.DeepEqual(got, c.want) || !slices.Equal(tail, c.tail) {
+			t.Errorf("%q: %+v tail %q, want %+v %q", c.words, got, tail, c.want, c.tail)
 		}
 	}
 }
@@ -411,5 +442,28 @@ func TestFuncDepsNonTestFiles(t *testing.T) {
 		if got := funcDeps(repo.Root, "p", c.name, all, c.executed); !slices.Equal(got, want) {
 			t.Errorf("%s (executed %v):\n got %v\nwant %v", c.name, c.executed, got, want)
 		}
+	}
+}
+
+// A package that did not build fails its functions as a build failure; a function that
+// ran and failed did not fail for that reason (a sharded shadow run tells the two
+// apart, see Observation.BuildFailed).
+func TestGoOutcomesBuildFailed(t *testing.T) {
+	for _, c := range []struct {
+		name, out string
+		want      bool
+	}{
+		{"build failed", "# m/a\na.go:3:2: undefined: x\nFAIL\tm/a [build failed]\n", true},
+		{"build failed, json", `{"Action":"fail","Package":"m/a","FailedBuild":"m/a"}` + "\n", true},
+		{"assertion", "=== RUN   TestA\n--- FAIL: TestA (0.00s)\nFAIL\nFAIL\tm/a\t0.01s\n", false},
+		{"passed", "ok  \tm/a\t0.01s\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &goOutcomes{}
+			feed(g, c.out)
+			if got := g.buildFailed("m/a"); got != c.want {
+				t.Errorf("buildFailed %v, want %v", got, c.want)
+			}
+		})
 	}
 }

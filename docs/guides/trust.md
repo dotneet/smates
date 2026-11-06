@@ -47,6 +47,14 @@ other runners, the unselected tests of a failing run are reported as *possible* 
     recheck files outside the module before reusing a result. `--shadow` cannot be
     combined with `--fail-fast`.
 
+    With `--shard I/N`, each shard runs every test it owns, selected or not, and judges
+    them against the selection of the whole run: a failing test another shard owns is
+    that shard's to report, so the shards together run every test once and report each
+    escape once. A Go test function that fails because its package does not build, while
+    the package's selected compile check is owned by another shard, is reported as a
+    possible escape: that shard reports the build failure. A function that ran and
+    failed on its own is an escape, as without shards.
+
 ## Flaky tests
 
 smates detects flaky tests by proof, not by heuristics. It knows the content hash of
@@ -135,7 +143,9 @@ What it counts:
 - The state keeps the last 1000 records within 180 days.
 - `smates state merge` unions records, so the stats of a state restored on CI cover all
   the runs that state went through.
-- A sharded run leaves one record per shard. Its orphans are counted by shard 1 only.
+- A sharded run leaves one record per shard. Its orphans are counted by shard 1 only;
+  a sharded shadow run counts as one shadow run (and as one run with misses, whichever
+  shards found them), its failures and escapes adding up over its shards' records.
 
 The GitHub Actions job summary shows the cumulative time saved in one line.
 

@@ -46,6 +46,20 @@ func TestRecordDetectsFlakes(t *testing.T) {
 			{snap: base, obs: obs(state.Pass)}, {snap: base, obs: obs(state.Unknown)},
 			{snap: base, obs: obs(state.Fail), wantFlip: "pass->fail"},
 		}, 1},
+		// A skip is no outcome to flip from or to.
+		{"skip then pass on the same inputs", nil, []step{
+			{snap: base, obs: obs(state.Skip)}, {snap: base, obs: obs(state.Pass)},
+		}, 0},
+		{"pass, skip, pass", nil, []step{
+			{snap: base, obs: obs(state.Pass)}, {snap: base, obs: obs(state.Skip)}, {snap: base, obs: obs(state.Pass)},
+		}, 0},
+		{"skip then fail on the same inputs", nil, []step{
+			{snap: base, obs: obs(state.Skip)}, {snap: base, obs: obs(state.Fail)},
+		}, 0},
+		{"same fingerprint across a skip", nil, []step{
+			{snap: base, obs: obs(state.Pass)}, {snap: base, obs: obs(state.Skip)},
+			{snap: base, obs: obs(state.Fail), wantFlip: "pass->fail"},
+		}, 1},
 		{"back to the old inputs after a change", nil, []step{
 			{snap: base, obs: obs(state.Pass)}, {snap: changed, obs: obs(state.Fail)},
 			{snap: base, obs: obs(state.Pass)},

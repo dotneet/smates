@@ -19,7 +19,7 @@ The guides explain when and why you use it.
 | [`smates config`](#smates-config) | Edit `smates.yml` safely |
 | [`smates guide`](#smates-guide) | Print the guide for coding agents |
 | [`smates state`](#smates-state) | Inspect, move and clear the recorded state |
-| [`smates hook`](#smates-hook) | Install a git pre-push/pre-commit hook or a Claude Code Stop hook |
+| [`smates hook`](#smates-hook) | Install a git pre-push/pre-commit hook, or a Claude Code or Codex Stop hook |
 | [`smates version`](#smates-version-and-help) | Print the version |
 
 Run `smates <command> -h` to print a command's flags (exit code 0); for `config`,
@@ -65,21 +65,22 @@ See [How smates decides](../getting-started/how-it-works.md).
 |---|---|---|---|
 | `--all` | | off | Run every test and rewrite the recorded state. |
 | `--select` | | off | Select tests even where the default is a full run (the default branch on CI). |
-| `--base` | rev | auto | Git revision to diff against for tests that have no recording yet. Default: the merge base with the pull request's target or the default branch. |
+| `--base` | rev | auto | Git revision to diff against for tests that have no recording yet. Default: the merge base with the pull request's target or the default branch. In CI such tests run as new unless `--base` is given. |
 | `--explain` | | off | Print why each test was selected (`[changed: src/price.ts]`). |
 | `--only` | `SUITE:UNIT` | | Run exactly this test unit and record it as usual. Repeatable. Other tests and changes are left for the next run. |
 | `--add` | `SUITE:UNIT` | | Also run this test. The unit may be a test file path; `SUITE:` may be left out when only one suite has it. Repeatable. Never removes tests. A name that matches no test exits with code 2. |
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | How to handle changes no test depends on, for this run: ask the agent, run the affected suites in full, or apply no policy (explicit opt-out). See [Changes no test explains](../guides/orphans.md). |
 | `--no-agent` | | off | Do not call the agent, neither for unattributed changes (the affected suites run in full instead) nor to explain failures. |
 | `--no-record` | | off | Run without tracing and without updating the state. |
-| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. See [Shadow mode](../guides/trust.md#shadow-mode). |
-| `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID. Sharded runs do not call the agent. |
+| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. With `--shard`, every test the shard owns. See [Shadow mode](../guides/trust.md#shadow-mode). |
+| `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID; the assignment depends on `N`, so all shards of a run use the same `N`. Sharded runs do not call the agent. |
 | `--fail-fast` | | off | Start no further test batch after one fails. Tests run likeliest-to-fail first. |
 | `--output` | `full`, `failures` | `$SMATES_OUTPUT`, else `full` | `full` streams the runner output. `failures` prints only the output of failing tests, then a short summary with a command that reruns them. `agent` is accepted as an alias of `failures`. |
 | `--report` | file | | Write a JSON report (selection, per-test results, shadow escapes, `exit_code`) to `file`. `-` writes it to stdout and moves all other output to stderr. |
 | `--markdown` | file | | Write the summary as Markdown to `file` (replaced), for a pull request comment. |
 | `--summary` | file | `$GITHUB_STEP_SUMMARY` on GitHub Actions | Append the Markdown summary to `file`. |
 | `--budget` | duration | `90s` | When the recorded durations of the selected tests add up to more than this, print how to split the run first. `0` turns it off. |
+| `--max-time` | duration | `0` (no limit) | Start no test batch that would end after this, by recorded durations. The tests left out stay selected for the next run. See [Time limit](#time-limit). |
 | `--dry-run` | | off | Print the runner commands instead of running them. |
 
 Plus the [common flags](#common-flags).
@@ -87,7 +88,7 @@ Plus the [common flags](#common-flags).
 Combinations that are rejected (exit code 2):
 
 - `--only` with `--all`, `--shadow`, `--add` or `--orphans`.
-- `--shadow` with `--shard` or `--fail-fast`.
+- `--shadow` with `--fail-fast` or `--max-time`.
 - `--dry-run` with `--report`, `--markdown` or `--summary` (use
   `smates select --format json|markdown` instead).
 
@@ -103,6 +104,47 @@ the suite's `command` instead.
     output it prints `smates: still running <suite> (...)`; `SMATES_HEARTBEAT` changes
     the interval. See [Coding agents](../guides/coding-agents.md).
 
+#### Time limit { #time-limit }
+
+`--max-time 8m` keeps a run within about eight minutes:
+
+- smates cuts each suite's tests into batches of about a quarter of the limit, by the
+  durations recorded for them. A test counts as measured when its last pass, failure
+  or skip was recorded with a duration above 0 ms; any other test (never recorded,
+  recorded with another outcome, or recorded at 0 ms) counts as the mean of the
+  suite's measured tests. A suite whose runner reports 0 ms for every test therefore
+  has no durations at all. A suite with no
+  durations at all stays one batch, which starts only while less than half the limit is
+  used. Each Go package a batch builds adds a second, as recorded durations leave out
+  compiling and linking the test binaries.
+- Batches start in the usual order, the likeliest to fail first. Before each one,
+  smates checks whether it would end after the limit. Its estimate grows by how much
+  longer than estimated the batches that ran took, on average per batch (starting the
+  runner and building take about the same time for a short batch as for a long one):
+  the batches of the same suite, or of every suite before a suite's first batch. The
+  requirements are checked first: a batch whose units are partly left out by unmet
+  requirements is estimated by the units that run, and one with no unit left does not
+  count against the limit (the next batch is checked instead). If it would end after
+  the limit, smates starts nothing more.
+- The first batch always starts, so every run makes progress. A batch that is running
+  is never stopped.
+- The tests left out are not run and not recorded. They stay selected, and a later run
+  runs them in the usual order (by priority, then shortest recorded duration first), so
+  a long test can be left out again while new changes keep selecting others; CI runs
+  them all. The log, the summary (`Time limit`) and the report
+  (`max_time_reached`, `not_run`) list them.
+
+When everything that ran passed, the run exits 0. Do not use `--max-time` to gate a
+merge on CI: tests it left out did not run. The Claude Code and Codex Stop hooks use
+`--max-time 8m` by default (see [Git hooks](../guides/git-hooks.md#claude-code-stop-hook)).
+
+#### Suites with unmet requirements { #unmet-requires }
+
+Units of a suite whose [`requires`](configuration.md#requires) are not met do not
+start. They stay selected and are not recorded; the log names each failed check. The
+run exits 4 when no test failed, else 1. The report lists the checks under
+`unmet_requires` and the units under `not_run`.
+
 ### smates select
 
 ```bash
@@ -111,6 +153,9 @@ smates select [flags]
 
 Prints the selection without running anything. It may still call the agent, and then
 saves its answer in the state so the next `smates run` on the same change reuses it.
+On a push build of a [full-run branch](configuration.md#top-level-keys) it selects every
+test, as `smates run` runs them all there: outputs that gate jobs (`skip`, `suites`)
+never skip the full run that refreshes the state.
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
@@ -122,6 +167,8 @@ saves its answer in the state so the next `smates run` on the same change reuses
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | As for `run`. |
 | `--no-agent` | | off | Do not call the agent. |
 | `--shard` | `I/N` | | Only shard `I` of `N` of the selection. |
+| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On a push build of a full-run branch it is sized for every test, as the selection is. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
+| `--shard-time` | duration | `10m` | With `--max-shards`: recorded test time to aim for per shard. A selected test without a recorded duration counts as its suite's median; a suite with selected tests and no recorded duration at all gives `N`. |
 | `--markdown` | file | | Also write the Markdown summary to `file`. |
 
 Plus the [common flags](#common-flags).
@@ -130,8 +177,8 @@ Plus the [common flags](#common-flags).
 |---|---|
 | `text` | One selected test ID per line; the selection summary goes to stderr. |
 | `files` | One selected test ID per line, nothing on stderr. |
-| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision. |
-| `github` | `selected`, `total`, `run-all`, `skip` and `tests` as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. |
+| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision, and `shards` with `--max-shards`. |
+| `github` | `selected`, `total`, `run-all`, `skip`, `tests` and `suites` (and with `--max-shards`, `shards` and `shard-matrix`) as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. See [Outputs](../ci/github-actions.md#outputs). |
 | `markdown` | The Markdown summary used for pull request comments. |
 
 ### smates watch
@@ -209,14 +256,18 @@ fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`,
 |---|---|
 | `git-installed`, `repository`, `project-load`, `config` | git is on `PATH`, the repository and `smates.yml` load |
 | `suites-detected`, `suite-units` | there are suites, and test files match each one |
+| `suite-not-detected` | without `smates.yml`: a package configures a test runner (a vitest or jest configuration file, a per-project `vitest.*.config.*`, a `vite.config.*` that imports vitest or sets `test`; not a plain Vite app) but got no suite (no test file smates can find there); `smates init` prints the same note |
 | `suite-tests-source`, `suite-test-discovery` | where the test patterns come from; a runner config smates could not read |
 | `suite-launcher`, `suite-dependencies-installed` | the suite command can start; `node_modules` is installed |
 | `toolchain-go`, `toolchain-bun`, `toolchain-python`, `suite-engines-node` | toolchains, and the Node version against `engines.node` |
 | `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses; variables it reads that are not set |
 | `suite-server-dependency` | an end-to-end-looking suite without `depends_on`, `serves` or `rules` |
+| `suite-rule-reaches` | how many test units each rule with `reaches` applies to; a warning for one that applies to none |
 | `state-recorded` | a recorded state exists, and from which commit |
+| `state-skipped` | test units that skipped themselves in their last run (not proven: they run every time until they pass) |
 | `agent`, `ci` | the agent is available; the CI detected and whether it runs everything by default |
 | `workflow-test-step` | a GitHub workflow step that runs the tests without smates |
+| `workflow-no-seed` | a GitHub workflow that runs smates only on pull requests, with no workflow running it on the default branch under the same `cache-key`: nothing records the state pull requests start from |
 
 Flags: `--format text|json`, plus the [common flags](#common-flags).
 
@@ -291,13 +342,18 @@ smates init [flags]
 ```
 
 Detects the suites of the repository, writes `smates.yml` and adds `.smates/` to
-`.gitignore`. It refuses to overwrite an existing config unless `--force`; with
+`.gitignore`. The `go test` flags that change how a Go suite's tests run (`-p`,
+`-tags`, `-race`, `-timeout`) go into its `command:` when the workflow steps or the
+Makefile test target running it use them (`-tags` only when every run of all the
+suite's unit tests agrees, see [Switch existing workflows](../ci/github-actions.md#switch-existing-workflows));
+the environment those steps set is written as a comment only. When a workflow already
+runs smates, `--github` writes no second one (unless `--force`). It refuses to overwrite an existing config unless `--force`; with
 `--github` or `--agents-md` over an existing config, only that part runs. See
 [Quick start](../getting-started/quickstart.md).
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
-| `--github` | | off | Also write `.github/workflows/smates.yml`. When an existing workflow already runs the tests, print a patch that switches its test steps to smates instead. |
+| `--github` | | off | Also write `.github/workflows/smates.yml`. When an existing workflow already runs the tests, print a patch that switches its test steps to smates instead ([what it patches](../ci/github-actions.md#switch-existing-workflows)). |
 | `--patch` | file | print it | With `--github`: write that patch to `file` (for `git apply`). |
 | `--agents-md` | | off | Add a short smates section to `AGENTS.md` (or `CLAUDE.md`) for coding agents. |
 | `--force` | | off | Overwrite an existing `smates.yml`. |
@@ -366,7 +422,7 @@ smates state clear
 |---|---|
 | `show` | Where the state lives (and whether it is shared or was seeded), the recorded commit, the snapshot size and per-suite counts. |
 | `path` | Print the state file's path. |
-| `pull` | Fetch the state from a git ref and save it. Without `--ref` it tries `refs/smates/state/<branch>`, then the default branch's ref. With `state_shared: true` the pulled entries are merged in. |
+| `pull` | Fetch the state from a git ref and save it. Without `--ref` it tries `refs/smates/state/<branch>`, then the ref of the branch a merge or pull request targets (its base branch, when the CI reports one), then the default branch's ref. With `state_shared: true` the pulled entries are merged in. |
 | `push` | Push the state as a commit of its own to `refs/smates/state/<branch>` (or `--ref`) on the remote (force-push, hooks skipped). |
 | `merge` | Merge the given state files into the state (or into `-o file`). |
 | `clear` | Delete the state. In a linked worktree it is then not seeded again. With `state_shared: true` this clears it for every worktree. |
@@ -392,34 +448,41 @@ branch. On a detached HEAD without either, `push` needs `--ref`. See
 ```bash
 smates hook install [--hook pre-push|pre-commit] [--append] [--agent] [-- run flags]
 smates hook install --claude [--user] [--agent] [-- run flags]
-smates hook uninstall [--hook ...] | [--claude [--user]]
+smates hook install --codex [--agent] [-- run flags]
+smates hook uninstall [--hook ...] | [--claude [--user]] | [--codex]
 smates hook status
 ```
 
 `install` writes a git hook that runs `smates run --no-agent` (plus the run flags after
 `--`) and stops the push or commit when a selected test fails. With `--claude` it adds a
-Stop hook to `.claude/settings.json` instead. `uninstall` removes only what smates
-wrote. `status` shows the git hook and the Claude Code hook. See
-[Git hooks and Claude Code](../guides/git-hooks.md).
+Stop hook to `.claude/settings.json` instead, and with `--codex` to `.codex/hooks.json`.
+`uninstall` removes only what smates wrote. `status` shows the git hook and the Claude
+Code and Codex hooks. See [Git hooks and Claude Code](../guides/git-hooks.md).
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
-| `--hook` | `pre-push`, `pre-commit` | `pre-push` | Git hook to manage. Not with `--claude`. |
-| `--append` | | off | `install`: add smates to the end of an existing hook script. Not with `--claude`. |
+| `--hook` | `pre-push`, `pre-commit` | `pre-push` | Git hook to manage. Not with `--claude` or `--codex`. |
+| `--append` | | off | `install`: add smates to the end of an existing hook script. Not with `--claude` or `--codex`. |
 | `--agent` | | off | `install`: let the hook call the agent (otherwise it passes `--no-agent`). |
 | `--claude` | | off | A Claude Code Stop hook in `.claude/settings.json` instead of a git hook. |
+| `--codex` | | off | A Codex Stop hook in `.codex/hooks.json` instead of a git hook. Not with `--claude` or `--user`. |
 | `--user` | | off | With `--claude`: use `~/.claude/settings.json` (active in every project that has a `smates.yml`). |
 | `-C` | dir | current directory | Run as if started in `dir`. |
 
-The installed hooks call two internal subcommands, which you normally do not run
-yourself:
+The installed hooks call internal subcommands, which you normally do not run yourself:
 
-- `smates hook run pre-push|pre-commit [-- run flags]`: what the git hook runs.
-- `smates hook claude-stop [--require-config] [-- run flags]`: what the Claude Code
-  Stop hook runs (`--output failures` is implied). It exits 0 and prints
-  `{"decision": "block", ...}` when tests fail, or exits 1 on smates' own errors.
+- `smates hook run pre-push|pre-commit [-- run flags]`: what the git hook runs. Tests
+  left out by unmet [`requires`](configuration.md#requires) do not stop the push or
+  commit: it prints one line about them and exits 0 (they stay selected for CI).
+- `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`: what the
+  Claude Code and Codex Stop hooks run (`--output failures --max-time 8m` is implied;
+  a `--max-time` in the run flags wins, and with `--shadow` none is added). It exits 0 and prints
+  `{"decision": "block", ...}` when tests fail, or exits 1 on smates' own errors. Tests
+  left out by the time limit or by unmet [`requires`](configuration.md#requires) do not
+  block: it prints one line about them to stderr and exits 0.
 
-Both do nothing when `SMATES_SKIP_HOOK` is set to a value other than `0` or `false`.
+All of them do nothing when `SMATES_SKIP_HOOK` is set to a value other than `0` or
+`false`.
 
 ## See also
 

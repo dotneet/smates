@@ -5,7 +5,9 @@ package cli
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -14,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/runner"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,16 +37,36 @@ type testStep struct {
 	// TestLine is the line of a multi-line run: block holding only the test command,
 	// when the block runs other commands too (0: the step runs only the tests).
 	TestLine int
-	WorkDir  string // the step's working-directory
+	// WorkDir is the directory the step runs in, relative to the repository root: its
+	// working-directory, else the job's or the workflow's defaults.run.working-directory
+	// ("" when none is set: the root).
+	WorkDir string
+	// Env is what the workflow, the job and the step set in env: (in that order, later
+	// ones win), for the hints in smates.yml.
+	Env [][2]string
+	// Carry are the go test flags a suite's command must keep for the smates action to
+	// stand in for the step.
+	Carry goCarry
 	// Skip says why the step is reported but not patched ("" = patchable).
 	Skip string
-	// Other is set for test targets other than the unit tests (test:e2e, test-integration).
+	// Other is set for test targets other than the unit tests (test:e2e, test-integration,
+	// go test -run).
 	Other bool
+	// Paths are the directories a pytest command names (relative to WorkDir).
+	Paths []string
+	// Matrix are the keys of the job's strategy.matrix (sorted): its legs may run in
+	// different environments (runtime versions, services), so each needs its own state.
+	Matrix []string
+	// Full is set for a go test step that runs every test of the suites under its
+	// directory with flags smates read in full: its -tags vote (see carryGoFlags).
+	Full bool
 }
 
 // testCmdRe finds test commands; suffixed script names ("test:e2e", "test-e2e") are
 // told apart by plainTestCmd.
-var testCmdRe = regexp.MustCompile(`(?:^|[\s;&|(])((?:go test|vitest|jest|pytest|bun test|(?:npm|pnpm|yarn) (?:run )?test(?::[\w:-]+)?|make test[\w-]*))(?:\s|$|;|&|\|)`)
+// turbo and node --test steps are found (they run the tests, so the smates workflow
+// would run them a second time) but never patched.
+var testCmdRe = regexp.MustCompile(`(?:^|[\s;&|(])((?:go test|vitest|jest|pytest|bun test|node --test|turbo (?:run )?test(?::[\w:-]+)?|(?:npm|pnpm|yarn) (?:run )?test(?::[\w:-]+)?|make test[\w-]*))(?:\s|$|;|&|\|)`)
 
 // plainTestCmd reports whether a matched test command runs the unit tests (plain
 // "test", "test:unit", "make test", "make test-unit") rather than another test target
@@ -74,6 +97,8 @@ func runnersOf(cmd string) []string {
 		return []string{"pytest"}
 	case cmd == "bun test":
 		return []string{"bun"}
+	case cmd == "node --test":
+		return []string{"node"}
 	case strings.HasPrefix(cmd, "make"):
 		return nil
 	}
@@ -107,14 +132,16 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 		return nil
 	}
 	lines := strings.Split(string(data), "\n")
-	jobs := mapGet(doc.Content[0], "jobs")
+	top := doc.Content[0]
+	jobs := mapGet(top, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
 		return nil
 	}
 	var out []testStep
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
 		job := jobs.Content[i].Value
-		steps := mapGet(jobs.Content[i+1], "steps")
+		jobNode := jobs.Content[i+1]
+		steps := mapGet(jobNode, "steps")
 		if steps == nil || steps.Kind != yaml.SequenceNode {
 			continue
 		}
@@ -124,6 +151,7 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 		}) {
 			continue // the job already runs smates
 		}
+		matrix, matrixSkip := matrixKeys(mapGet(mapGet(jobNode, "strategy"), "matrix"))
 		for si, st := range steps.Content {
 			if st.Kind != yaml.MappingNode {
 				continue
@@ -132,7 +160,7 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 			if run == nil || mapGet(st, "uses") != nil || strings.Contains(run.Value, "smates") {
 				continue
 			}
-			var cmd, match string
+			var cmd, match, state string
 			others, after := 0, 0
 			for _, l := range strings.Split(run.Value, "\n") {
 				t := strings.TrimSpace(l)
@@ -146,18 +174,75 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				others++
 				if cmd != "" {
 					after++
+				} else if state == "" && shellStateChange(t) {
+					state = t
 				}
 			}
 			if cmd == "" {
 				continue
 			}
-			ts := testStep{File: rel, Job: job, Step: fmt.Sprintf("#%d", si+1), Command: cmd, Runners: runnersOf(match), Line: st.Line, Dash: st.Column - 3, Blocks: map[string][2]int{}}
+			ts := testStep{File: rel, Job: job, Step: fmt.Sprintf("#%d", si+1), Command: cmd, Runners: runnersOf(match), Line: st.Line, Dash: st.Column - 3, Blocks: map[string][2]int{}, Matrix: matrix}
 			if n := mapGet(st, "name"); n != nil {
 				ts.Step = n.Value
 			}
-			if wd := mapGet(st, "working-directory"); wd != nil {
-				ts.WorkDir = wd.Value
+			wdSkip := ""
+			for _, n := range []*yaml.Node{mapGet(st, "working-directory"), defaultsWorkDir(jobNode), defaultsWorkDir(top)} {
+				if n == nil {
+					continue
+				}
+				wd, ok := workDir(n.Value)
+				switch {
+				case ok:
+					ts.WorkDir = wd
+				case strings.Contains(n.Value, "matrix."):
+					wdSkip = fmt.Sprintf("its working-directory %q changes with the matrix leg: smates cannot tell which suite each leg runs; give each leg `args: --suite <name>` and `cache-key: <name>` by hand", n.Value)
+				default:
+					wdSkip = fmt.Sprintf("its working-directory %q is not a directory of the repository smates can resolve", n.Value)
+				}
+				break
 			}
+			// An env: written as an expression (${{ fromJSON(...) }}), or a GOFLAGS that is
+			// no plain value, may set GOFLAGS smates cannot read.
+			envUnknown := false
+			for _, n := range []*yaml.Node{top, jobNode, st} {
+				e := mapGet(n, "env")
+				if e != nil && e.Kind != yaml.MappingNode {
+					envUnknown = true
+				}
+				if g := mapGet(e, "GOFLAGS"); g != nil && g.Kind != yaml.ScalarNode {
+					envUnknown = true
+				}
+				ts.Env = mergeEnv(ts.Env, e)
+			}
+			check := checkTestCmd(cmd, match)
+			envFlags := !envUnknown
+			goflagsSkip := ""
+			if !check.other {
+				ts.Carry = check.carry
+				envValue, envSet := envGoflags(ts.Env)
+				switch {
+				case !strings.HasPrefix(match, "go test"):
+				case check.inlineGoflags:
+					// The line's GOFLAGS replaces that of the env:, but the smates step
+					// keeps the env: and runs with it: only the same flags stand in.
+					if envUnknown || envSet {
+						goflagsSkip = inlineGoflagsSkip(check.inlineValue, envValue, envUnknown)
+					}
+				default:
+					// The GOFLAGS of the env: apply to the command too: its -tags are
+					// those the step runs with.
+					base, ok := envGoCarry(ts.Env)
+					envFlags = envFlags && ok
+					ts.Carry = ts.Carry.over(base)
+					if ok {
+						goflagsSkip = envOverride(check.carry, base)
+					}
+				}
+			}
+			ts.Paths = check.paths
+			// A GOFLAGS smates cannot read leaves the step's -tags unknown: it does not
+			// vote on them (see carryGoFlags).
+			ts.Full = check.full && envFlags && state == "" && wdSkip == "" && plainTestCmd(match) && !strings.HasSuffix(cmd, "\\")
 			if ts.Dash < 0 {
 				ts.Dash = 0
 			}
@@ -188,10 +273,20 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 			case !plainTestCmd(match):
 				ts.Other = true
 				ts.Skip = fmt.Sprintf("%q is not the plain unit-test command; switch it to smates by hand if smates should select those tests", match)
-			case len(shellSepRe.Split(cmd, -1)) > 1 || strings.HasSuffix(cmd, "\\"):
+			case strings.HasSuffix(cmd, "\\"):
 				ts.Skip = "the test command is chained with other commands on one line; split it out, then use the smates action for the test part"
+			case check.skip != "":
+				ts.Skip, ts.Other = check.skip, check.other
+			case goflagsSkip != "":
+				ts.Skip = goflagsSkip
+			case wdSkip != "":
+				ts.Skip = wdSkip
+			case matrixSkip != "":
+				ts.Skip = matrixSkip
 			case after > 0:
 				ts.Skip = "commands after the test line use its output (or must run after the tests); move them to their own step, then use the smates action for the tests"
+			case state != "":
+				ts.Skip = fmt.Sprintf("the line %q before the test line changes the directory or environment the tests run in, which the smates step after it would not keep: set working-directory: or env: on the step instead, then rerun", state)
 			case others > 0:
 				// Keep the commands before it: drop only the test line of the run: block.
 				b := ts.Blocks["run"]
@@ -211,6 +306,188 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 	return out
 }
 
+// inlineGoflagsSkip says why the smates step cannot stand in for a go test step whose
+// line sets GOFLAGS (inline) while its env: sets GOFLAGS too (env; unknown when an env:
+// is an expression): the line's value replaced the env's for the step, but the smates
+// step keeps the env: and runs with its GOFLAGS. "" when both carry the same flags
+// (goCarry) and the env's leaves no test out.
+func inlineGoflagsSkip(inline, env string, unknown bool) string {
+	const fix = ": set the same GOFLAGS in the step's env: (the smates step keeps it), then rerun"
+	if unknown {
+		return "it sets GOFLAGS on its line, and an env: of the step, job or workflow is an expression that may set GOFLAGS too, which the smates step would run with" + fix
+	}
+	ec, ok := goflagsCarry(env)
+	if !ok {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, whose value smates cannot read and the smates step would run with" + fix
+	}
+	ic, _ := goflagsCarry(inline)
+	if f := goflagsFilter(env); f != "" && goflagsFilter(inline) == "" {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, whose " + f + " the smates step would run with, leaving out tests the step runs" + fix
+	}
+	if !ic.equal(ec) {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, which the smates step would run with (its -tags or -race change which test files compile)" + fix
+	}
+	return ""
+}
+
+// shellStateCommands are shell commands that change the directory or environment of the
+// commands after them in the same shell.
+var shellStateCommands = []string{"cd", "pushd", "popd", "export", "set", "unset", "source", ".", "alias", "ulimit", "umask", "shopt", "eval", "nvm", "conda", "pyenv", "rbenv", "asdf", "mise", "direnv", "activate"}
+
+// shellStateChange reports whether a line of a run: block changes the directory or
+// environment of the lines after it (cd, export, source, a bare NAME=value, ...), in
+// any of its commands.
+func shellStateChange(line string) bool {
+	words := shellWords(line)
+	start := true
+	assignOnly := false
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if shellControlOp(w) {
+			if assignOnly {
+				return true
+			}
+			start = true
+			continue
+		}
+		if start {
+			start = false
+			if path.Base(w) == "set" {
+				j := i + 1
+				for j < len(words) && !shellControlOp(words[j]) {
+					j++
+				}
+				if !harmlessSet(words[i+1 : j]) {
+					return true
+				}
+				i = j - 1
+				continue
+			}
+			if slices.Contains(shellStateCommands, path.Base(w)) {
+				return true
+			}
+			if n, _, ok := strings.Cut(w, "="); ok && envName(n) {
+				assignOnly = true
+				start = true // NAME=v cmd: the next word is the command
+				continue
+			}
+			assignOnly = false
+		}
+	}
+	return assignOnly
+}
+
+// harmlessSetOptions are the shell options set may turn on or off without changing
+// the directory or environment the commands after it run in: error handling and
+// tracing (-e, -u, -x, -v, -o pipefail, ...).
+var harmlessSetOptions = map[string]bool{"errexit": true, "nounset": true, "pipefail": true, "xtrace": true, "verbose": true}
+
+// harmlessSet reports whether set with arguments args only changes harmless options
+// (harmlessSetOptions): set -euo pipefail, set -x, set +e. Anything else may change
+// what the tests see: -a (allexport) exports later assignments, positional parameters
+// (set -- a b, set a b) change "$@", and an option smates does not know counts too.
+func harmlessSet(args []string) bool {
+	letters := map[rune]string{'e': "errexit", 'u': "nounset", 'x': "xtrace", 'v': "verbose"}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) < 2 || a[0] != '-' && a[0] != '+' || a == "--" || a == "-" {
+			return false
+		}
+		for _, r := range a[1:] {
+			switch {
+			case r == 'o':
+				if i+1 < len(args) {
+					i++
+					if !harmlessSetOptions[args[i]] {
+						return false
+					}
+				}
+			case letters[r] != "":
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// matrixKeys returns the keys of a job's strategy.matrix (those of include entries
+// too), sorted, as the properties of matrix that name a leg: a dimension whose values
+// are objects ({os: ubuntu-latest, go: "1.22"}) is named by their properties
+// (platform.go, platform.os), since GitHub turns an object into the string "Object" in
+// a key. skip says why the smates step cannot get a cache-key per leg: the matrix, its
+// include or a dimension comes from an expression, or a value is a list or an object
+// holding more than plain values.
+func matrixKeys(m *yaml.Node) (keys []string, skip string) {
+	const expr = "the job's matrix comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg"
+	if m == nil {
+		return nil, ""
+	}
+	if m.Kind != yaml.MappingNode {
+		return nil, expr
+	}
+	add := func(k string) {
+		if !slices.Contains(keys, k) {
+			keys = append(keys, k)
+		}
+	}
+	// value adds the keys naming value v of dimension k; ok is false when none can.
+	value := func(k string, v *yaml.Node) bool {
+		switch v.Kind {
+		case yaml.ScalarNode:
+			if strings.Contains(v.Value, "${{") {
+				return false // fromJSON(...) may make it a list or an object
+			}
+			add(k)
+			return true
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				if p := v.Content[j+1]; p.Kind != yaml.ScalarNode || strings.Contains(p.Value, "${{") {
+					return false
+				}
+				add(k + "." + v.Content[j].Value)
+			}
+			return true
+		}
+		return false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k, v := m.Content[i].Value, m.Content[i+1]
+		switch k {
+		case "exclude":
+			continue
+		case "include":
+			if v.Kind != yaml.SequenceNode {
+				return nil, expr
+			}
+			for _, e := range v.Content {
+				if e.Kind != yaml.MappingNode {
+					return nil, expr
+				}
+				for j := 0; j+1 < len(e.Content); j += 2 {
+					if !value(e.Content[j].Value, e.Content[j+1]) {
+						return nil, fmt.Sprintf("the value of %q in an include entry of the job's matrix is an expression, a list or a nested object: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", e.Content[j].Value)
+					}
+				}
+			}
+			continue
+		}
+		if v.Kind != yaml.SequenceNode {
+			return nil, fmt.Sprintf("the job's matrix dimension %q comes from an expression: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", k)
+		}
+		for _, e := range v.Content {
+			if !value(k, e) {
+				return nil, fmt.Sprintf("the job's matrix dimension %q has a value that is an expression, a list or a nested object: smates cannot give each leg its own cache-key; switch the step by hand with `cache-key:` naming the leg", k)
+			}
+		}
+		if len(v.Content) == 0 {
+			add(k)
+		}
+	}
+	slices.Sort(keys)
+	return keys, ""
+}
+
 func mapGet(n *yaml.Node, key string) *yaml.Node {
 	if n == nil || n.Kind != yaml.MappingNode {
 		return nil
@@ -223,21 +500,224 @@ func mapGet(n *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// stepSuites returns the suites a test step covers.
-func stepSuites(st testStep, suites []config.Suite) []string {
-	var out []string
-	for _, s := range suites {
-		if st.Runners == nil || slices.Contains(st.Runners, s.Runner) {
-			out = append(out, s.Name)
+// defaultsWorkDir returns the defaults.run.working-directory of a workflow or a job.
+func defaultsWorkDir(n *yaml.Node) *yaml.Node {
+	return mapGet(mapGet(mapGet(n, "defaults"), "run"), "working-directory")
+}
+
+// workDir normalizes a working-directory value to a directory relative to the
+// repository root ("." for the root itself); ok is false for one smates cannot resolve:
+// an expression (other than the workspace), an absolute path, a path out of the
+// repository.
+func workDir(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	for _, ws := range []string{"${{ github.workspace }}", "${{github.workspace}}", "${GITHUB_WORKSPACE}", "$GITHUB_WORKSPACE"} {
+		if rest, ok := strings.CutPrefix(v, ws); ok && (rest == "" || rest[0] == '/') {
+			v = "." + rest
 		}
 	}
-	return out
+	if v == "" || strings.ContainsAny(v, "$`~\\") || path.IsAbs(v) {
+		return "", false
+	}
+	v = path.Clean(v)
+	if v == ".." || strings.HasPrefix(v, "../") {
+		return "", false
+	}
+	return v, true
+}
+
+// mergeEnv adds the scalar entries of an env: mapping to env (replacing a key's earlier
+// value).
+func mergeEnv(env [][2]string, n *yaml.Node) [][2]string {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return env
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i].Value, n.Content[i+1]
+		if v.Kind != yaml.ScalarNode {
+			continue
+		}
+		env = slices.DeleteFunc(env, func(kv [2]string) bool { return kv[0] == k })
+		env = append(env, [2]string{k, v.Value})
+	}
+	return env
+}
+
+// stepSuites returns the suites whose tests a workflow step runs, by its runner and by
+// the directory it runs in: every suite rooted at or below that directory (a nested
+// module or package may be reached too, so all of them are kept). When the directory
+// lies inside a suite's root instead, the step runs only part of that suite: the suite
+// is listed too, and partial names it.
+func stepSuites(st testStep, suites []config.Suite) (names []string, partial string) {
+	wd := st.WorkDir
+	if wd == "" {
+		wd = "."
+	}
+	rootAt := map[string]bool{} // runners with a suite rooted at wd
+	deepest := map[string]config.Suite{}
+	for _, s := range suites {
+		if st.Runners != nil && !slices.Contains(st.Runners, s.Runner) {
+			continue
+		}
+		root := cleanRoot(s.Root)
+		switch {
+		case wd == "." || root == wd || strings.HasPrefix(root, wd+"/"):
+			names = append(names, s.Name)
+			rootAt[s.Runner] = rootAt[s.Runner] || root == wd
+		case root == "." || strings.HasPrefix(wd, root+"/"):
+			if d, ok := deepest[s.Runner]; !ok || rootDepth(root) > rootDepth(cleanRoot(d.Root)) {
+				deepest[s.Runner] = s
+			}
+		}
+	}
+	for _, r := range slices.Sorted(maps.Keys(deepest)) {
+		s := deepest[r]
+		// A suite rooted at wd ends the outer one there (a Go module, a package), and an
+		// outer suite may exclude the directory.
+		if rootAt[r] || excludesDir(s, wd) {
+			continue
+		}
+		names = append(names, s.Name)
+		if partial == "" {
+			partial = s.Name
+		}
+	}
+	return names, partial
+}
+
+func cleanRoot(root string) string {
+	if root == "" {
+		return "."
+	}
+	return path.Clean(root)
+}
+
+func rootDepth(root string) int {
+	if root == "." {
+		return 0
+	}
+	return strings.Count(root, "/") + 1
+}
+
+// excludesDir reports whether an exclude: pattern of suite s leaves out all of
+// directory dir (repo-relative, inside the suite's root).
+func excludesDir(s config.Suite, dir string) bool {
+	rel := dir
+	if root := cleanRoot(s.Root); root != "." {
+		rel = strings.TrimPrefix(dir, root+"/")
+	}
+	for _, e := range s.Exclude {
+		e = strings.TrimSuffix(strings.TrimSuffix(e, "/**"), "/")
+		if e != "" && !strings.ContainsAny(e, "*?[{") && (rel == e || strings.HasPrefix(rel, e+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// stepPatch returns the suites the smates action would run in place of a workflow
+// step, and why it cannot stand in for the step ("" when it can).
+func stepPatch(st testStep, suites []config.Suite) ([]string, string) {
+	names, partial := stepSuites(st, suites)
+	switch {
+	case st.Skip != "":
+		return names, st.Skip
+	case len(names) == 0:
+		return nil, "it runs tests of no suite smates detected"
+	case partial != "":
+		s := suites[slices.IndexFunc(suites, func(s config.Suite) bool { return s.Name == partial })]
+		return names, fmt.Sprintf("it runs in %s, inside suite %q (root %s), so it runs only part of that suite and the smates action would select among all of it: add a suite rooted at %s to smates.yml, or switch the step by hand", st.WorkDir, s.Name, cleanRoot(s.Root), st.WorkDir)
+	}
+	if len(st.Paths) > 0 {
+		// The step collects only below the paths it names: the suites rooted there are
+		// what it runs; a suite holding such a path runs more than the step did.
+		wd := cleanRoot(st.WorkDir)
+		var kept []string
+		for _, s := range suites {
+			if !slices.Contains(names, s.Name) {
+				continue
+			}
+			root := cleanRoot(s.Root)
+			for _, p := range st.Paths {
+				d := path.Join(wd, p)
+				switch {
+				case d == "." || root == d || strings.HasPrefix(root, d+"/"):
+					kept = append(kept, s.Name)
+				case root == "." || strings.HasPrefix(d, root+"/"):
+					return names, fmt.Sprintf("it runs only the tests under %s, inside suite %q (root %s): smates selects among all of the suite's tests; switch it by hand if those are the suite's tests", p, s.Name, root)
+				default:
+					continue
+				}
+				break
+			}
+		}
+		if len(kept) == 0 {
+			return nil, "it runs tests of no suite smates detected"
+		}
+		names = kept
+	}
+	for _, s := range suites {
+		if s.Runner != "go" || !slices.Contains(names, s.Name) {
+			continue
+		}
+		_, args, ok := goSuiteCommand(s.Command)
+		if !ok {
+			// A wrapper (gotestsum -- -tags=..., make test, sh -c "...") may pass
+			// flags that leave tests out; smates cannot tell.
+			keep := ""
+			if !st.Carry.empty() {
+				keep = " and that it keeps " + st.Carry.String()
+			}
+			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) is not go test itself, so smates cannot tell whether it passes -tags, -race, -short, -run or -skip, which could leave out tests the step runs: check that it does not%s, then switch the step by hand", s.Name, s.Command, keep)
+		}
+		// The suite's env: GOFLAGS applies to its go test too (the command line's flags
+		// win over it).
+		goflags := s.Env["GOFLAGS"]
+		envCarry, ok := goflagsCarry(goflags)
+		if !ok {
+			return names, fmt.Sprintf("suite %q in smates.yml sets GOFLAGS=%s in its env:, whose value smates cannot read: it may pass flags that leave out tests the step runs; put them in the suite's command, or switch the step by hand", s.Name, goflags)
+		}
+		parsed, _ := runner.ParseGoTestArgs(args, false)
+		// The other way round: a suite command that leaves tests out would run fewer
+		// tests than the step it replaces.
+		if f := goArgsFilter(parsed); f != "" {
+			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes %s, so the smates step would leave out tests the step runs: drop it from the command, or switch the step by hand", s.Name, s.Command, f)
+		}
+		if f := goflagsFilter(goflags); f != "" {
+			return names, fmt.Sprintf("suite %q in smates.yml sets GOFLAGS=%s in its env:, whose %s would make the smates step leave out tests the step runs: drop it, or switch the step by hand", s.Name, goflags, f)
+		}
+		have := goCarryOf(parsed).over(envCarry)
+		where := fmt.Sprintf("the command of suite %q in smates.yml (%s)", s.Name, s.Command)
+		if goflags != "" {
+			where = fmt.Sprintf("suite %q in smates.yml (command %s, env GOFLAGS=%s)", s.Name, orGoTest(s.Command), goflags)
+		}
+		// -tags can leave test files out (//go:build !fast) as well as add them: a
+		// suite command with tags the step does not pass may not compile tests the
+		// step runs. (A step with -tags of its own is checked below.)
+		if len(have.Tags) > 0 && len(st.Carry.Tags) == 0 {
+			return names, fmt.Sprintf("%s passes -tags %s, which the step does not: build constraints may leave out test files the step compiles, so the smates step could skip tests it runs; drop -tags from the suite, or switch the step by hand", where, strings.Join(have.Tags, ","))
+		}
+		if st.Carry.empty() {
+			continue
+		}
+		if unmet := st.Carry.unmet(have); len(unmet) > 0 {
+			want, _, _ := withGoCarry(s.Command, st.Carry)
+			return names, fmt.Sprintf("it runs go test with %s, which the command of suite %q in smates.yml (%s) lacks: set `command: %s` for the suite, then rerun", strings.Join(unmet, ", "), s.Name, orGoTest(s.Command), yamlStr(want))
+		}
+	}
+	return names, ""
+}
+
+func orGoTest(command string) string {
+	if command == "" {
+		return "go test"
+	}
+	return command
 }
 
 var (
 	cacheKeyRe  = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
-	plainWordRe = regexp.MustCompile(`^[A-Za-z0-9_./:@-]+$`)
-	shellSepRe  = regexp.MustCompile(`&&|;|\|\|`)
+	plainWordRe = regexp.MustCompile(`^[A-Za-z0-9_./:@,=-]+$`)
 )
 
 // keptStepKeys are copied from a replaced test step to the smates step.
@@ -248,17 +728,28 @@ var keptStepKeys = []string{"id", "if", "timeout-minutes", "continue-on-error", 
 // over. A step that only runs the tests is replaced (keeping its id, if,
 // timeout-minutes, continue-on-error and env); when its run: block also runs other
 // commands, only the test line is removed and the smates step goes right after it.
-// The smates step gets --suite when the step's runner covers only some suites, and its
-// own cache-key when the tests run in several steps.
-func workflowPatch(root string, steps []testStep, suites []config.Suite) (string, []string) {
-	var todo []testStep
+// The smates step gets --suite for the suites the step ran (by its runner and the
+// directory it runs in), and a cache-key naming them when the tests run in several
+// steps. A workflow that then runs smates only on pull requests also gets a push
+// trigger for the default branch (def) and a nightly schedule, which record the state
+// pull requests start from; so does a workflow that already runs smates that way
+// (seedOnly).
+func workflowPatch(root string, steps []testStep, suites []config.Suite, def string, seedOnly ...string) (string, []string) {
+	type patched struct {
+		testStep
+		names []string
+	}
+	var todo []patched
 	for _, st := range steps {
-		if st.Skip == "" && len(stepSuites(st, suites)) > 0 {
-			todo = append(todo, st)
+		if names, why := stepPatch(st, suites); why == "" {
+			todo = append(todo, patched{st, names})
 		}
 	}
-	split := len(todo) > 1
-	byFile := map[string][]testStep{}
+	// Smates steps the workflows already have count too: a step patched in next to
+	// one of them must not share its state (nor take its cache-key).
+	existing, existingKeys := existingSmatesSteps(root)
+	split := len(todo)+existing > 1
+	byFile := map[string][]patched{}
 	var order []string
 	for _, st := range todo {
 		if byFile[st.File] == nil {
@@ -266,7 +757,45 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite) (string
 		}
 		byFile[st.File] = append(byFile[st.File], st)
 	}
-	keys := map[string]int{}
+	for _, f := range seedOnly {
+		if !slices.Contains(order, f) {
+			order = append(order, f)
+		}
+	}
+	// One cache key per job and set of suites: steps of a job running the same suites
+	// share state (as do jobs of the same name in different workflows: a push workflow
+	// seeding the state of the pull request one). Other jobs may run in another
+	// environment (a runtime version, other services), where a test that passes in one
+	// can fail in the other, so they never share a key; nor do the legs of a matrix job,
+	// whose key names the leg.
+	keyOf := map[string]string{} // job + suite set -> key
+	used := map[string]bool{}
+	for _, k := range existingKeys {
+		used[k] = true
+	}
+	cacheKey := func(st patched) string {
+		set := st.Job + "\x00" + strings.Join(st.names, "\x00")
+		key, ok := keyOf[set]
+		if !ok {
+			slug := func(s string) string { return strings.Trim(cacheKeyRe.ReplaceAllString(s, "-"), "-") }
+			base := slug(st.Job)
+			if len(st.names) <= 3 {
+				base = slug(strings.Join(st.names, "-"))
+			}
+			if used[base] && base != slug(st.Job) {
+				base += "-" + slug(st.Job)
+			}
+			key = base
+			for n := 2; used[key]; n++ {
+				key = base + "-" + strconv.Itoa(n)
+			}
+			used[key], keyOf[set] = true, key
+		}
+		for _, k := range st.Matrix {
+			key += "-${{ matrix." + k + " }}"
+		}
+		return key
+	}
 	var notes []string
 	var b strings.Builder
 	for _, f := range order {
@@ -291,13 +820,8 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite) (string
 			}
 			return out
 		}
-		var outLines []string
-		next := 1
+		var edits []lineEdit
 		for _, st := range byFile[f] {
-			if st.Line < next {
-				continue
-			}
-			names := stepSuites(st, suites)
 			ind := strings.Repeat(" ", st.Dash)
 			name := st.Step
 			if strings.HasPrefix(name, "#") {
@@ -308,48 +832,49 @@ func workflowPatch(root string, steps []testStep, suites []config.Suite) (string
 				if k == "id" && st.TestLine > 0 {
 					continue // the original step stays and keeps its id
 				}
-				rep = append(rep, block(st, k)...)
+				rep = append(rep, block(st.testStep, k)...)
 			}
 			rep = append(rep, ind+"  uses: "+actSmates, ind+"  with:")
-			if len(names) < len(suites) {
+			if len(st.names) < len(suites) {
 				args := ""
-				for _, n := range names {
+				for _, n := range st.names {
 					args += " --suite " + shellQuote(n)
 				}
 				rep = append(rep, ind+"    args: "+yamlStr(strings.TrimSpace(args)))
 			}
-			if split {
-				key := cacheKeyRe.ReplaceAllString(st.Job, "-")
-				if keys[key]++; keys[key] > 1 {
-					key += "-" + strconv.Itoa(keys[key])
-				}
-				rep = append(rep, ind+"    cache-key: "+yamlStr(key))
-			}
-			if wd := st.WorkDir; wd != "" {
-				if fileExists(root, joinRel(wd, "smates.yml")) {
-					rep = append(rep, ind+"    working-directory: "+yamlStr(wd))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: step %q ran in working-directory %s; smates runs from the repository root, where smates.yml lists the suites by root (set the action's working-directory input if your smates.yml lives in %s)", f, st.Step, wd, wd))
-				}
+			if split || len(st.Matrix) > 0 {
+				rep = append(rep, ind+"    cache-key: "+yamlStr(cacheKey(st)))
 			}
 			rep = append(rep, ind+"    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional (or openai-api-key / openrouter-api-key)")
-			rep = append(rep, block(st, "env")...)
-			if crlf {
-				for i, l := range rep {
-					if !strings.HasSuffix(l, "\r") {
-						rep[i] = l + "\r"
-					}
-				}
-			}
+			rep = append(rep, block(st.testStep, "env")...)
 			if st.TestLine > 0 {
-				outLines = append(outLines, lines[next-1:st.TestLine-1]...)
-				outLines = append(outLines, lines[st.TestLine:st.End]...)
+				edits = append(edits, lineEdit{From: st.TestLine, To: st.TestLine}, lineEdit{From: st.End + 1, To: st.End, Lines: rep})
 				notes = append(notes, fmt.Sprintf("%s: step %q also runs other commands: only %q moves to the smates step after it", f, st.Step, st.Command))
 			} else {
-				outLines = append(outLines, lines[next-1:st.Line-1]...)
+				edits = append(edits, lineEdit{From: st.Line, To: st.End, Lines: rep})
 			}
-			outLines = append(outLines, rep...)
-			next = st.End + 1
+		}
+		if e, n, ok := seedPatch(f, data, def); ok {
+			edits = append(edits, e)
+			notes = append(notes, n...)
+		} else {
+			notes = append(notes, n...)
+		}
+		sort.SliceStable(edits, func(i, j int) bool { return edits[i].From < edits[j].From })
+		var outLines []string
+		next := 1
+		for _, e := range edits {
+			if e.From < next {
+				continue // overlaps an earlier edit
+			}
+			outLines = append(outLines, lines[next-1:e.From-1]...)
+			for _, l := range e.Lines {
+				if crlf && !strings.HasSuffix(l, "\r") {
+					l += "\r"
+				}
+				outLines = append(outLines, l)
+			}
+			next = e.To + 1
 		}
 		outLines = append(outLines, lines[next-1:]...)
 		if nw := strings.Join(outLines, "\n"); nw != old {

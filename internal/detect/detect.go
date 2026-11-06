@@ -4,6 +4,7 @@ package detect
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -43,11 +44,27 @@ func (p *packageJSON) has(dep string) bool {
 	return a || b
 }
 
+// vitestProjectConfigRe matches a per-project vitest configuration file
+// (vitest.stories.config.ts), which configures vitest when a command names it.
+var vitestProjectConfigRe = regexp.MustCompile(`^vitest\.[^.]+\.config\.(ts|mts|cts|js|mjs|cjs)$`)
+
+// vitestMentionRe matches what makes a vite.config.* configure vitest: an import of
+// vitest, or a test key.
+var vitestMentionRe = regexp.MustCompile(`["']vitest(?:/[^"']*)?["']|\btest\s*:`)
+
 var vitestConfigRe = regexp.MustCompile(`^(vitest\.config|vite\.config|vitest\.workspace)\.(ts|mts|cts|js|mjs|cjs|json)$`)
 var jestConfigRe = regexp.MustCompile(`^jest\.config\.(ts|mts|cts|js|mjs|cjs|json)$`)
 
 // Suites detects suites from the files of the working tree.
 func Suites(repo *gitx.Repo, files []string) []config.Suite {
+	s, _ := Detect(repo, files)
+	return s
+}
+
+// Detect is Suites that also returns notes on the directories that configure a test
+// runner but got no suite, because no test file was found there (a package whose only
+// tests are Storybook stories smates cannot read, say) or its suite is invalid.
+func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 	var out []config.Suite
 	dirFiles := map[string][]string{}
 	for _, f := range files {
@@ -88,6 +105,10 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	// JS: one suite per package that uses a test runner, unless an ancestor suite with
 	// the same runner already covers it (workspace-level vitest/jest config).
 	jsRoots := map[string]string{}
+	// vitestConfigured: the package has a vitest configuration (a vitest.config.*, a
+	// workspace or per-project file, or a vite.config.* importing vitest or with a test
+	// key), so finding no test file is worth a note; a plain Vite app is not.
+	vitestConfigured := map[string]bool{}
 	for _, d := range dirs {
 		if !has(d, "package.json") {
 			continue
@@ -102,6 +123,26 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 		var tests []string
 		_, craAt, craBin := craTest(test)
 		nodeCommand, nodeEnv, isNodeTest := nodeTest(test)
+		vitestConfigured[d] = hasMatch(d, vitestProjectConfigRe) ||
+			slices.ContainsFunc(dirFiles[d], func(n string) bool {
+				if !vitestConfigRe.MatchString(n) {
+					return false
+				}
+				if !strings.HasPrefix(n, "vite.config.") {
+					return true
+				}
+				src, _ := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(d), n))
+				return vitestMentionRe.Match(src)
+			})
+		jestNamed, bunNamed := strings.Contains(test, "jest"), strings.Contains(test, "bun test")
+		if hasMatch(d, vitestProjectConfigRe) {
+			// Over a per-project vitest file, jest and bun win only when the script (or
+			// a package script it runs) invokes them: a script named test:jest-x, or
+			// bun test:unit running a package script, names no runner.
+			run := scriptClosure(pj.Scripts, test)
+			jestNamed = slices.ContainsFunc(run, runsJest)
+			bunNamed = slices.ContainsFunc(run, runsBunTest)
+		}
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
@@ -115,13 +156,18 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			if !jestHasKey(pj.Jest, "testMatch") && (craBin == "react-scripts" || craBin == "" || !hasMatch(d, craWrapperConfig)) {
 				tests = craTests
 			}
-		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
+		case pj.has("jest") || jestNamed || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
-		case strings.Contains(test, "bun test"):
+		case bunNamed:
 			r = "bun"
 		case isNodeTest || strings.Contains(test, "node --experimental-test"):
 			r = "node"
 			command, env = nodeCommand, nodeEnv
+		case hasMatch(d, vitestProjectConfigRe):
+			// A per-project file (vitest.stories.config.ts) configures vitest only
+			// when named: it picks vitest only when nothing else names the runner of the
+			// package's tests (a test script, a dependency, a configuration).
+			r = "vitest"
 		case has(d, "bun.lock") || has(d, "bun.lockb") || has(d, "bunfig.toml"):
 			r = "bun"
 		}
@@ -169,6 +215,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	// Keep suites that have tests (as the runner's configuration or the default
 	// patterns describe them); give them unique names.
 	var kept []config.Suite
+	var notes []string
 	for _, s := range out {
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {
@@ -177,7 +224,31 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			}
 		}
 		rs, err := runner.NewSuite(repo, s)
-		if err != nil || len(rs.TestFiles(files)) == 0 {
+		configured := s.Runner == "vitest" && vitestConfigured[s.Root] || s.Runner == "jest" && hasMatch(s.Root, jestConfigRe)
+		switch {
+		case err != nil:
+			if configured {
+				notes = append(notes, fmt.Sprintf("%s: no %s suite: %v", s.Root, s.Runner, err))
+			}
+			continue
+		case len(rs.TestFiles(files)) == 0:
+			if configured {
+				why := ""
+				if rs.DiscoveryWarning != "" {
+					why = " (" + rs.DiscoveryWarning + ")"
+				}
+				if s.Runner == "vitest" && !hasMatch(s.Root, vitestConfigRe) {
+					// Only per-project files: vitest reads one when the command names it.
+					for _, n := range dirFiles[s.Root] {
+						if vitestProjectConfigRe.MatchString(n) {
+							why += fmt.Sprintf(" (%s configures vitest only when named: set command: vitest run --config %s)", n, n)
+							break
+						}
+					}
+				}
+				notes = append(notes, fmt.Sprintf("%s: no %s suite: its configuration names no test file smates can find (test patterns: %s)%s; write the suite in smates.yml with tests: if it has tests",
+					s.Root, s.Runner, strings.Join(rs.TestPatterns(), " "), why))
+			}
 			continue
 		}
 		kept = append(kept, s)
@@ -197,7 +268,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			s.Name = s.Runner + ":" + s.Root
 		}
 	}
-	return kept
+	return kept, notes
 }
 
 // pythonProjects returns the Python project directories, sorted (parents before

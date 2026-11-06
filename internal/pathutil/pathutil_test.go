@@ -178,6 +178,8 @@ func TestMatchAndVendored(t *testing.T) {
 		"node_modules/x/i.js": true, "a/node_modules/b": true, ".git/config": true, "src/__pycache__/m.pyc": true,
 		"x.pyc": true, ".venv/lib/a.py": true, ".smates/state.json.gz": true, "a/.pytest_cache/v": true, ".tox/x": true,
 		"src/node_modules_extra/x": false, "src/a.py": false, "venv/lib/a.py": false, "my.git/x": false,
+		"node_modules": true, "a/.git": true, "a//.nox/b": true, "/node_modules/x": true, "": false, "/": false,
+		"a/node_modules.js": false, ".github/x": false, "a/b.pyc/c": false, "a/x.pyc.txt": false,
 	}
 	for p, want := range vendored {
 		if IsVendored(p) != want {

@@ -128,11 +128,16 @@ api	runner=go	root=services/api	units=32	command=go test	tests=runner defaults
 - **既存のワークフロー**: すでにテストを実行しているワークフローがあれば、2 つ目は
   作りません。代わりに、そのステップを smates アクションに置き換えるパッチを表示します
   （`--patch FILE` で `git apply` 用に書き出し、`--force` で新しいワークフローを書きます）。
+  対象を絞った実行やマトリクスのレグのように正確に置き換えられないステップは、報告して
+  そのままにします。pull request でしか実行されないワークフローには、ステートを記録する
+  トリガも追加します（[既存のワークフローを切り替える](../ci/github-actions.md#switch-existing-workflows) を参照）。
 - **既存の `smates.yml`**: 手を付けず、そのスイートからワークフロー（またはパッチ）だけを
   生成します。`--force` を付けると書き直します。
 
 Makefile の `test` ターゲットのフラグや変数は、`smates.yml` にコメントの `command:` /
-`env:` ヒントとして書かれます。`smates init --format json` は、確認すべき項目も含めて
+`env:` ヒントとして書かれます。テストを実行するワークフローのステップの `env:` も同様です。
+どちらかにある `go test` のフラグ `-p`、`-tags`、`-race`、`-timeout` は、スイートの
+`command:` そのものに入ります。`smates init --format json` は、確認すべき項目も含めて
 これらをスクリプトやコーディングエージェント向けに出力します。
 
 ## 次のステップ { #next-steps }

@@ -149,6 +149,17 @@ grep -q -- "--source-digest" "$gh_calls" && fail "verify: empty digest passed"
 [ "$(GH_TOKEN='' GITHUB_TOKEN='' status_of verify '' attestation false)" = 2 ] || fail "verify: no token"
 [ "$(GH_TOKEN='' GITHUB_TOKEN='' status_of verify '' auto false)" = 1 ] || fail "verify: no token, auto falls back"
 
+# --- smates_restore_base
+p=smates-state-Linux-
+expect "base differs" 0 "${p}release-" smates_restore_base "$p" feature release main
+expect "no base (push, schedule)" 0 "${p}main-" smates_restore_base "$p" main '' main
+expect "no base, other branch" 0 "${p}topic-" smates_restore_base "$p" topic '' main
+expect "base is the default" 0 "${p}feature-" smates_restore_base "$p" feature main main
+expect "base is the branch" 0 "${p}release-" smates_restore_base "$p" release release main
+expect "comma in base" 0 "${p}rel_1-" smates_restore_base "$p" feature 'rel,1' main
+expect "comma in base equal to sanitized branch" 0 "${p}a_b-" smates_restore_base "$p" a_b 'a,b' main
+expect "with cache-key" 0 "${p}unit-release-" smates_restore_base "${p}unit-" feature release main
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)"
   exit 1

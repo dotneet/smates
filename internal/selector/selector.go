@@ -2,7 +2,10 @@
 package selector
 
 import (
+	"time"
+
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
@@ -16,6 +19,9 @@ const (
 	ReasonNew        = "new"        // no recorded entry for this test
 	ReasonChanged    = "changed"    // an input changed since the test last passed
 	ReasonFailed     = "failed"     // the test did not pass last time
+	ReasonUnproven   = "unproven"   // the test skipped itself last time: its pass is not proven
+	ReasonVolatile   = "volatile"   // the suite's volatile lists it: it runs every time
+	ReasonExpired    = "expired"    // its last recorded run is older than the suite's max_age
 	ReasonOrphan     = "orphan"     // orphan policy "all" pulled the suite in
 	ReasonReference  = "reference"  // a test references an orphan file by name
 	ReasonAgent      = "agent"      // the agent asked for it
@@ -73,6 +79,8 @@ type Input struct {
 	// --orphans=skip), so the changes that would be orphans for the tests
 	// DiffUnrecorded decides by static analysis select none of them either.
 	NoOrphanPolicy bool
+	// Now is the time max_age is measured against (zero: the current time).
+	Now time.Time
 }
 
 // Test is the decision for one test unit.
@@ -118,6 +126,13 @@ type Suite struct {
 	Unrecorded bool `json:"-"`
 	// Services are the suite's depends_on/serves declarations, expanded at HEAD.
 	Services []*ServiceDeps `json:"-"`
+	// Browser is set when the suite's runner configuration may run tests in a browser
+	// (runner.RunnerConfig): what they load there is never traced.
+	Browser bool `json:"-"`
+	// Untrusted holds, with trust_browser_passes, the tests that run in a browser whose
+	// known dependencies may not be all they load, and why: recording keeps their
+	// reported passes unknown (see Record).
+	Untrusted map[string]string `json:"-"`
 }
 
 // ServiceDeps is one depends_on/serves declaration of a suite expanded to files: code
@@ -232,6 +247,11 @@ type Result struct {
 	// declared are the depends_on/serves declarations some test depends on (their
 	// files are in Covered; Explains also matches deleted ones).
 	declared []*ServiceDeps
+	// coverIndex indexes Covered for Explains.
+	coverIndex *depkey.CoverIndex
+	// loaded are the files a suite's runner loads through its configuration
+	// (runner.RunnerConfig): never untested code.
+	loaded map[string]bool
 }
 
 // HandleOrphans records how orphans were handled; earlier records win.

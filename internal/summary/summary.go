@@ -54,6 +54,8 @@ type Run struct {
 	// Interrupted: the run was cancelled (Ctrl-C), so NotRun were cut short, not left
 	// out by --fail-fast.
 	Interrupted bool
+	// MaxTime is set when --max-time, not --fail-fast, left NotRun out.
+	MaxTime time.Duration
 }
 
 // Section is an extra block of the summary.
@@ -254,6 +256,9 @@ func (v *view) run(b *strings.Builder) {
 	}
 	if len(r.NotRun) > 0 && r.Interrupted {
 		fmt.Fprintf(b, "\n**Interrupted:** %s not run (still selected next time):\n", plural(len(r.NotRun), "selected test unit"))
+		list(b, r.NotRun, maxItems)
+	} else if len(r.NotRun) > 0 && r.MaxTime > 0 {
+		fmt.Fprintf(b, "\n**Time limit:** %s not started within --max-time %s (still selected next time):\n", plural(len(r.NotRun), "selected test unit"), r.MaxTime)
 		list(b, r.NotRun, maxItems)
 	} else if len(r.NotRun) > 0 {
 		fmt.Fprintf(b, "\n**Fail fast:** %s not started after the first failure (still selected next time):\n", plural(len(r.NotRun), "selected test unit"))
@@ -544,6 +549,12 @@ func reasonLabel(r string) string {
 	switch r {
 	case selector.ReasonFailed:
 		return "Failed or unfinished last time"
+	case selector.ReasonUnproven:
+		return "Skipped last time (not proven)"
+	case selector.ReasonVolatile:
+		return "Volatile (runs every time)"
+	case selector.ReasonExpired:
+		return "Last run older than max_age"
 	case selector.ReasonNew:
 		return "Never recorded"
 	case selector.ReasonAgent:

@@ -11,12 +11,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
 )
 
-// ---- Claude Code Stop hook ----
+// ---- Claude Code and Codex Stop hooks ----
 //
 // `smates hook install --claude` adds a Stop hook to Claude Code's settings.json that
 // runs `smates hook claude-stop`. When Claude is about to end its turn, the hook runs the
@@ -30,35 +31,65 @@ import (
 // already continuing because of a Stop hook; the hook then never blocks again, so it
 // cannot loop. Errors of smates itself (configuration, environment) exit 1, which Claude
 // Code shows to the user without blocking.
+//
+// `smates hook install --codex` does the same for Codex, whose .codex/hooks.json has
+// the same "hooks" object, Stop input and block decision; its hook runs
+// `smates hook codex-stop`.
+//
+// Units the run leaves for later (--max-time, which the hooks default to
+// hookMaxTime, and unmet requires) do not block: the hook prints one line to stderr and
+// exits 0, and they stay selected.
 
 const (
 	// claudeHookMarker identifies smates' entry among the Stop hooks.
 	claudeHookMarker = "smates hook claude-stop"
+	// codexHookMarker identifies smates' entry among Codex's Stop hooks.
+	codexHookMarker = "smates hook codex-stop"
 	// claudeHookTimeout is the hook's timeout in seconds (the selected tests must finish).
 	claudeHookTimeout = 600
+	// hookMaxTime is the --max-time of the hook's run unless its run flags set one: the
+	// hook's timeout less a margin for selecting, recording and estimates that are off.
+	hookMaxTime = (claudeHookTimeout - 120) * time.Second
 	// maxClaudeReason bounds the reason fed back to Claude (its end is kept).
 	maxClaudeReason = 16 << 10
 )
 
-// claudeSettingsPath is the project's .claude/settings.json, or the user's with user.
-func claudeSettingsPath(repo *gitx.Repo, user bool) (string, error) {
+// agentHook is a coding agent smates installs a Stop hook for.
+type agentHook struct {
+	name   string // "Claude Code"
+	agent  string // what ends its turn: "Claude"
+	flag   string // the flag of `smates hook install`: "--claude"
+	marker string // the hook command, which identifies smates' entry
+	dir    string // the settings directory under the repository (or home) root
+	file   string // the settings file in dir
+}
+
+var (
+	claudeHook = agentHook{name: "Claude Code", agent: "Claude", flag: "--claude", marker: claudeHookMarker, dir: ".claude", file: "settings.json"}
+	// Codex reads project hooks from .codex/hooks.json (in a trusted project).
+	codexHook = agentHook{name: "Codex", agent: "Codex", flag: "--codex", marker: codexHookMarker, dir: ".codex", file: "hooks.json"}
+)
+
+// settingsPath is the project's settings file of the agent, or the user's with user.
+func (a agentHook) settingsPath(repo *gitx.Repo, user bool) (string, error) {
 	if user {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(home, ".claude", "settings.json"), nil
+		return filepath.Join(home, a.dir, a.file), nil
 	}
 	if repo == nil {
-		return "", errors.New("not in a git repository (use --user for ~/.claude/settings.json)")
+		return "", fmt.Errorf("not in a git repository (use --user for ~/%s/%s)", a.dir, a.file)
 	}
-	return filepath.Join(repo.Root, ".claude", "settings.json"), nil
+	return filepath.Join(repo.Root, a.dir, a.file), nil
 }
 
-// claudeHookCommand is the shell command of the Stop hook. It does nothing when smates
-// is not installed, so a committed project setting does not break teammates without it.
-func claudeHookCommand(user bool, runArgs []string) string {
-	cmd := claudeHookMarker
+// command is the shell command of the Stop hook. It does nothing when smates is not
+// installed, so a committed project setting does not break teammates without it. It
+// finds smates on PATH, so it works in every worktree of the repository.
+func (a agentHook) command(user bool, runArgs []string) string {
+	cmd := a.marker
 	if user {
 		// In every project: only those configured for smates.
 		cmd += " --require-config"
@@ -69,8 +100,13 @@ func claudeHookCommand(user bool, runArgs []string) string {
 	return "if command -v smates >/dev/null 2>&1; then " + cmd + "; fi"
 }
 
-// claudeHookCmd is `smates hook install|uninstall|status --claude [--user]`.
-func claudeHookCmd(sub, dir string, user, useAgent bool, extra []string, stdout io.Writer) (int, error) {
+// claudeHookCommand is the shell command of the Claude Code Stop hook.
+func claudeHookCommand(user bool, runArgs []string) string {
+	return claudeHook.command(user, runArgs)
+}
+
+// agentHookCmd is `smates hook install|uninstall|status --claude|--codex [--user]`.
+func agentHookCmd(a agentHook, sub, dir string, user, useAgent bool, extra []string, stdout io.Writer) (int, error) {
 	if dir == "" {
 		dir = "."
 	}
@@ -81,7 +117,7 @@ func claudeHookCmd(sub, dir string, user, useAgent bool, extra []string, stdout 
 	if err != nil {
 		repo = nil
 	}
-	path, err := claudeSettingsPath(repo, user)
+	path, err := a.settingsPath(repo, user)
 	if err != nil {
 		return 1, asEnvError(err)
 	}
@@ -91,84 +127,126 @@ func claudeHookCmd(sub, dir string, user, useAgent bool, extra []string, stdout 
 		if !useAgent {
 			runArgs = append(runArgs, "--no-agent")
 		}
-		err = installClaudeHook(path, claudeHookCommand(user, append(runArgs, extra...)), stdout)
+		err = installAgentHook(a, path, a.command(user, append(runArgs, extra...)), stdout)
 	case "uninstall":
-		err = uninstallClaudeHook(path, stdout)
+		err = uninstallAgentHook(a, path, stdout)
 	case "status":
-		claudeHookStatus(repo, stdout)
+		agentHookStatus(repo, stdout)
 	default:
 		return 2, usageError{fmt.Errorf("unknown hook command %q", sub)}
 	}
 	if err != nil {
-		return 1, err
+		return hookSetupError(err)
 	}
 	return 0, nil
 }
 
-// claudeHookStatus prints whether the project's and the user's settings run smates.
-func claudeHookStatus(repo *gitx.Repo, stdout io.Writer) {
-	for _, user := range []bool{false, true} {
-		path, err := claudeSettingsPath(repo, user)
+// hookSetupError is the exit code and error of installing, removing or reading a hook
+// that failed: a settings file smates cannot edit (not JSON, an unexpected layout) is
+// the user's to fix (a configuration error, exit 3); anything else, such as a file
+// that cannot be read or written or a hook script already there, is the environment's
+// (exit 4). Never "tests failed".
+func hookSetupError(err error) (int, error) {
+	var ue usageError
+	var ce configError
+	switch {
+	case errors.As(err, &ue):
+		return ExitUsage, err
+	case errors.As(err, &ce):
+		return ExitConfig, err
+	}
+	return ExitEnv, asEnvError(err)
+}
+
+// hasRunFlag reports whether run flags args (up to a "--", after which the runner's
+// arguments follow) set flag name, with one dash or two, with or without "=value".
+func hasRunFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if n, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "="); strings.HasPrefix(a, "-") && n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// agentHookStatus prints whether the project's and the user's Claude Code settings,
+// and the project's Codex hooks, run smates.
+func agentHookStatus(repo *gitx.Repo, stdout io.Writer) {
+	for _, h := range []struct {
+		a    agentHook
+		user bool
+	}{{claudeHook, false}, {claudeHook, true}, {codexHook, false}} {
+		path, err := h.a.settingsPath(repo, h.user)
 		if err != nil {
 			continue
 		}
 		scope := "project"
-		if user {
+		if h.user {
 			scope = "user"
 		}
 		status := "not installed"
-		if ok, err := claudeHookInstalled(path); err != nil {
+		if ok, err := agentHookInstalled(h.a, path); err != nil {
 			status = "unreadable: " + err.Error()
 		} else if ok {
 			status = "installed"
 		}
-		fmt.Fprintf(stdout, "Claude Code Stop hook (%s): %s\n  %s\n", scope, status, path)
+		fmt.Fprintf(stdout, "%s Stop hook (%s): %s\n  %s\n", h.a.name, scope, status, path)
 	}
 }
 
-// claudeStopInput is the part of Claude Code's Stop hook input smates reads.
-type claudeStopInput struct {
+// stopInput is the part of the Stop hook input (Claude Code's and Codex's) smates
+// reads.
+type stopInput struct {
 	StopHookActive bool   `json:"stop_hook_active"`
 	Cwd            string `json:"cwd"`
 }
 
-// hookClaudeStop is what the Claude Code Stop hook runs:
-// `smates hook claude-stop [--require-config] [-- run flags]`. It always exits 0
-// (allow or block via JSON) or 1 (an error shown to the user): exit code 2 would feed
-// smates' own errors back to Claude as if they were test failures.
-func hookClaudeStop(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+// hookAgentStop is what the Stop hook of agent a runs:
+// `smates hook claude-stop|codex-stop [--require-config] [-- run flags]`. It always
+// exits 0 (allow or block via JSON) or 1 (an error shown to the user): exit code 2
+// would feed smates' own errors back to the agent as if they were test failures.
+func hookAgentStop(ctx context.Context, a agentHook, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	requireConfig := false
 	var runArgs []string
-	for i, a := range args {
-		if a == "--" {
+	for i, arg := range args {
+		if arg == "--" {
 			runArgs = args[i+1:]
 			break
 		}
-		if a == "--require-config" {
+		if arg == "--require-config" {
 			requireConfig = true
 			continue
 		}
-		if isHelp(a) {
-			fmt.Fprintln(stdout, "usage: smates hook claude-stop [--require-config] [-- run flags]")
+		if isHelp(arg) {
+			fmt.Fprintf(stdout, "usage: %s [--require-config] [-- run flags]\n", a.marker)
 			return 0, nil
 		}
-		fmt.Fprintf(stderr, "smates hook claude-stop: unknown argument %q (run flags follow --)\n", a)
+		fmt.Fprintf(stderr, "%s: unknown argument %q (run flags follow --)\n", a.marker, arg)
 		return 1, nil
 	}
 	if v := os.Getenv("SMATES_SKIP_HOOK"); v != "" && v != "0" && v != "false" {
 		return 0, nil
 	}
-	var in claudeStopInput
+	var in stopInput
 	if stdin != nil {
 		data, _ := io.ReadAll(io.LimitReader(stdin, 1<<20))
 		_ = json.Unmarshal(data, &in)
 	}
 	if in.StopHookActive {
-		return 0, nil // Claude already continues because of a Stop hook: never block twice
+		return 0, nil // the agent already continues because of a Stop hook: never block twice
 	}
-	f, err := parseRunFlags(append([]string{"--output", "failures"}, runArgs...), stderr)
+	// The run flags come last. The hook's own --max-time applies only when they set
+	// none, and not with --shadow, which runs every test and takes no limit.
+	pre := []string{"--output", "failures"}
+	if !hasRunFlag(runArgs, "max-time") && !hasRunFlag(runArgs, "shadow") {
+		pre = append(pre, "--max-time", hookMaxTime.String())
+	}
+	f, err := parseRunFlags(append(pre, runArgs...), stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "smates hook claude-stop: %v\n", err)
+		fmt.Fprintf(stderr, "%s: %v\n", a.marker, err)
 		return 1, nil
 	}
 	dir := f.dir
@@ -193,14 +271,22 @@ func hookClaudeStop(ctx context.Context, args []string, stdin io.Reader, stdout,
 	f.dir = repo.Root
 	f.heartbeat = 0
 	f.skipEmpty = true
+	var deferred string
+	f.deferred = func(line string) { deferred = line }
 	var out bytes.Buffer
 	code, err := runCycle(ctx, f, &out, &out, nil)
-	if err != nil {
+	var re requiresError
+	if err != nil && !errors.As(err, &re) {
 		fmt.Fprintf(stderr, "%s", out.String())
-		fmt.Fprintf(stderr, "smates (Claude Code Stop hook): %v\n", err)
+		fmt.Fprintf(stderr, "smates (%s Stop hook): %v\n", a.name, err)
 		return 1, nil
 	}
 	if testsExitCode(code) == 0 {
+		// Units left for later (unmet requires, --max-time) do not block; they stay
+		// selected and run next time.
+		if deferred != "" {
+			fmt.Fprintln(stderr, deferred)
+		}
 		return 0, nil
 	}
 	text := strings.TrimSpace(out.String())

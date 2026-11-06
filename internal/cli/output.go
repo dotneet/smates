@@ -213,7 +213,11 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 		return
 	}
 	if c.worst == 0 {
-		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s\n", started, selected, total, elapsedText)
+		note := ""
+		if n := c.notStartedUnits(); n > 0 {
+			note = fmt.Sprintf("; %s left %d selected unit(s) not started (they stay selected)", c.notStartedBy(), n)
+		}
+		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s%s%s\n", started, selected, total, elapsedText, note, c.skippedNote())
 		return
 	}
 	if len(failed) == 0 && c.interrupted {
@@ -224,7 +228,7 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 		fmt.Fprintf(w, "smates: FAILED (exit code %d) in %s, but no test unit is known to have failed (see the output above)\n", c.worst, elapsedText)
 		return
 	}
-	fmt.Fprintf(w, "smates: FAILED %d of %d test unit(s) in %s:\n", len(failed), started, elapsedText)
+	fmt.Fprintf(w, "smates: FAILED %d of %d test unit(s) in %s%s:\n", len(failed), started, elapsedText, c.skippedNote())
 	byTest := map[string]*hints.Hint{}
 	for _, h := range c.failures.all() {
 		byTest[h.Suite+"\x00"+h.Test] = h
