@@ -555,3 +555,53 @@ export default { plugins: [storybookTest()] }`
 		})
 	}
 }
+
+// A per-project vitest file (vitest.storybook.config.ts) configures vitest only when
+// named, so it does not decide the runner of a package whose tests something else runs.
+func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
+	const sb = "export default { test: { include: [\"src/**/*.stories.tsx\"] } }\n"
+	cases := []struct {
+		name string
+		pkg  string
+		file string // an extra file of the package
+		want string // the runner of the suite rooted at ui
+	}{
+		// Must keep the jest suite: vitest would run jest's tests.
+		{"jest script", `{"scripts":{"test":"jest","test:stories":"vitest --config vitest.storybook.config.ts"},"devDependencies":{"jest":"^29"}}`, "jest.config.js", "jest"},
+		{"jest configuration only", `{"scripts":{"test:stories":"vitest --config vitest.storybook.config.ts"}}`, "jest.config.js", "jest"},
+		{"bun test", `{"scripts":{"test":"bun test"}}`, "", "bun"},
+		{"node --test", `{"scripts":{"test":"node --test"}}`, "", "node"},
+		{"react-scripts", `{"scripts":{"test":"react-scripts test"},"dependencies":{"react-scripts":"5"}}`, "", "jest"},
+		{"vitest dependency", `{"devDependencies":{"vitest":"^4"}}`, "", "vitest"},
+		{"nothing else names a runner", `{}`, "", "vitest"},
+		{"nothing else but a bun lockfile", `{}`, "bun.lock", "vitest"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{
+				"ui/package.json": c.pkg, "ui/vitest.storybook.config.ts": sb,
+				"ui/src/a.test.ts": "test('a', () => {})\n", "ui/src/b.stories.tsx": "",
+			}
+			if c.file != "" {
+				files["ui/"+c.file] = "module.exports = {}\n"
+			}
+			var list []string
+			for f, content := range files {
+				testutil.Write(t, dir, f, content)
+				list = append(list, f)
+			}
+			sort.Strings(list)
+			suites, _ := Detect(&gitx.Repo{Root: dir}, list)
+			var runners []string
+			for _, s := range suites {
+				if s.Root == "ui" {
+					runners = append(runners, s.Runner)
+				}
+			}
+			if len(runners) != 1 || runners[0] != c.want {
+				t.Errorf("runners of ui %v, want [%s]", runners, c.want)
+			}
+		})
+	}
+}

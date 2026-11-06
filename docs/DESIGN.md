@@ -310,7 +310,11 @@ file unchanged only when every suite it runs saw that content; a run of other su
 or of every suite, finds it changed (and, to the agent and failure hints, unrecorded),
 so a shared state (local runs, `state merge`, CI without a `cache-key` per job) never
 hides a change from the suites that have not compared it. Orphans a `--suite` run
-handles are recorded the same way. A suite with no recorded entry compares nothing with
+handles are recorded the same way, but as seen only by the suites the snapshot already
+holds a view of (`selector.Snapshotted`: `State.Commit` set, or a marker names the
+suite); a suite that never had a full recording is treated as left out there, so one
+handled orphan does not make it count as snapshotted (an orphan only it owns may be
+asked about again until it has one). A suite with no recorded entry compares nothing with
 a marker: in state mode its tests are decided against the base revision by static
 analysis (locally, or in CI with `--base`) or run as new. Nor does one whose entries all
 come from selective runs while no full run took a snapshot (`State.Commit` unset) and

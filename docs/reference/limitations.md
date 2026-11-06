@@ -31,7 +31,8 @@ targets), and for a story the Storybook configuration directory, the import clos
 module reached through an alias only Vite's configuration resolves, a fetched fixture, a
 CSS `@import`) is missed: a story whose known dependencies include an import smates
 cannot resolve, or whose `main.*` sets `viteFinal` or `previewAnnotations` or names a
-local addon, is never trusted. Code a Playwright end-to-end test drives in a browser is
+local addon (any addon or framework that is not a package name, as a string or through
+`getAbsolutePath(...)` or `require.resolve(...)`), is never trusted. Code a Playwright end-to-end test drives in a browser is
 covered as [a server](../guides/servers.md).
 
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands

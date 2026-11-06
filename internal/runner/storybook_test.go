@@ -464,3 +464,55 @@ export default { stories: ['../src/**/*.stories.tsx'], staticDirs: [], viteFinal
 		})
 	}
 }
+
+// An addon or framework that may be a local preset (whose settings smates does not
+// read) makes story passes untrusted, in every form a path can take; a package name,
+// literal or resolved by a known wrapper, does not.
+func TestStorybookMainUnsureAddons(t *testing.T) {
+	const pre = "import path, { join, dirname, resolve } from 'node:path'\nexport default { stories: ['../src/**/*.stories.tsx'], "
+	for _, tc := range []struct {
+		name, main string
+		unsure     bool
+	}{
+		{"package names", `addons: ['@storybook/addon-a11y', 'storybook-addon-x/preset'], framework: '@storybook/react-vite'`, false},
+		{"getAbsolutePath of a package", `addons: [getAbsolutePath('@storybook/addon-docs')], framework: { name: getAbsolutePath("@storybook/react-vite"), options: {} }`, false},
+		{"dirname of require.resolve of a package", `addons: [dirname(require.resolve(join('@storybook/addon-docs', 'package.json')))]`, false},
+		{"require.resolve of a package", `addons: [require.resolve('@storybook/addon-docs')]`, false},
+		{"an addon object naming a package", `addons: [{ name: '@storybook/addon-docs', options: { mdx: true } }]`, false},
+		// Must be unsure: every local path form.
+		{"./ literal", `addons: ['./local-addon']`, true},
+		{"../ literal", `addons: ['../tools/preset']`, true},
+		{"absolute literal", `addons: ['/opt/preset']`, true},
+		{"path.join of __dirname with a .. segment", `addons: [path.join(__dirname, "..", "tools", "sb-preset")]`, true},
+		{"path.join of __dirname", `addons: [path.join(__dirname, "local-addon")]`, true},
+		{"path.resolve of __dirname", `addons: [path.resolve(__dirname, "preset.ts")]`, true},
+		{"resolve of a bare path", `addons: [resolve("preset.ts")]`, true},
+		{"template literal", "addons: [`${__dirname}/preset.ts`]", true},
+		{"require.resolve of a relative path", `addons: [require.resolve('./x')]`, true},
+		{"getAbsolutePath of a relative path", `addons: [getAbsolutePath('../addons/x')]`, true},
+		{"framework name from join", `framework: { name: join(__dirname, "framework") }`, true},
+		{"framework string from join", `framework: join(__dirname, "framework")`, true},
+		{"an unknown helper", `addons: [localPreset()]`, true},
+		{"a variable", `addons: [presetPath]`, true},
+		{"an addon object without a name", `addons: [{ options: {} }]`, true},
+		{"options with a relative path", `framework: { name: '@storybook/react-vite', options: { builder: { viteConfigPath: '../vite.sb.ts' } } }`, true},
+		{"options with a file-relative path", `framework: { name: '@storybook/react-vite', options: { builder: { viteConfigPath: path.join(__dirname, 'vite.ts') } } }`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := pre + tc.main + " }\n"
+			main := readStorybookMain(".storybook", func(f string) []byte {
+				if f == ".storybook/main.ts" {
+					return []byte(src)
+				}
+				return nil
+			})
+			if main.err != nil {
+				t.Fatal(main.err)
+			}
+			got := storybookMainUnsure(main)
+			if (got != "") != tc.unsure {
+				t.Errorf("unsure %q, want unsure %v", got, tc.unsure)
+			}
+		})
+	}
+}

@@ -75,7 +75,11 @@ with two differences.
   test again. A story is never trusted when its known dependencies include an import
   smates cannot resolve (an alias only Vite's configuration knows, a virtual module), or
   when `main.*` sets `viteFinal` or `previewAnnotations` or names a local addon or
-  preset, which may load files smates cannot follow. smates reports the stories it does
+  preset, which may load files smates cannot follow. An addon or framework counts as a
+  package only when it is a package name, written as a string or resolved by
+  `getAbsolutePath(...)` or `require.resolve(...)`; any path (`./preset`,
+  `path.join(__dirname, "..", "preset")`, a template literal) or other expression
+  counts as local. smates reports the stories it does
   not trust, and why, when it records them. Check the
   setting with `smates run --shadow` before relying on it; see
   [Limitations](../reference/limitations.md#what-tracing-reaches).

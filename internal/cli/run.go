@@ -929,11 +929,29 @@ func (c *cycle) ranSuites() (picked, left []*runner.Suite) {
 // branch does not ask again. Other files stay as recorded; per-test entries track
 // them. Orphans the policy was not applied to (a watch cycle's older changes, --only)
 // stay unseen. With suites left out (ranSuites) an orphan is recorded as seen by the
-// picked suites only.
+// picked suites only, and only by those the snapshot already holds a view of
+// (selector.Snapshotted): a marker naming a suite no full recording covered would make
+// it count as snapshotted, and every marker it has not seen a change for it again. Such
+// a suite is treated like one left out: an orphan only it owns may be asked about again.
 func (c *cycle) markHandledOrphans(picked, left []*runner.Suite) {
 	p, res := c.p, c.sel.res
 	if len(p.state.Files) == 0 {
 		return
+	}
+	if len(left) > 0 {
+		snapshotted := selector.Snapshotted(p.state)
+		var kept []*runner.Suite
+		left = slices.Clone(left)
+		for _, s := range picked {
+			if snapshotted(s.Name) {
+				kept = append(kept, s)
+			} else {
+				left = append(left, s)
+			}
+		}
+		if picked = kept; len(picked) == 0 {
+			return
+		}
 	}
 	own := selector.NewOwnership(picked, left)
 	for _, o := range res.Orphans {

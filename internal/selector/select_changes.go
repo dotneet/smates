@@ -53,20 +53,15 @@ func (s *selection) markerFilter() {
 		return
 	}
 	names := NewOwnership(in.Suites, in.Others).Picked()
-	var seen map[string]bool // suites some marker names (unsnapshotted, computed once)
+	var snapshotted func(string) bool // computed once
 	unsnapshotted := func(name string) bool {
 		if in.State.Commit != "" || in.Base == "" || !in.DiffUnrecorded {
 			return false
 		}
-		if seen == nil {
-			seen = map[string]bool{}
-			for _, v := range in.State.Files {
-				for _, n := range state.ParseSnap(v).SeenBy() {
-					seen[n] = true
-				}
-			}
+		if snapshotted == nil {
+			snapshotted = Snapshotted(in.State)
 		}
-		return !seen[name]
+		return !snapshotted(name)
 	}
 	var recorded, never []string
 	for _, name := range names {
@@ -102,6 +97,25 @@ func (s *selection) markerFilter() {
 	if n > 0 {
 		s.neverRecorded = never
 	}
+}
+
+// Snapshotted returns whether the snapshot of st holds suite name's view of the tree:
+// a full run took it (State.Commit is set), or a marker names the suite. Only a full
+// recording of the suite (`--all --suite`) names it in markers; a selective run
+// recording the orphans it handled names only suites that already count (see the
+// cli's markHandledOrphans), so one handled orphan does not make a suite count as
+// snapshotted and turn every marker it has not seen back into a change.
+func Snapshotted(st *state.State) func(name string) bool {
+	if st.Commit != "" {
+		return func(string) bool { return true }
+	}
+	seen := map[string]bool{}
+	for _, v := range st.Files {
+		for _, n := range state.ParseSnap(v).SeenBy() {
+			seen[n] = true
+		}
+	}
+	return func(name string) bool { return seen[name] }
 }
 
 // changedFiles returns the files that differ between the snapshot and the state's

@@ -135,7 +135,7 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 				return vitestMentionRe.Match(src)
 			})
 		switch {
-		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe) || hasMatch(d, vitestProjectConfigRe):
+		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
 		case craAt >= 0 || strings.Contains(test, "react-scripts test"):
 			// Create React App runs jest with a configuration react-scripts generates,
@@ -154,6 +154,11 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		case isNodeTest || strings.Contains(test, "node --experimental-test"):
 			r = "node"
 			command, env = nodeCommand, nodeEnv
+		case hasMatch(d, vitestProjectConfigRe):
+			// A per-project file (vitest.storybook.config.ts) configures vitest only
+			// when named: it picks vitest only when nothing else names the runner of the
+			// package's tests (a test script, a dependency, a configuration).
+			r = "vitest"
 		case has(d, "bun.lock") || has(d, "bun.lockb") || has(d, "bunfig.toml"):
 			r = "bun"
 		}

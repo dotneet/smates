@@ -255,12 +255,23 @@ func pluginText(v any) []byte {
 // annotations of addons or presets.
 var mainLoadsRe = regexp.MustCompile(`\b(?:viteFinal|webpackFinal|previewAnnotations|managerEntries)\b`)
 
-// relativeRe matches a string literal naming a relative path.
-var relativeRe = regexp.MustCompile(`["'` + "`" + `]\.\.?/`)
+// pkgNameRe matches a package name, with an optional subpath ("@storybook/addon-docs",
+// "storybook-addon-x/preset"): what an addon or framework is when it is no local file.
+var pkgNameRe = regexp.MustCompile(`^(?:@[\w][\w.-]*/)?[\w][\w.-]*(?:/[\w][\w.-]*)*$`)
+
+// pkgWrapperRes match the expressions that resolve a package by name, as Storybook's
+// templates write them (getAbsolutePath("@storybook/addon-docs"), require.resolve(...),
+// dirname(require.resolve(join("@storybook/x", "package.json")))): the name is
+// submatch 2.
+var pkgWrapperRes = []*regexp.Regexp{
+	regexp.MustCompile("^(?:getAbsolutePath|wrapForPnp|require\\.resolve|import\\.meta\\.resolve)\\(\\s*([\"'`])([^\"'`]+)[\"'`]\\s*,?\\s*\\)$"),
+	regexp.MustCompile("^(?:path\\.)?dirname\\(\\s*require\\.resolve\\(\\s*(?:path\\.)?join\\(\\s*([\"'`])([^\"'`]+)[\"'`]\\s*,\\s*[\"'`]package\\.json[\"'`]\\s*\\)\\s*\\)\\s*\\)$"),
+}
 
 // storybookMainUnsure says why main.* may make the stories depend on files smates
 // does not know of ("" when it cannot): see mainLoadsRe, and addons or a framework
-// given by relative path (a local preset, whose own settings smates does not read).
+// that may be local (a preset whose own settings smates does not read, see
+// localAddon).
 func storybookMainUnsure(main storybookMain) string {
 	if m := mainLoadsRe.Find(main.src); m != nil {
 		return fmt.Sprintf("%s sets %s, which may load files for the stories that smates cannot follow", main.file, m)
@@ -270,56 +281,71 @@ func storybookMainUnsure(main storybookMain) string {
 		if !known {
 			return fmt.Sprintf("%s: its %s may come from a ...spread", main.file, key)
 		}
-		if mentionsRelative(v) || relativeRe.MatchString(unknownText(v)) {
-			return fmt.Sprintf("%s names a local addon or preset in %s, whose settings smates does not read", main.file, key)
+		if localAddon(v, true) {
+			return fmt.Sprintf("%s names a local addon or preset in %s (or one smates cannot tell is a package), whose settings smates does not read", main.file, key)
 		}
 	}
 	return ""
 }
 
-// unknownText returns the source of the expressions in a value (its non-literal parts).
-func unknownText(v any) string {
-	var b strings.Builder
-	var walk func(any)
-	walk = func(v any) {
-		switch x := v.(type) {
-		case js.Unknown:
-			b.WriteString(string(x))
-			b.WriteByte('\n')
-		case []any:
-			for _, e := range x {
-				walk(e)
-			}
-		case *js.Object:
-			for _, e := range x.Fields {
-				walk(e)
+// localAddon reports whether an addons or framework value may name a local file rather
+// than a package. A name (the value itself, an entry of a list, or the name of an
+// {name, options} object) counts as a package only when it is a string literal that is
+// a package name, or a known wrapper resolving one (pkgWrapperRes); a path in any form
+// (./x, ../x, /x, path.join(__dirname, "..", "x"), a template literal) and any other
+// expression may be local. Other values (options) count when they hold a relative or
+// file-relative path. name is set where a value names an addon or framework.
+func localAddon(v any, name bool) bool {
+	switch x := v.(type) {
+	case nil:
+		return false
+	case string:
+		if name {
+			return !pkgNameRe.MatchString(x)
+		}
+		return strings.HasPrefix(x, "./") || strings.HasPrefix(x, "../")
+	case js.Unknown:
+		e := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(x)), "..."))
+		if _, fromFile, ok := js.PathValue(e); ok && fromFile {
+			return true
+		}
+		if relativeRe.MatchString(e) {
+			return true
+		}
+		if !name {
+			return false
+		}
+		for _, re := range pkgWrapperRes {
+			if m := re.FindStringSubmatch(e); m != nil && pkgNameRe.MatchString(m[2]) {
+				return false
 			}
 		}
-	}
-	walk(v)
-	return b.String()
-}
-
-// mentionsRelative reports whether a value holds a string that is a relative path.
-func mentionsRelative(v any) bool {
-	switch x := v.(type) {
-	case string:
-		return strings.HasPrefix(x, "./") || strings.HasPrefix(x, "../")
+		return true
 	case []any:
 		for _, e := range x {
-			if mentionsRelative(e) {
+			if localAddon(e, name) {
 				return true
 			}
 		}
+		return false
 	case *js.Object:
-		for _, e := range x.Fields {
-			if mentionsRelative(e) {
+		for k, f := range x.Fields {
+			if localAddon(f, name && k == "name") {
 				return true
 			}
 		}
+		if name {
+			if n, ok := x.Get("name"); !ok || n == nil {
+				return true // no name smates can read
+			}
+		}
+		return false
 	}
-	return false
+	return name
 }
+
+// relativeRe matches a string literal naming a relative path.
+var relativeRe = regexp.MustCompile(`["'` + "`" + `]\.\.?/`)
 
 // storybookDirMatchers returns the story matchers of the Storybook configuration
 // directory dir, with the dependencies every story has: the directory itself, the

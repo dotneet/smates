@@ -293,3 +293,30 @@ func TestSelectNeverRecordedLikeDiffMode(t *testing.T) {
 		t.Errorf("orphans %v, want %v as with no state", partial.Orphans, apiOrphans)
 	}
 }
+
+// Snapshotted: a full snapshot covers every suite; otherwise a suite counts once a
+// marker names it.
+func TestSnapshotted(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		commit string
+		files  map[string]string
+		want   map[string]bool
+	}{
+		{"full snapshot", "c0", map[string]string{"a": "h"}, map[string]bool{"web": true, "api": true}},
+		{"markers", "", map[string]string{"a": "?h@web", "b": "?h@api%2Cx,web", "c": "h", "d": "?"},
+			map[string]bool{"web": true, "api,x": true, "api": false}},
+		{"no marker", "", map[string]string{"a": "h"}, map[string]bool{"web": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := state.New()
+			st.Commit, st.Files = tc.commit, tc.files
+			snap := Snapshotted(st)
+			for name, want := range tc.want {
+				if got := snap(name); got != want {
+					t.Errorf("%s: %v, want %v", name, got, want)
+				}
+			}
+		})
+	}
+}
