@@ -97,6 +97,10 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 | `total` | Number of known test units. |
 | `run-all` | `true` when everything was selected. |
 | `skip` | `true` when nothing was selected. |
+| `tests` | JSON object: each suite's selected test unit IDs. |
+| `suites` | JSON object, one entry per suite: `{"selected": 2, "total": 40, "all": false, "skip": false}`. `skip` is `true` only when the suite selected nothing ([gate on it](#gate-jobs-per-suite)). |
+| `shards` | With `command: select` and `--max-shards N`: how many shards the selection needs, `0` when nothing was selected, else `1` to `N` ([below](#size-the-shards-to-the-selection)). |
+| `shard-matrix` | With `--max-shards`: a `strategy.matrix`, `{"shard": ["1/3", "2/3", "3/3"]}`, whose values go to `--shard` as they are. |
 | `exit-code` | Exit code of the smates command. |
 | `flaky` | Number of test units `run` proved flaky (outcome flipped with unchanged inputs). |
 | `flaky-tests` | JSON array of those units (`"suite: unit"`); see `smates flaky`. |
@@ -159,21 +163,92 @@ jobs:
           command: select
   test:
     needs: select
-    if: needs.select.outputs.skip != 'true'
+    # Skip only when the select job succeeded and said nothing is selected.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     steps:
       # ... checkout, toolchains, then the smates step
 ```
 
-Use this only if a skipped job is acceptable for your required status checks (GitHub
-treats a skipped job as passing).
+Write the condition this way. Without `!cancelled()`, a `needs:` job is skipped when
+the select job fails, and GitHub treats a skipped job as passing, so a required check
+on it turns green with no test run. With it, a failed select job lets the test job run
+as it would without the gate (it then selects on its own). Use this only if a skipped
+job is acceptable for your required status checks.
+
+### Gate jobs per suite { #gate-jobs-per-suite }
+
+The `suites` output says, for each suite, whether it selected anything. Jobs that run
+one suite each (`args: --suite <name>`) can then be skipped one by one:
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        uses: dotneet/smates@vX.Y.Z
+        with:
+          command: select
+  api:
+    needs: plan
+    if: >-
+      ${{ !cancelled() && (needs.plan.result != 'success' ||
+      fromJSON(needs.plan.outputs.suites || '{}')['api'].skip != true) }}
+    runs-on: ubuntu-latest
+    steps:
+      # ... then the smates step with args: --suite api and cache-key: api
+```
+
+Skip a job only when the output explicitly says its suite selected nothing:
+
+- **Gate on `.skip != true`, never on `.selected > 0` or `.selected != 0`.** A suite
+  missing from the output (a typo, a suite `--suite` left out, an empty output) reads as
+  `null`, and a workflow expression treats `null` as `0`: a `selected` condition would
+  skip the job, while `null != true` runs it.
+- **Run when the plan job did not succeed** (`needs.plan.result != 'success'`, with
+  `!cancelled()` so that the job is not skipped along with it). smates exits 2 to 4 on
+  its own errors (configuration, environment), and then the outputs say nothing.
+- `|| '{}'` keeps `fromJSON` from failing on an empty output.
+
+smates selects across suites: a change to a shared package selects the tests of every
+suite that depends on it. This usually runs more than hand-written path filters, which
+miss such dependents; keep path filters, if at all, only as a coarse outer gate that
+never skips a suite smates selects.
+
+**Required status checks.** A skipped job counts as passing. If one aggregate job is
+the required check, have it accept a skipped job only when the plan said so:
+
+```yaml
+  tests-passed:
+    needs: [plan, api, web]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          SUITES: ${{ needs.plan.outputs.suites }}
+          API: ${{ needs.api.result }}
+          WEB: ${{ needs.web.result }}
+        run: |
+          ok() { # result suite
+            [ "$1" = success ] && return 0
+            [ "$1" = skipped ] && [ "$PLAN" = success ] &&
+              [ "$(jq -r --arg s "$2" '.[$s].skip' <<<"$SUITES")" = true ]
+          }
+          ok "$API" api && ok "$WEB" web
+```
 
 ### Shards and matrices
 
 `--shard I/N` assigns every test to a shard by a stable hash
-of its suite and ID, so a test always lands in the same shard and every shard agrees,
-whatever state each one restored. Give each shard its own `cache-key`, so jobs do not
-overwrite each other's state:
+of its suite and ID, so for a given `N` a test always lands in the same shard and every
+shard agrees, whatever state each one restored. Which shard owns a test depends on `N`,
+so all shards of one run must use the same `N` (a matrix does). Give each shard its own
+`cache-key`, so jobs do not overwrite each other's state:
 
 ```yaml
     strategy:
@@ -195,6 +270,117 @@ applies the orphan policy to its share. To use the agent with shards, run
 `smates select` once before them (unsharded) and have every shard restore the state it
 saved: they then reuse its cached decision.
 
+### Size the shards to the selection { #size-the-shards-to-the-selection }
+
+A fixed matrix starts every shard, each paying for its setup, even when the change
+selects three tests. `smates select --max-shards N` sizes the shard count to the
+selection: `0` when nothing is selected, else the recorded duration of the selected
+tests divided by `--shard-time` (default `10m`), rounded up and kept within `1` to `N`.
+A selected test without a recorded duration counts as the median of its suite; if a
+suite with selected tests has no recorded duration at all, the count is `N`. On a push
+build of the default branch (or a `full_run_branches` branch), where `smates run` runs
+every test, the count is sized for all of them.
+
+The count only decides how many jobs share the selection: every selected test still runs
+in one of them. Ownership depends on the count, so the matrix values carry it
+(`"1/3"`), and every shard of a run uses the same one.
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      shard-matrix: ${{ steps.plan.outputs.shard-matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        uses: dotneet/smates@vX.Y.Z
+        with:
+          command: select
+          args: --max-shards 8
+          cache-key: sharded
+          comment: true            # one comment for the whole selection
+  test:
+    needs: plan
+    if: needs.plan.outputs.shards != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.shard-matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ... toolchains
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --shard ${{ matrix.shard }}
+          cache-key: sharded
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smates-state-${{ strategy.job-index }}
+          path: .smates/state.json.gz
+          include-hidden-files: true
+          if-no-files-found: ignore
+  # Mandatory: when the plan job did not succeed there is no matrix, and the sharded
+  # job is skipped. Run a fixed matrix then, as without the plan.
+  test-fallback:
+    needs: plan
+    if: ${{ !cancelled() && needs.plan.result != 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ... toolchains
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          args: --shard ${{ matrix.shard }}/8
+          cache-key: sharded
+  # Combine what the shards recorded, so the next plan sees every shard's outcomes.
+  merge-state:
+    needs: test
+    if: ${{ !cancelled() && needs.test.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smates-state-*
+          path: ${{ runner.temp }}/shard-states
+      - uses: dotneet/smates@vX.Y.Z
+        with:
+          command: state
+          args: merge ${{ runner.temp }}/shard-states/*/state.json.gz
+          cache-key: sharded
+```
+
+- **The fallback is not optional.** If the plan job fails (smates exits 2 to 4 on its
+  own errors, or the runner fails), `needs.plan.outputs.shards` is empty and the
+  sharded job is skipped; without `test-fallback` nothing would test the change. A
+  required check over these jobs must accept a skipped `test` only when the plan
+  succeeded with `shards` `0`, and a skipped `test-fallback` only when the plan
+  succeeded (see the aggregate job [above](#gate-jobs-per-suite)).
+- **One cache key for all.** The plan and every shard share `cache-key: sharded`
+  instead of one key per shard: with a varying count, shard 2 of one run owns other
+  tests than shard 2 of the next, so a per-shard key would mostly restore entries of
+  tests the shard no longer runs. Each shard saves what it ran; `merge-state` merges
+  them (`smates state merge`, newer entry per test) and saves the result last, so the
+  next run restores it. If `merge-state` does not run, the next run restores one
+  shard's state: a test another shard ran is then selected again whenever its inputs
+  differ from that state's older entry, which runs more, not less. A test that failed
+  in another shard with inputs that have not changed since its last pass is only known
+  to the merged state, so keep the merge job.
+- **Comments.** Each shard's comment is keyed by `shard-I-of-N`, and a later run with
+  another count leaves the old ones in place. Comment from the plan job instead, as
+  above.
+- **Overhead.** Recorded durations are test time only. For `go test` they leave out
+  compiling packages, `TestMain` and fixtures, and every shard pays its own job setup.
+  Lower `--shard-time` when that cost is large. The hash spreads tests evenly by count,
+  not by duration, so shards can still differ in length.
+
 ### Monorepos
 
 A single smates step covers every suite of the repository (`smates.yml` at the
@@ -213,6 +399,12 @@ step would select for its suites:
 `args: --shadow` runs the full suite and reports what selection would have done, to
 build confidence before trusting it. See
 [Shadow mode](../guides/trust.md#shadow-mode) for a rollout plan.
+
+It works with shards: `args: --shadow --shard ${{ matrix.shard }}/4` runs every test
+the shard owns, selected or not, and reports as escapes the failing tests of its own
+share that the selection (of the whole run) would have skipped. Together the shards run
+every test once, and an escape is reported only by the shard that owns the test.
+`smates stats` adds up the escapes of the shards' records.
 
 ### Pull request comment { #pull-request-comment }
 

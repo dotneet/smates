@@ -750,6 +750,13 @@ skip as a pass (the package's or the file's summary).
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+With `--shard I/N` a shadow run runs every unit its shard owns (`cycle.units`), selected
+or not, so the shards of one run together run every unit once. `checkShadow` judges only
+owned units, against the selection before `applyShard` (`cycle.preShard`): a failure the
+runner reports for a unit another shard owns is never an escape here, since its owner
+reports it. A Go function whose package's selected compile check another shard owns is a
+possible escape when it fails: only that shard sees whether the package builds.
+
 ### Run order and `--fail-fast`
 
 `smates run` orders what it runs so the likeliest failures finish first. Priorities come
@@ -842,6 +849,21 @@ runner that could not start or a state that could not be saved is reported first
 Stop hooks tell `requiresError` apart and print one line instead of an error: in a
 worktree without the database, every turn would otherwise end with the same message.
 `--dry-run` does not run the checks (a `cmd` may be slow or have side effects).
+
+### Shard counts
+
+`--shard I/N` hashes suite and unit ID (FNV-1a) modulo `N`: ownership needs no
+coordination and no state, but it depends on `N`, so every shard of a run must use the
+same count. `smates select --max-shards N` sizes `N` for a CI matrix (`shardCount`): `0`
+when nothing is selected, else the recorded duration of the selected units over
+`--shard-time`, rounded up and kept within `1..N`. A selected unit without a duration
+weighs its suite's median; a suite with selected units and no duration at all yields `N`
+(nothing to size by). On a full-run branch it sizes for every unit, as the shards'
+`smates run` will run them all. The count never changes what runs, only how many jobs
+share it, so a wrong estimate costs time, not coverage. The `shard-matrix` output carries
+the count in each value (`"2/3"`) so legs cannot disagree on it. Balancing shards by
+duration (instead of the hash) is not done: it would need a plan file every shard reads,
+and a single point of failure where the hash needs none.
 
 ### Flaky tests
 

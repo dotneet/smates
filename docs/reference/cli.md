@@ -72,8 +72,8 @@ See [How smates decides](../getting-started/how-it-works.md).
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | How to handle changes no test depends on, for this run: ask the agent, run the affected suites in full, or apply no policy (explicit opt-out). See [Changes no test explains](../guides/orphans.md). |
 | `--no-agent` | | off | Do not call the agent, neither for unattributed changes (the affected suites run in full instead) nor to explain failures. |
 | `--no-record` | | off | Run without tracing and without updating the state. |
-| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. See [Shadow mode](../guides/trust.md#shadow-mode). |
-| `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID. Sharded runs do not call the agent. |
+| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. With `--shard`, every test the shard owns. See [Shadow mode](../guides/trust.md#shadow-mode). |
+| `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID; the assignment depends on `N`, so all shards of a run use the same `N`. Sharded runs do not call the agent. |
 | `--fail-fast` | | off | Start no further test batch after one fails. Tests run likeliest-to-fail first. |
 | `--output` | `full`, `failures` | `$SMATES_OUTPUT`, else `full` | `full` streams the runner output. `failures` prints only the output of failing tests, then a short summary with a command that reruns them. `agent` is accepted as an alias of `failures`. |
 | `--report` | file | | Write a JSON report (selection, per-test results, shadow escapes, `exit_code`) to `file`. `-` writes it to stdout and moves all other output to stderr. |
@@ -88,7 +88,7 @@ Plus the [common flags](#common-flags).
 Combinations that are rejected (exit code 2):
 
 - `--only` with `--all`, `--shadow`, `--add` or `--orphans`.
-- `--shadow` with `--shard`, `--fail-fast` or `--max-time`.
+- `--shadow` with `--fail-fast` or `--max-time`.
 - `--dry-run` with `--report`, `--markdown` or `--summary` (use
   `smates select --format json|markdown` instead).
 
@@ -150,6 +150,8 @@ saves its answer in the state so the next `smates run` on the same change reuses
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | As for `run`. |
 | `--no-agent` | | off | Do not call the agent. |
 | `--shard` | `I/N` | | Only shard `I` of `N` of the selection. |
+| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On a push build of a [full-run branch](configuration.md#top-level-keys) it is sized for every test, as `smates run` runs them all there. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
+| `--shard-time` | duration | `10m` | With `--max-shards`: recorded test time to aim for per shard. A selected test without a recorded duration counts as its suite's median; a suite with selected tests and no recorded duration at all gives `N`. |
 | `--markdown` | file | | Also write the Markdown summary to `file`. |
 
 Plus the [common flags](#common-flags).
@@ -158,8 +160,8 @@ Plus the [common flags](#common-flags).
 |---|---|
 | `text` | One selected test ID per line; the selection summary goes to stderr. |
 | `files` | One selected test ID per line, nothing on stderr. |
-| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision. |
-| `github` | `selected`, `total`, `run-all`, `skip` and `tests` as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. |
+| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision, and `shards` with `--max-shards`. |
+| `github` | `selected`, `total`, `run-all`, `skip`, `tests` and `suites` (and with `--max-shards`, `shards` and `shard-matrix`) as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. See [Outputs](../ci/github-actions.md#outputs). |
 | `markdown` | The Markdown summary used for pull request comments. |
 
 ### smates watch

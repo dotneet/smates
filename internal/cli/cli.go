@@ -376,6 +376,8 @@ type selection struct {
 	candidates []orphanCandidate
 	// hint: suites run in full for orphans the caller has not decided about.
 	hint bool
+	// shards is the shard count `select --max-shards` sized for the selection.
+	shards *int
 }
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {

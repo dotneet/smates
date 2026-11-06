@@ -132,9 +132,6 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
 		return nil, err
 	}
-	if f.shadow && f.shardN > 1 {
-		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
-	}
 	if f.shadow && f.failFast {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
 	}
@@ -198,15 +195,20 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if hooks != nil {
 		sel.hint = false // smates watch: a person at the terminal, no calling agent
 	}
+	var preShard map[string]map[string]bool
+	if f.shadow && f.shardN > 1 {
+		preShard = selectedUnits(sel.res)
+	}
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
-	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
+	c := &cycle{p: p, f: f, sel: sel, preShard: preShard, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
 		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{},
 		unmet: map[string][]string{}, unmetWhy: map[string][]string{}, checked: map[string]error{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
-	// sharded runs only this shard's share (applyShard narrowed the selection).
+	// sharded runs only this shard's share (applyShard narrowed the selection), and so
+	// does a sharded shadow run (units).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
 	prioritize(sel.res, p.state, p.direct())
 	batches := c.plan()
@@ -383,11 +385,14 @@ func (c *cycle) exitCode(saveErr error) int {
 
 // cycle is one `smates run` over the selected suites.
 type cycle struct {
-	p      *project
-	f      *runFlags
-	sel    *selection
-	stdout io.Writer // runner output (stderr with --report -)
-	stderr io.Writer
+	p   *project
+	f   *runFlags
+	sel *selection
+	// preShard is the selection before applyShard (suite -> unit), kept by a sharded
+	// shadow run to judge escapes against the whole run's selection.
+	preShard map[string]map[string]bool
+	stdout   io.Writer // runner output (stderr with --report -)
+	stderr   io.Writer
 	// reportOut is the real stdout, where --report - writes.
 	reportOut io.Writer
 	// quiet is --output failures: runner output is buffered per batch and printed only
@@ -472,16 +477,36 @@ func (c *cycle) prepareTrace() (cleanup func(), err error) {
 }
 
 // units returns the units of a suite this cycle runs, and whether they are the whole
-// suite.
+// suite. A sharded shadow run runs every unit its shard owns, selected or not, so the
+// shards of one run together run every test once.
 func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
-	if c.runAll {
+	if c.runAll || c.shadowShard() {
 		ids := make([]string, 0, len(sr.Tests))
 		for _, t := range sr.Tests {
-			ids = append(ids, t.ID)
+			if c.runAll || t.Shard == c.f.shardI {
+				ids = append(ids, t.ID)
+			}
 		}
-		return ids, true
+		return ids, c.runAll
 	}
 	return sr.Selected(), sr.All && c.f.shardN <= 1
+}
+
+// shadowShard reports whether the cycle is a sharded shadow run (--shadow --shard).
+func (c *cycle) shadowShard() bool {
+	return c.f.shadow && c.f.shardN > 1
+}
+
+// selectedUnits is the set of selected units of a selection, per suite.
+func selectedUnits(res *selector.Result) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, sr := range res.Suites {
+		out[sr.Name] = map[string]bool{}
+		for _, id := range sr.Selected() {
+			out[sr.Name][id] = true
+		}
+	}
+	return out
 }
 
 func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runner.RunContext {
@@ -741,22 +766,39 @@ func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
 // selected test (they are possible escapes). A Go test function of a package whose
 // compile check was selected and failed is no escape: it failed because its package
 // does not build, which the check reports.
+//
+// A sharded shadow run judges only the units its shard owns, against the selection
+// before sharding (preShard). A unit another shard owns is that shard's to report,
+// whatever the runner said about it here. A function whose package's selected compile
+// check another shard owns may have failed because the package does not build, which
+// only that shard sees: its failure is a possible escape.
 func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
+	owned := func(t *selector.Test) bool { return !c.shadowShard() || t.Shard == c.f.shardI }
+	selected := func(t *selector.Test) bool { return t.Selected || c.preShard[sr.Name][t.ID] }
 	brokenBuild := map[string]bool{} // package directories whose selected check failed
+	elsewhere := map[string]bool{}   // package directories whose selected check another shard runs
 	for _, t := range sr.Tests {
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && t.Selected && runner.IsBuildCheck(t.ID) && obs[t.ID] != nil && obs[t.ID].Status == state.Fail {
+		dir, _, ok := runner.SplitFuncUnit(t.ID)
+		if !ok || !selected(t) || !runner.IsBuildCheck(t.ID) {
+			continue
+		}
+		switch {
+		case !owned(t):
+			elsewhere[dir] = true
+		case obs[t.ID] != nil && obs[t.ID].Status == state.Fail:
 			brokenBuild[dir] = true
 		}
 	}
 	for _, t := range sr.Tests {
 		o := obs[t.ID]
-		if t.Selected || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
+		if selected(t) || !owned(t) || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
 			continue
 		}
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && brokenBuild[dir] {
+		dir, _, isFunc := runner.SplitFuncUnit(t.ID)
+		if isFunc && brokenBuild[dir] {
 			continue
 		}
-		if o.Inferred {
+		if o.Inferred || isFunc && elsewhere[dir] {
 			c.possible = append(c.possible, sr.Name+": "+t.ID)
 		} else {
 			c.escapes = append(c.escapes, sr.Name+": "+t.ID)
@@ -1026,6 +1068,12 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 				fmt.Fprintf(c.stderr, "  - %s\n", e)
 			}
 		} else {
+			if c.shadowShard() {
+				// Out of the units this shard owns, all of which it ran.
+				var r state.Run
+				countSelection(&r, c.sel.res, c.f.shardI, c.f.shardN)
+				selected, total = r.Selected, r.Total
+			}
 			p.logf("shadow: every failing test was selected (%d/%d would have run)", selected, total)
 		}
 		if len(c.possible) > 0 {
@@ -1159,6 +1207,25 @@ type selectFlags struct {
 	shard    string
 	explain  bool
 	markdown string
+	// maxShards (--max-shards) asks for a shard count sized to the selection, at most
+	// this many; shardTime (--shard-time) is the recorded test time to aim for per shard.
+	maxShards int
+	shardTime time.Duration
+}
+
+// validateShards checks --max-shards and --shard-time (set: the flags given).
+func (f *selectFlags) validateShards(set map[string]bool) error {
+	switch {
+	case set["max-shards"] && (f.maxShards < 1 || f.maxShards > maxShardsLimit):
+		return usageError{fmt.Errorf("invalid --max-shards %d (want 1 to %d)", f.maxShards, maxShardsLimit)}
+	case set["shard-time"] && !set["max-shards"]:
+		return usageError{fmt.Errorf("--shard-time sizes --max-shards and needs it")}
+	case f.shardTime < time.Second:
+		return usageError{fmt.Errorf("invalid --shard-time %s (want at least 1s)", f.shardTime)}
+	case set["max-shards"] && f.shard != "":
+		return usageError{fmt.Errorf("--max-shards sizes the shards of the whole selection and cannot be combined with --shard")}
+	}
+	return nil
 }
 
 func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -1174,6 +1241,8 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs.StringVar(&f.shard, "shard", "", "only shard `I/N` of the selection")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
 	fs.StringVar(&f.markdown, "markdown", "", "also write the summary as Markdown to `file`, e.g. for a pull request comment")
+	fs.IntVar(&f.maxShards, "max-shards", 0, "also size a shard count for the selection: 0 when nothing is selected, else 1 to `N` (outputs shards and shard-matrix)")
+	fs.DurationVar(&f.shardTime, "shard-time", defaultShardTime, "with --max-shards: recorded test time to aim for per shard")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -1184,6 +1253,11 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := f.callerFlags.validate(); err != nil {
 		return 2, err
 	}
+	set := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	if err := f.validateShards(set); err != nil {
+		return 2, err
+	}
 	shardI, shardN, err := parseShard(f.shard)
 	if err != nil {
 		return 2, err
@@ -1192,11 +1266,27 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
+	all := f.all
+	if f.maxShards > 0 && !all {
+		// The shards are sized for what `smates run` will run in them: everything where
+		// it runs everything by default (the default branch on CI).
+		if full, branch := fullRunBranch(p.ci, p.repo, p.cfg.FullRunBranches); full {
+			p.logf("on %s (%s): sizing the shards for a full run, as `smates run` runs every test there", branch, p.ci.Name)
+			all = true
+		}
+	}
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
 	if err != nil {
 		return 1, err
 	}
 	applyShard(sel.res, shardI, shardN)
+	var shardLines []string
+	if f.maxShards > 0 {
+		n := shardCount(sel.res, f.maxShards, f.shardTime)
+		p.logf("%d shard(s) for this selection (--max-shards %d, about %s of recorded test time per shard)", n, f.maxShards, f.shardTime)
+		shardLines = shardOutputs(n)
+		sel.shards = &n
+	}
 	if sel.agentDec != nil && !sel.agentCache {
 		// Keep the agent's answer for the next run on the same change.
 		if err := p.store.Save(p.state); err != nil {
@@ -1225,7 +1315,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 0, enc.Encode(jsonSelection(sel))
 	case "github":
 		printSelection(p, sel, stderr, f.explain)
-		if err := writeGitHubOutputs(stdout, sel); err != nil {
+		if err := writeGitHubOutputs(stdout, sel, shardLines...); err != nil {
 			return 0, err
 		}
 		writeRunSummary(p, "", sum)
@@ -1245,11 +1335,13 @@ type jsonOut struct {
 	// Candidates describe the orphans for a calling agent that decides about them
 	// itself (--add, --orphans).
 	Candidates []orphanCandidate `json:"orphan_candidates"`
+	// Shards is the shard count `select --max-shards` sized (absent without it).
+	Shards *int `json:"shards,omitempty"`
 }
 
 func jsonSelection(sel *selection) jsonOut {
 	s, t := sel.res.Counts()
-	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates}
+	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates, Shards: sel.shards}
 	if out.Candidates == nil {
 		out.Candidates = []orphanCandidate{}
 	}
@@ -1300,23 +1392,42 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 }
 
-// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
-func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+// suiteOutput is one suite of the `suites` GitHub output. Skip is true only when the
+// suite selected nothing. A workflow skips a job only when `.skip` is true, never when
+// `.selected` is 0: a suite the output does not list (left out by --suite, a plan job
+// that failed) reads as null, which equals 0 in a workflow expression but not true.
+type suiteOutput struct {
+	Selected int  `json:"selected"`
+	Total    int  `json:"total"`
+	All      bool `json:"all"`
+	Skip     bool `json:"skip"`
+}
+
+// githubOutputs are the selection's step outputs, as name=value lines.
+func githubOutputs(sel *selection) []string {
 	s, t := sel.res.Counts()
 	runAll := true
 	tests := map[string][]string{}
+	suites := map[string]suiteOutput{}
 	for _, su := range sel.res.Suites {
 		if !su.All {
 			runAll = false
 		}
-		tests[su.Name] = append([]string{}, su.Selected()...)
+		ids := append([]string{}, su.Selected()...)
+		tests[su.Name] = ids
+		suites[su.Name] = suiteOutput{Selected: len(ids), Total: len(su.Tests), All: su.All && len(su.Tests) > 0, Skip: len(ids) == 0}
 	}
 	tj, _ := json.Marshal(tests)
-	lines := []string{
+	sj, _ := json.Marshal(suites)
+	return []string{
 		fmt.Sprintf("selected=%d", s), fmt.Sprintf("total=%d", t), fmt.Sprintf("run-all=%t", runAll && t > 0),
-		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj),
+		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj), "suites=" + string(sj),
 	}
-	lines = append(lines, extra...)
+}
+
+// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
+func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+	lines := append(githubOutputs(sel), extra...)
 	if out := os.Getenv("GITHUB_OUTPUT"); out != "" {
 		f, err := os.OpenFile(out, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
