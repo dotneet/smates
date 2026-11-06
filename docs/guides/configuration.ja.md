@@ -65,7 +65,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 | ランナー | 読み取る場所 | 対応するオプション |
 |---|---|---|
 | `jest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `jest.config.{js,ts,mjs,cjs,mts,cts,json}` または `package.json` の `"jest"`（jest と同じく最も近い `package.json` で止まる） | `rootDir`、`roots`、`testMatch`（`?(x)` や `+(spec\|test)` などの micromatch の extglob は変換し、`!` パターンは除外として扱う）、`testRegex`、`testPathIgnorePatterns`（`<rootDir>` は置換） |
-| `vitest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `vitest.config.*` / `vite.config.*` | `root`、`test.root`、`test.dir`、`test.include`、`test.exclude`（`...configDefaults.exclude` も解釈）、プロジェクト（`test.projects`、`test.workspace`、`vitest.workspace.*`） |
+| `vitest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `vitest.config.*` / `vite.config.*` | `root`、`test.root`、`test.dir`、`test.include`、`test.exclude`（`...configDefaults.exclude` も解釈）、プロジェクト（`test.projects`、`test.workspace`、`vitest.workspace.*`。コマンドの `--project` で絞り込み）、Storybook の Vitest プラグインのストーリー（[ブラウザモードと Storybook](runners.md#browser-mode-and-storybook) を参照） |
 | `pytest` | スイートの root から上へ向かって最初に見つかる `pytest.ini`、`.pytest.ini`、`pyproject.toml`（`[tool.pytest.ini_options]` / `[tool.pytest]`）、`tox.ini`（`[pytest]`）、`setup.cfg`（`[tool:pytest]`） | `python_files`、`norecursedirs`。`testpaths` はそのファイルがスイートの root にあるときだけ（pytest も rootdir で起動したときだけ使うため） |
 | `unittest` | `python -m unittest discover …` コマンドの `-s`/`-p`/`-t` | 既定はスイートの root 以下の `test*.py` |
 | `go` | `testdata/` と `vendor/` を除く `**/*_test.go` | スイートの中に入れ子になったモジュールは、`go.work` のワークスペースに含まれるときだけそのスイートに属する |

@@ -90,6 +90,8 @@ type Suite struct {
 	TestsSource string
 	// DiscoveryWarning says why the runner configuration could not be read.
 	DiscoveryWarning string
+	// ConfigFiles are the runner configuration files discovery read (repo-relative).
+	ConfigFiles []string
 	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
 	// units are found in the test files' contents.
 	RepoRoot string
@@ -153,6 +155,10 @@ type Observation struct {
 	Inferred bool
 	// Failure is the failure output a runner plugin reported for the unit (bounded).
 	Failure string
+	// StaticOnly is set for a pass trust_browser_passes took from the reporter alone (a
+	// test that runs in a browser, untraced): its dependencies are the known ones, and
+	// recording keeps it unknown when those may not be all (see selector.Record).
+	StaticOnly bool
 	// untraced: the runner reported the unit but its process left no trace (observeAll).
 	untraced bool
 }
@@ -230,7 +236,7 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 		s.TestsSource = SourceDefaults
 		if dc, ok := a.(discoverer); ok && repo != nil {
 			disc := dc.Discover(repo, s)
-			s.DiscoveryWarning = disc.Warning
+			s.DiscoveryWarning, s.ConfigFiles = disc.Warning, disc.Files
 			if len(disc.Matchers) > 0 {
 				s.Discovered, s.TestsSource, s.Tests = disc.Matchers, disc.Source, nil
 				if disc.Exclude != nil {

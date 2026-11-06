@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -447,5 +448,63 @@ func BenchmarkPythonProjects(b *testing.B) {
 		if got := pythonProjects(repo, dirs, dirFiles); len(got) != 401 {
 			b.Fatalf("%d projects", len(got))
 		}
+	}
+}
+
+// TestDetectStoriesAndNotes: a package whose only tests are Storybook stories gets a
+// suite; a package that configures a runner but has no test smates can find gets a
+// note instead of being dropped silently.
+func TestDetectStoriesAndNotes(t *testing.T) {
+	sbConfig := `import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
+export default { plugins: [storybookTest()] }`
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []got
+		note  string // substring of the only note ("" = none)
+	}{
+		{
+			name: "stories-only package",
+			files: map[string]string{
+				"ui/package.json": vitestPkg, "ui/vitest.config.ts": sbConfig,
+				"ui/.storybook/main.ts":     `export default { stories: ["../src/**/*.stories.tsx"] }`,
+				"ui/src/button.stories.tsx": "", "ui/src/button.tsx": "",
+			},
+			want: []got{{"vitest", "ui", "vitest"}},
+		},
+		{
+			name: "configured package with no test file",
+			files: map[string]string{
+				"ui/package.json": vitestPkg, "ui/vitest.config.ts": `export default { test: { include: ["src/**/*.spec.ts"] } }`,
+				"ui/src/button.tsx": "",
+			},
+			note: "ui: no vitest suite: its configuration names no test file smates can find (test patterns: src/**/*.spec.ts)",
+		},
+		{
+			name:  "package without a runner configuration needs no note",
+			files: map[string]string{"ui/package.json": vitestPkg, "ui/src/button.tsx": ""},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var list []string
+			for f, content := range c.files {
+				testutil.Write(t, dir, f, content)
+				list = append(list, f)
+			}
+			sort.Strings(list)
+			suites, notes := Detect(&gitx.Repo{Root: dir}, list)
+			var out []got
+			for _, s := range suites {
+				out = append(out, got{s.Name, s.Root, s.Runner})
+			}
+			if !reflect.DeepEqual(out, c.want) {
+				t.Errorf("suites %v, want %v", out, c.want)
+			}
+			if c.note == "" && len(notes) > 0 || c.note != "" && (len(notes) != 1 || !strings.Contains(notes[0], c.note)) {
+				t.Errorf("notes %q, want one containing %q", notes, c.note)
+			}
+		})
 	}
 }

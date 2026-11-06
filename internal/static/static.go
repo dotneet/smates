@@ -34,7 +34,9 @@ type Graph struct {
 	// something only for its types, their direct dependencies left once type-only
 	// imports are erased (absent: direct).
 	runtime map[string][]string
-	langs   []host.Analyzer
+	// unresolved memoizes Unresolved.
+	unresolved map[string][]string
+	langs      []host.Analyzer
 
 	// closers compute Closure and RuntimeClosure (see closer), built on first use.
 	closersOnce sync.Once
@@ -43,7 +45,7 @@ type Graph struct {
 
 // New creates a graph over the given set of repo files.
 func New(root string, files []string, opts Options) *Graph {
-	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}, runtime: map[string][]string{}}
+	g := &Graph{root: root, files: make(map[string]bool, len(files)), opts: opts, direct: map[string][]string{}, runtime: map[string][]string{}, unresolved: map[string][]string{}}
 	for _, f := range files {
 		g.files[f] = true
 	}
@@ -144,6 +146,47 @@ func (g *Graph) Analyzes(paths ...string) bool {
 		}
 	}
 	return false
+}
+
+// Unresolved returns the specifiers of p's imports that resolve to no repository file
+// nor to anything installed (see host.ResolveReporter; nil for languages whose
+// analyzer does not tell): an alias only a bundler's configuration knows, a virtual
+// module, a missing file. The static closure of p may then miss what they load.
+func (g *Graph) Unresolved(p string) []string {
+	g.mu.Lock()
+	u, ok := g.unresolved[p]
+	g.mu.Unlock()
+	if ok {
+		return u
+	}
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if rr, ok := l.(host.ResolveReporter); ok {
+			u = rr.Unresolved(p, g.Read(p))
+		}
+		break
+	}
+	g.mu.Lock()
+	g.unresolved[p] = u
+	g.mu.Unlock()
+	return u
+}
+
+// Resolve returns the repository files a module specifier imported from file p
+// resolves to (see host.Resolver; nil for languages whose analyzer does not tell).
+func (g *Graph) Resolve(p, spec string) []string {
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if r, ok := l.(host.Resolver); ok {
+			return r.Resolve(p, spec)
+		}
+		return nil
+	}
+	return nil
 }
 
 // Closure returns the transitive dependencies of the start files, including them,

@@ -47,6 +47,7 @@ type Analyzer struct {
 	tsPaths   memo[[]string]    // config dir -> config files that apply there
 	typeOpts  memo[typeImportOpts]
 	elides    memo[bool] // dir -> elidesTypeImports
+	installs  memo[bool] // dir + "\x00" + package -> installed
 }
 
 // Options configure the analyzer.

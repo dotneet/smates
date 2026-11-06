@@ -128,6 +128,7 @@ One entry of `suites:`.
 | `record_jobs` | int (≥ 0) | see meaning | How many per-file processes run at once while recording with one process per file: `1` for `bun` and for commands that run files serially (`--runInBand`, `--no-file-parallelism`, `--test-isolation=none`, `--test-concurrency=1`), else the CPU count. With `granularity: func`: how many test functions of one package are recorded at once (default `1`). `0` means the default. |
 | `granularity` | `package`, `func` | `package` | Go only. `func` makes each top-level test function a unit (`function` is accepted as an alias). See [Go test functions](../guides/go-test-functions.md). |
 | `static` | bool | `true` | Use the static import graph in addition to tracing. |
+| `trust_browser_passes` | bool | `false` | vitest only. Record a pass of a test that runs only in a browser (browser mode, Storybook stories), which leaves no trace, with the dependencies smates knows statically, so that it is skipped until one of them changes. Off, such a test runs again on every run. See [Browser mode and Storybook](../guides/runners.md#browser-mode-and-storybook). |
 | `junit` | path (relative to `root`) | | A JUnit XML report the command writes. smates reads per-file pass/fail from it when the runner cannot report it otherwise. |
 | `python_roots` | list of paths (relative to `root`) | `[]` | Extra import roots for Python static analysis (for example `src` in a src layout). |
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |

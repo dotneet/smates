@@ -90,6 +90,27 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	return adds
 }
 
+// WholeSuites returns additions that run every test of each suite in which a selected
+// test belongs to a project whose test files smates could not list (a Storybook
+// project whose stories it cannot read, runner.Matcher.Whole): its tests are a guess,
+// and only an unfiltered run is sure to run them all.
+func (r *Result) WholeSuites() []Addition {
+	var adds []Addition
+	for _, s := range r.Suites {
+		if s.All {
+			continue
+		}
+		for _, t := range s.Tests {
+			if t.Selected && s.Suite.RunsWhole(s.Files[t.ID]) {
+				adds = append(adds, Addition{Suite: s.Name, Reason: ReasonAll,
+					Detail: "runs with " + t.ID + ", of a project whose test files smates cannot list"})
+				break
+			}
+		}
+	}
+	return adds
+}
+
 // Ownership answers which suites own a change for a --suite run: the suites the
 // orphan policy over every suite would run for it (see orphanOwners), among the suites
 // the run picked and the suites it left out.
@@ -519,7 +540,9 @@ var jsExts = []string{".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cj
 // something outside the repository's tests runs it (a server an e2e suite talks to,
 // which depends_on/rules declare, or a script started by a command smates cannot see
 // into). Tool and runner configuration written as code (vite.config.ts, setup.py, ...)
-// is never counted as untested.
+// is never counted as untested, nor is what a runner's configuration loads by name (a
+// setup file, a Vite plugin, and what they import; see runner.RunnerConfig), nor code
+// under the root of a suite whose tests may run in a browser.
 func (r *Result) Untested(orphans []string) []string {
 	if r.Mode != ModeState {
 		// Without a recorded state D(T) holds the static closure only: files tests
@@ -542,6 +565,9 @@ func (r *Result) untested(f string) bool {
 	if strings.HasSuffix(base, ".d.ts") || strings.Contains(stem, ".config") || strings.HasSuffix(stem, "rc") || untestedExcluded[stem] {
 		return false
 	}
+	if r.loaded[f] {
+		return false // a runner loads it through its configuration (a setup file, a plugin)
+	}
 	for _, seg := range strings.Split(path.Dir(f), "/") {
 		if dataDirs[strings.ToLower(seg)] {
 			return false // source files tests read as data
@@ -549,9 +575,10 @@ func (r *Result) untested(f string) bool {
 	}
 	// Every suite that may run f's code must have recorded all its tests: a test
 	// with no entry is known by its import closure only, which misses code loaded by
-	// name (a settings module, a plugin) and data reads.
+	// name (a settings module, a plugin) and data reads. Tests that run in a browser
+	// are never traced: what they load is never fully recorded either.
 	for _, s := range r.Suites {
-		if s.Unrecorded && pathutil.Under(f, s.Suite.Root) {
+		if (s.Unrecorded || s.Browser) && pathutil.Under(f, s.Suite.Root) {
 			return false
 		}
 	}

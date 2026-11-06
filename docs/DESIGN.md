@@ -326,10 +326,13 @@ Orphans go through, in order:
    test, directly or transitively (every test's import closure is in its `D(T)`), and
    was neither read nor executed by any test in its last run. No test can be affected,
    so it selects nothing and is reported as a change to untested code. Code configuring
-   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
-   directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
-   are left out, and so are files under the root of a suite with a test that has no
-recorded entry yet; so is everything without a recorded state, where `D(T)` holds only the
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), what a Vitest or
+   Jest configuration loads by name (`runner.RunnerConfig`: every repository file a
+   string literal in a configuration file names, such as setupFiles, plugins and alias
+   targets, plus the static closure of both), source under data directories
+   (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes are left
+   out, and so are files under the root of a suite with a test that has no recorded
+   entry yet or whose configuration may run tests in a browser (never traced); so is everything without a recorded state, where `D(T)` holds only the
    import closure and files tests read as data are not known yet. Code run by another
    process must be declared (rules), as for any dependency tracing
    cannot see.
@@ -393,6 +396,29 @@ config's base directory, and falls back to its default globs, with a `doctor` wa
 when the config is not literal. Derived patterns do not mark the suite narrowed: a full
 run still lets the runner discover its tests, so an approximation (a converted
 extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
+A vitest suite command's `--project` drops only the projects known to be named
+otherwise (a literal `test.name`, not a browser project, no pattern in the filter).
+
+**Browser projects.** A vitest project with `test.browser` (or a configuration
+`mentionsBrowser` when it cannot be read) or Storybook's Vitest plugin is a browser
+project (`Matcher.Browser`). Storybook's stories become units: `storybookMatchers` finds
+`storybookTest(...)` calls in the source (also inside `mergeConfig`, which
+`ConfigObject` cannot evaluate), evaluates `configDir` (`js.CallArgs`,
+`js.PathValue`), reads `stories` and `staticDirs` from `<configDir>/main.*` and converts
+each entry to a matcher (MDX excluded). Unreadable stories fall back to
+`**/*.stories.*` under the project, marked `Whole`: `Result.WholeSuites` then selects
+the whole suite whenever one of them is selected, so the runner, unfiltered, runs every
+story whatever the guess. Browser projects give their units `Deps` (the configuration
+directory and static directories, as globs) and `Starts` (`preview.*`, whose static
+closure is added), and a unit that runs only in browser projects also depends on what
+the suite's configuration loads (`RunnerConfig.Files`). Such a unit leaves no trace:
+`observeAll` makes its reported pass `unknown` (re-run every time) unless the suite sets
+`trust_browser_passes`, which records it as a `StaticOnly` pass with `Known` (plus the
+runner's global code) as its dependencies; `Record` keeps it `unknown` when
+`Suite.Untrusted` names a reason: a matcher's `Unsure` (stories or `staticDirs` not
+read), no static analysis, or a known dependency with an import `Graph.Unresolved`
+reports (no repository file, no installed package, no builtin: a Vite alias, a virtual
+module).
 
 A Go package unit is the directory of a test file, unless build constraints exclude every
 Go file of that directory in the suite's configuration (`go list -find` with the suite's
@@ -725,16 +751,26 @@ them (`runner.TypeEraser`): vitest run directly by the suite command, with no me
 type checking (typecheck, tsc, tsd, ts-node, the options above, `tsconfigRaw`) in the
 command, the arguments passed through or the suite env, nor in a vitest/vite config at or
 below the suite root or above it or anything those import, no workspace file, no config
-naming other configs by path (`projects:`, `workspace:`, `extends:`), no import of a package
-other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
-`vite-tsconfig-paths`) and Node's builtins (a preset, or a plugin whose config hook may
-return test settings), and no `*.test-d.*` / `*.spec-d.*` file in the suite; or
-`bun test` itself. The rule is deliberately coarse: any
+naming other configs by path (`projects:`, `workspace:`, `extends:`) except an aggregator
+`vitestAggregator` reads in full (a single literal `test.projects` of existing JS/TS files,
+which are scanned in turn, and inline projects with `extends: true`), no run-time import
+of a package other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
+`vite-tsconfig-paths`), `@tailwindcss/vite`, Node's builtins and packages the analyzer
+resolves inside the repository (`Sources.Resolve`; their files are in the closure
+scanned) — a preset, or a plugin whose config hook may return test settings — and no
+`*.test-d.*` / `*.spec-d.*` file in the suite; or `bun test` itself. Storybook's Vitest
+plugin applies the Vite settings of `<configDir>/main.*` and of the addons and framework
+it names as strings, which no import reaches: `storybookKnown` accepts it only from
+`@storybook/addon-vitest` 10 on (which leaves react-docgen out), with a configuration
+directory it can tell and a `main.*` without `viteFinal` or `typescript` naming only
+allowlisted addons and frameworks, and scans that `main.*` as configuration. The rule is deliberately coarse: any
 mention keeps the type edges, which costs precision, never correctness (a type-only change
 can fail a type-checking run: vitest typecheck, ts-jest, ts-node). jest, node and custom
 suites always keep them. The files only the full closure reaches are added to `Covered`
 (a change to them is explained, not an orphan) but not to D(T) or `Known`, so recording
-does not write them either.
+does not write them either. A file the runner loads through its configuration
+(`runner.RunnerConfig`, a Vite plugin serving a mock API that a test imports only for its
+types) stays in the closure: erasing the import does not stop the runner loading it.
 
 ## 3. Status and shadow mode
 

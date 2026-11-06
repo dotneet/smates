@@ -13,6 +13,7 @@ import (
 
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/detect"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
@@ -121,6 +122,10 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkOK, "config", "config %s", p.cfg.Path)
 	} else {
 		r.add(checkWarn, "config", "no smates.yml: using auto-detected suites (run `smates init` to pin them)").fix(doctorFix{Command: "smates init"})
+		_, notes := detect.Detect(p.repo, p.files)
+		for _, n := range notes {
+			r.add(checkWarn, "suite-not-detected", "%s", n).fix(doctorFix{Doc: docURL + "guides/configuration/#which-files-are-tests"})
+		}
 	}
 	if len(p.suites) == 0 {
 		r.add(checkFail, "suites-detected", "no test suites detected").fix(doctorFix{Command: "smates init", Doc: docURL + "guides/configuration/"})

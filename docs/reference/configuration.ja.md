@@ -119,6 +119,7 @@ agent:
 | `record_jobs` | int（0 以上） | 意味の欄を参照 | ファイルごとに 1 プロセスで記録するとき、同時に動かすプロセス数。`bun` と、ファイルを順に実行するコマンド（`--runInBand`、`--no-file-parallelism`、`--test-isolation=none`、`--test-concurrency=1`）では `1`、それ以外は CPU 数です。`granularity: func` では、1 つのパッケージのテスト関数を同時にいくつ記録するか（デフォルト `1`）。`0` はデフォルトの意味です。 |
 | `granularity` | `package`、`func` | `package` | Go のみ。`func` にするとトップレベルのテスト関数がそれぞれ 1 ユニットになります（`function` も別名として使えます）。[Go のテスト関数単位の選択](../guides/go-test-functions.md) を参照してください。 |
 | `static` | bool | `true` | トレースに加えて静的な import グラフを使います。 |
+| `trust_browser_passes` | bool | `false` | vitest のみ。ブラウザでだけ動くテスト（ブラウザモード、Storybook のストーリー）はトレースを残しません。その pass を、smates が静的に分かる依存とともに記録し、依存のどれかが変わるまでスキップします。オフのときは、そうしたテストを毎回実行します。[ブラウザモードと Storybook](../guides/runners.md#browser-mode-and-storybook) を参照してください。 |
 | `junit` | パス（`root` から） | | コマンドが書き出す JUnit XML のレポート。ランナーがファイルごとの成否を報告できない場合に、smates はここから読み取ります。 |
 | `python_roots` | パスのリスト（`root` から） | `[]` | Python の静的解析で使う追加の import ルート（src レイアウトの `src` など）。 |
 | `env_ignore` | 名前またはグロブのリスト | `[]` | トップレベルのキーと同じで、このスイートだけに追加されます。 |

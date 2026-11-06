@@ -1,11 +1,15 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+
+	"github.com/dotneet/smates/internal/static/js"
 )
 
 // TypeEraser is implemented by adapters whose runner may execute TypeScript with its
@@ -21,12 +25,15 @@ type TypeEraser interface {
 
 // Sources is the view of the repository a TypeEraser decides from.
 type Sources struct {
-	// Files are the repo-relative paths of the working tree.
+	// Files are the repo-relative paths of the working tree, sorted.
 	Files []string
 	// Read returns a file's content (nil if unreadable).
 	Read func(string) []byte
 	// Closure returns the static import closure of files, including them.
 	Closure func(...string) []string
+	// Resolve returns the repository files a module specifier imported from a file
+	// resolves to (nil: not known).
+	Resolve func(from, spec string) []string
 }
 
 // ErasesTypes reports whether s's tests are known to run with TypeScript types erased
@@ -42,22 +49,22 @@ func ErasesTypes(s *Suite, src Sources) bool {
 // imports of types as side-effect imports. It is matched against commands, the suite's
 // environment and runner configuration files (comments included): any mention keeps
 // type-only imports, which costs selection precision, never correctness.
-var typeCheckRe = regexp.MustCompile(`(?i)type-?check|\btsc\b|\btsd\b|ts-node|verbatimModuleSyntax|preserveValueImports|importsNotUsedAsValues|onlyRemoveTypeImports|tsconfigRaw`)
+var typeCheckRe = regexp.MustCompile(`(?i)type-?check|\btsc\b|\btsd\b|ts-node|verbatimModuleSyntax|preserveValueImports|importsNotUsedAsValues|onlyRemoveTypeImports|tsconfigRaw|STORYBOOK_COMPONENT_PATHS`)
 
 // runsDirectly reports whether the suite's command runs the runner itself (bin(words,
 // i) matches at some word) as one plain command: not a package script or a shell
 // pipeline, which may check types before or after the tests, nor with anything in the
-// command, the arguments passed through or the suite's environment that typeCheckRe
-// matches. A --tsconfig option (bun's --tsconfig-override) makes the compiler options
-// unknown too.
+// command, the arguments passed through or the suite's environment (names and values)
+// that typeCheckRe matches. A --tsconfig option (bun's --tsconfig-override) makes the
+// compiler options unknown too.
 func runsDirectly(s *Suite, bin func(words []string, i int) bool) bool {
 	cmd := s.Command
 	if strings.ContainsAny(cmd, ";|&`\n") || strings.Contains(cmd, "$(") {
 		return false
 	}
 	all := append([]string{cmd}, s.ExtraArgs...)
-	for _, v := range s.Env {
-		all = append(all, v)
+	for k, v := range s.Env {
+		all = append(all, k+"="+v)
 	}
 	for _, a := range all {
 		if typeCheckRe.MatchString(a) || strings.Contains(a, "--tsconfig") {
@@ -203,14 +210,16 @@ var moduleRe = regexp.MustCompile(`(?:\bfrom|\bimport\s*\(|\bimport|\brequire\s*
 // knownConfigModule reports whether a vitest configuration importing module m is
 // still fully seen: a relative path (the static closure follows it) or a package
 // that does not configure vitest's type checking (vitest and vite themselves, their
-// official plugins, Node's builtins). Any other package may: a preset, or a plugin
-// whose config hook returns test settings.
+// official plugins, Tailwind's Vite plugin, Node's builtins). Any other package may: a
+// preset, or a plugin whose config hook returns test settings. Storybook's Vitest
+// plugin is known only where storybookKnown says so.
 func knownConfigModule(m string) bool {
 	switch {
 	case strings.HasPrefix(m, "."), strings.HasPrefix(m, "/"), strings.HasPrefix(m, "node:"):
 		return true
 	case m == "vitest", m == "vite", strings.HasPrefix(m, "vitest/"), strings.HasPrefix(m, "vite/"),
-		strings.HasPrefix(m, "@vitest/"), strings.HasPrefix(m, "@vitejs/"), m == "vite-tsconfig-paths":
+		strings.HasPrefix(m, "@vitest/"), strings.HasPrefix(m, "@vitejs/"), m == "vite-tsconfig-paths",
+		m == "@tailwindcss/vite":
 		return true
 	}
 	switch m {
@@ -222,19 +231,55 @@ func knownConfigModule(m string) bool {
 
 // mentionsTypeCheck reports whether the vitest configuration may check types, or is not
 // fully seen: a configuration file, or a source file in its static import closure,
-// matches typeCheckRe, names other configuration files by path (a workspace file,
-// configRefRe), or imports a package that may configure vitest (see
-// knownConfigModule); or a configuration file cannot be read.
+// matches typeCheckRe, names other configuration files by path (configRefRe, except
+// the projects of an aggregator vitestAggregator reads in full, which are scanned in
+// turn), or imports at run time a package that may configure vitest (see
+// knownConfigModule; an import of types only, or of a package the static analysis
+// resolves inside the repository, whose files the closure holds, is seen); or a
+// configuration file cannot be read. Storybook's Vitest plugin counts as seen in a
+// configuration storybookKnown accepts, whose main.* files are scanned in turn.
 func mentionsTypeCheck(src Sources, configs []string) bool {
 	if len(configs) == 0 {
 		return false
 	}
-	for _, f := range configs {
-		if src.Read(f) == nil {
+	// refs holds, by configuration file, how many configRefRe matches are known to
+	// name only files that are scanned too.
+	refs := map[string]int{}
+	storybook := map[string]bool{}
+	seen := map[string]bool{}
+	// projectFiles are the files aggregators name: a project file is no aggregator.
+	projectFiles := map[string]bool{}
+	for i := 0; i < len(configs); i++ {
+		f := configs[i]
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		b := src.Read(f)
+		if b == nil {
 			return true
 		}
-		if b := path.Base(f); strings.HasPrefix(b, "vitest.workspace.") || strings.HasPrefix(b, "vitest.projects.") {
+		if base := path.Base(f); strings.HasPrefix(base, "vitest.workspace.") || strings.HasPrefix(base, "vitest.projects.") {
 			return true
+		}
+		if configRefRe.Match(b) {
+			projects, n, ok := vitestAggregator(f, b, src)
+			if !ok || projectFiles[f] {
+				return true
+			}
+			refs[f] = n
+			for _, p := range projects {
+				projectFiles[p] = true
+			}
+			configs = append(configs, projects...)
+		}
+		if usesStorybookPlugin(b) {
+			mains, ok := storybookKnown(f, b, src)
+			if !ok {
+				return true
+			}
+			storybook[f] = true
+			configs = append(configs, mains...)
 		}
 	}
 	for _, f := range src.Closure(configs...) {
@@ -245,17 +290,228 @@ func mentionsTypeCheck(src Sources, configs []string) bool {
 			}
 		case ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts":
 			b := src.Read(f)
-			if typeCheckRe.Match(b) || configRefRe.Match(b) {
+			if typeCheckRe.Match(b) || len(configRefRe.FindAllIndex(b, -1)) > refs[f] {
 				return true
 			}
+			typeOnly := typeOnlyImports(f, b)
 			for _, m := range moduleRe.FindAllSubmatch(b, -1) {
-				if !knownConfigModule(string(m[1])) {
+				spec := string(m[1])
+				switch {
+				case knownConfigModule(spec), typeOnly[spec], storybook[f] && storybookModule(spec):
+				case src.Resolve != nil && len(src.Resolve(f, spec)) > 0:
+				default:
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// typeOnlyImports returns the specifiers source b (of file f) imports only in
+// type-only declarations, which never load the module.
+func typeOnlyImports(f string, b []byte) map[string]bool {
+	out := map[string]bool{}
+	for _, imp := range js.Imports(f, b) {
+		if v, ok := out[imp.Spec]; ok {
+			out[imp.Spec] = v && imp.TypeOnly
+		} else {
+			out[imp.Spec] = imp.TypeOnly
+		}
+	}
+	return out
+}
+
+// vitestAggregator reads the projects of a vitest configuration file f (source b)
+// that names other configuration files by path (configRefRe) and returns them, with
+// how many configRefRe matches of b they account for. ok is false unless every match
+// is accounted for: a single `projects:`, the test.projects of a configuration
+// ConfigObject reads (no mergeConfig, no spread, no root), whose entries are paths of
+// repository JS/TS files (no glob, no directory, no negation) or inline projects that
+// extend nothing but the root configuration (`extends: true`, as is every other
+// `extends:`). A `workspace:` is never accounted for.
+func vitestAggregator(f string, b []byte, src Sources) (projects []string, n int, ok bool) {
+	matches := configRefRe.FindAllIndex(b, -1)
+	nProjects := 0
+	for _, m := range matches {
+		switch key := strings.TrimRight(string(b[m[0]:m[1]]), " \t\r\n:"); key {
+		case "projects":
+			nProjects++
+		case "extends":
+			if !extendsTrueRe.Match(b[m[1]:]) {
+				return nil, 0, false
+			}
+		default:
+			return nil, 0, false
+		}
+	}
+	if nProjects != 1 {
+		return nil, 0, false
+	}
+	v, found := js.ConfigObject(b)
+	obj, isObj := v.(*js.Object)
+	if !found || !isObj {
+		return nil, 0, false
+	}
+	if r, known := obj.Get("root"); !known || r != nil {
+		return nil, 0, false
+	}
+	tv, _ := obj.Get("test")
+	test, isObj := tv.(*js.Object)
+	if !isObj {
+		return nil, 0, false
+	}
+	pv, _ := test.Get("projects")
+	list, isList := pv.([]any)
+	if !isList {
+		return nil, 0, false
+	}
+	dir := path.Dir(f)
+	for _, e := range list {
+		switch x := e.(type) {
+		case string:
+			p, inRepo := repoRel(dir, x)
+			if !inRepo || strings.ContainsAny(x, "*?[]{}()!") || !isJSSource(p) {
+				return nil, 0, false
+			}
+			if _, exists := slices.BinarySearch(src.Files, p); !exists {
+				return nil, 0, false
+			}
+			projects = append(projects, p)
+		case *js.Object:
+			if ext, known := x.Get("extends"); !known || ext != nil && ext != true {
+				return nil, 0, false
+			}
+		default:
+			return nil, 0, false
+		}
+	}
+	return projects, len(matches), true
+}
+
+// extendsTrueRe matches what follows `extends:` in an inline project that inherits
+// the root configuration.
+var extendsTrueRe = regexp.MustCompile(`^\s*true\b`)
+
+// usesStorybookPlugin reports whether configuration source b uses Storybook's Vitest
+// plugin: imports its package (or the experimental one) or calls storybookTest. A
+// main.* naming the addon among its addons does not.
+func usesStorybookPlugin(b []byte) bool {
+	if storybookCallRe.Match(b) {
+		return true
+	}
+	for _, m := range moduleRe.FindAllSubmatch(b, -1) {
+		if spec := string(m[1]); storybookModule(spec) || strings.HasPrefix(spec, "@storybook/experimental-addon-test") {
+			return true
+		}
+	}
+	return false
+}
+
+var storybookCallRe = regexp.MustCompile(`\bstorybookTest\s*\(`)
+
+// storybookModule reports whether m is the package of Storybook's Vitest plugin.
+func storybookModule(m string) bool {
+	return m == "@storybook/addon-vitest" || strings.HasPrefix(m, "@storybook/addon-vitest/")
+}
+
+// storybookAddons and storybookFrameworks are the Storybook addons and frameworks a
+// configuration using Storybook's Vitest plugin may name while types stay erased:
+// none sets test options or adds a Vite plugin that reads types (react-docgen, which
+// the plugin itself leaves out from Storybook 10 on, or vue-component-meta).
+var (
+	storybookAddons = []string{"@storybook/addon-vitest", "@storybook/addon-docs", "@storybook/addon-a11y",
+		"@storybook/addon-links", "@storybook/addon-themes", "@storybook/addon-onboarding"}
+	storybookFrameworks = []string{"@storybook/react-vite", "@storybook/html-vite", "@storybook/web-components-vite"}
+)
+
+// storybookKnown reports whether Storybook's Vitest plugin in configuration file f
+// (source b) is fully seen, and returns the main.* files of its configuration
+// directories, to be scanned like configuration: the plugin loads them and applies
+// the Vite settings of main.* and of every addon and framework it names, which are
+// strings, not imports. It is when the plugin is @storybook/addon-vitest of
+// Storybook 10 or later (installed in a node_modules at or above f), smates can tell
+// each call's configuration directory, and the main.* there can be read, sets no
+// viteFinal and no typescript options (react-docgen), and names only the addons and
+// framework of storybookAddons and storybookFrameworks.
+func storybookKnown(f string, b []byte, src Sources) ([]string, bool) {
+	if bytes.Contains(b, []byte("@storybook/experimental-addon-test")) || storybookMajor(path.Dir(f), src) < 10 {
+		return nil, false
+	}
+	names, imported := storybookNames(b)
+	dirs, found, err := storybookDirs(f, path.Dir(f), b, names, imported)
+	if err != nil || !found || len(dirs) == 0 {
+		return nil, false
+	}
+	var mains []string
+	for _, d := range dirs {
+		main := readStorybookMain(d, src.Read)
+		if main.err != nil {
+			return nil, false
+		}
+		for _, k := range []string{"viteFinal", "typescript"} {
+			if v, known := main.obj.Get(k); !known || v != nil {
+				return nil, false
+			}
+		}
+		if !storybookNamesKnown(main.obj, "addons", storybookAddons, true) ||
+			!storybookNamesKnown(main.obj, "framework", storybookFrameworks, false) {
+			return nil, false
+		}
+		mains = append(mains, main.file)
+	}
+	return mains, true
+}
+
+// storybookNamesKnown reports whether key of main.* names only packages among
+// allowed: a string or {name} object, or (list) a list of them, which may be absent.
+func storybookNamesKnown(obj *js.Object, key string, allowed []string, list bool) bool {
+	v, known := obj.Get(key)
+	if !known {
+		return false
+	}
+	entries := []any{v}
+	if list {
+		if v == nil {
+			return true
+		}
+		l, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		entries = l
+	}
+	for _, e := range entries {
+		if o, ok := e.(*js.Object); ok {
+			e, _ = o.Get("name")
+		}
+		name, ok := e.(string)
+		if !ok || !slices.Contains(allowed, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// storybookMajor returns the major version of the @storybook/addon-vitest installed in
+// the node_modules nearest dir (at or above it), 0 if none or unknown.
+func storybookMajor(dir string, src Sources) int {
+	for d := dir; ; d = path.Dir(d) {
+		if b := src.Read(path.Join(d, "node_modules/@storybook/addon-vitest/package.json")); b != nil {
+			var pkg struct {
+				Version string `json:"version"`
+			}
+			if json.Unmarshal(b, &pkg) != nil {
+				return 0
+			}
+			major, _, _ := strings.Cut(pkg.Version, ".")
+			n, _ := strconv.Atoi(major)
+			return n
+		}
+		if d == "." || d == "/" || d == "" {
+			return 0
+		}
+	}
 }
 
 // hasNodeModules reports whether a repo-relative path is inside a node_modules

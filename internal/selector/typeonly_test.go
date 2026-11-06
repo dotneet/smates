@@ -1,6 +1,8 @@
 package selector
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -105,5 +107,47 @@ func TestSelectTypeOnlyDiffMode(t *testing.T) {
 	}
 	if len(res.Orphans) != 0 {
 		t.Errorf("orphans %v", res.Orphans)
+	}
+}
+
+// TestSelectTypeOnlyThroughAggregator: a package whose vitest configuration is an
+// aggregator of a node project and a Storybook project (with Tailwind's plugin) still
+// erases type-only imports, as long as smates sees every configuration in full.
+func TestSelectTypeOnlyThroughAggregator(t *testing.T) {
+	cases := []struct {
+		name string
+		main string
+		want string // cart.test.ts after a type-only change
+	}{
+		{name: "every configuration seen", want: "-unaffected",
+			main: `import type { StorybookConfig } from "@storybook/react-vite"
+const config: StorybookConfig = { stories: ["../src/**/*.stories.tsx"], addons: ["@storybook/addon-a11y"], framework: "@storybook/react-vite" }
+export default config`},
+		{name: "must keep: Storybook main with viteFinal", want: ReasonChanged,
+			main: `export default { stories: ["../src/**/*.stories.tsx"], framework: "@storybook/react-vite", viteFinal: async (c) => c }`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := typeOnlyFixture(t, config.Suite{Runner: "vitest", Command: "vitest run"}, map[string]string{
+				"web/vitest.config.ts":      `export default defineConfig({ test: { projects: ["./vitest.node.config.ts", "./vitest.storybook.config.ts"] } })`,
+				"web/vitest.node.config.ts": `export default { test: { include: ["src/**/*.test.ts"] } }`,
+				"web/vitest.storybook.config.ts": `import tailwind from "@tailwindcss/vite"
+import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
+export default mergeConfig(base, defineConfig({ plugins: [tailwind(), storybookTest()] }))`,
+				"web/.storybook/main.ts": c.main,
+			})
+			pkg := filepath.Join(f.dir, "node_modules", "@storybook", "addon-vitest")
+			if err := os.MkdirAll(pkg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{"version":"10.0.0"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st := f.record(nil, nil)
+			f.write("web/src/types.ts", `export type User = { id: number }`)
+			if got := decisions(f.sel(st, nil))["web/src/cart.test.ts"]; got != c.want {
+				t.Errorf("cart.test.ts after a type-only change: %s, want %s", got, c.want)
+			}
+		})
 	}
 }

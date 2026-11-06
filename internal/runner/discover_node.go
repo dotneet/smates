@@ -2,11 +2,13 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -147,6 +149,25 @@ func commandFlag(s *Suite, names ...string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// commandFlags returns the values of every occurrence of a --name flag of the suite
+// command ("--name=v", "--name v").
+func commandFlags(s *Suite, name string) []string {
+	words, err := SplitWords(s.Command)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for i, w := range words {
+		switch {
+		case w == name && i+1 < len(words):
+			out = append(out, words[i+1])
+		case strings.HasPrefix(w, name+"="):
+			out = append(out, w[len(name)+1:])
+		}
+	}
+	return out
 }
 
 // findUp returns the first repo-relative file among names (in order) found in dir or
@@ -437,7 +458,11 @@ func vitestWorkspaceNames() []string {
 // and exclude patterns below its root.
 func (vitest) Discover(repo *gitx.Repo, s *Suite) Discovery {
 	d, err := vitestDiscover(repo, s)
-	if err != nil {
+	var se *storiesError
+	switch {
+	case errors.As(err, &se):
+		d.Warning = fmt.Sprintf("%v (set tests: in smates.yml if they differ)", se)
+	case err != nil:
 		// With matchers, the error concerns one project, which keeps the defaults.
 		scope := ""
 		if len(d.Matchers) > 0 {
@@ -449,7 +474,7 @@ func (vitest) Discover(repo *gitx.Repo, s *Suite) Discovery {
 }
 
 func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
-	for _, f := range []string{"--root", "-r", "--dir", "--workspace", "--project"} {
+	for _, f := range []string{"--root", "-r", "--dir", "--workspace"} {
 		if _, ok := commandFlag(s, f); ok {
 			return Discovery{}, fmt.Errorf("the suite command sets %s", f)
 		}
@@ -464,6 +489,25 @@ func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
 	} else {
 		file = findUp(repo, s.Root, vitestConfigNames(), nil)
 	}
+	d, err := vitestConfigDiscovery(repo, s, file)
+	if err != nil && len(d.Matchers) == 0 && file != "" {
+		// The configuration cannot be read, but Storybook's plugin in it still says
+		// where its stories are; the other tests keep the defaults.
+		src := repoReader(repo)(file)
+		if stories, serr := storybookMatchers(file, s.Root, src, nil, repoReader(repo)); len(stories) > 0 {
+			def := Matcher{Base: s.Root, Tests: vitestInclude, Browser: true}
+			if serr != nil {
+				err = serr
+			}
+			return Discovery{Matchers: append([]Matcher{def}, stories...), Source: file + " Storybook stories", Files: []string{file}}, err
+		}
+	}
+	return d, err
+}
+
+// vitestConfigDiscovery is vitestDiscover once the configuration file is known ("":
+// none).
+func vitestConfigDiscovery(repo *gitx.Repo, s *Suite, file string) (Discovery, error) {
 	var obj *js.Object
 	if file != "" {
 		var err error
@@ -550,17 +594,57 @@ func vitestDiscover(repo *gitx.Repo, s *Suite) (Discovery, error) {
 		}
 	}
 	if projects != nil {
-		return vitestProjects(repo, root, projFile, projKey, test, projects)
+		d, err := vitestProjects(repo, root, projFile, projKey, test, projects, commandFlags(s, "--project"))
+		for _, f := range []string{file, projFile} {
+			if f != "" && !slices.Contains(d.Files, f) {
+				d.Files = append(d.Files, f)
+			}
+		}
+		return d, err
 	}
 	m, k, err := vitestMatcher(file, root, test)
 	if err != nil {
 		return Discovery{}, err
 	}
 	keys = append(keys, k...)
-	if len(keys) == 0 {
+	ms := []Matcher{m}
+	var src []byte
+	if file != "" {
+		src = repoReader(repo)(file)
+	}
+	m.Browser = browserEnabled(test, src)
+	stories, err := storybookMatchers(file, root, src, nil, repoReader(repo))
+	switch {
+	case len(stories) > 0:
+		// Storybook's plugin adds the stories to the project's include; the default
+		// include applies only when there is none.
+		m.Browser = true
+		ms = nil
+		if slices.Contains(k, "test.include") {
+			ms = []Matcher{m}
+		}
+		ms = append(ms, stories...)
+		keys = append(keys, "Storybook stories")
+	case m.Browser:
+		ms[0] = m
+		keys = append(keys, "test.browser")
+	}
+	if len(keys) == 0 || file == "" {
 		return Discovery{}, nil
 	}
-	return Discovery{Matchers: []Matcher{m}, Source: file + " " + strings.Join(keys, ", ")}, nil
+	return Discovery{Matchers: ms, Source: file + " " + strings.Join(keys, ", "), Files: []string{file}}, err
+}
+
+// repoReader returns a function reading repo-relative files of repo (nil when
+// unreadable or a directory).
+func repoReader(repo *gitx.Repo) func(string) []byte {
+	return func(p string) []byte {
+		b, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(p)))
+		if err != nil {
+			return nil
+		}
+		return b
+	}
 }
 
 // vitestMatcher builds the matcher of one project from its test options; keys lists
@@ -622,19 +706,30 @@ func vitestMatcher(file, root string, test *js.Object) (Matcher, []string, error
 
 // vitestProjects unites the projects of a workspace: strings are globs of project
 // directories or config files (relative to root), objects inline project configs.
-func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object, projects []any) (Discovery, error) {
+func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object, projects []any, only []string) (Discovery, error) {
 	label := file
 	if key != "" {
 		label += " " + key
 	}
-	var ms []Matcher
+	var ms, skipped []Matcher
+	var files []string
 	var warn error
-	add := func(m Matcher, err error) {
+	n := 0
+	// add adds the matchers of one project named name ("" when unknown), unless the
+	// suite command's --project leaves it out (see runsProject).
+	add := func(m []Matcher, name string, err error) {
+		if !runsProject(name, m, only) {
+			skipped = append(skipped, m...)
+			return
+		}
 		if err != nil && warn == nil {
 			warn = err
 		}
-		ms = append(ms, m)
+		ms = append(ms, m...)
+		n++
 	}
+	read := repoReader(repo)
+	src := read(file)
 	base := path.Dir(file)
 	if key != "" {
 		base = root
@@ -670,10 +765,12 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 					cfg = mt
 				}
 				if cfg == "" {
-					ms = append(ms, Matcher{Base: mt, Tests: vitestInclude})
+					add([]Matcher{{Base: mt, Tests: vitestInclude}}, "", nil)
 					continue
 				}
-				add(vitestProjectFile(repo, cfg))
+				files = append(files, cfg)
+				pm, name, err := vitestProjectFile(repo, cfg)
+				add(pm, name, err)
 			}
 		case *js.Object:
 			pr := root
@@ -707,50 +804,117 @@ func vitestProjects(repo *gitx.Repo, root, file, key string, rootTest *js.Object
 					return Discovery{}, fmt.Errorf("%s: project root %q is outside the repository", label, rs)
 				}
 			}
-			m, _, err := vitestMatcher(label, pr, t)
+			m, k, err := vitestMatcher(label, pr, t)
 			if err != nil {
 				return Discovery{}, err
 			}
-			ms = append(ms, m)
+			m.Browser = browserEnabled(t, nil)
+			plugins, _ := x.Get("plugins")
+			stories, err := storybookMatchers(file, pr, src, pluginText(plugins), read)
+			name := projectName(t)
+			if len(stories) > 0 {
+				m.Browser = true
+				if !slices.Contains(k, "test.include") {
+					add(stories, name, err)
+					continue
+				}
+			}
+			add(append([]Matcher{m}, stories...), name, err)
 		default:
 			return Discovery{}, errNotLiteral(label, "a project", p)
 		}
 	}
+	if len(ms) == 0 && len(skipped) > 0 {
+		// No project smates can name is the one --project runs: keep them all.
+		return Discovery{Matchers: skipped, Source: fmt.Sprintf("%s (%d projects)", label, len(projects)), Files: files},
+			fmt.Errorf("%s: no project is named %s", label, strings.Join(only, ", "))
+	}
 	if len(ms) == 0 {
 		return Discovery{}, fmt.Errorf("%s: no project found", label)
 	}
-	return Discovery{Matchers: ms, Source: fmt.Sprintf("%s (%d projects)", label, len(ms))}, warn
+	source := fmt.Sprintf("%s (%d projects)", label, n)
+	if n == 1 {
+		source = label + " (1 project)"
+	}
+	if len(only) > 0 {
+		source += " --project " + strings.Join(only, ", ")
+	}
+	return Discovery{Matchers: ms, Source: source, Files: files}, warn
+}
+
+// projectName returns the name a project's test options give it (test.name, a
+// string or {label}), "" when there is none or it cannot be read.
+func projectName(test *js.Object) string {
+	v, _ := test.Get("name")
+	if o, ok := v.(*js.Object); ok {
+		v, _ = o.Get("label")
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// runsProject reports whether `vitest --project` with the names only (none: no
+// filter) may run the project named name whose matchers are ms. Only a project known
+// to be named otherwise is left out: one with no readable name (Vitest then names it
+// after its package or directory), a browser project (whose browser instances get
+// names of their own) and any project when a filter is a pattern are kept.
+func runsProject(name string, ms []Matcher, only []string) bool {
+	if len(only) == 0 || name == "" || slices.Contains(only, name) {
+		return true
+	}
+	for _, m := range ms {
+		if m.Browser {
+			return true
+		}
+	}
+	for _, o := range only {
+		if strings.ContainsAny(o, "*?[]{}!") {
+			return true
+		}
+	}
+	return false
 }
 
 // vitestProjectFile reads the test options of a project config file; its root is the
 // file's directory unless it sets one. An unreadable file yields the defaults for its
-// directory and the reason.
-func vitestProjectFile(repo *gitx.Repo, cfg string) (Matcher, error) {
+// directory and the reason. Storybook's plugin in it adds the stories (see
+// storybookMatchers), whether the rest can be read or not.
+func vitestProjectFile(repo *gitx.Repo, cfg string) ([]Matcher, string, error) {
 	dir := path.Dir(cfg)
-	def := Matcher{Base: dir, Tests: vitestInclude}
+	read := repoReader(repo)
+	src := read(cfg)
+	stories, serr := storybookMatchers(cfg, dir, src, nil, read)
+	def := Matcher{Base: dir, Tests: vitestInclude, Browser: len(stories) > 0 || mentionsBrowser(src)}
+	fallback := func(err error) ([]Matcher, string, error) {
+		return append([]Matcher{def}, stories...), "", err
+	}
 	obj, err := loadJSConfig(repo, cfg)
 	if err != nil {
-		return def, err
+		return fallback(err)
 	}
 	root := dir
 	if v, err := get(cfg, obj, "root"); err != nil {
-		return def, err
+		return fallback(err)
 	} else if r, ok := v.(string); ok {
 		if root, ok = repoRel(dir, r); !ok {
-			return def, fmt.Errorf("%s: root %q is outside the repository", cfg, r)
+			return fallback(fmt.Errorf("%s: root %q is outside the repository", cfg, r))
 		}
 	}
 	t := &js.Object{}
 	if tv, err := get(cfg, obj, "test"); err != nil {
-		return def, err
+		return fallback(err)
 	} else if tv != nil {
 		if t, _ = tv.(*js.Object); t == nil {
-			return def, errNotLiteral(cfg, "test", tv)
+			return fallback(errNotLiteral(cfg, "test", tv))
 		}
 	}
-	m, _, err := vitestMatcher(cfg, root, t)
+	m, k, err := vitestMatcher(cfg, root, t)
 	if err != nil {
-		return def, err
+		return fallback(err)
 	}
-	return m, nil
+	m.Browser = len(stories) > 0 || browserEnabled(t, src)
+	if len(stories) > 0 && !slices.Contains(k, "test.include") {
+		return stories, projectName(t), serr
+	}
+	return append([]Matcher{m}, stories...), projectName(t), serr
 }

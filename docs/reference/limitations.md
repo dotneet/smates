@@ -20,8 +20,18 @@ that import the database helper; a test that connects in a way the rule does not
 is then not run for a migration change (see
 [Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database)).
 
-**Code that runs in a browser.** Code executed in a browser (vitest browser mode,
-Playwright) is covered by the static import graph only.
+**Code that runs in a browser.** Tracing does not reach into a browser. A vitest test
+that runs only in a browser (browser mode, a Storybook story run by Storybook's Vitest
+plugin) leaves no trace, so after every run its outcome is unknown and it runs again
+next time, whatever changed. With `trust_browser_passes: true` on the suite, a pass the
+reporter gives is recorded instead, with the dependencies smates knows statically: the
+test's import closure, what the Vitest configuration loads (setup files, plugins, alias
+targets), and for a story the Storybook configuration directory, the import closure of
+`preview.*` and the `staticDirs`. What the browser loads beyond that (a module reached
+through an alias only Vite's configuration resolves, a fetched fixture, a CSS
+`@import`) is missed: a story whose known dependencies include an import smates cannot
+resolve is never trusted. Code a Playwright end-to-end test drives in a browser is
+covered as [a server](../guides/servers.md).
 
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands
 are analyzed from their command line. A command smates cannot see into (`make`, a
@@ -52,10 +62,20 @@ imports too whenever the run may check types: a suite command that does not run
 `vitest` (or `bun test`) directly (`npm test`, a `&&` chain), any mention of
 `typecheck`, `tsc` and similar in the command, the arguments after `--` or the suite
 `env`, a `typecheck` setting (or those compiler options) in a vitest/vite config of the
-suite or a file it imports, a vitest config smates cannot fully see (a workspace file,
-`projects:`, `workspace:` or `extends:` naming other configs by path, an import of a
-package other than vitest, vite, their official plugins and Node's builtins, such as a
-shared preset), and `*.test-d.*` / `*.spec-d.*` files in the suite. jest
+suite or a file it imports, a vitest config smates cannot fully see, and `*.test-d.*` /
+`*.spec-d.*` files in the suite. A config is fully seen when every config it names is
+too: `test.projects` may list config files by literal path (no glob, no directory) and
+inline projects with `extends: true`, but a workspace file, `workspace:`, any other
+`extends:`, or projects inside `mergeConfig(...)` are not seen. It may import vitest,
+vite, their official plugins, `@tailwindcss/vite`, Node's builtins, packages the static
+analysis resolves inside the repository (whose files are then checked too), and any
+package for its types only (`import type`), but not another package such as a shared
+preset. Storybook's Vitest plugin is seen when it is `@storybook/addon-vitest` 10 or
+later, its configuration directory can be told, and that directory's `main.*` sets no
+`viteFinal` and no `typescript` options and names only Storybook's own addons (docs,
+a11y, links, themes, onboarding, vitest) and the `react-vite`, `html-vite` or
+`web-components-vite` framework; `STORYBOOK_COMPONENT_PATHS` in the suite `env` counts as
+a mention. jest
 (ts-jest reports type errors), `node --test` and custom suites always keep them. Tests
 recorded by an earlier smates version keep the dependency until they are recorded again.
 Type checking is not a test run: keep `tsc` (or your type checker) in CI.

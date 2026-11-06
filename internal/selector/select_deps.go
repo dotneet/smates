@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"fmt"
 	"path"
 	"slices"
 	"sort"
@@ -38,7 +39,13 @@ type suiteSel struct {
 	// of every unit.
 	rules      []*suiteRule
 	reachFiles bool
-	units      []*unitSel
+	// loaded are the files the suite's runner loads through its configuration
+	// (runner.RunnerConfig): type-only imports of them are kept (see knownDeps).
+	loaded map[string]bool
+	// browserDeps caches, by their globs and starts, the files browser projects add to
+	// their tests (see browserDeps).
+	browserDeps map[string][]string
+	units       []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -122,9 +129,12 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	mapper, _ := su.Adapter.(runner.StaticMapper)
 	// A runner that erases types without checking them never loads what tests reach
 	// only through type-only imports (see runner.TypeEraser).
-	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, runner.Sources{
-		Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure,
-	})
+	var src runner.Sources
+	if in.Graph != nil {
+		src = runner.Sources{Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure, Resolve: in.Graph.Resolve}
+		s.runnerConfig(ss, src)
+	}
+	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, src)
 	// The closures of the units cover as their union, less the vendored files a unit
 	// does not depend on: unless the union holds one (then unit by unit, see
 	// knownDeps), that is the union itself.
@@ -174,6 +184,14 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		known := k.sorted()
 		sort.Strings(traced)
 		sr.Known[u] = known
+		if config.Bool(su.TrustBrowserPasses, false) && su.BrowserUnit(sr.Files[u]) {
+			if why := s.untrusted(ss, u, known, static); why != "" {
+				if sr.Untrusted == nil {
+					sr.Untrusted = map[string]string{}
+				}
+				sr.Untrusted[u] = why
+			}
+		}
 		sr.Deps[u] = mergeSorted(known, traced)
 		ss.units = append(ss.units, &unitSel{id: u, entry: entry, known: k})
 	}
@@ -181,6 +199,25 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		for _, f := range in.Graph.Closure(bulkStarts...) {
 			s.cover(f, true)
 		}
+	}
+}
+
+// runnerConfig notes what the suite's runner loads through its configuration
+// (runner.ConfigOf): the files, which are never untested code (Result.loaded), and
+// whether it may run tests in a browser (Suite.Browser; so may a browser project).
+func (s *selection) runnerConfig(ss *suiteSel, src runner.Sources) {
+	rc := runner.ConfigOf(ss.sr.Suite, src)
+	ss.sr.Browser = rc.Browser || slices.ContainsFunc(ss.sr.Suite.Discovered, func(m runner.Matcher) bool { return m.Browser })
+	if len(rc.Files) == 0 {
+		return
+	}
+	ss.loaded = make(map[string]bool, len(rc.Files))
+	if s.res.loaded == nil {
+		s.res.loaded = map[string]bool{}
+	}
+	for _, f := range rc.Files {
+		ss.loaded[f] = true
+		s.res.loaded[f] = true
 	}
 }
 
@@ -256,8 +293,9 @@ func mergeSorted(a, b []string) []string {
 // depends on is declared (see declare). A Go compile check (runner.IsBuildCheck)
 // depends on what the compiler reads, not on what the tests do at run time: neither
 // declarations nor rules apply to it. With suiteSel.eraseTypes the static closure is
-// the one at run time (static.Graph.RuntimeClosure), and typeOnly holds the files the
-// full closure adds to it. With bulk (the suite's union holds no vendored file), a
+// the one at run time (static.Graph.RuntimeClosure) plus the files of the full one
+// the runner loads through its configuration (a Vite plugin a test imports for its
+// types runs anyway), and typeOnly holds the files the full closure adds to it. With bulk (the suite's union holds no vendored file), a
 // closure the runner does not map is left to the suite's union, and a suite left out
 // by --suite does not compute it at all. The reaches of a rule see the full file
 // closure, before the mapper keys it by declaration, and entry (the unit's recorded
@@ -291,6 +329,17 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			if !bulk && len(closure) != len(full) {
 				k.typeOnly = sortedMinus(full, closure)
 			}
+			if len(ss.loaded) > 0 && len(k.typeOnly) > 0 {
+				kept := k.typeOnly[:0:0]
+				for _, f := range k.typeOnly {
+					if ss.loaded[f] {
+						closure = append(closure, f)
+					} else {
+						kept = append(kept, f)
+					}
+				}
+				k.typeOnly = kept
+			}
 		}
 		k.bulk = bulk
 		if mapper != nil {
@@ -308,6 +357,18 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			closure = slices.DeleteFunc(slices.Clone(closure), pathutil.IsVendored)
 		}
 		k.closure = closure
+	}
+	if globs, starts, _ := su.BrowserDeps(files); len(globs) > 0 || len(starts) > 0 {
+		for _, f := range s.browserDeps(ss, globs, starts, static) {
+			k.rest[f] = ViaInput
+		}
+	}
+	if su.BrowserUnit(files) {
+		// What the runner loads through its configuration (setup files, Vite plugins
+		// serving mock APIs, alias targets) runs with the test in the browser.
+		for f := range ss.loaded {
+			k.rest[f] = ViaInput
+		}
 	}
 	for _, f := range inputs {
 		k.rest[f] = ViaInput
@@ -350,6 +411,45 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 		}
 	}
 	return k
+}
+
+// browserDeps returns the files a browser project adds to each of its tests
+// (runner.Suite.BrowserDeps): those among the selection's files that globs match,
+// and the static import closure of starts (with static analysis on).
+func (s *selection) browserDeps(ss *suiteSel, globs, starts []string, static bool) []string {
+	key := strings.Join(globs, "\x00") + "\x01" + strings.Join(starts, "\x00")
+	if out, ok := ss.browserDeps[key]; ok {
+		return out
+	}
+	out := expandInputs(globs, s.files)
+	if static && len(starts) > 0 {
+		out = append(out, s.in.Graph.Closure(starts...)...)
+	}
+	if ss.browserDeps == nil {
+		ss.browserDeps = map[string][]string{}
+	}
+	ss.browserDeps[key] = out
+	return out
+}
+
+// untrusted says why a reported pass of unit u, which runs only in a browser, cannot
+// be recorded with its known dependencies (known): a browser project whose
+// configuration smates could not fully read, no static analysis, or an import in
+// what it is known to load that resolves to nothing smates knows (an alias, a
+// virtual module), whose files are then missing. "" when it can.
+func (s *selection) untrusted(ss *suiteSel, u string, known []string, static bool) string {
+	if _, _, unsure := ss.sr.Suite.BrowserDeps(ss.sr.Files[u]); unsure != "" {
+		return unsure
+	}
+	if !static {
+		return "static analysis is off"
+	}
+	for _, f := range known {
+		if spec := s.in.Graph.Unresolved(f); len(spec) > 0 {
+			return fmt.Sprintf("%s imports %q, which smates cannot resolve", f, spec[0])
+		}
+	}
+	return ""
 }
 
 // sortedMinus returns the elements of the sorted list a that the sorted list b lacks.

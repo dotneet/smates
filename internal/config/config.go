@@ -103,6 +103,11 @@ type Suite struct {
 	Granularity string `yaml:"granularity"`
 	// Static enables import-graph analysis (default true).
 	Static *bool `yaml:"static"`
+	// TrustBrowserPasses records a vitest test that runs only in a browser (browser
+	// mode, Storybook stories), where no trace sees what it loads, as passed when the
+	// reporter says so, with its static dependencies; otherwise (the default) such a
+	// test is unknown after every run and runs again next time.
+	TrustBrowserPasses *bool `yaml:"trust_browser_passes"`
 	// Junit: optional path (relative to Root) of a JUnit XML report the command writes;
 	// used for per-file pass/fail when the runner cannot report it otherwise.
 	Junit string `yaml:"junit"`
@@ -744,6 +749,9 @@ func (c *Config) Normalize() error {
 		}
 		if err := checkRequires(s); err != nil {
 			return err
+		}
+		if Bool(s.TrustBrowserPasses, false) && s.Runner != "vitest" {
+			return fmt.Errorf("suite %q: trust_browser_passes is only supported by the vitest runner", s.Name)
 		}
 	}
 	for i := range c.Suites {
