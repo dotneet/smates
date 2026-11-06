@@ -25,7 +25,9 @@ func TestConfigHashKeysAddedLater(t *testing.T) {
 	}{
 		{"reaches", "Reaches", func(s *config.Suite) { s.Rules[0].Reaches = []string{"pkg/shared/testkit/**"} }, true},
 		{"requires", "Requires", func(s *config.Suite) { s.Requires = []config.Requirement{{TCP: "127.0.0.1:5432"}} }, false},
-		{"requires timeout", "Requires", func(s *config.Suite) { s.Requires = []config.Requirement{{TCP: "127.0.0.1:5432", Timeout: 5 * time.Second}} }, false},
+		{"requires timeout", "Requires", func(s *config.Suite) {
+			s.Requires = []config.Requirement{{TCP: "127.0.0.1:5432", Timeout: 5 * time.Second}}
+		}, false},
 		{"trust_browser_passes", "TrustBrowserPasses", func(s *config.Suite) { s.TrustBrowserPasses = new(bool) }, true},
 		{"volatile", "Volatile", func(s *config.Suite) { s.Volatile = []string{"pkg/clock"} }, false},
 		{"max_age", "MaxAge", func(s *config.Suite) { s.MaxAge = time.Hour }, false},
