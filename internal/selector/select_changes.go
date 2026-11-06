@@ -27,20 +27,56 @@ func (s *selection) changes() error {
 	return nil
 }
 
-// markerFilter drops, for a --suite run, the changes every suite it runs has already
-// seen: entries --suite runs wrote as markers (cli saveState, state.MarkerSnap) are
-// unchanged for this run when every suite it runs saw the current content.
+// markerFilter drops the changes the suites of this selection have all seen: entries
+// --suite runs wrote as markers (cli saveState, state.MarkerSnap) are unchanged for
+// this run when every suite it runs saw the current content. A suite that has never
+// been recorded (no entry in the state) has nothing to compare a marker with: its
+// tests are decided against Base (DiffUnrecorded) or run as new. So a marker every
+// recorded suite of the run saw is unchanged too, once some suite saw it; without
+// that, a partial recording (`smates run --all --suite X`) would leave every file of
+// the tree changed for an unscoped run, and an orphan of every suite. Such a file is
+// still an orphan of the never-recorded suites that own it when it changed since Base
+// and no test explains it (neverRecordedOrphans). This holds in state mode only: with
+// no entry at all (diff mode) the changes against the snapshot decide every test.
 func (s *selection) markerFilter() {
 	in := s.in
-	if len(in.Others) == 0 || len(in.State.Files) == 0 {
+	if len(in.State.Files) == 0 {
 		return
 	}
 	names := NewOwnership(in.Suites, in.Others).Picked()
+	var recorded, never []string
+	for _, name := range names {
+		if st := in.State.Suites[name]; st != nil && len(st.Tests) > 0 {
+			recorded = append(recorded, name)
+		} else {
+			never = append(never, name)
+		}
+	}
+	partial := s.res.Mode == ModeState && len(never) > 0
+	if len(in.Others) == 0 && !partial {
+		return
+	}
+	n := 0
 	for f := range s.changed {
 		v, _ := in.State.Snap(f)
-		if h, ok := v.SeenHash(); ok && gitx.SameHash(h, in.Snap[f]) && v.SeenByAll(names) {
-			delete(s.changed, f)
+		h, ok := v.SeenHash()
+		if !ok || !gitx.SameHash(h, in.Snap[f]) {
+			continue
 		}
+		switch {
+		case v.SeenByAll(names):
+			delete(s.changed, f)
+		case partial && len(v.SeenBy()) > 0 && v.SeenByAll(recorded):
+			delete(s.changed, f)
+			if s.unseen == nil {
+				s.unseen = map[string]bool{}
+			}
+			s.unseen[f] = true
+			n++
+		}
+	}
+	if n > 0 {
+		s.neverRecorded = never
 	}
 }
 

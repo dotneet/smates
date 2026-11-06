@@ -260,6 +260,11 @@ func (r *Result) Mentions(g *static.Graph, orphans []string) ([]Mention, []strin
 	if len(needles) == 0 {
 		return nil, nil
 	}
+	names := make([]string, len(needles))
+	for i, n := range needles {
+		names[i] = n.name
+	}
+	scan := newNameScanner(names)
 	// Search each distinct source file once.
 	hits := map[string]map[string]bool{} // file -> orphans referenced
 	explainedTier0 := map[string]bool{}
@@ -300,10 +305,9 @@ func (r *Result) Mentions(g *static.Graph, orphans []string) ([]Mention, []strin
 						h = map[string]bool{}
 						c := content(d)
 						if c != "" {
-							for _, n := range needles {
-								if strings.Contains(c, n.name) {
-									h[n.orphan] = strings.Contains(c, n.qualified)
-								}
+							for _, i := range scan.find(c) {
+								n := needles[i]
+								h[n.orphan] = strings.Contains(c, n.qualified)
 							}
 						}
 						hits[d] = h
@@ -339,6 +343,148 @@ func (r *Result) Mentions(g *static.Graph, orphans []string) ([]Mention, []strin
 	}
 	sort.Strings(ex)
 	return out, ex
+}
+
+// nameScanner finds which of many names a text contains in one pass over the text,
+// however many names there are (Aho-Corasick): a changed tree can hold thousands of
+// orphans, and every test dependency is searched for all of them.
+type nameScanner struct {
+	names []string
+	// root holds the transitions of the root by byte (0: stay at the root); every
+	// other node lists its own.
+	root  [256]int32
+	nodes []scanNode
+	stamp []uint32
+	epoch uint32
+}
+
+type scanNode struct {
+	edges []scanEdge
+	// fail is the node of the longest proper suffix of this node's path that is a
+	// path too; out the next node on that chain that ends a name (-1: none).
+	fail, out int32
+	// ends are the names this node's path is.
+	ends []int
+}
+
+type scanEdge struct {
+	b  byte
+	to int32
+}
+
+// next returns the child of node n by byte b (-1: none).
+func (x *nameScanner) next(n int32, b byte) int32 {
+	if n == 0 {
+		if c := x.root[b]; c != 0 {
+			return c
+		}
+		return -1
+	}
+	for _, e := range x.nodes[n].edges {
+		if e.b == b {
+			return e.to
+		}
+	}
+	return -1
+}
+
+func newNameScanner(names []string) *nameScanner {
+	x := &nameScanner{names: names, nodes: []scanNode{{fail: 0, out: -1}}, stamp: make([]uint32, len(names))}
+	for i, name := range names {
+		n := int32(0)
+		for j := 0; j < len(name); j++ {
+			c := x.next(n, name[j])
+			if c < 0 {
+				c = int32(len(x.nodes))
+				x.nodes = append(x.nodes, scanNode{out: -1})
+				if n == 0 {
+					x.root[name[j]] = c
+				} else {
+					x.nodes[n].edges = append(x.nodes[n].edges, scanEdge{name[j], c})
+				}
+			}
+			n = c
+		}
+		x.nodes[n].ends = append(x.nodes[n].ends, i)
+	}
+	// Failure links, breadth first: a node's comes from its parent's.
+	var queue []int32
+	for b := 0; b < 256; b++ {
+		if c := x.root[b]; c != 0 {
+			queue = append(queue, c)
+		}
+	}
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		for _, e := range x.nodes[n].edges {
+			f := x.nodes[n].fail
+			for {
+				if c := x.next(f, e.b); c >= 0 {
+					f = c
+					break
+				}
+				if f == 0 {
+					break
+				}
+				f = x.nodes[f].fail
+			}
+			x.nodes[e.to].fail = f
+			if len(x.nodes[f].ends) > 0 {
+				x.nodes[e.to].out = f
+			} else {
+				x.nodes[e.to].out = x.nodes[f].out
+			}
+			queue = append(queue, e.to)
+		}
+	}
+	return x
+}
+
+// find returns the indexes of the names text contains (as strings.Contains), in
+// ascending order.
+func (x *nameScanner) find(text string) []int {
+	x.epoch++
+	if x.epoch == 0 {
+		clear(x.stamp)
+		x.epoch = 1
+	}
+	var out []int
+	add := func(n int32) {
+		for _, i := range x.nodes[n].ends {
+			if x.stamp[i] != x.epoch {
+				x.stamp[i] = x.epoch
+				out = append(out, i)
+			}
+		}
+	}
+	for _, name := range x.names {
+		if name == "" {
+			add(0) // contained in any text
+		}
+	}
+	n := int32(0)
+	for i := 0; i < len(text); i++ {
+		for {
+			if c := x.next(n, text[i]); c >= 0 {
+				n = c
+				break
+			}
+			if n == 0 {
+				break
+			}
+			n = x.nodes[n].fail
+		}
+		if n == 0 {
+			continue
+		}
+		add(n)
+		for o := x.nodes[n].out; o > 0; o = x.nodes[o].out {
+			add(o)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 var genericNames = map[string]bool{

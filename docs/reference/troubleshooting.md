@@ -52,7 +52,13 @@ Common causes of a test that never settles:
 - **A warning in the log.** `N test file(s) passed but left no trace (their process was
   likely killed before writing it); they will run again next time` means the test
   process exited before smates could save what it used (a `process.exit()` in a test, a
-  killed worker).
+  killed worker). `N test unit(s) ran and passed but left no trace` (or `N test file(s)
+  passed but none left a trace`) means no test process of the batch was traced at all:
+  the suite command most likely runs the tests through a wrapper that drops smates'
+  tracing environment (`NODE_OPTIONS`, `NODE_V8_COVERAGE`, `SMATES_*`; a task runner
+  such as turbo or nx, `env -i`, a container) or replays cached results. Point the
+  suite's `command` at the test runner itself, with `root:` set to its package, or pass
+  that environment through.
 - **Runner arguments.** A run with arguments after `--` never records a test as passed.
   Move permanent flags into the suite's `command`.
 - **A unittest module written for pytest.** Its status stays unknown, so it runs every

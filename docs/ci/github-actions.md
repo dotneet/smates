@@ -398,6 +398,12 @@ step would select for its suites:
 - `--suite <name> --all` on the default branch records the snapshot as a full run does,
   so pull requests only see what changed since.
 
+To adopt suites one at a time in a single job instead, record the ready ones with
+`--suite <name> --all` and pass `--base` to the job's selection: the suites that have
+never been recorded are then decided against that revision by static analysis, as with
+no state at all (without `--base`, CI runs their tests as new). A file only they have
+not seen since a recorded suite saw it is no change for the recorded suites.
+
 ### Switch existing workflows { #switch-existing-workflows }
 
 `smates init --github` reads `.github/workflows/` and, when a workflow already runs the

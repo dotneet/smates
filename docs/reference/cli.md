@@ -65,7 +65,7 @@ See [How smates decides](../getting-started/how-it-works.md).
 |---|---|---|---|
 | `--all` | | off | Run every test and rewrite the recorded state. |
 | `--select` | | off | Select tests even where the default is a full run (the default branch on CI). |
-| `--base` | rev | auto | Git revision to diff against for tests that have no recording yet. Default: the merge base with the pull request's target or the default branch. |
+| `--base` | rev | auto | Git revision to diff against for tests that have no recording yet. Default: the merge base with the pull request's target or the default branch. In CI such tests run as new unless `--base` is given. |
 | `--explain` | | off | Print why each test was selected (`[changed: src/price.ts]`). |
 | `--only` | `SUITE:UNIT` | | Run exactly this test unit and record it as usual. Repeatable. Other tests and changes are left for the next run. |
 | `--add` | `SUITE:UNIT` | | Also run this test. The unit may be a test file path; `SUITE:` may be left out when only one suite has it. Repeatable. Never removes tests. A name that matches no test exits with code 2. |

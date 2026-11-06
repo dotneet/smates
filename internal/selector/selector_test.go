@@ -21,14 +21,14 @@ import (
 
 // fixture is a working tree on disk plus helpers to run selection over it.
 type fixture struct {
-	t      *testing.T
+	t      testing.TB
 	dir    string
 	files  map[string]string
 	cfg    *config.Config
 	suites []*runner.Suite
 }
 
-func newFixture(t *testing.T, files map[string]string) *fixture {
+func newFixture(t testing.TB, files map[string]string) *fixture {
 	t.Helper()
 	f := &fixture{t: t, dir: t.TempDir(), files: map[string]string{}}
 	for p, c := range files {

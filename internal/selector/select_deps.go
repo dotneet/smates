@@ -35,7 +35,7 @@ type suiteSel struct {
 	eraseTypes bool
 	// rules are the suite's rules with their globs expanded (newSuiteRules).
 	rules []*suiteRule
-	units []*unitSel
+	units      []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -43,9 +43,9 @@ type unitSel struct {
 	id string
 	// entry is the unit's recorded entry (nil: none).
 	entry *state.Entry
-	// via holds the unit's known dependencies (Suite.Known) by strongest explanation
-	// (Via*); a dependency it does not hold was traced.
-	via map[string]string
+	// known holds the unit's known dependencies (Suite.Known) by strongest
+	// explanation (Via*); a dependency it does not hold was traced.
+	known *unitKnown
 }
 
 // suiteDeps computes D(T) for every unit of every suite, the suites left out
@@ -95,6 +95,10 @@ func (s *selection) newSuiteSel(su *runner.Suite, selecting bool, hasher *Hasher
 // recording (knownDeps, Suite.Known) plus those of the unit's recorded entry, less the
 // environment variables env_ignore now lists. A unit with no entry marks the suite
 // Unrecorded. Every dependency is covered.
+//
+// The static closures of a suite's units overlap (a package every test imports), so
+// they are covered as one union rather than unit by unit (bulk); a suite left out by
+// --suite only covers, so its D(T) lists are not built.
 func (s *selection) unitDeps(ss *suiteSel) {
 	in, sr, su := s.in, ss.sr, ss.sr.Suite
 	tests := su.TestFiles(s.files)
@@ -105,8 +109,8 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		sr.Inputs[f] = true
 	}
 	static := config.Bool(su.Static, true) && in.Graph != nil
+	var starts []string
 	if static {
-		var starts []string
 		for _, u := range units {
 			starts = append(starts, sr.Files[u]...)
 		}
@@ -118,6 +122,11 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, runner.Sources{
 		Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure,
 	})
+	// The closures of the units cover as their union, less the vendored files a unit
+	// does not depend on: unless the union holds one (then unit by unit, see
+	// knownDeps), that is the union itself.
+	bulk := static && !slices.ContainsFunc(in.Graph.Closure(starts...), pathutil.IsVendored)
+	var bulkStarts []string
 	st := in.State.Suites[su.Name]
 	ss.rules = newSuiteRules(su, s.files)
 
@@ -126,45 +135,114 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		if st != nil {
 			entry = st.Tests[u]
 		}
-		via, typeOnly := s.knownDeps(ss, u, entry, inputs, static, mapper)
+		k := s.knownDeps(ss, u, entry, inputs, static, mapper, bulk)
+		if k.bulk {
+			bulkStarts = append(bulkStarts, sr.Files[u]...)
+		} else {
+			for _, f := range k.closure {
+				s.cover(f, true)
+			}
+		}
+		for f := range k.rest {
+			s.cover(f, true)
+		}
 		// Files reached only through type-only imports are no dependency, but a change
 		// to them is explained (not an orphan): it cannot affect the tests.
-		for _, f := range typeOnly {
-			s.res.Covered[f] = true
-			if s.knownCovered != nil {
-				s.knownCovered[f] = true
-			}
+		for _, f := range k.typeOnly {
+			s.cover(f, true)
 		}
-		deps := make(map[string]bool, len(via))
-		known := make([]string, 0, len(via))
-		for f := range via {
-			deps[f] = true
-			known = append(known, f)
-			if s.knownCovered != nil {
-				s.knownCovered[f] = true
-			}
-		}
-		sort.Strings(known)
-		sr.Known[u] = known
+		// What the entry adds to the known dependencies.
+		var traced []string
 		if entry == nil {
 			sr.Unrecorded = true
 		} else {
 			for f := range entry.Deps {
 				// A variable env_ignore lists now (it may have been recorded before).
-				if !EnvIgnored(in.Config, su, f) {
-					deps[f] = true
+				if k.how(f) == "" && !EnvIgnored(in.Config, su, f) {
+					traced = append(traced, f)
+					s.cover(f, false)
 				}
 			}
 		}
-		dl := make([]string, 0, len(deps))
-		for f := range deps {
-			dl = append(dl, f)
-			s.res.Covered[f] = true
+		if !ss.selecting {
+			continue // only covers
 		}
-		sort.Strings(dl)
-		sr.Deps[u] = dl
-		ss.units = append(ss.units, &unitSel{id: u, entry: entry, via: via})
+		known := k.sorted()
+		sort.Strings(traced)
+		sr.Known[u] = known
+		sr.Deps[u] = mergeSorted(known, traced)
+		ss.units = append(ss.units, &unitSel{id: u, entry: entry, known: k})
 	}
+	if len(bulkStarts) > 0 {
+		for _, f := range in.Graph.Closure(bulkStarts...) {
+			s.cover(f, true)
+		}
+	}
+}
+
+// cover adds f to the coverage of the changes (Result.Covered) and, when it is known
+// without a recording, to knownCovered.
+func (s *selection) cover(f string, known bool) {
+	s.res.Covered[f] = true
+	if known && s.knownCovered != nil {
+		s.knownCovered[f] = true
+	}
+}
+
+// unitKnown holds the dependencies of a unit known without its recording (see
+// knownDeps), each with how it reaches the test (Via*): the keys of its static import
+// closure (ViaImport) and the others, which win over the closure.
+type unitKnown struct {
+	// closure are the keys of the static import closure, mapped by the runner (see
+	// runner.StaticMapper), sorted, without vendored files.
+	closure []string
+	// rest holds the other known dependencies by strongest explanation.
+	rest map[string]string
+	// typeOnly are the files the closure reaches only through type-only imports.
+	typeOnly []string
+	// bulk: closure is the unit's plain static closure, covered with the suite's
+	// union (see unitDeps; typeOnly is then not computed). A suite left out by
+	// --suite leaves closure empty then: it only covers.
+	bulk bool
+}
+
+// how returns how known dependency f reaches the test ("" when f is none: traced).
+func (k *unitKnown) how(f string) string {
+	if how, ok := k.rest[f]; ok {
+		return how
+	}
+	if _, ok := slices.BinarySearch(k.closure, f); ok {
+		return ViaImport
+	}
+	return ""
+}
+
+// sorted returns the known dependencies, sorted.
+func (k *unitKnown) sorted() []string {
+	rest := make([]string, 0, len(k.rest))
+	for f := range k.rest {
+		if _, dup := slices.BinarySearch(k.closure, f); !dup {
+			rest = append(rest, f)
+		}
+	}
+	sort.Strings(rest)
+	return mergeSorted(k.closure, rest)
+}
+
+// mergeSorted merges two sorted lists with no element in common.
+func mergeSorted(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]string, 0, len(a)+len(b))
+	i := 0
+	for _, x := range a {
+		for ; i < len(b) && b[i] < x; i++ {
+			out = append(out, b[i])
+		}
+		out = append(out, x)
+	}
+	return append(out, b[i:]...)
 }
 
 // knownDeps returns the dependencies of unit u known without its recording, each with
@@ -174,47 +252,63 @@ func (s *selection) unitDeps(ss *suiteSel) {
 // depends on is declared (see declare). A Go compile check (runner.IsBuildCheck)
 // depends on what the compiler reads, not on what the tests do at run time: neither
 // declarations nor rules apply to it. With suiteSel.eraseTypes the static closure is
-// the one at run time (static.Graph.RuntimeClosure), and typeOnly returns the files
-// the full closure adds to it. The reaches of a rule see the full file closure, before
-// the mapper keys it by declaration, and entry (the unit's recorded entry, nil: none)
-// for the environment variables the unit read (see suiteRule.reaches).
-func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs []string, static bool, mapper runner.StaticMapper) (via map[string]string, typeOnly []string) {
+// the one at run time (static.Graph.RuntimeClosure), and typeOnly holds the files the
+// full closure adds to it. With bulk (the suite's union holds no vendored file), a
+// closure the runner does not map is left to the suite's union, and a suite left out
+// by --suite does not compute it at all. The reaches of a rule see the full file
+// closure, before the mapper keys it by declaration, and entry (the unit's recorded
+// entry, nil: none) for the environment variables the unit read (see
+// suiteRule.reaches).
+func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs []string, static bool, mapper runner.StaticMapper, bulk bool) *unitKnown {
 	sr, su := ss.sr, ss.sr.Suite
 	files := sr.Files[u]
-	via = map[string]string{}
+	k := &unitKnown{rest: map[string]string{}}
 	check := runner.IsBuildCheck(u)
 	for _, d := range sr.Services {
 		if !check && d.applies(su, u, files) {
-			via[d.Key] = ViaService
+			k.rest[d.Key] = ViaService
 			s.declare(d)
 		}
 	}
 	reach := unitReach{entry: entry}
-	if static {
+	switch {
+	case static && bulk && mapper == nil && !ss.selecting:
+		k.bulk = true // only the coverage needs it
+	case static:
 		closure := s.in.Graph.Closure(files...)
 		reach.closure, reach.known = closure, s.in.Graph.Analyzes(files...)
 		if ss.eraseTypes {
 			full := closure
 			closure = s.in.Graph.RuntimeClosure(files...)
-			if len(closure) != len(full) {
-				typeOnly = sortedMinus(full, closure)
+			if !bulk && len(closure) != len(full) {
+				k.typeOnly = sortedMinus(full, closure)
 			}
 		}
+		k.bulk = bulk
 		if mapper != nil {
-			closure = mapper.MapStatic(su, u, closure)
+			mapped := mapper.MapStatic(su, u, closure)
+			if len(mapped) != len(closure) || len(mapped) > 0 && &mapped[0] != &closure[0] {
+				// Keys of its own: covered unit by unit.
+				closure, k.bulk = slices.Clone(mapped), false
+				slices.Sort(closure)
+				closure = slices.Compact(closure)
+			}
 		}
-		for _, f := range closure {
-			via[f] = ViaImport
+		// Record never writes vendored paths (see below); the suite's union holds
+		// none with bulk.
+		if !k.bulk && slices.ContainsFunc(closure, pathutil.IsVendored) {
+			closure = slices.DeleteFunc(slices.Clone(closure), pathutil.IsVendored)
 		}
+		k.closure = closure
 	}
 	for _, f := range inputs {
-		via[f] = ViaInput
+		k.rest[f] = ViaInput
 	}
 	if !check {
 		for _, r := range ss.rules {
 			if r.applies(su, u, files, reach) {
 				for _, f := range r.deps {
-					via[f] = ViaInput
+					k.rest[f] = ViaInput
 				}
 			}
 		}
@@ -226,24 +320,28 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 		own := false
 		if static && mapper != nil {
 			prefix := depkey.Decl(f, "")
-			for k := range via {
-				if strings.HasPrefix(k, prefix) {
-					via[k], own = ViaTest, true
+			i, _ := slices.BinarySearch(k.closure, prefix)
+			for ; i < len(k.closure) && strings.HasPrefix(k.closure[i], prefix); i++ {
+				k.rest[k.closure[i]], own = ViaTest, true
+			}
+			for key := range k.rest {
+				if strings.HasPrefix(key, prefix) {
+					k.rest[key], own = ViaTest, true
 				}
 			}
 		}
 		if !own {
-			via[f] = ViaTest
+			k.rest[f] = ViaTest
 		}
 	}
 	// Record never writes vendored paths (a committed node_modules file an input glob
 	// matches): as known deps they would count as unrecorded, and changed, forever.
-	for f := range via {
+	for f := range k.rest {
 		if pathutil.IsVendored(f) {
-			delete(via, f)
+			delete(k.rest, f)
 		}
 	}
-	return via, typeOnly
+	return k
 }
 
 // sortedMinus returns the elements of the sorted list a that the sorted list b lacks.
