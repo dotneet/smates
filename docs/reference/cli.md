@@ -72,7 +72,7 @@ See [How smates decides](../getting-started/how-it-works.md).
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | How to handle changes no test depends on, for this run: ask the agent, run the affected suites in full, or apply no policy (explicit opt-out). See [Changes no test explains](../guides/orphans.md). |
 | `--no-agent` | | off | Do not call the agent, neither for unattributed changes (the affected suites run in full instead) nor to explain failures. |
 | `--no-record` | | off | Run without tracing and without updating the state. |
-| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. See [Shadow mode](../guides/trust.md#shadow-mode). |
+| `--shadow` | | off | Run every test, but report the failing tests the selection would have skipped. With `--shard`, every test the shard owns. See [Shadow mode](../guides/trust.md#shadow-mode). |
 | `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID. Sharded runs do not call the agent. |
 | `--fail-fast` | | off | Start no further test batch after one fails. Tests run likeliest-to-fail first. |
 | `--output` | `full`, `failures` | `$SMATES_OUTPUT`, else `full` | `full` streams the runner output. `failures` prints only the output of failing tests, then a short summary with a command that reruns them. `agent` is accepted as an alias of `failures`. |
@@ -87,7 +87,7 @@ Plus the [common flags](#common-flags).
 Combinations that are rejected (exit code 2):
 
 - `--only` with `--all`, `--shadow`, `--add` or `--orphans`.
-- `--shadow` with `--shard` or `--fail-fast`.
+- `--shadow` with `--fail-fast`.
 - `--dry-run` with `--report`, `--markdown` or `--summary` (use
   `smates select --format json|markdown` instead).
 

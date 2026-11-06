@@ -697,6 +697,13 @@ build are failures (with `granularity: func`, of the package's compile check
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
 
+With `--shard I/N` a shadow run runs every unit its shard owns (`cycle.units`), selected
+or not, so the shards of one run together run every unit once. `checkShadow` judges only
+owned units, against the selection before `applyShard` (`cycle.preShard`): a failure the
+runner reports for a unit another shard owns is never an escape here, since its owner
+reports it. A Go function whose package's selected compile check another shard owns is a
+possible escape when it fails: only that shard sees whether the package builds.
+
 ### Run order and `--fail-fast`
 
 `smates run` orders what it runs so the likeliest failures finish first. Priorities come

@@ -286,6 +286,12 @@ step would select for its suites:
 build confidence before trusting it. See
 [Shadow mode](../guides/trust.md#shadow-mode) for a rollout plan.
 
+It works with shards: `args: --shadow --shard ${{ matrix.shard }}/4` runs every test
+the shard owns, selected or not, and reports as escapes the failing tests of its own
+share that the selection (of the whole run) would have skipped. Together the shards run
+every test once, and an escape is reported only by the shard that owns the test.
+`smates stats` adds up the escapes of the shards' records.
+
 ### Pull request comment { #pull-request-comment }
 
 `comment: true` tells reviewers what the change affects and

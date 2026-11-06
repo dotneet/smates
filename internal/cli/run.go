@@ -122,9 +122,6 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
 		return nil, err
 	}
-	if f.shadow && f.shardN > 1 {
-		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
-	}
 	if f.shadow && f.failFast {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
 	}
@@ -185,14 +182,19 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if hooks != nil {
 		sel.hint = false // smates watch: a person at the terminal, no calling agent
 	}
+	var preShard map[string]map[string]bool
+	if f.shadow && f.shardN > 1 {
+		preShard = selectedUnits(sel.res)
+	}
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
-	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
+	c := &cycle{p: p, f: f, sel: sel, preShard: preShard, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
 		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
-	// sharded runs only this shard's share (applyShard narrowed the selection).
+	// sharded runs only this shard's share (applyShard narrowed the selection), and so
+	// does a sharded shadow run (units).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
 	prioritize(sel.res, p.state, p.direct())
 	batches := c.plan()
@@ -344,11 +346,14 @@ func (c *cycle) exitCode(saveErr error) int {
 
 // cycle is one `smates run` over the selected suites.
 type cycle struct {
-	p      *project
-	f      *runFlags
-	sel    *selection
-	stdout io.Writer // runner output (stderr with --report -)
-	stderr io.Writer
+	p   *project
+	f   *runFlags
+	sel *selection
+	// preShard is the selection before applyShard (suite -> unit), kept by a sharded
+	// shadow run to judge escapes against the whole run's selection.
+	preShard map[string]map[string]bool
+	stdout   io.Writer // runner output (stderr with --report -)
+	stderr   io.Writer
 	// reportOut is the real stdout, where --report - writes.
 	reportOut io.Writer
 	// quiet is --output failures: runner output is buffered per batch and printed only
@@ -424,16 +429,36 @@ func (c *cycle) prepareTrace() (cleanup func(), err error) {
 }
 
 // units returns the units of a suite this cycle runs, and whether they are the whole
-// suite.
+// suite. A sharded shadow run runs every unit its shard owns, selected or not, so the
+// shards of one run together run every test once.
 func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
-	if c.runAll {
+	if c.runAll || c.shadowShard() {
 		ids := make([]string, 0, len(sr.Tests))
 		for _, t := range sr.Tests {
-			ids = append(ids, t.ID)
+			if c.runAll || t.Shard == c.f.shardI {
+				ids = append(ids, t.ID)
+			}
 		}
-		return ids, true
+		return ids, c.runAll
 	}
 	return sr.Selected(), sr.All && c.f.shardN <= 1
+}
+
+// shadowShard reports whether the cycle is a sharded shadow run (--shadow --shard).
+func (c *cycle) shadowShard() bool {
+	return c.f.shadow && c.f.shardN > 1
+}
+
+// selectedUnits is the set of selected units of a selection, per suite.
+func selectedUnits(res *selector.Result) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, sr := range res.Suites {
+		out[sr.Name] = map[string]bool{}
+		for _, id := range sr.Selected() {
+			out[sr.Name][id] = true
+		}
+	}
+	return out
 }
 
 func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runner.RunContext {
@@ -693,22 +718,39 @@ func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
 // selected test (they are possible escapes). A Go test function of a package whose
 // compile check was selected and failed is no escape: it failed because its package
 // does not build, which the check reports.
+//
+// A sharded shadow run judges only the units its shard owns, against the selection
+// before sharding (preShard). A unit another shard owns is that shard's to report,
+// whatever the runner said about it here. A function whose package's selected compile
+// check another shard owns may have failed because the package does not build, which
+// only that shard sees: its failure is a possible escape.
 func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
+	owned := func(t *selector.Test) bool { return !c.shadowShard() || t.Shard == c.f.shardI }
+	selected := func(t *selector.Test) bool { return t.Selected || c.preShard[sr.Name][t.ID] }
 	brokenBuild := map[string]bool{} // package directories whose selected check failed
+	elsewhere := map[string]bool{}   // package directories whose selected check another shard runs
 	for _, t := range sr.Tests {
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && t.Selected && runner.IsBuildCheck(t.ID) && obs[t.ID] != nil && obs[t.ID].Status == state.Fail {
+		dir, _, ok := runner.SplitFuncUnit(t.ID)
+		if !ok || !selected(t) || !runner.IsBuildCheck(t.ID) {
+			continue
+		}
+		switch {
+		case !owned(t):
+			elsewhere[dir] = true
+		case obs[t.ID] != nil && obs[t.ID].Status == state.Fail:
 			brokenBuild[dir] = true
 		}
 	}
 	for _, t := range sr.Tests {
 		o := obs[t.ID]
-		if t.Selected || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
+		if selected(t) || !owned(t) || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
 			continue
 		}
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && brokenBuild[dir] {
+		dir, _, isFunc := runner.SplitFuncUnit(t.ID)
+		if isFunc && brokenBuild[dir] {
 			continue
 		}
-		if o.Inferred {
+		if o.Inferred || isFunc && elsewhere[dir] {
 			c.possible = append(c.possible, sr.Name+": "+t.ID)
 		} else {
 			c.escapes = append(c.escapes, sr.Name+": "+t.ID)
@@ -939,6 +981,12 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 				fmt.Fprintf(c.stderr, "  - %s\n", e)
 			}
 		} else {
+			if c.shadowShard() {
+				// Out of the units this shard owns, all of which it ran.
+				var r state.Run
+				countSelection(&r, c.sel.res, c.f.shardI, c.f.shardN)
+				selected, total = r.Selected, r.Total
+			}
 			p.logf("shadow: every failing test was selected (%d/%d would have run)", selected, total)
 		}
 		if len(c.possible) > 0 {
