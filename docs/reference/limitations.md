@@ -58,10 +58,20 @@ imports too whenever the run may check types: a suite command that does not run
 `vitest` (or `bun test`) directly (`npm test`, a `&&` chain), any mention of
 `typecheck`, `tsc` and similar in the command, the arguments after `--` or the suite
 `env`, a `typecheck` setting (or those compiler options) in a vitest/vite config of the
-suite or a file it imports, a vitest config smates cannot fully see (a workspace file,
-`projects:`, `workspace:` or `extends:` naming other configs by path, an import of a
-package other than vitest, vite, their official plugins and Node's builtins, such as a
-shared preset), and `*.test-d.*` / `*.spec-d.*` files in the suite. jest
+suite or a file it imports, a vitest config smates cannot fully see, and `*.test-d.*` /
+`*.spec-d.*` files in the suite. A config is fully seen when every config it names is
+too: `test.projects` may list config files by literal path (no glob, no directory) and
+inline projects with `extends: true`, but a workspace file, `workspace:`, any other
+`extends:`, or projects inside `mergeConfig(...)` are not seen. It may import vitest,
+vite, their official plugins, `@tailwindcss/vite`, Node's builtins, packages the static
+analysis resolves inside the repository (whose files are then checked too), and any
+package for its types only (`import type`), but not another package such as a shared
+preset. Storybook's Vitest plugin is seen when it is `@storybook/addon-vitest` 10 or
+later, its configuration directory can be told, and that directory's `main.*` sets no
+`viteFinal` and no `typescript` options and names only Storybook's own addons (docs,
+a11y, links, themes, onboarding, vitest) and the `react-vite`, `html-vite` or
+`web-components-vite` framework; `STORYBOOK_COMPONENT_PATHS` in the suite `env` counts as
+a mention. jest
 (ts-jest reports type errors), `node --test` and custom suites always keep them. Tests
 recorded by an earlier smates version keep the dependency until they are recorded again.
 Type checking is not a test run: keep `tsc` (or your type checker) in CI.

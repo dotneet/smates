@@ -40,3 +40,9 @@ type ResolveReporter interface {
 	// file of the repository nor to anything installed: what they load is unknown.
 	Unresolved(path string, src []byte) []string
 }
+
+// Resolver is implemented by analyzers that resolve a module specifier on its own.
+type Resolver interface {
+	// Resolve returns the repository files spec, imported from path, resolves to.
+	Resolve(path, spec string) []string
+}

@@ -120,7 +120,7 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	// only through type-only imports (see runner.TypeEraser).
 	var src runner.Sources
 	if in.Graph != nil {
-		src = runner.Sources{Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure}
+		src = runner.Sources{Files: s.files, Read: in.Graph.Read, Closure: in.Graph.Closure, Resolve: in.Graph.Resolve}
 		s.runnerConfig(ss, src)
 	}
 	ss.eraseTypes = static && mapper == nil && runner.ErasesTypes(su, src)

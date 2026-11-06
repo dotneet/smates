@@ -695,11 +695,19 @@ them (`runner.TypeEraser`): vitest run directly by the suite command, with no me
 type checking (typecheck, tsc, tsd, ts-node, the options above, `tsconfigRaw`) in the
 command, the arguments passed through or the suite env, nor in a vitest/vite config at or
 below the suite root or above it or anything those import, no workspace file, no config
-naming other configs by path (`projects:`, `workspace:`, `extends:`), no import of a package
-other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
-`vite-tsconfig-paths`) and Node's builtins (a preset, or a plugin whose config hook may
-return test settings), and no `*.test-d.*` / `*.spec-d.*` file in the suite; or
-`bun test` itself. The rule is deliberately coarse: any
+naming other configs by path (`projects:`, `workspace:`, `extends:`) except an aggregator
+`vitestAggregator` reads in full (a single literal `test.projects` of existing JS/TS files,
+which are scanned in turn, and inline projects with `extends: true`), no run-time import
+of a package other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
+`vite-tsconfig-paths`), `@tailwindcss/vite`, Node's builtins and packages the analyzer
+resolves inside the repository (`Sources.Resolve`; their files are in the closure
+scanned) — a preset, or a plugin whose config hook may return test settings — and no
+`*.test-d.*` / `*.spec-d.*` file in the suite; or `bun test` itself. Storybook's Vitest
+plugin applies the Vite settings of `<configDir>/main.*` and of the addons and framework
+it names as strings, which no import reaches: `storybookKnown` accepts it only from
+`@storybook/addon-vitest` 10 on (which leaves react-docgen out), with a configuration
+directory it can tell and a `main.*` without `viteFinal` or `typescript` naming only
+allowlisted addons and frameworks, and scans that `main.*` as configuration. The rule is deliberately coarse: any
 mention keeps the type edges, which costs precision, never correctness (a type-only change
 can fail a type-checking run: vitest typecheck, ts-jest, ts-node). jest, node and custom
 suites always keep them. The files only the full closure reaches are added to `Covered`

@@ -157,6 +157,21 @@ func (g *Graph) Unresolved(p string) []string {
 	return u
 }
 
+// Resolve returns the repository files a module specifier imported from file p
+// resolves to (see host.Resolver; nil for languages whose analyzer does not tell).
+func (g *Graph) Resolve(p, spec string) []string {
+	for _, l := range g.langs {
+		if !l.Handles(p) {
+			continue
+		}
+		if r, ok := l.(host.Resolver); ok {
+			return r.Resolve(p, spec)
+		}
+		return nil
+	}
+	return nil
+}
+
 // Closure returns the transitive dependencies of the start files, including them.
 func (g *Graph) Closure(start ...string) []string {
 	return g.closure(g.Direct, start)

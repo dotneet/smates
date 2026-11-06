@@ -2,6 +2,7 @@ package runner
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -169,6 +170,178 @@ export default defineConfig({ plugins: [react()], resolve: { alias: { "@": path.
 				Adapter: a, ExtraArgs: tt.extra}
 			if got := ErasesTypes(s, fakeSources(files, tt.imports)); got != tt.want {
 				t.Errorf("ErasesTypes = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestErasesTypesAggregatorsAndPlugins covers the vitest configurations smates still
+// sees in full although they name other configuration files or import packages: an
+// aggregator of literal project files, Tailwind's plugin, Storybook's plugin with a
+// readable main.*, type-only imports. Every way it cannot see one keeps type-only
+// imports (want false).
+func TestErasesTypesAggregatorsAndPlugins(t *testing.T) {
+	agg := `export default defineConfig({ test: { projects: ['./vitest.node.config.ts', './vitest.ui.config.ts'] } })`
+	node := `export default { test: { include: ['src/**/*.test.ts'] } }`
+	ui := `import tailwind from '@tailwindcss/vite'
+export default mergeConfig(base, defineConfig({ plugins: [tailwind()], test: { browser: { enabled: true } } }))`
+	sbConfig := `import path from 'node:path'
+import { defineConfig } from 'vitest/config'
+import { storybookTest } from '@storybook/addon-vitest/vitest-plugin'
+const dirname = path.dirname(new URL(import.meta.url).pathname)
+export default defineConfig({ plugins: [storybookTest({ configDir: path.join(dirname, '.storybook') })] })`
+	sbMainOK := `import type { StorybookConfig } from '@storybook/react-vite'
+const config: StorybookConfig = {
+  stories: ['../src/**/*.stories.tsx'],
+  addons: ['@storybook/addon-a11y', { name: '@storybook/addon-docs', options: {} }, '@storybook/addon-vitest'],
+  framework: { name: '@storybook/react-vite', options: {} },
+}
+export default config`
+	sbVersion := `{"name":"@storybook/addon-vitest","version":"10.2.1"}`
+	sb := func(main string, extra ...string) map[string]string {
+		m := map[string]string{"web/vitest.config.ts": sbConfig, "web/.storybook/main.ts": main,
+			"node_modules/@storybook/addon-vitest/package.json": sbVersion}
+		for i := 0; i+1 < len(extra); i += 2 {
+			m[extra[i]] = extra[i+1]
+		}
+		return m
+	}
+	tests := []struct {
+		name  string
+		files map[string]string
+		env   map[string]string
+		want  bool
+	}{
+		{name: "aggregator of literal project files with Tailwind", want: true,
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node, "web/vitest.ui.config.ts": ui}},
+		{name: "inline projects extending the root configuration", want: true,
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [
+  { extends: true, test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+  { test: { name: 'other' } },
+] } }`}},
+		{name: "type-only import of an unknown package", want: true,
+			files: map[string]string{"web/vitest.config.ts": `import type { Options } from '@acme/types'
+export default { test: {} } satisfies Options`}},
+		{name: "Storybook's plugin with a known main", want: true, files: sb(sbMainOK)},
+		{name: "Storybook's plugin with the default configuration directory", want: true,
+			files: sb(sbMainOK, "web/vitest.config.ts", `import { storybookTest } from '@storybook/addon-vitest/vitest-plugin'
+export default { plugins: [storybookTest()] }`)},
+
+		// Must keep: what an aggregator names may check types.
+		{name: "a project file sets typecheck",
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": `export default { test: { typecheck: { enabled: true } } }`, "web/vitest.ui.config.ts": ui}},
+		{name: "a project file is missing",
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node}},
+		{name: "a project glob",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./packages/*'] } }`, "web/packages/a/vitest.config.ts": node}},
+		{name: "a project directory",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./packages/a'] } }`, "web/packages/a/vitest.config.ts": node}},
+		{name: "a negated project",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.node.config.ts', '!./x.ts'] } }`, "web/vitest.node.config.ts": node}},
+		{name: "a spread project list",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [...shared, './vitest.node.config.ts'] } }`, "web/vitest.node.config.ts": node}},
+		{name: "a project list from a variable",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: list } }`}},
+		{name: "an inline project extending a file",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: [{ extends: './vitest.shared.ts' }] } }`, "web/vitest.shared.ts": node}},
+		{name: "projects inside mergeConfig",
+			files: map[string]string{"web/vitest.config.ts": `export default mergeConfig(base, { test: { projects: ['./vitest.node.config.ts'] } })`, "web/vitest.node.config.ts": node}},
+		{name: "a project root",
+			files: map[string]string{"web/vitest.config.ts": `export default { root: 'src', test: { projects: ['./vitest.node.config.ts'] } }`, "web/src/vitest.node.config.ts": node, "web/vitest.node.config.ts": node}},
+		{name: "a project file that is itself an aggregator",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { projects: ['./vitest.node.config.ts'] } }`,
+				"web/vitest.node.config.ts": `export default { test: { projects: ['./vitest.deep.config.ts'] } }`, "web/vitest.deep.config.ts": node}},
+		{name: "an unknown plugin imported by a project file only",
+			files: map[string]string{"web/vitest.config.ts": agg, "web/vitest.node.config.ts": node,
+				"web/vitest.ui.config.ts": `import checker from 'vite-plugin-checker'; export default { plugins: [checker()] }`}},
+		{name: "another projects option next to test.projects",
+			files: map[string]string{"web/vitest.config.ts": `import paths from 'vite-tsconfig-paths'
+export default { plugins: [paths({ projects: ['./tsconfig.json'] })], test: { projects: ['./vitest.node.config.ts'] } }`, "web/vitest.node.config.ts": node}},
+		{name: "test.workspace",
+			files: map[string]string{"web/vitest.config.ts": `export default { test: { workspace: './w.ts' } }`, "web/w.ts": `export default []`}},
+		{name: "a value import of a package also imported for types",
+			files: map[string]string{"web/vitest.config.ts": `import type { Options } from '@acme/preset'
+import preset from '@acme/preset'
+export default preset`}},
+		{name: "an unknown package named in a comment only",
+			files: map[string]string{"web/vitest.config.ts": `// import preset from '@acme/preset'
+export default {}`}},
+
+		// Must keep: what Storybook's plugin loads by name may check types.
+		{name: "Storybook main with viteFinal", files: sb(`export default { stories: [], framework: '@storybook/react-vite', viteFinal: (c) => c }`)},
+		{name: "Storybook main with typescript options", files: sb(`export default { stories: [], framework: '@storybook/react-vite', typescript: { reactDocgen: 'react-docgen-typescript' } }`)},
+		{name: "Storybook main with a spread", files: sb(`export default { ...base, stories: [], framework: '@storybook/react-vite' }`)},
+		{name: "an unknown Storybook addon", files: sb(`export default { stories: [], addons: ['storybook-addon-custom'], framework: '@storybook/react-vite' }`)},
+		{name: "Storybook addons through a function", files: sb(`export default { stories: [], addons: [getAbsolutePath('@storybook/addon-docs')], framework: '@storybook/react-vite' }`)},
+		{name: "a Storybook framework with a type-aware docgen", files: sb(`export default { stories: [], framework: '@storybook/vue3-vite' }`)},
+		{name: "no Storybook framework", files: sb(`export default { stories: [] }`)},
+		{name: "no Storybook main", files: sb(sbMainOK, "web/.storybook/main.ts", "")},
+		{name: "a computed Storybook configuration directory",
+			files: sb(sbMainOK, "web/vitest.config.ts", `import { storybookTest } from '@storybook/addon-vitest/vitest-plugin'
+export default { plugins: [storybookTest({ configDir: process.env.SB })] }`)},
+		{name: "Storybook's plugin before Storybook 10",
+			files: sb(sbMainOK, "node_modules/@storybook/addon-vitest/package.json", `{"version":"9.1.0"}`)},
+		{name: "Storybook's plugin not installed",
+			files: sb(sbMainOK, "node_modules/@storybook/addon-vitest/package.json", ``)},
+		{name: "Storybook's experimental plugin",
+			files: sb(sbMainOK, "web/vitest.config.ts", `import { storybookTest } from '@storybook/experimental-addon-test/vitest-plugin'
+export default { plugins: [storybookTest()] }`)},
+		{name: "Storybook's component paths in the environment", files: sb(sbMainOK), env: map[string]string{"STORYBOOK_COMPONENT_PATHS": "src"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := map[string]string{}
+			for p, c := range tt.files {
+				if c != "" || !strings.HasSuffix(p, "main.ts") && !strings.HasSuffix(p, "package.json") {
+					files[p] = c
+				}
+			}
+			a, _ := Get("vitest")
+			s := &Suite{Suite: config.Suite{Name: "web", Runner: "vitest", Root: "web", Command: "vitest run", Env: tt.env}, Adapter: a}
+			if got := ErasesTypes(s, fakeSources(files, nil)); got != tt.want {
+				t.Errorf("ErasesTypes = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestErasesTypesResolvedPackage: a package the static analysis resolves inside the
+// repository (a workspace package) is seen, its files being in the closure scanned;
+// one it does not resolve is not.
+func TestErasesTypesResolvedPackage(t *testing.T) {
+	files := map[string]string{
+		"web/vitest.config.ts":     `import { shared } from '@ws/test-config'; export default shared`,
+		"packages/tc/src/index.ts": `export const shared = { test: {} }`,
+	}
+	cases := []struct {
+		name     string
+		resolves bool
+		content  string
+		want     bool
+	}{
+		{name: "resolved inside the repository", resolves: true, content: files["packages/tc/src/index.ts"], want: true},
+		{name: "resolved inside the repository, which enables typecheck", resolves: true, content: `export const shared = { test: { typecheck: { enabled: true } } }`},
+		{name: "not resolved", content: files["packages/tc/src/index.ts"]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := map[string]string{"web/vitest.config.ts": files["web/vitest.config.ts"], "packages/tc/src/index.ts": c.content}
+			var imports map[string][]string
+			src := fakeSources(fs, nil)
+			if c.resolves {
+				imports = map[string][]string{"web/vitest.config.ts": {"packages/tc/src/index.ts"}}
+				src = fakeSources(fs, imports)
+				src.Resolve = func(from, spec string) []string {
+					if from == "web/vitest.config.ts" && spec == "@ws/test-config" {
+						return []string{"packages/tc/src/index.ts"}
+					}
+					return nil
+				}
+			}
+			a, _ := Get("vitest")
+			s := &Suite{Suite: config.Suite{Name: "web", Runner: "vitest", Root: "web", Command: "vitest run"}, Adapter: a}
+			if got := ErasesTypes(s, src); got != c.want {
+				t.Errorf("ErasesTypes = %v, want %v", got, c.want)
 			}
 		})
 	}
