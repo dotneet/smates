@@ -182,6 +182,7 @@ smates doctor [flags]
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
 | `suite-rule-reaches` | `reaches` を持つルールごとに適用されるテストユニットの数。1 つにも適用されないルールは警告 |
 | `state-recorded` | 記録されたステートがあるか、どのコミットのものか |
+| `state-skipped` | 前回の実行で自分をスキップしたテストユニット（未証明なので、成功するまで毎回実行される） |
 | `agent`、`ci` | エージェントが使えるか、検出した CI と、デフォルトで全件実行になるか |
 | `workflow-test-step` | smates を使わずにテストを実行している GitHub ワークフローのステップ |
 

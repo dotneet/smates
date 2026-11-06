@@ -919,6 +919,24 @@ func (c *cycle) noResultUnits() int {
 	return n
 }
 
+// skippedNote is what the outcome line adds for the units that skipped themselves in
+// this run (state.Skip): they did not fail, but they are not proven to pass, so they
+// stay selected. "" when none did.
+func (c *cycle) skippedNote() string {
+	n := 0
+	for _, units := range c.ran {
+		for _, st := range units {
+			if st == state.Skip {
+				n++
+			}
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d skipped (not proven: they run again next time)", n)
+}
+
 // logShadowAndFlakes logs, in failures mode, what logOutcome logs besides the outcome
 // line: shadow escapes and flaky tests.
 func (c *cycle) logShadowAndFlakes() {
@@ -949,7 +967,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 	} else if n := c.notStartedUnits(); n > 0 {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.exit, c.notStartedBy(), n)
 	} else {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.exit)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d%s", elapsed, selected, total, c.exit, c.skippedNote())
 	}
 	logFlakes(p, c.stderr, c.flakes)
 }

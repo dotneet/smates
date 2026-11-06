@@ -15,6 +15,7 @@ import (
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // Doctor check statuses.
@@ -196,6 +197,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		for _, s := range p.state.Suites {
 			n += len(s.Tests)
 		}
+		doctorSkipped(p, r)
 		if p.state.Created.IsZero() {
 			// Shared state without a snapshot of this worktree yet.
 			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, no snapshot in this worktree yet (the next run records one)", p.statePath, n)
@@ -234,6 +236,25 @@ func doctorRuleReach(p *project, s *runner.Suite, units int, r *doctorReport) {
 			r.add(checkOK, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to %d of %d test units", s.Name, i, strings.Join(rule.Reaches, ", "), n, units).about(subject)
 		}
 	}
+}
+
+// doctorSkipped lists the units that skipped themselves in their last recorded run:
+// they are not proven to pass, so they run every time until they pass (a test that
+// always skips, behind a missing service, a flag or an environment variable).
+func doctorSkipped(p *project, r *doctorReport) {
+	var units []string
+	for _, name := range slices.Sorted(maps.Keys(p.state.Suites)) {
+		for _, u := range slices.Sorted(maps.Keys(p.state.Suites[name].Tests)) {
+			if p.state.Suites[name].Tests[u].Status == state.Skip {
+				units = append(units, name+": "+u)
+			}
+		}
+	}
+	if len(units) == 0 {
+		return
+	}
+	r.add(checkWarn, "state-skipped", "%d test unit(s) skipped themselves in their last run and run again every time until they pass (not proven): %s", len(units), strings.Join(limit(units, 10), ", ")).
+		fix(doctorFix{Doc: docURL + "guides/go-test-functions/#skipped-tests"})
 }
 
 // installCommand is the command installing the JS dependencies of a suite rooted at

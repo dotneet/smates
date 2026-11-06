@@ -128,6 +128,8 @@ One entry of `suites:`.
 | `python_roots` | list of paths (relative to `root`) | `[]` | Extra import roots for Python static analysis (for example `src` in a src layout). |
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
+| `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
+| `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
 
 ### rules
 

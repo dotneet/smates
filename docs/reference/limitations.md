@@ -124,6 +124,19 @@ See [Go test functions](../guides/go-test-functions.md).
 (`smates run -- -t name`) may skip tests, so such runs never record a test as passed.
 Workaround: put permanent flags in the suite's `command`.
 
+**A skipped test counts as passed, except for Go test functions.** A Go test function
+recorded in its own process (`granularity: func`) that skips itself is recorded as not
+proven and runs again (see [Skipped tests](../guides/go-test-functions.md#skipped-tests)).
+Everywhere else a skip is a pass: a Go package (`granularity: package`, or a package
+recorded as a whole) whose tests all skip, a pytest `skip`/`xfail`, a vitest or jest file
+whose tests all skip. Such a test is not run again until its dependencies change, unless
+the gate is an environment variable it reads (a dependency) or a file it probes.
+Workaround: list it in `volatile`, or set `max_age`.
+
+**Time is not tracked.** A test whose outcome depends on the date or the clock is not
+selected when only the time changes. Workaround: list it in `volatile` (it runs every
+time), or set `max_age` so recorded runs expire.
+
 **Jest** occasionally runs two files back to back in one worker even when recycling
 workers. Their dependencies are then merged: still correct, but less precise.
 Workaround: `isolate: true` makes it exact, at the cost of one jest start per file

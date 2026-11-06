@@ -121,6 +121,9 @@ func TestParseErrors(t *testing.T) {
 		{"rule bad variable pattern", "suites:\n  - runner: go\n    rules: [{reaches: [\"$DB_[\"], deps: [m/**]}]\n", "bad environment variable pattern"},
 		{"rule bad tests glob", "suites:\n  - runner: go\n    rules: [{tests: [\"a\\\\b\"], deps: [m/**]}]\n", "path separator"},
 		{"unknown rule field", "suites:\n  - runner: go\n    rules: [{test: [\"**\"], deps: [m/**]}]\n", "field test not found"},
+		{"bad volatile glob", "suites:\n  - runner: go\n    volatile: [\"a[\"]\n", "volatile"},
+		{"negative max_age", "suites:\n  - runner: go\n    max_age: -1h\n", "max_age"},
+		{"bad max_age", "suites:\n  - runner: go\n    max_age: 7d\n", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -235,6 +238,8 @@ func TestParseRules(t *testing.T) {
 	c, err := Parse([]byte(`
 suites:
   - runner: go
+    volatile: ["./pkg/clock#TestToday", "pkg/calendar"]
+    max_age: 168h
     rules:
       - reaches: ["./pkg/shared/testkit/**", "$APP_DB_*"]
         deps: ["./database/migrations/**"]
@@ -246,6 +251,12 @@ suites:
 		t.Fatal(err)
 	}
 	s := c.Suites[0]
+	if want := []string{"pkg/clock#TestToday", "pkg/calendar"}; !reflect.DeepEqual(s.Volatile, want) {
+		t.Errorf("volatile %v, want %v", s.Volatile, want)
+	}
+	if s.MaxAge != 168*time.Hour {
+		t.Errorf("max_age %v", s.MaxAge)
+	}
 	r := s.Rules[0]
 	if want := []string{"pkg/shared/testkit/**", "$APP_DB_*"}; !reflect.DeepEqual(r.Reaches, want) {
 		t.Errorf("reaches %v, want %v", r.Reaches, want)

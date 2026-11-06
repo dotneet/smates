@@ -103,7 +103,7 @@ func retryFlaky(ctx context.Context, p *project, rc *runner.RunContext, sr *sele
 			if o == nil {
 				return nil, false // no outcome for a unit of a failed run: not explained by flakes
 			}
-			if o.Status == state.Pass {
+			if o.Status == state.Pass || o.Status == state.Skip {
 				continue
 			}
 			if o.Status != state.Fail || o.Inferred || known == nil || known.Tests[u] == nil || known.Tests[u].Flaky == nil {

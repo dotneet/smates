@@ -2,6 +2,8 @@
 package selector
 
 import (
+	"time"
+
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/pathutil"
@@ -16,6 +18,9 @@ const (
 	ReasonNew        = "new"        // no recorded entry for this test
 	ReasonChanged    = "changed"    // an input changed since the test last passed
 	ReasonFailed     = "failed"     // the test did not pass last time
+	ReasonUnproven   = "unproven"   // the test skipped itself last time: its pass is not proven
+	ReasonVolatile   = "volatile"   // the suite's volatile lists it: it runs every time
+	ReasonExpired    = "expired"    // its last recorded run is older than the suite's max_age
 	ReasonOrphan     = "orphan"     // orphan policy "all" pulled the suite in
 	ReasonReference  = "reference"  // a test references an orphan file by name
 	ReasonAgent      = "agent"      // the agent asked for it
@@ -73,6 +78,8 @@ type Input struct {
 	// --orphans=skip), so the changes that would be orphans for the tests
 	// DiffUnrecorded decides by static analysis select none of them either.
 	NoOrphanPolicy bool
+	// Now is the time max_age is measured against (zero: the current time).
+	Now time.Time
 }
 
 // Test is the decision for one test unit.

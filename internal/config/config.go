@@ -108,6 +108,14 @@ type Suite struct {
 	// EnvIgnore and EnvTrack add to the top-level lists for this suite only.
 	EnvIgnore []string `yaml:"env_ignore"`
 	EnvTrack  []string `yaml:"env_track"`
+	// Volatile: globs (relative to Root, matched like the tests of a rule) of the test
+	// units that run every time, whatever changed: tests that depend on something
+	// smates cannot track, such as the date.
+	Volatile []string `yaml:"volatile" json:"-"`
+	// MaxAge: a unit whose last recorded run is older than this runs again, whatever
+	// changed (0: never). Neither it nor Volatile changes how the tests run, so they are
+	// left out of the settings hash (selector.ConfigHash).
+	MaxAge time.Duration `yaml:"max_age" json:"-"`
 }
 
 // Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
@@ -568,6 +576,13 @@ func (c *Config) Normalize() error {
 		}
 		if s.RecordJobs < 0 {
 			return fmt.Errorf("suite %q: record_jobs must not be negative (got %d)", s.Name, s.RecordJobs)
+		}
+		if s.MaxAge < 0 {
+			return fmt.Errorf("suite %q: max_age must not be negative (got %s)", s.Name, s.MaxAge)
+		}
+		trimDotSlash(s.Volatile)
+		if err := checkGlobs(fmt.Sprintf("suite %q: volatile", s.Name), s.Volatile); err != nil {
+			return err
 		}
 		if err := checkRules(s); err != nil {
 			return err

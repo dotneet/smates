@@ -304,6 +304,7 @@ top-level `env_track`, not the whole file:
 | top-level `env_track` | every test runs again |
 | another suite's entry | nothing of this suite |
 | `ignore`, `orphans`, `untested`, `agent`, `flaky`, top-level `env_ignore` | nothing runs |
+| a suite's `volatile` or `max_age` | only the units they select now: they choose when tests run, not how |
 | `inputs` or `rules` | the files they add are new dependencies: tests that gain one run once |
 
 The defaults smates fills in (a detected command, test globs) are not part of the

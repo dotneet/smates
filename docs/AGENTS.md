@@ -17,6 +17,11 @@ smates: FAILED 1 of 7 test unit(s) in 3.2s:
 smates: rerun them: smates run --output failures --only web:src/cart.test.ts
 ```
 
+A passing summary that ends in `; N skipped (not proven: they run again next time)`
+means N selected tests skipped themselves (a service that is not running, an
+environment gate): they did not check your change. Say so when you report, or start
+what they need and run again; they stay selected until they pass.
+
 Fix the code, rerun the printed `--only` command until it passes, then finish with a
 plain `smates run --output failures` (it reruns what failed plus anything newly
 affected). Do not run the whole test suite yourself: smates already picked what can break.

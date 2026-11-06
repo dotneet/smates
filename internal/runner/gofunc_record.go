@@ -313,7 +313,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	profile, testLog := filepath.Join(work, "cover.out"), filepath.Join(work, "test.log")
 	argv := append(slices.Clone(fr.flags.exec), bin, "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.coverprofile="+profile,
 		"-test.testlogfile="+testLog, "-test.paniconexit0")
-	argv = append(append(argv, fr.flags.test...), fr.flags.tail...)
+	argv = append(append(argv, verboseFlags(fr.flags.test)...), fr.flags.tail...)
 	env := []string{"GOCOVERDIR=" + covDir, childCoverEnv + "=" + covDir, trace.GoChildLogEnv + "=" + childDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
 	env = append(env, childTraceEnv(rc, work)...)
 	var buf bytes.Buffer
@@ -331,6 +331,10 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	setUnitExit(o, code)
 	if code != 0 {
 		o.Failure = string(lastMessage(buf.Bytes()))
+	} else if o.Status == state.Pass {
+		// A process that passed proves the function passed only if it ran and did not
+		// skip itself.
+		o.Status = funcOutcome(buf.Bytes(), name)
 	}
 	files, envs := trace.GoTestLogs(testLog, pkgDir, bin, childDir)
 	addTestLog(o, rc.Repo.Root, files, envs)

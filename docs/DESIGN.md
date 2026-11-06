@@ -13,10 +13,14 @@ function with `granularity: func`, see "Go test functions" below) smates stores 
 inputs it was observed to depend on, with the content hash (git blob SHA-1) each had when
 `T` last ran, and whether `T` passed:
 
-    T -> { deps: {key: hash}, status: pass|fail|unknown, duration_ms, commit }
+    T -> { deps: {key: hash}, status: pass|fail|skip|unknown, duration_ms, commit }
 
 A test is **skipped** iff it last passed and every input it depends on hashes the same
-today. Otherwise it is selected, with the reason. This is the rule of Go's test cache and
+today. Otherwise it is selected, with the reason. Two suite settings select tests that
+would be skipped (`runAnyway`): `volatile` globs (matched like a rule's `tests`; compile
+checks excluded) run every time, for inputs smates cannot track such as the date
+(reason `volatile`), and `max_age` selects a unit whose entry is older than it (reason
+`expired`; a unit with no entry is new anyway). This is the rule of Go's test cache and
 Bazel, but with inputs *discovered* by tracing real runs, across languages, and with
 content hashes rather than mtimes (so fresh CI checkouts do not invalidate everything).
 
@@ -40,7 +44,9 @@ those are the same, until the test runs again. A test that reads smates.yml itse
 records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
-comparing), so editing them selects nothing. Diff mode (no recorded state) still
+comparing), so editing them selects nothing. A suite's `volatile` and `max_age` are
+left out of the hash too (they choose when tests run, not how), and so is an empty
+rule `reaches`, so an upgrade does not change the hash. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
 hash instead of the key; it counts as unchanged while the file is, until the test runs
 again.
@@ -708,6 +714,21 @@ an interrupted run: never started, or tests that were declared to run but did no
 finish) and files the pytest plugin saw only some tests of run. Go packages that fail to
 build are failures (with `granularity: func`, of the package's compile check
 `dir#(build)` and of the functions that ran).
+
+A test that skips itself is not proven to pass. Go test functions recorded one per
+process run with `-test.v` (added unless the flags already print every result line:
+`-test.v`, or `test2json`, whose framing byte is dropped) and `funcOutcome` reads the
+output of a process that exited 0: a top-level `--- SKIP` in any `-count` iteration, or
+no `=== RUN` line for the function (a `TestMain` that exits before `m.Run`), records
+`skip`; a missing result line `unknown`; only `--- PASS` a pass. Lines are matched
+anywhere, since output without a final newline precedes the result line; text a test
+prints that looks like a skip can only cause a rerun. go test's own output (plain
+`--- SKIP` lines, `-json` test events) maps a top-level skip to `skip` the same way,
+fail > skip > pass across iterations; a package-level skip event (no test files) and a
+package with no tests to run stay passes. A `skip` entry is selected with reason
+`unproven` until a run passes; flake detection ignores it (`decisive`), and the
+outcome line counts the run's skips. Package granularity, and other runners, record a
+skip as a pass (the package's or the file's summary).
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
