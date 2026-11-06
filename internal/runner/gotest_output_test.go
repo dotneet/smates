@@ -187,3 +187,32 @@ func TestAddTestLogSymlink(t *testing.T) {
 		t.Errorf("files %v", got)
 	}
 }
+
+// A go.work that $GOWORK names (ci/go.work) governs version selection for every module
+// it uses, though no go.work is at or above their files: its pins are suite inputs.
+func TestGoWorkEnvPins(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir()) // as the repository root is
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.Write(t, root, "ci/go.work", "go 1.22\n\nuse ../a\nuse ../c\n\nreplace example.com/lib => ../forks/lib\n")
+	testutil.Write(t, root, "a/go.mod", "module example.com/a\n\nreplace (\n\texample.com/dep => ../forks/dep\n\texample.com/x => example.com/y v1.0.0\n)\n")
+	testutil.Write(t, root, "c/go.mod", "module example.com/c\n")
+	all := []string{"/ci/go.work", "/ci/go.work.sum", "/a/go.mod", "/a/go.sum", "/c/go.mod", "/c/go.sum", "/forks/lib/go.mod", "/forks/dep/go.mod"}
+	for _, tt := range []struct {
+		name, gowork string
+		want         []string
+	}{
+		{"absolute GOWORK", filepath.Join(root, "ci", "go.work"), all},
+		{"relative to the suite directory", "../ci/go.work", all},
+		{"unset", "", nil},
+		{"off", "off", nil},
+		{"outside the repository", filepath.Join(t.TempDir(), "go.work"), nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goWorkEnvPins(root, filepath.Join(root, "c"), tt.gowork); !slices.Equal(got, tt.want) {
+				t.Errorf("pins %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

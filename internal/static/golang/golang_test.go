@@ -268,6 +268,12 @@ func TestDepsWorkspacePins(t *testing.T) {
 			wsModule("b", "example.com/b"), wsModule("ws/c", "example.com/c"),
 			map[string]string{"ws/go.work": "use ./c\nuse ../b\n"},
 		), "ws/c/x_test.go", []string{"b/go.mod", "b/go.sum", "ws/c/go.mod", "ws/c/go.sum", "ws/c/x.go", "ws/go.work"}},
+		// Must keep: a suite run from the root uses the root go.work although the file's
+		// nearest go.work is svc/go.work; which one governs is not known, so both count.
+		{"nested workspace under a root workspace", merge(
+			wsModule("a", "example.com/a"), wsModule("svc/b", "example.com/b"),
+			map[string]string{"go.work": "use ./a\nuse ./svc/b\n", "svc/go.work": "use ./b\n"},
+		), "svc/b/x_test.go", []string{"a/go.mod", "a/go.sum", "go.work", "svc/b/go.mod", "svc/b/go.sum", "svc/b/x.go", "svc/go.work"}},
 		{"absolute path", merge(mods, map[string]string{
 			"go.work": "use $ROOT/b\nuse ./c\n", "go.work.sum": "",
 		}), "c/x_test.go", withB},

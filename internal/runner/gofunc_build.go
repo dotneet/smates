@@ -12,12 +12,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dotneet/smates/internal/gitx"
 )
+
+// goBuildFlagsVisible reports whether smates sees every build flag the suite's command
+// passes: the command is go test itself (not a wrapper such as gotestsum, make or
+// sh -c, whose flags reach go test unseen) and no "--" hands the rest of the words to
+// something smates does not parse. When it cannot tell, a constraint excluding a file
+// under the flags it does see proves nothing.
+func goBuildFlagsVisible(s *Suite) bool {
+	argv, err := SplitWords(s.Command)
+	if err != nil || len(argv) < 2 || strings.TrimSuffix(filepath.Base(argv[0]), ".exe") != "go" || argv[1] != "test" {
+		return false
+	}
+	return !slices.Contains(argv, "--") && !slices.Contains(s.ExtraArgs, "--")
+}
 
 // buildInfo is what is known about one test file (absolute path), valid while its size
 // and modification time and the build flags stay the same.
@@ -35,9 +49,10 @@ var buildInfos sync.Map // absolute path -> buildInfo
 // reports as excluded by build constraints in the suite's configuration (GOFLAGS,
 // command flags and the arguments passed through, its environment). Only files that may be constrained are looked up,
 // with one go list for all their packages; results are cached by file stat. When go
-// list fails nothing is excluded.
+// list fails, or when the command may pass build flags smates cannot see (see
+// goBuildFlagsVisible), nothing is excluded.
 func excludedTestFiles(s *Suite, testFiles []string) map[string]bool {
-	if s.RepoRoot == "" {
+	if s.RepoRoot == "" || !goBuildFlagsVisible(s) {
 		return nil
 	}
 	rc := &RunContext{Repo: &gitx.Repo{Root: s.RepoRoot}, Suite: s, ExtraArgs: s.ExtraArgs}

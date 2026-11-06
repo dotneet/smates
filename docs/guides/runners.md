@@ -220,7 +220,11 @@ the workspace uses, so a `require` bump in one module can change what another bu
 even when it never imports the first. Every Go file of the workspace therefore depends
 on the `go.mod` and `go.sum` of every module listed by `use`, and on the `go.mod` of
 each local `replace` target: a dependency bump in any of them selects every test of the
-workspace. A `go.work` smates cannot parse makes every module below it count.
+workspace. A `go.work` smates cannot parse makes every module below it count. Go uses
+the `go.work` nearest the directory it runs in, so a file counts the pins of every
+`go.work` at or above it (a nested `svc/go.work` and the root's). A `go.work` that
+`GOWORK` names elsewhere (in the suite's `env:` or smates' environment) has its pins
+made inputs of every test of the suite.
 
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
@@ -243,12 +247,14 @@ suites:
 
 Each matching directory is then a unit: `go test ./cmd/app` compiles it and reports
 `[no test files]`, or fails it on a build error, and it depends on its static import
-closure like any package. It runs when a package it imports changes, or when its own
-files do. With `granularity: func` the directory becomes a compile check
-(`cmd/app#(build)`) with no function units. A directory whose Go files the suite's
-build constraints all exclude (`//go:build` lines, `_linux.go` names, with the tags of
-`GOFLAGS`, the command and arguments passed through) is no unit; when smates cannot tell
-(go list fails), it stays one.
+closure like any package. smates records `[no test files]` as a pass (with `go test
+-json` too), so the unit runs when a package it imports changes, or when its own files
+do. With `granularity: func` the directory becomes a compile check (`cmd/app#(build)`)
+with no function units. A directory whose Go files the suite's build constraints all
+exclude (`//go:build` lines, `_linux.go` names, with the tags of `GOFLAGS`, the command
+and arguments passed through) is no unit. When smates cannot tell, it stays one: go list
+fails, or the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
+`sh -c "..."`) or passes words after `--`, where tags reach go test unseen.
 
 A package that compiles only after code generation fails like any build failure (exit
 1), not as an environment error: smates cannot tell a missing generated file from a real

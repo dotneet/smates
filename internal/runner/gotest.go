@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,7 @@ func (g goTest) Defaults(repo *gitx.Repo, root string) Defaults {
 // depends on GOWORK in its env:.
 func (goTest) DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults {
 	exclude := []string{"**/testdata/**", "**/vendor/**", "**/_*/**", "**/.*/**"}
+	inputs := []string{"go.mod", "go.sum", "/go.work", "/go.work.sum", "/.tool-versions"}
 	if repo != nil {
 		// Packages of a nested module are not the suite's: go test of the outer module
 		// cannot build them (and ./... skips them), unless the go.work workspace has them.
@@ -45,13 +47,101 @@ func (goTest) DefaultsForSuite(repo *gitx.Repo, c config.Suite) Defaults {
 		for _, m := range nested {
 			exclude = append(exclude, m+"/**")
 		}
+		inputs = append(inputs, goWorkEnvPins(repo.Root, dir, goWorkEnv(c.Env))...)
 	}
 	return Defaults{
 		Tests:   []string{"**/*_test.go"},
 		Exclude: exclude,
-		Inputs:  []string{"go.mod", "go.sum", "/go.work", "/go.work.sum", "/.tool-versions"},
+		Inputs:  inputs,
 		Command: "go test",
 	}
+}
+
+// goWorkEnvPins returns, as repository-rooted input patterns ("/a/go.mod"), the files
+// pinning the dependency versions of the go.work workspace that $GOWORK (gowork) names:
+// the go.work and its go.work.sum, the go.mod and go.sum of each module it uses, and
+// the go.mod of each local replace target of the go.work or of those modules. Static
+// analysis finds a workspace only from the go.work files at or above each file, so a
+// go.work elsewhere (ci/go.work) would govern minimal version selection unseen. None
+// without GOWORK, with GOWORK=off, or for files outside the repository. dir is the
+// suite directory, against which a relative GOWORK resolves.
+func goWorkEnvPins(root, dir, gowork string) []string {
+	if gowork == "" || gowork == "off" {
+		return nil
+	}
+	file := gowork
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(dir, file)
+	}
+	var out []string
+	add := func(abs string) {
+		if rel, ok := pathutil.Rel(root, abs); ok && !slices.Contains(out, "/"+rel) {
+			out = append(out, "/"+rel)
+		}
+	}
+	add(file)
+	add(filepath.Join(filepath.Dir(file), "go.work.sum"))
+	replaces := localReplaces(file)
+	mods := make([]string, 0, len(goWorkModules(root, dir, file)))
+	for m := range goWorkModules(root, dir, file) {
+		mods = append(mods, m)
+	}
+	slices.Sort(mods)
+	for _, m := range mods {
+		add(filepath.Join(m, "go.mod"))
+		add(filepath.Join(m, "go.sum"))
+		replaces = append(replaces, localReplaces(filepath.Join(m, "go.mod"))...)
+	}
+	for _, r := range replaces {
+		add(filepath.Join(r, "go.mod"))
+	}
+	return out
+}
+
+// localReplaces returns the local directories (absolute) the replace directives of a
+// go.mod or go.work file point at: targets that are ".", "..", start with "./" or
+// "../", or are absolute (anything else is a module path).
+func localReplaces(file string) []string {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	block := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0:
+			continue
+		case block && f[0] == ")":
+			block = false
+			continue
+		case !block && len(f) >= 2 && f[0] == "replace" && f[1] == "(":
+			block = true
+			continue
+		case !block && f[0] == "replace":
+			f = f[1:]
+		case !block:
+			continue
+		}
+		i := slices.Index(f, "=>")
+		if i < 0 || i+1 >= len(f) {
+			continue
+		}
+		t := strings.ReplaceAll(strings.Trim(f[i+1], `"`), `\`, "/")
+		if !(t == "." || t == ".." || strings.HasPrefix(t, "./") || strings.HasPrefix(t, "../") || filepath.IsAbs(t)) {
+			continue
+		}
+		p := filepath.FromSlash(t)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(file), p)
+		}
+		out = append(out, filepath.Clean(p))
+	}
+	return out
 }
 
 // goWorkEnv is the GOWORK go test sees with the suite's env: on top of smates' own.
@@ -372,6 +462,19 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 			o.Status = st
 		}
 	}
+	// A package unit without test files ("?  pkg [no test files]") builds no test
+	// binary and leaves no trace; go test compiled it, so it passed, and its
+	// dependencies are the known ones (its static closure), as for a compile check.
+	// Only for package units run as such: under granularity func (out set, or a -run
+	// filter) a package-level pass must not stand in for functions that never ran.
+	for _, u := range units {
+		if out != nil || run != "" {
+			break
+		}
+		if ip := failed.key(rc, u); ip != "" && failed.noTests[ip] && res.Observations[u] == nil && !failed.paths[ip] {
+			res.Observations[u] = &Observation{Files: map[string]bool{}, Status: state.Pass}
+		}
+	}
 	addCoverPkgDeps(ctx, rc, res)
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		for _, u := range units {
@@ -518,16 +621,33 @@ type buildFailures struct {
 	pending []byte
 	output  map[string]string // import path -> failure output (bounded)
 	status  map[string]string // import path -> state.Pass / state.Fail
+	noTests map[string]bool   // import paths go test reported "[no test files]" for
+}
+
+// goPackageEvent is the part of a go test -json event telling a package finished
+// without tests (Action "skip" with no Test).
+type goPackageEvent struct {
+	Action  string
+	Package string
+	Test    string
 }
 
 // collect accumulates one output line, attributing it to the package whose summary
 // line follows.
 func (b *buildFailures) collect(line []byte) {
+	if bytes.HasPrefix(line, []byte("{")) && bytes.Contains(line, []byte(`"skip"`)) {
+		var ev goPackageEvent
+		if json.Unmarshal(line, &ev) == nil && ev.Action == "skip" && ev.Test == "" && ev.Package != "" {
+			b.noTest(ev.Package)
+		}
+	}
 	if m := goSummaryRe.FindSubmatch(line); m != nil {
 		if b.status == nil {
 			b.status = map[string]string{}
 		}
 		switch string(m[1]) {
+		case "?":
+			b.noTest(string(m[2]))
 		case "ok":
 			if b.status[string(m[2])] != state.Fail {
 				b.status[string(m[2])] = state.Pass
@@ -550,6 +670,14 @@ func (b *buildFailures) collect(line []byte) {
 	if extra := len(b.pending) - maxGoPending; extra > 0 {
 		b.pending = append(b.pending[:0], b.pending[extra:]...)
 	}
+}
+
+// noTest notes that package ip has no test files: go test compiled it and ran nothing.
+func (b *buildFailures) noTest(ip string) {
+	if b.noTests == nil {
+		b.noTests = map[string]bool{}
+	}
+	b.noTests[ip] = true
 }
 
 func (b *buildFailures) Write(p []byte) (int, error) {
@@ -602,7 +730,7 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 // workspace is not the suite's), or the relative argument naming it when go test could
 // not resolve that ("FAIL ./x [setup failed]").
 func (b *buildFailures) key(rc *RunContext, u string) string {
-	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" {
+	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" || b.noTests[arg] {
 		return arg
 	}
 	return dirImportPath(rc.Repo.Root, u)

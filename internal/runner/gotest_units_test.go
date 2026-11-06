@@ -52,6 +52,7 @@ func TestPackageUnitsBuildConstraints(t *testing.T) {
 	everything := []string{"lib", "cmd/app", "cmd/tool", "cmd/plan", "cmd/mixed", "tagged", "alltagged", "xonly"}
 	tests := []struct {
 		name        string
+		command     string
 		env         map[string]string
 		extra       []string
 		granularity string
@@ -75,6 +76,13 @@ func TestPackageUnitsBuildConstraints(t *testing.T) {
 		{name: "excluded test of a compiling package", files: []string{"tagged/t_test.go"}, want: []string{"tagged"}},
 		{name: "excluded file of a compiling main", files: []string{"cmd/mixed/extra.go"}, want: []string{"cmd/mixed"}},
 		{name: "excluded file alone", files: []string{"cmd/tool/main.go"}, want: nil},
+		// Must keep: a wrapper or a "--" can pass build flags (a tag that compiles the
+		// directory) smates does not see, so nothing is known to be excluded.
+		{name: "wrapper with flags after --", command: `gotestsum -- -tags=smates_never`, files: files, want: everything},
+		{name: "make target", command: "make test-integration", files: files, want: everything},
+		{name: "sh -c", command: `sh -c "go test -tags=smates_never"`, files: files, want: everything},
+		{name: "-- passthrough", extra: []string{"--", "-tags=smates_never"}, files: files, want: everything},
+		{name: "wrapper, excluded file alone", command: "make test", files: []string{"cmd/tool/main.go"}, want: []string{"cmd/tool"}},
 		{name: "func granularity", granularity: config.GranularityFunc, files: files,
 			want: []string{"lib#TestF", "xonly#TestX", "lib#(build)", "cmd/app#(build)", "cmd/mixed#(build)", "xonly#(build)"}},
 	}
@@ -85,7 +93,7 @@ func TestPackageUnitsBuildConstraints(t *testing.T) {
 				env[k] = v
 			}
 			suites, err := Resolve(repo, []config.Suite{{
-				Name: "go", Root: ".", Runner: "go", Granularity: tt.granularity, Env: env,
+				Name: "go", Root: ".", Runner: "go", Command: tt.command, Granularity: tt.granularity, Env: env,
 				Tests: []string{"**/*_test.go", "**/cmd/**/*.go"},
 			}})
 			if err != nil {

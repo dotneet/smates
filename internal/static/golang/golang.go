@@ -90,7 +90,10 @@ func (a *Analyzer) Deps(p string, src []byte) []string {
 		out = append(out, joinRel(m, "go.mod"), joinRel(m, "go.sum"))
 		out = append(out, ix.modPins[m]...)
 	}
-	if w, ok := enclosing(dir, ix.workDirs); ok {
+	// Every go.work at or above the file counts, not only the nearest: the go command
+	// takes the one nearest its working directory (the suite's, which may be above a
+	// nested go.work), so which workspace governs MVS for this file is not known here.
+	for _, w := range enclosingAll(dir, ix.workDirs) {
 		out = append(out, joinRel(w, "go.work"), joinRel(w, "go.work.sum"))
 		out = append(out, ix.workPins[w]...)
 	}
@@ -330,6 +333,20 @@ func enclosing(dir string, set map[string]bool) (string, bool) {
 		}
 		if dir == "" {
 			return "", false
+		}
+		dir = dirOf(dir)
+	}
+}
+
+// enclosingAll returns every directory at or above dir that is in set, nearest first.
+func enclosingAll(dir string, set map[string]bool) []string {
+	var out []string
+	for {
+		if set[dir] {
+			out = append(out, dir)
+		}
+		if dir == "" {
+			return out
 		}
 		dir = dirOf(dir)
 	}

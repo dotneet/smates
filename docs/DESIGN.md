@@ -422,10 +422,14 @@ module).
 
 A Go package unit is the directory of a test file, unless build constraints exclude every
 Go file of that directory in the suite's configuration (`go list -find` with the suite's
-build flags, as for test functions; when go list fails, or any Go file of the directory
-may compile, it stays a unit): `go test` would fail such a directory ("build constraints
-exclude all Go files") and `./...` skips it. Widening `tests` to non-test files
-(`**/cmd/**/*.go`) makes packages without tests units that `go test` compiles.
+build flags, as for test functions; when go list fails, when the command is not `go test`
+itself or passes words after `--` (a wrapper's flags are unseen), or when any Go file of
+the directory may compile, it stays a unit): `go test` would fail such a directory
+("build constraints exclude all Go files") and `./...` skips it. Widening `tests` to
+non-test files (`**/cmd/**/*.go`) makes packages without tests units that `go test`
+compiles; their `[no test files]` line (or a package-level `-json` skip event) is
+recorded as a pass whose dependencies are the known ones, as for a compile check, since
+no test binary runs to leave a trace.
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
@@ -722,8 +726,11 @@ targets (minimal version selection picks one version per dependency across them 
 `require` bump in a module a package never imports can change what it links; another
 module's `go.sum` counts because the go command verifies checksums against all of them, so
 a removed line can fail the build). A `go.work` whose directives do not parse, or that
-uses nothing, counts every module below its directory. These are content keys: any edit
-selects every test of the workspace.
+uses nothing, counts every module below its directory. Every `go.work` at or above the
+file counts, not only the nearest: the go command takes the one nearest its working
+directory, which may be above a nested one. A `go.work` named by `GOWORK` (suite env or
+smates' own) is invisible to static analysis, so the go runner makes its pins (the same
+set) suite inputs. These are content keys: any edit selects every test of the workspace.
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
 into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript
