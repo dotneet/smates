@@ -548,6 +548,11 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 		for _, n := range funcs[d] {
 			unit := FuncUnit(d, n)
 			st, inferred, ran := oc.status(ip, n)
+			if r.excluded[d] {
+				// Build constraints exclude its package: nothing ran (see skipped).
+				fr.res.Observations[unit] = &Observation{Files: map[string]bool{}, Status: state.Skip}
+				continue
+			}
 			if po == nil && !ran {
 				continue
 			}

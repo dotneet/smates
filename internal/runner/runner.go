@@ -143,6 +143,10 @@ type RunResult struct {
 	// ReadsBy maps source files to dependency keys they read when they ran (see
 	// trace.Proc.ReadsBy); recording adds them to every unit depending on the reader.
 	ReadsBy map[string]map[string]bool
+	// excluded holds the Go package directories of the run whose Go files build
+	// constraints all exclude in the flags go test got, and that failed for nothing
+	// else (see buildFailures.onlyExcl): their tests did not run, a skip.
+	excluded map[string]bool
 }
 
 // Observation is what tracing saw for one unit.

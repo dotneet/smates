@@ -235,7 +235,12 @@ func runFuncsPlain(ctx context.Context, rc *RunContext, dirs []string, funcs map
 				if !ran {
 					continue
 				}
-				res.Observations[FuncUnit(d, n)] = &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n), BuildFailed: st == state.Fail && oc.buildFailed(ip)}
+				o := &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n), BuildFailed: st == state.Fail && oc.buildFailed(ip)}
+				if r != nil && r.excluded[d] {
+					// Build constraints exclude its package: nothing ran (see skipped).
+					o = &Observation{Files: map[string]bool{}, Status: state.Skip}
+				}
+				res.Observations[FuncUnit(d, n)] = o
 			}
 		}
 	}

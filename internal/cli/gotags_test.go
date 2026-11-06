@@ -21,6 +21,7 @@ func TestGoBuildConstraintRuns(t *testing.T) {
 		t.Skip("go not on PATH")
 	}
 	const tagged = "//go:build smates_extra\n\npackage extra\n\nimport \"testing\"\n\nfunc TestExtra(t *testing.T) {}\n"
+	const taggedFailing = "//go:build smates_extra\n\npackage extra\n\nimport \"testing\"\n\nfunc TestExtra(t *testing.T) { t.Fatal(\"boom\") }\n"
 	const failing = "package bad\n\nimport \"testing\"\n\nfunc TestBad(t *testing.T) { t.Fatal(\"boom\") }\n"
 	type step struct {
 		goflags string
@@ -34,20 +35,42 @@ func TestGoBuildConstraintRuns(t *testing.T) {
 		files       map[string]string
 		steps       []step
 		notPass     []string // units whose recorded status must not be a pass
+		skip        []string // units whose recorded status must be a skip
+		fail        []string // units whose recorded status must be a failure
 	}{
 		{
 			// Must keep: the wrapper may pass the tag, so the directory stays a unit;
 			// go test's "build constraints exclude all Go files" is no failure.
 			name: "wrapper, all-tag-gated directory", command: "./gt",
-			files:   map[string]string{"extra/x_test.go": tagged},
-			steps:   []step{{args: []string{"--all"}}, {}, {}},
-			notPass: []string{"extra"},
+			files: map[string]string{"extra/x_test.go": tagged},
+			steps: []step{{args: []string{"--all"}}, {}, {}},
+			skip:  []string{"extra"},
 		},
 		{
 			name: "wrapper, all-tag-gated directory, func granularity", command: "./gt", granularity: "func",
-			files:   map[string]string{"extra/x_test.go": tagged},
-			steps:   []step{{args: []string{"--all"}}, {}, {}},
-			notPass: []string{"extra#TestExtra", "extra#(build)"},
+			files: map[string]string{"extra/x_test.go": tagged},
+			steps: []step{{args: []string{"--all"}}, {}, {}},
+			skip:  []string{"extra#TestExtra", "extra#(build)"},
+		},
+		{
+			// Must keep: a wrapper running go test again with the tag compiles the
+			// directory, and its failing test fails the run although the first pass
+			// said build constraints exclude it.
+			name: "wrapper running go test twice, the tagged pass fails", command: "./gt2",
+			files: map[string]string{"extra/x_test.go": taggedFailing},
+			steps: []step{{args: []string{"--all"}, want: 1}, {want: 1}},
+			fail:  []string{"extra"},
+		},
+		{
+			name: "wrapper running go test twice, the tagged pass fails, func granularity", command: "./gt2", granularity: "func",
+			files: map[string]string{"extra/x_test.go": taggedFailing},
+			steps: []step{{args: []string{"--all"}, want: 1}, {want: 1}},
+			fail:  []string{"extra#TestExtra"},
+		},
+		{
+			name: "wrapper running go test twice, the tagged pass passes", command: "./gt2",
+			files: map[string]string{"extra/x_test.go": tagged},
+			steps: []step{{args: []string{"--all"}}, {}},
 		},
 		{
 			name: "go test itself, all-tag-gated directory", command: "go test",
@@ -112,6 +135,7 @@ func TestGoBuildConstraintRuns(t *testing.T) {
 			write("smates.yml", "version: 1\norphans: ignore\nsuites:\n  - name: go\n    runner: go\n"+gran+"    command: "+tt.command+"\n", 0o644)
 			write(".gitignore", ".smates/\n", 0o644)
 			write("gt", "#!/bin/sh\nexec go test \"$@\"\n", 0o755)
+			write("gt2", "#!/bin/sh\ngo test \"$@\"; a=$?\ngo test -tags smates_extra \"$@\"; b=$?\nexit $((a|b))\n", 0o755)
 			write("go.mod", "module example.com/tags\n\ngo 1.21\n", 0o644)
 			write("lib/lib.go", "package lib\n\nfunc F() int { return 1 }\n", 0o644)
 			write("lib/lib_test.go", "package lib\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) { F() }\n", 0o644)
@@ -135,6 +159,16 @@ func TestGoBuildConstraintRuns(t *testing.T) {
 			for _, u := range tt.notPass {
 				if e := st.Suites["go"].Tests[u]; e != nil && e.Status == state.Pass {
 					t.Errorf("%s recorded as a pass: its tests never ran", u)
+				}
+			}
+			for _, u := range tt.skip {
+				if e := st.Suites["go"].Tests[u]; e == nil || e.Status != state.Skip {
+					t.Errorf("%s: recorded %+v, want a skip", u, e)
+				}
+			}
+			for _, u := range tt.fail {
+				if e := st.Suites["go"].Tests[u]; e == nil || e.Status != state.Fail {
+					t.Errorf("%s: recorded %+v, want a failure", u, e)
 				}
 			}
 		})

@@ -455,8 +455,13 @@ environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the to
 and the platform are not dependencies, so a pass would hide those tests from a
 configuration that compiles them. A unit kept because a wrapper's flags are unseen,
 which go test then fails with "build constraints exclude all Go files" (read from its
-stderr), is recorded as a skip too, and the exit code 1 is forgiven when every other
-package of the invocation is reported as passing or without test files.
+stderr), is recorded as a skip too (its function units as well), and the exit code 1
+is forgiven when every other package of the invocation is reported as passing or
+without test files, in plain summary lines or the output events of `go test -json`.
+Only go test's own code 1 is forgiven (`make` exits 2), and only when each `[setup
+failed]` of the package is matched by such a message and no other FAIL line names it: a
+wrapper running go test twice (the second time with the tag) compiles the package, and
+a test or build failure there stands.
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,

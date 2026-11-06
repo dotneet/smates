@@ -124,7 +124,7 @@ func runBuildChecks(ctx context.Context, rc *RunContext, dirs []string) (*RunRes
 			ip := failed.key(rc, d)
 			o := &Observation{Files: map[string]bool{}, Status: state.Pass}
 			switch {
-			case failed.excluded[ip]:
+			case failed.onlyExcl(ip):
 				// Nothing of it compiles in this configuration: not proven to build.
 				o.Status = state.Skip
 			case failed.paths[ip] || failed.status[ip] == state.Fail:

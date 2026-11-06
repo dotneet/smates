@@ -120,6 +120,23 @@ func TestBuildFailuresOnlyExcluded(t *testing.T) {
 		{"an imported package excluded", "FAIL\texample.com/m/b [setup failed]\n",
 			"package example.com/m/b\n\timports example.com/m/a: build constraints exclude all Go files in /r/a\n", []string{"b"}, 1, false},
 		{"another exit code", setup, excl, []string{"a"}, 2, false},
+		{"another exit code (make)", setup + okB, excl, []string{"a", "b"}, 2, false},
+		{"excluded in two passes", setup + okB + setup + okB, excl + excl, []string{"a", "b"}, 1, true},
+		// go test -json: the summary lines are output events.
+		{"excluded, JSON events", `{"ImportPath":"example.com/m/a","Action":"build-output","Output":"package example.com/m/a: build constraints exclude all Go files in /r/a\n"}` + "\n" +
+			`{"Action":"output","Package":"example.com/m/a","Output":"FAIL\texample.com/m/a [setup failed]\n"}` + "\n" +
+			`{"Action":"fail","Package":"example.com/m/a","Elapsed":0,"FailedBuild":"example.com/m/a"}` + "\n" +
+			`{"Action":"output","Package":"example.com/m/b","Test":"TestB","Output":"--- PASS: TestB (0.00s)\n"}` + "\n" +
+			`{"Action":"output","Package":"example.com/m/b","Output":"ok  \texample.com/m/b\t0.01s\n"}` + "\n" +
+			`{"Action":"pass","Package":"example.com/m/b","Elapsed":0.01}` + "\n", "", []string{"a", "b"}, 1, true},
+		// Must keep: a package excluded in one pass of a wrapper and compiled in another
+		// (go test run again with the tag) fails for real there, in either order.
+		{"excluded, then its test fails", setup + okB + "FAIL\texample.com/m/a\t0.6s\n", excl, []string{"a", "b"}, 1, false},
+		{"its test fails, then excluded", "FAIL\texample.com/m/a\t0.6s\n" + setup + okB, excl, []string{"a", "b"}, 1, false},
+		{"excluded, then its build fails", setup + okB + "FAIL\texample.com/m/a [build failed]\n", excl, []string{"a", "b"}, 1, false},
+		{"its build fails, then excluded", "FAIL\texample.com/m/a [build failed]\n" + setup + okB, excl, []string{"a", "b"}, 1, false},
+		{"set up failing more often than excluded", setup + setup + okB, excl, []string{"a", "b"}, 1, false},
+		{"excluded, then its test fails, JSON events", setup + `{"Action":"output","Package":"example.com/m/a","Output":"FAIL\texample.com/m/a\t0.6s\n"}` + "\n", excl, []string{"a"}, 1, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			b, e := &buildFailures{}, &buildFailures{}
@@ -128,6 +145,20 @@ func TestBuildFailuresOnlyExcluded(t *testing.T) {
 			b.addExcluded(e)
 			if got := b.onlyExcluded(rc, tt.units, tt.code); got != tt.want {
 				t.Errorf("onlyExcluded %v, want %v", got, tt.want)
+			}
+			// A package failing for real keeps its failure: not dropped from the
+			// observations, not recorded as a skip.
+			obs := b.observations(&RunContext{Repo: rc.Repo, Suite: rc.Suite, Units: tt.units})
+			res := &RunResult{Observations: obs}
+			b.addSkipped(rc, tt.units, res)
+			ex := b.excludedUnits(rc, tt.units)
+			if b.status["example.com/m/a"] == state.Fail && b.failures["example.com/m/a"] {
+				if o := res.Observations["a"]; o == nil || o.Status != state.Fail {
+					t.Errorf("a: observed %+v, want a failure", o)
+				}
+				if ex["a"] {
+					t.Errorf("a counted as excluded although it failed for real")
+				}
 			}
 		})
 	}

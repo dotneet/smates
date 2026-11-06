@@ -444,7 +444,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	if err == nil && !all && failed.onlyExcluded(rc, units, code) {
 		code = 0
 	}
-	res := &RunResult{ExitCode: code, Duration: time.Since(start)}
+	res := &RunResult{ExitCode: code, Duration: time.Since(start), excluded: failed.excludedUnits(rc, units)}
 	if err != nil {
 		return res, err
 	}
@@ -513,7 +513,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	if len(failed.paths) > 0 || len(failed.output) > 0 {
 		for _, u := range units {
 			ip := failed.key(rc, u)
-			if ip == "" || failed.excluded[ip] {
+			if ip == "" || failed.onlyExcl(ip) {
 				continue
 			}
 			if failed.paths[ip] {
@@ -661,30 +661,48 @@ type buildFailures struct {
 	output  map[string]string // import path -> failure output (bounded)
 	status  map[string]string // import path -> state.Pass / state.Fail
 	noTests map[string]bool   // import paths go test reported "[no test files]" for
-	// excluded holds the import paths whose Go files build constraints all exclude in
-	// the flags go test actually got: go test fails them ("[setup failed]") without
-	// testing anything. smates keeps such a directory as a unit whenever it cannot see
-	// those flags (a wrapper command), so this is no test failure.
-	excluded map[string]bool
+	// excluded counts, per import path, go's messages that build constraints exclude
+	// all its Go files in the flags go test actually got: go test fails such a package
+	// ("[setup failed]") without testing anything. smates keeps such a directory as a
+	// unit whenever it cannot see those flags (a wrapper command), so this is no test
+	// failure, as long as each of its failures is one of those (see onlyExcl).
+	excluded map[string]int
+	setups   map[string]int  // import path -> "FAIL <ip> [setup failed]" lines
+	failures map[string]bool // import paths with a FAIL line of another kind (a test failed, [build failed])
 }
 
-// goPackageEvent is the part of a go test -json event telling a package finished
-// without tests (Action "skip" with no Test).
+// goPackageEvent is the part of a go test -json event smates reads here: a package
+// that finished without tests (Action "skip" with no Test), and the output lines
+// (Action "output"), which carry the summary lines of plain output.
 type goPackageEvent struct {
 	Action  string
 	Package string
 	Test    string
+	Output  string
 }
 
 // collect accumulates one output line, attributing it to the package whose summary
-// line follows.
+// line follows. The events of go test -json count as the lines they carry.
 func (b *buildFailures) collect(line []byte) {
-	if bytes.HasPrefix(line, []byte("{")) && bytes.Contains(line, []byte(`"skip"`)) {
+	if bytes.HasPrefix(line, []byte("{")) {
 		var ev goPackageEvent
-		if json.Unmarshal(line, &ev) == nil && ev.Action == "skip" && ev.Test == "" && ev.Package != "" {
-			b.noTest(ev.Package)
+		if json.Unmarshal(line, &ev) == nil && ev.Action != "" {
+			switch {
+			case ev.Action == "skip" && ev.Test == "" && ev.Package != "":
+				b.noTest(ev.Package)
+			case ev.Action == "output" && ev.Package != "":
+				for l := range strings.SplitSeq(strings.TrimSuffix(ev.Output, "\n"), "\n") {
+					b.plain([]byte(strings.TrimRight(l, "\r")))
+				}
+			}
+			return
 		}
 	}
+	b.plain(line)
+}
+
+// plain accumulates one line of go test's plain output (see collect).
+func (b *buildFailures) plain(line []byte) {
 	if m := goSummaryRe.FindSubmatch(line); m != nil {
 		if b.status == nil {
 			b.status = map[string]string{}
@@ -698,6 +716,17 @@ func (b *buildFailures) collect(line []byte) {
 			}
 		case "FAIL":
 			b.status[string(m[2])] = state.Fail
+			if bytes.HasSuffix(bytes.TrimSpace(line), []byte("[setup failed]")) {
+				if b.setups == nil {
+					b.setups = map[string]int{}
+				}
+				b.setups[string(m[2])]++
+			} else {
+				if b.failures == nil {
+					b.failures = map[string]bool{}
+				}
+				b.failures[string(m[2])] = true
+			}
 		}
 		if string(m[1]) == "FAIL" && len(bytes.TrimSpace(b.pending)) > 0 {
 			if b.output == nil {
@@ -735,9 +764,9 @@ func (b *buildFailures) Write(p []byte) (int, error) {
 		}
 		if m := excludedAllRe.FindSubmatch(b.buf[:i]); m != nil {
 			if b.excluded == nil {
-				b.excluded = map[string]bool{}
+				b.excluded = map[string]int{}
 			}
-			b.excluded[string(m[1])] = true
+			b.excluded[string(m[1])]++
 		}
 		if m := buildFailedRe.FindSubmatch(b.buf[:i]); m != nil {
 			if b.paths == nil {
@@ -763,7 +792,7 @@ func (b *buildFailures) observations(rc *RunContext) map[string]*Observation {
 	for _, u := range rc.Units {
 		ip := b.key(rc, u)
 		st, ok := b.status[ip]
-		if ip == "" || !ok || b.excluded[ip] {
+		if ip == "" || !ok || b.onlyExcl(ip) {
 			continue
 		}
 		o := &Observation{Files: map[string]bool{}, Status: st}
@@ -782,20 +811,59 @@ func (b *buildFailures) addExcluded(o *buildFailures) {
 	defer o.mu.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for ip := range o.excluded {
+	for ip, n := range o.excluded {
 		if b.excluded == nil {
-			b.excluded = map[string]bool{}
+			b.excluded = map[string]int{}
 		}
-		b.excluded[ip] = true
+		b.excluded[ip] += n
 	}
+	for ip, n := range o.setups {
+		if b.setups == nil {
+			b.setups = map[string]int{}
+		}
+		b.setups[ip] += n
+	}
+	for ip := range o.failures {
+		if b.failures == nil {
+			b.failures = map[string]bool{}
+		}
+		b.failures[ip] = true
+	}
+}
+
+// onlyExcl reports whether package ip failed only because build constraints exclude
+// all its Go files: go test said so at least once for each "[setup failed]" line of it,
+// and printed no other FAIL line for it. A wrapper running go test more than once (with
+// other tags the second time) may compile it and see a test fail or the build break:
+// that failure stands. The caller holds b.mu or owns b.
+func (b *buildFailures) onlyExcl(ip string) bool {
+	return ip != "" && b.excluded[ip] > 0 && !b.failures[ip] && b.setups[ip] <= b.excluded[ip]
+}
+
+// excludedUnits returns the package directories of units onlyExcl says of.
+func (b *buildFailures) excludedUnits(rc *RunContext, units []string) map[string]bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out map[string]bool
+	for _, u := range units {
+		if b.onlyExcl(b.key(rc, u)) {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[u] = true
+		}
+	}
+	return out
 }
 
 // onlyExcluded reports whether go test's exit code (code) of a run of the package
 // directories units is explained by packages whose Go files build constraints all
-// exclude: it is 1, go test said so of at least one of them, and it reported every
-// other one as passing or without test files. Output it cannot read that way (a wrapper
-// such as gotestsum reformatting it, a step after go test) leaves a package unaccounted
-// for, and the code stands.
+// exclude: it is 1 (go test's own code; make, for one, exits 2 when a recipe fails),
+// every failure of at least one package is that (onlyExcl), and go test reported every
+// other one as passing or without test files, in its plain summary lines or in the
+// events of go test -json. Output it cannot read that way (a wrapper such as gotestsum
+// reformatting it, a step after go test) leaves a package unaccounted for, and the code
+// stands.
 func (b *buildFailures) onlyExcluded(rc *RunContext, units []string, code int) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -808,7 +876,9 @@ func (b *buildFailures) onlyExcluded(rc *RunContext, units []string, code int) b
 		switch {
 		case ip == "":
 			return false
-		case b.excluded[ip]:
+		case b.onlyExcl(ip):
+		case b.excluded[ip] > 0:
+			return false // it also failed for real
 		case b.status[ip] == state.Pass || b.noTests[ip] && b.status[ip] != state.Fail:
 		default:
 			return false
@@ -816,12 +886,12 @@ func (b *buildFailures) onlyExcluded(rc *RunContext, units []string, code int) b
 		accounted[ip] = true
 	}
 	for ip, st := range b.status {
-		if st == state.Fail && !b.excluded[ip] {
+		if st == state.Fail && !b.onlyExcl(ip) {
 			return false
 		}
 	}
 	for ip := range b.paths {
-		if !b.excluded[ip] || !accounted[ip] {
+		if !b.onlyExcl(ip) || !accounted[ip] {
 			return false
 		}
 	}
@@ -840,7 +910,7 @@ func (b *buildFailures) skipped(rc *RunContext, u string) bool {
 	if ip == "" {
 		return false
 	}
-	if b.excluded[ip] {
+	if b.onlyExcl(ip) {
 		return true
 	}
 	return b.noTests[ip] && hasTestFiles(filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
@@ -885,7 +955,7 @@ func hasTestFiles(dir string) bool {
 // workspace is not the suite's), or the relative argument naming it when go test could
 // not resolve that ("FAIL ./x [setup failed]").
 func (b *buildFailures) key(rc *RunContext, u string) string {
-	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" || b.noTests[arg] || b.excluded[arg] {
+	if arg := pkgArg(rc.Suite, u); b.paths[arg] || b.status[arg] != "" || b.output[arg] != "" || b.noTests[arg] || b.excluded[arg] > 0 {
 		return arg
 	}
 	return dirImportPath(rc.Repo.Root, u)

@@ -268,8 +268,14 @@ and arguments passed through) is no unit. When smates cannot tell, it stays one:
 fails, or the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
 `sh -c "..."`) or passes words after `--`, where tags reach go test unseen. When go test
 then reports "build constraints exclude all Go files" for such a directory, that is no
-test failure: the unit is recorded as a skip, and the run exits 0 if nothing else
-failed. A directory whose test files the configuration all leaves out (a tag in
+test failure: the unit is recorded as a skip (its test functions too, with `granularity:
+func`). The run exits 0 only when smates can tell nothing else failed: the command exits
+with go test's own code 1 (`make` exits 2 when a recipe fails), go test's summary lines
+(plain, or the events of `go test -json`) reach smates and report every other package as
+passing or without test files, and each `[setup failed]` of the directory follows such a
+report. Output a wrapper reformats (gotestsum's own lines) or another exit code keeps
+the run failing. A wrapper that runs go test again with the tag compiles the directory,
+and a test or build that fails there fails the run. A directory whose test files the configuration all leaves out (a tag in
 `GOFLAGS`, a `_linux_test.go` name on another platform) reports `[no test files]` too,
 but it is recorded as a skip, not a pass, so it runs again on the next run: the
 environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
