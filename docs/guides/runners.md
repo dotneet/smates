@@ -79,7 +79,8 @@ with two differences.
   package only when it is a package name, written as a string or resolved by
   `getAbsolutePath(...)` or `require.resolve(...)`; any path (`./preset`,
   `path.join(__dirname, "..", "preset")`, a template literal) or other expression
-  counts as local. smates reports the stories it does
+  counts as local, and so does an `{ name, options }` object with a `...spread`, which
+  may override the name or bring options holding paths. smates reports the stories it does
   not trust, and why, when it records them. Check the
   setting with `smates run --shadow` before relying on it; see
   [Limitations](../reference/limitations.md#what-tracing-reaches).

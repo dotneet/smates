@@ -134,6 +134,15 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 				src, _ := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(d), n))
 				return vitestMentionRe.Match(src)
 			})
+		jestNamed, bunNamed := strings.Contains(test, "jest"), strings.Contains(test, "bun test")
+		if hasMatch(d, vitestProjectConfigRe) {
+			// Over a per-project vitest file, jest and bun win only when the script (or
+			// a package script it runs) invokes them: a script named test:jest-x, or
+			// bun test:unit running a package script, names no runner.
+			run := scriptClosure(pj.Scripts, test)
+			jestNamed = slices.ContainsFunc(run, runsJest)
+			bunNamed = slices.ContainsFunc(run, runsBunTest)
+		}
 		switch {
 		case pj.has("vitest") || strings.Contains(test, "vitest") || hasMatch(d, vitestConfigRe):
 			r = "vitest"
@@ -147,9 +156,9 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 			if !jestHasKey(pj.Jest, "testMatch") && (craBin == "react-scripts" || craBin == "" || !hasMatch(d, craWrapperConfig)) {
 				tests = craTests
 			}
-		case pj.has("jest") || strings.Contains(test, "jest") || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
+		case pj.has("jest") || jestNamed || hasMatch(d, jestConfigRe) || len(pj.Jest) > 0:
 			r = "jest"
-		case strings.Contains(test, "bun test"):
+		case bunNamed:
 			r = "bun"
 		case isNodeTest || strings.Contains(test, "node --experimental-test"):
 			r = "node"

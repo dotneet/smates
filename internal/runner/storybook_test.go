@@ -497,6 +497,12 @@ func TestStorybookMainUnsureAddons(t *testing.T) {
 		{"an addon object without a name", `addons: [{ options: {} }]`, true},
 		{"options with a relative path", `framework: { name: '@storybook/react-vite', options: { builder: { viteConfigPath: '../vite.sb.ts' } } }`, true},
 		{"options with a file-relative path", `framework: { name: '@storybook/react-vite', options: { builder: { viteConfigPath: path.join(__dirname, 'vite.ts') } } }`, true},
+		// Must be unsure: a ...spread may override the name or bring options with paths.
+		{"framework object with a spread after the name", `framework: { name: '@storybook/react-vite', ...local }`, true},
+		{"framework object with a spread before the name", `framework: { ...fw, name: '@storybook/react-vite' }`, true},
+		{"addon object with a spread", `addons: [{ name: '@storybook/addon-docs', ...local }]`, true},
+		{"framework options with a spread", `framework: { name: '@storybook/react-vite', options: { ...fwOptions } }`, true},
+		{"builder options with a spread", `framework: { name: '@storybook/react-vite', options: { builder: { ...builder } } }`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := pre + tc.main + " }\n"

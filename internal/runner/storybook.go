@@ -294,7 +294,9 @@ func storybookMainUnsure(main storybookMain) string {
 // a package name, or a known wrapper resolving one (pkgWrapperRes); a path in any form
 // (./x, ../x, /x, path.join(__dirname, "..", "x"), a template literal) and any other
 // expression may be local. Other values (options) count when they hold a relative or
-// file-relative path. name is set where a value names an addon or framework.
+// file-relative path. An object with a ...spread may get any of these from it (a
+// name overriding the literal one, options holding a path), which smates does not
+// read. name is set where a value names an addon or framework.
 func localAddon(v any, name bool) bool {
 	switch x := v.(type) {
 	case nil:
@@ -329,6 +331,9 @@ func localAddon(v any, name bool) bool {
 		}
 		return false
 	case *js.Object:
+		if x.Spread {
+			return true
+		}
 		for k, f := range x.Fields {
 			if localAddon(f, name && k == "name") {
 				return true

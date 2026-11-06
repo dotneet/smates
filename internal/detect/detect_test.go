@@ -575,6 +575,19 @@ func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
 		{"vitest dependency", `{"devDependencies":{"vitest":"^4"}}`, "", "vitest"},
 		{"nothing else names a runner", `{}`, "", "vitest"},
 		{"nothing else but a bun lockfile", `{}`, "bun.lock", "vitest"},
+		// A script whose name holds another runner's word names no runner: it runs a
+		// package script, which runs vitest here.
+		{"bun running a package script", `{"scripts":{"test":"bun test:unit","test:unit":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
+		{"npm run of a script named after jest", `{"scripts":{"test":"npm run test:jest-compat","test:jest-compat":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
+		{"yarn script named after jest", `{"scripts":{"test":"yarn test:jest-x","test:jest-x":"vitest --config vitest.storybook.config.ts"}}`, "", "vitest"},
+		// Must keep the runner a script really invokes, directly or through a package
+		// script.
+		{"npm run of a script running jest", `{"scripts":{"test":"npm run test:jest","test:jest":"jest --ci"}}`, "", "jest"},
+		{"npx jest", `{"scripts":{"test":"npx jest"}}`, "", "jest"},
+		{"cross-env jest", `{"scripts":{"test":"cross-env TZ=UTC jest"}}`, "", "jest"},
+		{"jest through its bin file", `{"scripts":{"test":"node node_modules/jest/bin/jest.js"}}`, "", "jest"},
+		{"bun run of a script running bun test", `{"scripts":{"test":"bun run test:unit","test:unit":"bun test"}}`, "", "bun"},
+		{"pnpm script running bun test", `{"scripts":{"test":"pnpm test:unit","test:unit":"bun test --preload ./setup.ts"}}`, "", "bun"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
