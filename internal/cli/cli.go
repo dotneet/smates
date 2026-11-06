@@ -408,6 +408,7 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	if err := p.applyCallerAdds(res, opt.adds); err != nil {
 		return nil, err
 	}
+	res.Apply(res.WholeSuites())
 	sel.candidates = p.orphanCandidates(sel)
 	return sel, nil
 }

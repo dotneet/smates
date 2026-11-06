@@ -16,8 +16,18 @@ Workaround: declare the server's code with `depends_on` or `serves`. See
 is not tracked. Workaround: declare the files it depends on with `rules` or `inputs`,
 or let such changes reach the agent as [orphans](../guides/orphans.md).
 
-**Code that runs in a browser.** Code executed in a browser (vitest browser mode,
-Playwright) is covered by the static import graph only.
+**Code that runs in a browser.** Tracing does not reach into a browser. A vitest test
+that runs only in a browser (browser mode, a Storybook story run by Storybook's Vitest
+plugin) leaves no trace, so after every run its outcome is unknown and it runs again
+next time, whatever changed. With `trust_browser_passes: true` on the suite, a pass the
+reporter gives is recorded instead, with the dependencies smates knows statically: the
+test's import closure, what the Vitest configuration loads (setup files, plugins, alias
+targets), and for a story the Storybook configuration directory, the import closure of
+`preview.*` and the `staticDirs`. What the browser loads beyond that (a module reached
+through an alias only Vite's configuration resolves, a fetched fixture, a CSS
+`@import`) is missed: a story whose known dependencies include an import smates cannot
+resolve is never trusted. Code a Playwright end-to-end test drives in a browser is
+covered as [a server](../guides/servers.md).
 
 **Commands smates cannot see into.** Shell scripts, `grep`, `cat` and similar commands
 are analyzed from their command line. A command smates cannot see into (`make`, a

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/state"
@@ -155,22 +156,42 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 	// A test file that failed before executing (an import error during collection)
 	// leaves no trace, but the runner still reported it. One that passed without a trace
 	// ran in a process whose trace was lost (a pool worker killed before it wrote its
-	// coverage): what it used is unknown, so it must run again rather than be skipped.
-	untraced := 0
+	// coverage), or in a browser, which is never traced: what it used is unknown, so it
+	// must run again rather than be skipped. With trust_browser_passes, a pass of a test
+	// that runs only in a browser is recorded with the dependencies known statically
+	// and those of the runner's own process.
+	untraced, browser := 0, 0
+	trust := config.Bool(rc.Suite.TrustBrowserPasses, false)
 	for f, r := range results {
 		id := rc.UnitOf(f)
 		if id == "" || obs[id] != nil {
 			continue
 		}
+		inBrowser := rc.Suite.BrowserUnit([]string{f})
+		if trust && inBrowser && r.Status == state.Pass {
+			o := &Observation{Files: map[string]bool{}, Status: state.Pass, DurationMs: r.Ms, StaticOnly: true}
+			for g := range attr.Global {
+				o.Files[g] = true
+			}
+			obs[id] = o
+			continue
+		}
 		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms, Failure: r.Message, untraced: true}
 		if o.Status != state.Fail {
 			o.Status = state.Unknown
-			untraced++
+			if inBrowser {
+				browser++
+			} else {
+				untraced++
+			}
 		}
 		obs[id] = o
 	}
 	if untraced > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time", untraced))
+	}
+	if browser > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d test file(s) ran in a browser, which smates cannot trace; they will run again next time (\"trust_browser_passes: true\" on the suite records their passes with their static dependencies)", browser))
 	}
 	return obs, warnings, readsBy, nil
 }

@@ -46,6 +46,39 @@ name, such as `setupFiles`, `globalSetup`, local Vite plugins and alias targets,
 whatever they import, are never treated as untested code: a change to one goes to the
 [orphan policy](orphans.md) unless a test depends on it.
 
+### Browser mode and Storybook
+
+A vitest project that runs its tests in a browser (`test.browser`) or with Storybook's
+Vitest plugin (`storybookTest()` from `@storybook/addon-vitest`) is read like any other,
+with two differences.
+
+- **Stories are tests.** The plugin reads the stories of the Storybook configuration
+  directory, and so does smates: the `configDir` option of the plugin (a literal, or
+  `path.join` / `path.resolve` of `__dirname`, `import.meta.dirname` or `dirname`),
+  else `.storybook` next to the Vitest configuration, and the `stories` of its
+  `main.*` (strings, directories and `{ directory, files }` specifiers; MDX pages are
+  not tests). This works when the Vitest configuration itself cannot be read
+  (`mergeConfig(...)`), so a package whose only tests are stories gets a suite. When
+  the stories cannot be read, smates takes every `*.stories.*` file under the project
+  and, because those are a guess, runs the whole suite whenever one of them is
+  selected; `smates list` and `smates doctor` say so.
+- **Nothing in the browser is traced.** After every run such a test's outcome is
+  unknown, so it runs again next time. Set `trust_browser_passes: true` on the suite
+  to record its passes instead, with what smates knows statically: the test's import
+  closure, what the Vitest configuration loads (setup files, plugins, alias targets),
+  and for a story the configuration directory, the import closure of its `preview.*`
+  and the `staticDirs` of `main.*`. A change to any of them selects the test again.
+  A story whose known dependencies include an import smates cannot resolve (an alias
+  only Vite's configuration knows, a virtual module) is never trusted. Check the
+  setting with `smates run --shadow` before relying on it; see
+  [Limitations](../reference/limitations.md#what-tracing-reaches).
+
+A suite command that runs some projects with `--project <name>` gets the test files of
+those projects. A project whose name smates cannot read (no literal `test.name`, so
+Vitest names it after its package or directory), a browser project and every project
+when the name is a pattern are kept, so that no test of a project the command runs is
+left out.
+
 ### jest
 
 Jest workers run many files each, which would merge their dependencies. While

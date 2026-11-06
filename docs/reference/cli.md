@@ -209,6 +209,7 @@ fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`,
 |---|---|
 | `git-installed`, `repository`, `project-load`, `config` | git is on `PATH`, the repository and `smates.yml` load |
 | `suites-detected`, `suite-units` | there are suites, and test files match each one |
+| `suite-not-detected` | without `smates.yml`: a package configures a test runner but got no suite (no test file smates can find there); `smates init` prints the same note |
 | `suite-tests-source`, `suite-test-discovery` | where the test patterns come from; a runner config smates could not read |
 | `suite-launcher`, `suite-dependencies-installed` | the suite command can start; `node_modules` is installed |
 | `toolchain-go`, `toolchain-bun`, `toolchain-python`, `suite-engines-node` | toolchains, and the Node version against `engines.node` |

@@ -73,7 +73,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if existing != nil {
 		return initExisting(repo, existing, files, *patch, *github, *agentsMD, asJSON, stdout, stderr)
 	}
-	suites := detect.Suites(repo, files)
+	suites, notes := detect.Detect(repo, files)
+	for _, n := range notes {
+		fmt.Fprintf(stderr, "smates: %s\n", n)
+	}
 	mk := makefileHints(repo.Root, suites)
 	for _, h := range mk {
 		fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)

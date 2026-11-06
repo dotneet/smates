@@ -4,6 +4,7 @@ package detect
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -48,6 +49,14 @@ var jestConfigRe = regexp.MustCompile(`^jest\.config\.(ts|mts|cts|js|mjs|cjs|jso
 
 // Suites detects suites from the files of the working tree.
 func Suites(repo *gitx.Repo, files []string) []config.Suite {
+	s, _ := Detect(repo, files)
+	return s
+}
+
+// Detect is Suites that also returns notes on the directories that configure a test
+// runner but got no suite, because no test file was found there (a package whose only
+// tests are Storybook stories smates cannot read, say) or its suite is invalid.
+func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 	var out []config.Suite
 	dirFiles := map[string][]string{}
 	for _, f := range files {
@@ -169,6 +178,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 	// Keep suites that have tests (as the runner's configuration or the default
 	// patterns describe them); give them unique names.
 	var kept []config.Suite
+	var notes []string
 	for _, s := range out {
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {
@@ -177,7 +187,22 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			}
 		}
 		rs, err := runner.NewSuite(repo, s)
-		if err != nil || len(rs.TestFiles(files)) == 0 {
+		configured := s.Runner == "vitest" && hasMatch(s.Root, vitestConfigRe) || s.Runner == "jest" && hasMatch(s.Root, jestConfigRe)
+		switch {
+		case err != nil:
+			if configured {
+				notes = append(notes, fmt.Sprintf("%s: no %s suite: %v", s.Root, s.Runner, err))
+			}
+			continue
+		case len(rs.TestFiles(files)) == 0:
+			if configured {
+				why := ""
+				if rs.DiscoveryWarning != "" {
+					why = " (" + rs.DiscoveryWarning + ")"
+				}
+				notes = append(notes, fmt.Sprintf("%s: no %s suite: its configuration names no test file smates can find (test patterns: %s)%s; write the suite in smates.yml with tests: if it has tests",
+					s.Root, s.Runner, strings.Join(rs.TestPatterns(), " "), why))
+			}
 			continue
 		}
 		kept = append(kept, s)
@@ -197,7 +222,7 @@ func Suites(repo *gitx.Repo, files []string) []config.Suite {
 			s.Name = s.Runner + ":" + s.Root
 		}
 	}
-	return kept
+	return kept, notes
 }
 
 // pythonProjects returns the Python project directories, sorted (parents before

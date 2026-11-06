@@ -90,6 +90,27 @@ func (r *Result) OrphanAll(orphans []string) []Addition {
 	return adds
 }
 
+// WholeSuites returns additions that run every test of each suite in which a selected
+// test belongs to a project whose test files smates could not list (a Storybook
+// project whose stories it cannot read, runner.Matcher.Whole): its tests are a guess,
+// and only an unfiltered run is sure to run them all.
+func (r *Result) WholeSuites() []Addition {
+	var adds []Addition
+	for _, s := range r.Suites {
+		if s.All {
+			continue
+		}
+		for _, t := range s.Tests {
+			if t.Selected && s.Suite.RunsWhole(s.Files[t.ID]) {
+				adds = append(adds, Addition{Suite: s.Name, Reason: ReasonAll,
+					Detail: "runs with " + t.ID + ", of a project whose test files smates cannot list"})
+				break
+			}
+		}
+	}
+	return adds
+}
+
 // Ownership answers which suites own a change for a --suite run: the suites the
 // orphan policy over every suite would run for it (see orphanOwners), among the suites
 // the run picked and the suites it left out.

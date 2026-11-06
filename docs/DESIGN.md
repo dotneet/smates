@@ -363,6 +363,29 @@ config's base directory, and falls back to its default globs, with a `doctor` wa
 when the config is not literal. Derived patterns do not mark the suite narrowed: a full
 run still lets the runner discover its tests, so an approximation (a converted
 extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
+A vitest suite command's `--project` drops only the projects known to be named
+otherwise (a literal `test.name`, not a browser project, no pattern in the filter).
+
+**Browser projects.** A vitest project with `test.browser` (or a configuration
+`mentionsBrowser` when it cannot be read) or Storybook's Vitest plugin is a browser
+project (`Matcher.Browser`). Storybook's stories become units: `storybookMatchers` finds
+`storybookTest(...)` calls in the source (also inside `mergeConfig`, which
+`ConfigObject` cannot evaluate), evaluates `configDir` (`js.CallArgs`,
+`js.PathValue`), reads `stories` and `staticDirs` from `<configDir>/main.*` and converts
+each entry to a matcher (MDX excluded). Unreadable stories fall back to
+`**/*.stories.*` under the project, marked `Whole`: `Result.WholeSuites` then selects
+the whole suite whenever one of them is selected, so the runner, unfiltered, runs every
+story whatever the guess. Browser projects give their units `Deps` (the configuration
+directory and static directories, as globs) and `Starts` (`preview.*`, whose static
+closure is added), and a unit that runs only in browser projects also depends on what
+the suite's configuration loads (`RunnerConfig.Files`). Such a unit leaves no trace:
+`observeAll` makes its reported pass `unknown` (re-run every time) unless the suite sets
+`trust_browser_passes`, which records it as a `StaticOnly` pass with `Known` (plus the
+runner's global code) as its dependencies; `Record` keeps it `unknown` when
+`Suite.Untrusted` names a reason: a matcher's `Unsure` (stories or `staticDirs` not
+read), no static analysis, or a known dependency with an import `Graph.Unresolved`
+reports (no repository file, no installed package, no builtin: a Vite alias, a virtual
+module).
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,

@@ -891,7 +891,7 @@ func Record(st *state.State, sr *Suite, obs map[string]*runner.Observation, h *H
 			}
 		}
 		status := o.Status
-		if status == "" {
+		if status == "" || o.StaticOnly && sr.Untrusted[unit] != "" {
 			status = state.Unknown
 		}
 		e := &state.Entry{Deps: deps, Status: status, DurationMs: o.DurationMs, Commit: opt.Commit, At: opt.Now}

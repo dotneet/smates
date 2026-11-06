@@ -1,6 +1,7 @@
 package selector
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -34,7 +35,10 @@ type suiteSel struct {
 	// loaded are the files the suite's runner loads through its configuration
 	// (runner.RunnerConfig): type-only imports of them are kept (see knownDeps).
 	loaded map[string]bool
-	units  []*unitSel
+	// browserDeps caches, by their globs and starts, the files browser projects add to
+	// their tests (see browserDeps).
+	browserDeps map[string][]string
+	units       []*unitSel
 }
 
 // unitSel is one unit of a suite, between suiteDeps and decideTests.
@@ -143,6 +147,14 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		}
 		sort.Strings(known)
 		sr.Known[u] = known
+		if config.Bool(su.TrustBrowserPasses, false) && su.BrowserUnit(sr.Files[u]) {
+			if why := s.untrusted(ss, u, known, static); why != "" {
+				if sr.Untrusted == nil {
+					sr.Untrusted = map[string]string{}
+				}
+				sr.Untrusted[u] = why
+			}
+		}
 		var entry *state.Entry
 		if st != nil {
 			entry = st.Tests[u]
@@ -170,10 +182,10 @@ func (s *selection) unitDeps(ss *suiteSel) {
 
 // runnerConfig notes what the suite's runner loads through its configuration
 // (runner.ConfigOf): the files, which are never untested code (Result.loaded), and
-// whether it may run tests in a browser (Suite.Browser).
+// whether it may run tests in a browser (Suite.Browser; so may a browser project).
 func (s *selection) runnerConfig(ss *suiteSel, src runner.Sources) {
 	rc := runner.ConfigOf(ss.sr.Suite, src)
-	ss.sr.Browser = rc.Browser
+	ss.sr.Browser = rc.Browser || slices.ContainsFunc(ss.sr.Suite.Discovered, func(m runner.Matcher) bool { return m.Browser })
 	if len(rc.Files) == 0 {
 		return
 	}
@@ -235,6 +247,18 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 			via[f] = ViaImport
 		}
 	}
+	if globs, starts, _ := su.BrowserDeps(files); len(globs) > 0 || len(starts) > 0 {
+		for _, f := range s.browserDeps(ss, globs, starts, static) {
+			via[f] = ViaInput
+		}
+	}
+	if su.BrowserUnit(files) {
+		// What the runner loads through its configuration (setup files, Vite plugins
+		// serving mock APIs, alias targets) runs with the test in the browser.
+		for f := range ss.loaded {
+			via[f] = ViaInput
+		}
+	}
 	for _, f := range inputs {
 		via[f] = ViaInput
 	}
@@ -268,6 +292,45 @@ func (s *selection) knownDeps(ss *suiteSel, u string, inputs []string, static bo
 		}
 	}
 	return via, typeOnly
+}
+
+// browserDeps returns the files a browser project adds to each of its tests
+// (runner.Suite.BrowserDeps): those among the selection's files that globs match,
+// and the static import closure of starts (with static analysis on).
+func (s *selection) browserDeps(ss *suiteSel, globs, starts []string, static bool) []string {
+	key := strings.Join(globs, "\x00") + "\x01" + strings.Join(starts, "\x00")
+	if out, ok := ss.browserDeps[key]; ok {
+		return out
+	}
+	out := expandInputs(globs, s.files)
+	if static && len(starts) > 0 {
+		out = append(out, s.in.Graph.Closure(starts...)...)
+	}
+	if ss.browserDeps == nil {
+		ss.browserDeps = map[string][]string{}
+	}
+	ss.browserDeps[key] = out
+	return out
+}
+
+// untrusted says why a reported pass of unit u, which runs only in a browser, cannot
+// be recorded with its known dependencies (known): a browser project whose
+// configuration smates could not fully read, no static analysis, or an import in
+// what it is known to load that resolves to nothing smates knows (an alias, a
+// virtual module), whose files are then missing. "" when it can.
+func (s *selection) untrusted(ss *suiteSel, u string, known []string, static bool) string {
+	if _, _, unsure := ss.sr.Suite.BrowserDeps(ss.sr.Files[u]); unsure != "" {
+		return unsure
+	}
+	if !static {
+		return "static analysis is off"
+	}
+	for _, f := range known {
+		if spec := s.in.Graph.Unresolved(f); len(spec) > 0 {
+			return fmt.Sprintf("%s imports %q, which smates cannot resolve", f, spec[0])
+		}
+	}
+	return ""
 }
 
 // sortedMinus returns the elements of the sorted list a that the sorted list b lacks.

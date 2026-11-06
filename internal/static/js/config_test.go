@@ -69,6 +69,23 @@ export default config;`,
 			ok:   true,
 		},
 		{
+			name: "binding without semicolons",
+			src: `const config: Config = {
+  stories: ['../src/**/*.stories.tsx'],
+}
+export default config`,
+			want: obj(map[string]any{"stories": []any{"../src/**/*.stories.tsx"}}),
+			ok:   true,
+		},
+		{
+			name: "an expression continued on the next line is not a literal",
+			src: `const config = { a: 1 }
+  .concat(x)
+export default config`,
+			want: Unknown("{ a: 1 }\n  .concat(x)\nexport default config"),
+			ok:   true,
+		},
+		{
 			name: "arrow returning an object",
 			src:  `export default defineConfig(() => ({ test: { dir: 'src' } }))`,
 			want: obj(map[string]any{"test": obj(map[string]any{"dir": "src"})}),
