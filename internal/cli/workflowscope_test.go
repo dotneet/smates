@@ -329,6 +329,7 @@ func TestCarryGoFlags(t *testing.T) {
 	cases := []struct {
 		name     string
 		steps    string
+		workflow string            // the whole workflow, in place of steps
 		makefile map[string]string // dir -> Makefile
 		want     map[string]string // suite -> command
 		stderr   string
@@ -402,10 +403,39 @@ func TestCarryGoFlags(t *testing.T) {
 			steps:    envStep("pkg/app", "${{ vars.GOFLAGS }}", "go test ./..."),
 			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
 			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		// An env: written as an expression may set GOFLAGS: the step does not vote, at
+		// any level.
+		{name: "an env: expression of the workflow does not vote",
+			workflow: "on: push\nenv: ${{ fromJSON(vars.CI_ENV) }}\njobs:\n  t:\n    steps:\n" + step("pkg/app", "go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		{name: "an env: expression of the job does not vote",
+			workflow: "on: push\njobs:\n  t:\n    env: ${{ fromJSON(vars.CI_ENV) }}\n    steps:\n" + step("pkg/app", "go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		{name: "an env: expression of the step does not vote",
+			workflow: "on: push\njobs:\n  t:\n    steps:\n      - working-directory: pkg/app\n        env: ${{ fromJSON(vars.CI_ENV) }}\n        run: go test ./...\n",
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		{name: "a GOFLAGS that is no plain value does not vote",
+			workflow: "on: push\njobs:\n  t:\n    env:\n      GOFLAGS: [-tags=integration]\n    steps:\n" + step("pkg/app", "go test ./..."),
+			makefile: map[string]string{"pkg/app": "test:\n\tgo test -tags integration ./...\n"},
+			want:     map[string]string{"app": "go test -tags integration"}, noStderr: "different -tags"},
+		// The command line's -race=false wins over the -race of GOFLAGS.
+		{name: "-race=false on the command line over env GOFLAGS -race",
+			steps: envStep("pkg/app", "-race", "go test -race=false ./..."),
+			want:  map[string]string{}},
+		{name: "env GOFLAGS -race alone is carried",
+			steps: envStep("pkg/app", "-race", "go test ./..."),
+			want:  map[string]string{"app": "go test -race"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			files := map[string]string{".github/workflows/ci.yml": "on: push\njobs:\n  t:\n    steps:\n" + c.steps}
+			wf := c.workflow
+			if wf == "" {
+				wf = "on: push\njobs:\n  t:\n    steps:\n" + c.steps
+			}
+			files := map[string]string{".github/workflows/ci.yml": wf}
 			for d, mk := range c.makefile {
 				files[joinRel(d, "Makefile")] = mk
 			}

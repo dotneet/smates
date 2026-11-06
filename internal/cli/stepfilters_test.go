@@ -22,11 +22,30 @@ func TestStepPatchNarrowing(t *testing.T) {
 		{Name: "short", Runner: "go", Root: "pkg/short", Command: "go test -short"},
 		{Name: "filtered", Runner: "go", Root: "pkg/filtered", Command: "go test -run TestUnit"},
 		{Name: "tagged", Runner: "go", Root: "pkg/tagged", Command: "go test -tags fast"},
+		{Name: "envtags", Runner: "go", Root: "pkg/envtags", Env: map[string]string{"GOFLAGS": "-tags=fast"}},
+		{Name: "envshort", Runner: "go", Root: "pkg/envshort", Env: map[string]string{"GOFLAGS": "-count=1 -short"}},
+		{Name: "envdyn", Runner: "go", Root: "pkg/envdyn", Env: map[string]string{"GOFLAGS": "${EXTRA_GOFLAGS}"}},
+		{Name: "envcount", Runner: "go", Root: "pkg/envcount", Env: map[string]string{"GOFLAGS": "-count=1"}},
+		{Name: "gotestsum", Runner: "go", Root: "pkg/gotestsum", Command: "gotestsum -- -tags=fast"},
+		{Name: "make", Runner: "go", Root: "pkg/make", Command: "make test"},
+		{Name: "shc", Runner: "go", Root: "pkg/shc", Command: `sh -c "go test -tags fast"`},
 		{Name: "py", Runner: "pytest", Root: "tests"},
 		{Name: "svc", Runner: "pytest", Root: "svc"},
 	}
-	step := func(wd, run string) string {
-		s := "on: push\njobs:\n  t:\n    steps:\n      - "
+	// env holds env: blocks of the workflow, the job and the step (YAML, "" = none).
+	step := func(wd, run string, env [3]string) string {
+		s := "on: push\n"
+		if env[0] != "" {
+			s += "env: " + env[0] + "\n"
+		}
+		s += "jobs:\n  t:\n"
+		if env[1] != "" {
+			s += "    env: " + env[1] + "\n"
+		}
+		s += "    steps:\n      - "
+		if env[2] != "" {
+			s += "env: " + env[2] + "\n        "
+		}
 		if wd != "" {
 			s += "working-directory: " + wd + "\n        "
 		}
@@ -34,47 +53,75 @@ func TestStepPatchNarrowing(t *testing.T) {
 	}
 	cases := []struct {
 		name, wd, run string
-		why           string // substring of the refusal ("" = patched)
-		names         string // the suites patched in, when checked
+		why           string    // substring of the refusal ("" = patched)
+		names         string    // the suites patched in, when checked
+		env           [3]string // env: of the workflow, the job and the step
 	}{
-		{"cd before the test line", "", "cd pkg/app\ngo test ./...", "changes the directory or environment", ""},
-		{"export before the test line", "pkg/app", "export GOFLAGS=-tags=integration\ngo test ./...", "changes the directory or environment", ""},
-		{"source before the test line", "svc", "source .venv/bin/activate\npytest", "changes the directory or environment", ""},
-		{"dot-source before the test line", "svc", ". .venv/bin/activate\npytest", "changes the directory or environment", ""},
-		{"bare assignment before the test line", "pkg/app", "DB_PORT=3307\ngo test ./...", "changes the directory or environment", ""},
-		{"cd inside a chain", "", "make deps && cd pkg/app\ngo test ./...", "changes the directory or environment", ""},
-		{"harmless command before the test line", "pkg/app", "go mod download\ngo test ./...", "", ""},
+		{"cd before the test line", "", "cd pkg/app\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"export before the test line", "pkg/app", "export GOFLAGS=-tags=integration\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"source before the test line", "svc", "source .venv/bin/activate\npytest", "changes the directory or environment", "", [3]string{}},
+		{"dot-source before the test line", "svc", ". .venv/bin/activate\npytest", "changes the directory or environment", "", [3]string{}},
+		{"bare assignment before the test line", "pkg/app", "DB_PORT=3307\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"cd inside a chain", "", "make deps && cd pkg/app\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"harmless command before the test line", "pkg/app", "go mod download\ngo test ./...", "", "", [3]string{}},
 		// Shell options for errors and tracing change neither directory nor environment.
-		{"set -euo pipefail before the test line", "pkg/app", "set -euo pipefail\ngo test ./...", "", ""},
-		{"set -x before the test line", "pkg/app", "set -x\ngo test ./...", "", ""},
-		{"set +e before the test line", "pkg/app", "set +e\ngo test ./...", "", ""},
-		{"set -o errexit -o pipefail before the test line", "pkg/app", "set -o errexit -o pipefail\ngo test ./...", "", ""},
-		{"set -e in a chain before the test line", "pkg/app", "set -e && go mod download\ngo test ./...", "", ""},
+		{"set -euo pipefail before the test line", "pkg/app", "set -euo pipefail\ngo test ./...", "", "", [3]string{}},
+		{"set -x before the test line", "pkg/app", "set -x\ngo test ./...", "", "", [3]string{}},
+		{"set +e before the test line", "pkg/app", "set +e\ngo test ./...", "", "", [3]string{}},
+		{"set -o errexit -o pipefail before the test line", "pkg/app", "set -o errexit -o pipefail\ngo test ./...", "", "", [3]string{}},
+		{"set -e in a chain before the test line", "pkg/app", "set -e && go mod download\ngo test ./...", "", "", [3]string{}},
 		// Must refuse: these change what the commands after them see.
-		{"set -a before the test line", "pkg/app", "set -a\ngo test ./...", "changes the directory or environment", ""},
-		{"set -o allexport before the test line", "pkg/app", "set -eo allexport\ngo test ./...", "changes the directory or environment", ""},
-		{"set -- before the test line", "pkg/app", "set -- -race\ngo test ./...", "changes the directory or environment", ""},
-		{"set positional parameters before the test line", "pkg/app", "set a b\ngo test ./...", "changes the directory or environment", ""},
-		{"set with an unknown option before the test line", "pkg/app", "set -k\ngo test ./...", "changes the directory or environment", ""},
-		{"assignment for one command only", "pkg/app", "CGO_ENABLED=0 go build ./...\ngo test ./...", "", ""},
-		{"pytest path equal to the suite root", "", "pytest tests", "", "py"},
-		{"pytest path inside a suite", "", "pytest tests/unit", "it runs only the tests under tests/unit, inside suite", ""},
-		{"pytest path of one suite of two", "", "pytest svc", "", "svc"},
-		{"pytest . from the suite's directory", "svc", "pytest .", "", ""},
-		{"suite command with -short", "pkg/short", "go test ./...", "passes -short", ""},
-		{"suite command with -run", "pkg/filtered", "go test ./...", "passes -run", ""},
-		{"plain suite command", "pkg/app", "go test ./...", "", ""},
+		{"set -a before the test line", "pkg/app", "set -a\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"set -o allexport before the test line", "pkg/app", "set -eo allexport\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"set -- before the test line", "pkg/app", "set -- -race\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"set positional parameters before the test line", "pkg/app", "set a b\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"set with an unknown option before the test line", "pkg/app", "set -k\ngo test ./...", "changes the directory or environment", "", [3]string{}},
+		{"assignment for one command only", "pkg/app", "CGO_ENABLED=0 go build ./...\ngo test ./...", "", "", [3]string{}},
+		{"pytest path equal to the suite root", "", "pytest tests", "", "py", [3]string{}},
+		{"pytest path inside a suite", "", "pytest tests/unit", "it runs only the tests under tests/unit, inside suite", "", [3]string{}},
+		{"pytest path of one suite of two", "", "pytest svc", "", "svc", [3]string{}},
+		{"pytest . from the suite's directory", "svc", "pytest .", "", "", [3]string{}},
+		{"suite command with -short", "pkg/short", "go test ./...", "passes -short", "", [3]string{}},
+		{"suite command with -run", "pkg/filtered", "go test ./...", "passes -run", "", [3]string{}},
+		{"plain suite command", "pkg/app", "go test ./...", "", "", [3]string{}},
 		// Must refuse: the suite's -tags may leave out files the step compiles
 		// (//go:build !fast).
-		{"suite command with -tags, plain step", "pkg/tagged", "go test ./...", "passes -tags fast", ""},
-		{"suite command with -tags, -count and -v step", "pkg/tagged", "go test -count=1 -v ./...", "passes -tags fast", ""},
-		{"suite command with -tags, inline GOFLAGS step", "pkg/tagged", "GOFLAGS=-count=1 go test ./...", "passes -tags fast", ""},
-		{"suite command with -tags, step with other tags", "pkg/tagged", "go test -tags slow ./...", "-tags slow, which the command", ""},
-		{"suite command with -tags, step with the same tags", "pkg/tagged", "go test -tags fast ./...", "", ""},
+		{"suite command with -tags, plain step", "pkg/tagged", "go test ./...", "passes -tags fast", "", [3]string{}},
+		{"suite command with -tags, -count and -v step", "pkg/tagged", "go test -count=1 -v ./...", "passes -tags fast", "", [3]string{}},
+		{"suite command with -tags, inline GOFLAGS step", "pkg/tagged", "GOFLAGS=-count=1 go test ./...", "passes -tags fast", "", [3]string{}},
+		{"suite command with -tags, step with other tags", "pkg/tagged", "go test -tags slow ./...", "-tags slow, which the command", "", [3]string{}},
+		{"suite command with -tags, step with the same tags", "pkg/tagged", "go test -tags fast ./...", "", "", [3]string{}},
+		// The suite's env: GOFLAGS applies to its go test as its command does. Must
+		// refuse what leaves out tests the step runs, or what smates cannot read.
+		{"suite env GOFLAGS with -tags, plain step", "pkg/envtags", "go test ./...", "env GOFLAGS=-tags=fast) passes -tags fast", "", [3]string{}},
+		{"suite env GOFLAGS with -tags, step with the same tags", "pkg/envtags", "go test -tags fast ./...", "", "", [3]string{}},
+		{"suite env GOFLAGS with -short", "pkg/envshort", "go test ./...", "whose -short would make", "", [3]string{}},
+		{"suite env GOFLAGS smates cannot read", "pkg/envdyn", "go test ./...", "whose value smates cannot read", "", [3]string{}},
+		{"suite env GOFLAGS with -count only", "pkg/envcount", "go test ./...", "", "", [3]string{}},
+		// Must refuse: a suite command that is not go test itself may pass flags
+		// smates cannot see.
+		{"suite command through gotestsum", "pkg/gotestsum", "go test ./...", "is not go test itself", "", [3]string{}},
+		{"suite command through make", "pkg/make", "go test ./...", "is not go test itself", "", [3]string{}},
+		{"suite command through sh -c", "pkg/shc", "go test ./...", "is not go test itself", "", [3]string{}},
+		// An inline GOFLAGS replaces the env's for the step, but the smates step keeps
+		// the env: and runs with its GOFLAGS. Must refuse unless both carry the same.
+		{"inline GOFLAGS over job env GOFLAGS -tags", "pkg/app", "GOFLAGS=-count=1 go test ./...", "over GOFLAGS=-tags=integration of the env:", "", [3]string{"", "{GOFLAGS: -tags=integration}", ""}},
+		{"inline GOFLAGS over step env GOFLAGS -tags", "pkg/app", "GOFLAGS=-count=1 go test ./...", "over GOFLAGS=-tags=integration of the env:", "", [3]string{"", "", "{GOFLAGS: -tags=integration}"}},
+		{"inline GOFLAGS over workflow env GOFLAGS -tags", "pkg/app", "GOFLAGS=-count=1 go test ./...", "over GOFLAGS=-tags=integration of the env:", "", [3]string{"{GOFLAGS: -tags=integration}", "", ""}},
+		{"inline GOFLAGS over env GOFLAGS -race", "pkg/app", "GOFLAGS=-count=1 go test ./...", "over GOFLAGS=-race of the env:", "", [3]string{"", "{GOFLAGS: -race}", ""}},
+		{"inline GOFLAGS over env GOFLAGS -short", "pkg/app", "GOFLAGS=-count=1 go test ./...", "whose -short the smates step", "", [3]string{"", "{GOFLAGS: -short}", ""}},
+		{"inline GOFLAGS over env GOFLAGS from an expression", "pkg/app", "GOFLAGS=-count=1 go test ./...", "smates cannot read", "", [3]string{"", "{GOFLAGS: '${{ vars.GOFLAGS }}'}", ""}},
+		{"inline GOFLAGS under an env: expression", "pkg/app", "GOFLAGS=-count=1 go test ./...", "is an expression that may set GOFLAGS", "", [3]string{"", "${{ fromJSON(vars.CI_ENV) }}", ""}},
+		{"inline GOFLAGS equal to env GOFLAGS", "pkg/app", "GOFLAGS='-count=1 -v' go test ./...", "", "", [3]string{"", "{GOFLAGS: -count=1}", ""}},
+		{"inline GOFLAGS with env without GOFLAGS", "pkg/app", "GOFLAGS=-count=1 go test ./...", "", "", [3]string{"", "{TZ: UTC}", ""}},
+		// Must refuse: the command line turns off a flag of the env's GOFLAGS that the
+		// suite's command cannot turn off.
+		{"-race=false over env GOFLAGS -race", "pkg/app", "go test -race=false ./...", "turns -race off", "", [3]string{"", "{GOFLAGS: -race}", ""}},
+		{"-tags= over env GOFLAGS -tags", "pkg/app", "go test -tags= ./...", "clears the -tags of GOFLAGS", "", [3]string{"", "{GOFLAGS: -tags=integration}", ""}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			steps := parseWorkflowSteps("ci.yml", []byte(step(c.wd, c.run)))
+			steps := parseWorkflowSteps("ci.yml", []byte(step(c.wd, c.run, c.env)))
 			if len(steps) != 1 {
 				t.Fatalf("steps %+v", steps)
 			}

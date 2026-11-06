@@ -201,19 +201,42 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				}
 				break
 			}
+			// An env: written as an expression (${{ fromJSON(...) }}), or a GOFLAGS that is
+			// no plain value, may set GOFLAGS smates cannot read.
+			envUnknown := false
 			for _, n := range []*yaml.Node{top, jobNode, st} {
-				ts.Env = mergeEnv(ts.Env, mapGet(n, "env"))
+				e := mapGet(n, "env")
+				if e != nil && e.Kind != yaml.MappingNode {
+					envUnknown = true
+				}
+				if g := mapGet(e, "GOFLAGS"); g != nil && g.Kind != yaml.ScalarNode {
+					envUnknown = true
+				}
+				ts.Env = mergeEnv(ts.Env, e)
 			}
 			check := checkTestCmd(cmd, match)
-			envFlags := true
+			envFlags := !envUnknown
+			goflagsSkip := ""
 			if !check.other {
 				ts.Carry = check.carry
-				// The GOFLAGS of the env: apply to the command too (unless the line
-				// sets its own): its -tags are those the step runs with.
-				if strings.HasPrefix(match, "go test") && !check.inlineGoflags {
-					var base goCarry
-					base, envFlags = envGoCarry(ts.Env)
+				envValue, envSet := envGoflags(ts.Env)
+				switch {
+				case !strings.HasPrefix(match, "go test"):
+				case check.inlineGoflags:
+					// The line's GOFLAGS replaces that of the env:, but the smates step
+					// keeps the env: and runs with it: only the same flags stand in.
+					if envUnknown || envSet {
+						goflagsSkip = inlineGoflagsSkip(check.inlineValue, envValue, envUnknown)
+					}
+				default:
+					// The GOFLAGS of the env: apply to the command too: its -tags are
+					// those the step runs with.
+					base, ok := envGoCarry(ts.Env)
+					envFlags = envFlags && ok
 					ts.Carry = ts.Carry.over(base)
+					if ok {
+						goflagsSkip = envOverride(check.carry, base)
+					}
 				}
 			}
 			ts.Paths = check.paths
@@ -254,6 +277,8 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				ts.Skip = "the test command is chained with other commands on one line; split it out, then use the smates action for the test part"
 			case check.skip != "":
 				ts.Skip, ts.Other = check.skip, check.other
+			case goflagsSkip != "":
+				ts.Skip = goflagsSkip
 			case wdSkip != "":
 				ts.Skip = wdSkip
 			case matrixSkip != "":
@@ -279,6 +304,30 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 		}
 	}
 	return out
+}
+
+// inlineGoflagsSkip says why the smates step cannot stand in for a go test step whose
+// line sets GOFLAGS (inline) while its env: sets GOFLAGS too (env; unknown when an env:
+// is an expression): the line's value replaced the env's for the step, but the smates
+// step keeps the env: and runs with its GOFLAGS. "" when both carry the same flags
+// (goCarry) and the env's leaves no test out.
+func inlineGoflagsSkip(inline, env string, unknown bool) string {
+	const fix = ": set the same GOFLAGS in the step's env: (the smates step keeps it), then rerun"
+	if unknown {
+		return "it sets GOFLAGS on its line, and an env: of the step, job or workflow is an expression that may set GOFLAGS too, which the smates step would run with" + fix
+	}
+	ec, ok := goflagsCarry(env)
+	if !ok {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, whose value smates cannot read and the smates step would run with" + fix
+	}
+	ic, _ := goflagsCarry(inline)
+	if f := goflagsFilter(env); f != "" && goflagsFilter(inline) == "" {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, whose " + f + " the smates step would run with, leaving out tests the step runs" + fix
+	}
+	if !ic.equal(ec) {
+		return "it sets GOFLAGS on its line over GOFLAGS=" + env + " of the env:, which the smates step would run with (its -tags or -race change which test files compile)" + fix
+	}
+	return ""
 }
 
 // shellStateCommands are shell commands that change the directory or environment of the
@@ -613,30 +662,45 @@ func stepPatch(st testStep, suites []config.Suite) ([]string, string) {
 		}
 		_, args, ok := goSuiteCommand(s.Command)
 		if !ok {
-			if st.Carry.empty() {
-				continue
+			// A wrapper (gotestsum -- -tags=..., make test, sh -c "...") may pass
+			// flags that leave tests out; smates cannot tell.
+			keep := ""
+			if !st.Carry.empty() {
+				keep = " and that it keeps " + st.Carry.String()
 			}
-			return names, fmt.Sprintf("it runs go test with %s, and suite %q's command is not go test: check that the command keeps them, then switch the step by hand", st.Carry, s.Name)
+			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) is not go test itself, so smates cannot tell whether it passes -tags, -race, -short, -run or -skip, which could leave out tests the step runs: check that it does not%s, then switch the step by hand", s.Name, s.Command, keep)
+		}
+		// The suite's env: GOFLAGS applies to its go test too (the command line's flags
+		// win over it).
+		goflags := s.Env["GOFLAGS"]
+		envCarry, ok := goflagsCarry(goflags)
+		if !ok {
+			return names, fmt.Sprintf("suite %q in smates.yml sets GOFLAGS=%s in its env:, whose value smates cannot read: it may pass flags that leave out tests the step runs; put them in the suite's command, or switch the step by hand", s.Name, goflags)
 		}
 		parsed, _ := runner.ParseGoTestArgs(args, false)
 		// The other way round: a suite command that leaves tests out would run fewer
 		// tests than the step it replaces.
-		for _, a := range parsed {
-			switch strings.TrimPrefix(a.Name, "test.") {
-			case "short", "run", "skip":
-				return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes -%s, so the smates step would leave out tests the step runs: drop it from the command, or switch the step by hand", s.Name, s.Command, strings.TrimPrefix(a.Name, "test."))
-			}
+		if f := goArgsFilter(parsed); f != "" {
+			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes %s, so the smates step would leave out tests the step runs: drop it from the command, or switch the step by hand", s.Name, s.Command, f)
+		}
+		if f := goflagsFilter(goflags); f != "" {
+			return names, fmt.Sprintf("suite %q in smates.yml sets GOFLAGS=%s in its env:, whose %s would make the smates step leave out tests the step runs: drop it, or switch the step by hand", s.Name, goflags, f)
+		}
+		have := goCarryOf(parsed).over(envCarry)
+		where := fmt.Sprintf("the command of suite %q in smates.yml (%s)", s.Name, s.Command)
+		if goflags != "" {
+			where = fmt.Sprintf("suite %q in smates.yml (command %s, env GOFLAGS=%s)", s.Name, orGoTest(s.Command), goflags)
 		}
 		// -tags can leave test files out (//go:build !fast) as well as add them: a
 		// suite command with tags the step does not pass may not compile tests the
 		// step runs. (A step with -tags of its own is checked below.)
-		if have := goCarryOf(parsed); len(have.Tags) > 0 && len(st.Carry.Tags) == 0 {
-			return names, fmt.Sprintf("the command of suite %q in smates.yml (%s) passes -tags %s, which the step does not: build constraints may leave out test files the step compiles, so the smates step could skip tests it runs; drop -tags from the command, or switch the step by hand", s.Name, s.Command, strings.Join(have.Tags, ","))
+		if len(have.Tags) > 0 && len(st.Carry.Tags) == 0 {
+			return names, fmt.Sprintf("%s passes -tags %s, which the step does not: build constraints may leave out test files the step compiles, so the smates step could skip tests it runs; drop -tags from the suite, or switch the step by hand", where, strings.Join(have.Tags, ","))
 		}
 		if st.Carry.empty() {
 			continue
 		}
-		if unmet := st.Carry.unmet(goCarryOf(parsed)); len(unmet) > 0 {
+		if unmet := st.Carry.unmet(have); len(unmet) > 0 {
 			want, _, _ := withGoCarry(s.Command, st.Carry)
 			return names, fmt.Sprintf("it runs go test with %s, which the command of suite %q in smates.yml (%s) lacks: set `command: %s` for the suite, then rerun", strings.Join(unmet, ", "), s.Name, orGoTest(s.Command), yamlStr(want))
 		}

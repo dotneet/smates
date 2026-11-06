@@ -20,9 +20,12 @@ import (
 // passes; -run and other filters are refused instead (testCmdCheck).
 type goCarry struct {
 	P       int      // -p (0: not given)
-	Tags    []string // -tags, sorted
+	Tags    []string // -tags, sorted (nil: not given; empty: -tags "" clears them)
 	Race    bool
 	Timeout string // -timeout ("": not given)
+	// raceSet is set when -race is given at all (-race=false too): it then wins over
+	// the -race of GOFLAGS (see over).
+	raceSet bool
 }
 
 func (c goCarry) empty() bool {
@@ -63,8 +66,12 @@ func goCarryOf(args []runner.GoArg) goCarry {
 			c.Tags = strings.FieldsFunc(a.Value, func(r rune) bool { return r == ',' || r == ' ' })
 			slices.Sort(c.Tags)
 			c.Tags = slices.Compact(c.Tags)
+			if c.Tags == nil {
+				c.Tags = []string{} // given, empty: it clears the tags of GOFLAGS
+			}
 		case "race":
 			c.Race = a.Value == "" || a.Value == "true" || a.Value == "1"
+			c.raceSet = true
 		case "timeout", "test.timeout":
 			c.Timeout = a.Value
 		}
@@ -97,7 +104,9 @@ func (c goCarry) over(base goCarry) goCarry {
 	if c.Tags == nil {
 		c.Tags = base.Tags
 	}
-	c.Race = c.Race || base.Race
+	if !c.raceSet {
+		c.Race, c.raceSet = base.Race, base.raceSet
+	}
 	if c.Timeout == "" {
 		c.Timeout = base.Timeout
 	}
@@ -108,17 +117,62 @@ func (c goCarry) over(base goCarry) goCarry {
 // of a workflow, job and step, in order) sets; ok is false when smates cannot read it
 // (a ${{ }} expression, a $VAR).
 func envGoCarry(env [][2]string) (c goCarry, ok bool) {
-	v := ""
+	v, _ := envGoflags(env)
+	return goflagsCarry(v)
+}
+
+// envGoflags is the GOFLAGS env sets (the last one), and whether it sets one.
+func envGoflags(env [][2]string) (v string, set bool) {
 	for _, kv := range env {
 		if kv[0] == "GOFLAGS" {
-			v = kv[1]
+			v, set = kv[1], true
 		}
 	}
+	return v, set
+}
+
+// goflagsCarry reads the carried flags (see goCarry) of a GOFLAGS value; ok is false
+// when smates cannot read it (a ${{ }} expression, a $VAR, a command substitution).
+func goflagsCarry(v string) (c goCarry, ok bool) {
 	if strings.ContainsAny(v, "$`") {
 		return goCarry{}, false
 	}
 	args, _ := runner.ParseGoTestArgs(strings.Fields(v), true)
 	return goCarryOf(args), true
+}
+
+// goflagsFilter returns the first flag of GOFLAGS value v that leaves tests out
+// (-short, -run, -skip), "" when there is none.
+func goflagsFilter(v string) string {
+	args, _ := runner.ParseGoTestArgs(strings.Fields(v), true)
+	return goArgsFilter(args)
+}
+
+// goArgsFilter returns the first go test flag of args that leaves tests out (-short,
+// -run, -skip), "" when there is none.
+func goArgsFilter(args []runner.GoArg) string {
+	for _, a := range args {
+		switch n := strings.TrimPrefix(a.Name, "test."); n {
+		case "short", "run", "skip":
+			return "-" + n
+		}
+	}
+	return ""
+}
+
+// envOverride says why the smates step cannot stand in for a go test step whose
+// command line (cmd) turns off a flag of the GOFLAGS of its env: (base) that its
+// command in smates.yml cannot turn off ("" when it does not): -race=false, -tags "".
+// The smates step keeps the env:, so it would run with them, and both change which
+// files compile (the race build tag, //go:build !integration).
+func envOverride(cmd, base goCarry) string {
+	switch {
+	case base.Race && cmd.raceSet && !cmd.Race:
+		return "it turns -race off on its command line, over the -race of GOFLAGS in its env:, which the smates step keeps (the race build tag can leave out test files the step compiles): drop -race from GOFLAGS for this step, or switch the step by hand"
+	case len(base.Tags) > 0 && cmd.Tags != nil && len(cmd.Tags) == 0:
+		return "it clears the -tags of GOFLAGS in its env: on its command line, which the smates step keeps (the tags can leave out test files the step compiles): drop -tags from GOFLAGS for this step, or switch the step by hand"
+	}
+	return ""
 }
 
 // merge combines the flags of two commands running the same tests toward the safer
@@ -236,8 +290,9 @@ type testCmdCheck struct {
 	// only when each is the root of a suite it covers.
 	paths []string
 	// inlineGoflags is set when the line sets GOFLAGS for the command (GOFLAGS=...
-	// go test): it replaces the GOFLAGS of the step's env:.
+	// go test): it replaces the GOFLAGS of the step's env:. inlineValue is its value.
 	inlineGoflags bool
+	inlineValue   string
 }
 
 // Flags of the JavaScript and Python runners, and of the package managers running
@@ -351,7 +406,7 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 				return c
 			}
 		}
-		goflags, c.inlineGoflags = strings.Fields(lit), true
+		goflags, c.inlineGoflags, c.inlineValue = strings.Fields(lit), true, lit
 	}
 	var args []string
 	for i := at + len(mw); i < to; i++ {
@@ -374,7 +429,7 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 	case strings.HasPrefix(match, "go test"):
 		// GOFLAGS come first: the command line's flags win over them.
 		gc := checkGoTestArgs(append(goflags, args...))
-		gc.inlineGoflags = c.inlineGoflags
+		gc.inlineGoflags, gc.inlineValue = c.inlineGoflags, c.inlineValue
 		return gc
 	case strings.Contains(match, "turbo"):
 		c.skip = "turbo runs the tests through its own task graph and cache (and --filter picks packages): smates does not replace it; switch to `uses: " + actSmates + "` with `args: --suite <name>` per package by hand"

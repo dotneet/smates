@@ -487,7 +487,10 @@ It reports the steps it leaves alone, and why:
 | passes `-short`, names tests (`vitest run unit`, `jest unit`, a `pytest` path other than a suite's root) or packages (`-w`, `--workspace`, `--filter`) | it runs only some of the suite's tests |
 | runs `turbo run test` or `node --test` | found, so that no second workflow runs the same tests, but never replaced |
 | runs `go test` with `-p`, `-tags`, `-race` or `-timeout` that the suite's `command:` lacks | the action would run without them: add them to `smates.yml`, then rerun |
-| is a plain run, but the suite's `command:` passes `-short`, `-run` or `-skip`, or `-tags` the step does not pass | the action would leave out tests the step runs (a tag can leave out files: `//go:build !fast`) |
+| is a plain run, but the suite's `command:` or the `GOFLAGS` of its `env:` passes `-short`, `-run` or `-skip`, or `-tags` the step does not pass, or that `GOFLAGS` is not a plain value (`${EXTRA}`) | the action would leave out tests the step runs (a tag can leave out files: `//go:build !fast`) |
+| runs `go test`, but the suite's `command:` is not `go test` itself (`gotestsum -- -tags=fast`, `make test`, `sh -c "..."`) | smates cannot tell which flags it passes: check that it leaves out no test the step runs, then switch the step by hand |
+| sets `GOFLAGS` on the test line while an `env:` of the workflow, job or step sets `GOFLAGS` too (or is an expression), unless both carry the same `-p`, `-tags`, `-race` and `-timeout` and the `env:` one leaves no test out | the line's value replaced the `env:` one for the step, but the smates step keeps the `env:` and runs with its `GOFLAGS`: set the flags in the step's `env:` |
+| turns off on its command line (`-race=false`, `-tags=`) a flag the `GOFLAGS` of its `env:` sets | the suite's `command:` cannot turn it off, and the smates step keeps the `env:` |
 
 Without an existing `smates.yml`, `smates init` writes those `go test` flags into the
 suite's `command:` itself, so that `-p 1` for tests sharing a database applies to local
@@ -499,7 +502,8 @@ target, one without `-tags` voting for none. They are taken only when all votes 
 a `test-integration` target or a step testing a few packages never puts its tags on the
 whole suite. A `GOFLAGS` set in the `env:` of the workflow, job or step counts as flags
 of the step's `go test` (its own flags win, and a `GOFLAGS` on the test line replaces
-it); one smates cannot read (`${{ vars.GOFLAGS }}`) keeps the step from voting. The environment the steps set goes into
+it); one smates cannot read (`${{ vars.GOFLAGS }}`, or an `env:` written as an
+expression such as `${{ fromJSON(vars.CI_ENV) }}`) keeps the step from voting. The environment the steps set goes into
 `smates.yml` only as a comment: CI values such as ports and database names may not hold
 locally, and in CI the step's `env:` reaches the action anyway. Nothing is added to
 `env_ignore`.
