@@ -315,13 +315,22 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 	}
 	for _, st := range workflowTestSteps(p.repo.Root) {
 		subject := st.File + ":" + st.Job + ":" + st.Step
-		if st.Skip != "" {
-			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, st.Skip).about(subject).
+		if names, why := stepPatch(st, cs); why != "" && (st.Skip != "" || len(names) > 0) {
+			r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs tests without smates (%s); %s", st.File, st.Job, st.Step, st.Command, why).about(subject).
 				fix(doctorFix{Doc: docURL + "ci/github-actions/"})
 			continue
 		}
 		r.add(checkWarn, "workflow-test-step", "%s: job %q, step %q runs the tests without smates (%s): `smates init --github --patch smates.patch` writes a patch replacing it with `uses: %s`", st.File, st.Job, st.Step, st.Command, actSmates).about(subject).
 			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/"})
+	}
+	def := p.repo.DefaultBranch()
+	for _, g := range smatesSeedGaps(p.repo.Root, def) {
+		keys := ""
+		if len(g.Keys) > 1 || g.Keys[0] != "" {
+			keys = " (cache-key " + strings.Join(g.Keys, ", ") + ")"
+		}
+		r.add(checkWarn, "workflow-no-seed", "%s runs smates only on pull requests, and no workflow runs it on %s%s: nothing records the state pull requests start from, so the first run of each one starts cold; add `push: branches: [%s]` and/or a nightly `schedule:` to its on: (`smates init --github --patch smates.patch` writes that patch)", g.File, def, keys, def).about(g.File).
+			fix(doctorFix{Command: "smates init --github --patch smates.patch", Doc: docURL + "ci/github-actions/#seed-the-state"})
 	}
 }
 
