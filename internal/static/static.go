@@ -35,6 +35,10 @@ type Graph struct {
 	// imports are erased (absent: direct).
 	runtime map[string][]string
 	langs   []host.Analyzer
+
+	// closers compute Closure and RuntimeClosure (see closer), built on first use.
+	closersOnce sync.Once
+	closers     [2]*closer
 }
 
 // New creates a graph over the given set of repo files.
@@ -129,9 +133,10 @@ func (g *Graph) deps(p string) (direct, runtime []string) {
 	return d, r
 }
 
-// Closure returns the transitive dependencies of the start files, including them.
+// Closure returns the transitive dependencies of the start files, including them,
+// sorted.
 func (g *Graph) Closure(start ...string) []string {
-	return g.closure(g.Direct, start)
+	return g.closer(false).closure(start)
 }
 
 // RuntimeClosure returns the transitive dependencies of the start files through the
@@ -139,52 +144,62 @@ func (g *Graph) Closure(start ...string) []string {
 // including the start files: what running them loads, for a runner that strips
 // types without checking them.
 func (g *Graph) RuntimeClosure(start ...string) []string {
-	return g.closure(g.RuntimeDirect, start)
+	return g.closer(true).closure(start)
 }
 
-func (g *Graph) closure(direct func(string) []string, start []string) []string {
-	seen := map[string]bool{}
-	stack := append([]string{}, start...)
-	for len(stack) > 0 {
-		p := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		for _, d := range direct(p) {
-			if !seen[d] {
-				stack = append(stack, d)
-			}
-		}
+// closer returns the closure engine over Direct, or over RuntimeDirect: a type-only
+// import can split a cycle, so the two have components of their own.
+func (g *Graph) closer(runtime bool) *closer {
+	g.closersOnce.Do(func() {
+		g.closers[0] = newCloser(g.files, g.Direct)
+		g.closers[1] = newCloser(g.files, g.RuntimeDirect)
+	})
+	if runtime {
+		return g.closers[1]
 	}
-	out := make([]string, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
+	return g.closers[0]
 }
 
-// Warm resolves direct dependencies of the files in parallel (closure computation
-// afterwards is then memory-only).
+// Warm resolves the direct dependencies of the files and of everything they reach, in
+// parallel (closure computation afterwards is then memory-only).
 func (g *Graph) Warm(paths []string) {
-	var wg sync.WaitGroup
-	ch := make(chan string)
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for p := range ch {
-				g.Direct(p)
-			}
-		}()
-	}
+	seen := make(map[string]bool, len(paths))
+	var frontier []string
 	for _, p := range paths {
-		ch <- p
+		if !seen[p] {
+			seen[p] = true
+			frontier = append(frontier, p)
+		}
 	}
-	close(ch)
-	wg.Wait()
+	for len(frontier) > 0 {
+		deps := make([][]string, len(frontier))
+		var wg sync.WaitGroup
+		ch := make(chan int)
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range ch {
+					deps[j] = g.Direct(frontier[j])
+				}
+			}()
+		}
+		for j := range frontier {
+			ch <- j
+		}
+		close(ch)
+		wg.Wait()
+		var next []string
+		for _, ds := range deps {
+			for _, d := range ds {
+				if !seen[d] {
+					seen[d] = true
+					next = append(next, d)
+				}
+			}
+		}
+		frontier = next
+	}
 }
 
 func dedupe(in []string, self string) []string {
