@@ -33,8 +33,11 @@ type suiteSel struct {
 	// checking them (runner.ErasesTypes): its static closures leave type-only imports
 	// out (see knownDeps).
 	eraseTypes bool
-	// rules are the suite's rules with their globs expanded (newSuiteRules).
-	rules []*suiteRule
+	// rules are the suite's rules with their globs expanded (newSuiteRules);
+	// reachFiles: one of them has file globs in reaches, which need the static closure
+	// of every unit.
+	rules      []*suiteRule
+	reachFiles bool
 	units      []*unitSel
 }
 
@@ -129,6 +132,7 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	var bulkStarts []string
 	st := in.State.Suites[su.Name]
 	ss.rules = newSuiteRules(su, s.files)
+	ss.reachFiles = slices.ContainsFunc(ss.rules, func(r *suiteRule) bool { return len(r.reachFiles) > 0 })
 
 	for _, u := range units {
 		var entry *state.Entry
@@ -274,6 +278,10 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 	switch {
 	case static && bulk && mapper == nil && !ss.selecting:
 		k.bulk = true // only the coverage needs it
+		if !check && ss.reachFiles {
+			// A rule's reaches still decides which units cover its deps.
+			reach.closure, reach.known = s.in.Graph.Closure(files...), s.in.Graph.Analyzes(files...)
+		}
 	case static:
 		closure := s.in.Graph.Closure(files...)
 		reach.closure, reach.known = closure, s.in.Graph.Analyzes(files...)

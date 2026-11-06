@@ -75,7 +75,57 @@ func coverageCases() []coverageCase {
 			f.write("p/a.go", "package p\n\nfunc A() int { return 2 }\n")
 			return f, st
 		}},
+		{"reaches", func(t *testing.T) (*fixture, *state.State) {
+			return reachesCoverage(t, "")
+		}},
+		{"reaches, go functions", func(t *testing.T) (*fixture, *state.State) {
+			return reachesCoverage(t, config.GranularityFunc)
+		}},
+		{"reaches, a runner that keeps the closure", func(t *testing.T) (*fixture, *state.State) {
+			// The closures of a suite left out are covered as their union, but the
+			// reaches of a rule still need each unit's closure.
+			f := newFixture(t, map[string]string{
+				"web/a.test.js":               `require("./kit.js")`,
+				"web/b.test.js":               `require("./b.js")`,
+				"web/kit.js":                  `module.exports = 1`,
+				"web/b.js":                    `module.exports = 2`,
+				migration:                     "create table t()",
+				"database/fixtures/users.yml": "- id: 1",
+				"api/test_a.py":               "",
+			})
+			f.suites = []*runner.Suite{
+				suite(t, config.Suite{Name: "web", Runner: "vitest", Root: "web", Tests: []string{"*.test.js"}, Rules: reachesRules("web/kit.js", "web/nothing.js")}),
+				suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}}),
+			}
+			st := f.record(nil, nil)
+			f.write(migration, "create table t(id int)")
+			f.write("database/fixtures/users.yml", "- id: 2")
+			return f, st
+		}},
 	}
+}
+
+// reachesRules are a rule whose reaches some units match (its deps, the migrations,
+// are covered) and one whose reaches no unit matches (its deps, the fixtures, stay
+// orphans). A suite left out by --suite must tell them apart too, rather than give the
+// deps of both to units whose closure it did not compute.
+func reachesRules(reached, unreached string) []config.Rule {
+	return []config.Rule{
+		{Reaches: []string{reached}, Deps: []string{"database/migrations/**"}},
+		{Tests: []string{"**"}, Reaches: []string{unreached}, Deps: []string{"database/fixtures/**"}},
+	}
+}
+
+// reachesCoverage is reachesFixture with reachesRules, both deps changed.
+func reachesCoverage(t *testing.T, granularity string) (*fixture, *state.State) {
+	f := reachesFixture(t, granularity, reachesRules("pkg/shared/testkit/**", "pkg/shared/testkits/**")...)
+	f.suites = f.suites[:1] // the shell suite: no analyzer reads it, so the rules apply
+	f.suites = append(f.suites, suite(t, config.Suite{Name: "py", Runner: "pytest", Root: "api", Tests: []string{"test_*.py"}}))
+	f.write("api/test_a.py", "")
+	st := reachesRecord(f, nil)
+	f.write(migration, "create table t(id int)")
+	f.write("database/fixtures/users.yml", "- id: 2")
+	return f, st
 }
 
 // TestSelectCoverageOfSuitesLeftOut checks that the suites --suite leaves out cover
