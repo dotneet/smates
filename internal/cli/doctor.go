@@ -5,13 +5,17 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/selector"
+	"github.com/dotneet/smates/internal/state"
 )
 
 // Doctor check statuses.
@@ -139,6 +143,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "guides/servers/"})
 		}
+		doctorRuleReach(p, s, len(units), r)
 		runners[s.Runner] = true
 	}
 	tool := func(name string, args ...string) string {
@@ -192,6 +197,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		for _, s := range p.state.Suites {
 			n += len(s.Tests)
 		}
+		doctorSkipped(p, r)
 		if p.state.Created.IsZero() {
 			// Shared state without a snapshot of this worktree yet.
 			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, no snapshot in this worktree yet (the next run records one)", p.statePath, n)
@@ -211,6 +217,44 @@ func runDoctor(cf *commonFlags) *doctorReport {
 		r.add(checkOK, "ci", "CI %s, branch %q, pull request %t, full run by default: %t", ci.Name, b, ci.PullRequest, full)
 	}
 	return r
+}
+
+// doctorRuleReach reports how many of the units of suite s each of its rules with
+// reaches applies to. One that applies to none is likely a glob that names no helper
+// the tests import: its deps are then no test's dependencies, and a change to them is
+// an orphan (as without the rule), but once one unit matches, the units that do not are
+// skipped on such a change.
+func doctorRuleReach(p *project, s *runner.Suite, units int, r *doctorReport) {
+	counts := selector.RuleReach(s, p.files, p.graph, p.state.Suites[s.Name])
+	for _, i := range slices.Sorted(maps.Keys(counts)) {
+		rule := s.Rules[i]
+		subject := fmt.Sprintf("%s: rules[%d]", s.Name, i)
+		if n := counts[i]; n == 0 {
+			r.add(checkWarn, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to no test unit: no test's static imports reach a file its globs match, and no recorded test read a variable it names; check the globs, and name every helper the tests use the dependency through (a change to %s stays an orphan meanwhile)", s.Name, i, strings.Join(rule.Reaches, ", "), strings.Join(rule.Deps, ", ")).about(subject).
+				fix(doctorFix{Doc: docURL + "reference/configuration/#rules"})
+		} else {
+			r.add(checkOK, "suite-rule-reaches", "suite %s: rules[%d] (reaches %s) applies to %d of %d test units", s.Name, i, strings.Join(rule.Reaches, ", "), n, units).about(subject)
+		}
+	}
+}
+
+// doctorSkipped lists the units that skipped themselves in their last recorded run:
+// they are not proven to pass, so they run every time until they pass (a test that
+// always skips, behind a missing service, a flag or an environment variable).
+func doctorSkipped(p *project, r *doctorReport) {
+	var units []string
+	for _, name := range slices.Sorted(maps.Keys(p.state.Suites)) {
+		for _, u := range slices.Sorted(maps.Keys(p.state.Suites[name].Tests)) {
+			if p.state.Suites[name].Tests[u].Status == state.Skip {
+				units = append(units, name+": "+u)
+			}
+		}
+	}
+	if len(units) == 0 {
+		return
+	}
+	r.add(checkWarn, "state-skipped", "%d test unit(s) skipped themselves in their last run and run again every time until they pass (not proven): %s", len(units), strings.Join(limit(units, 10), ", ")).
+		fix(doctorFix{Doc: docURL + "guides/go-test-functions/#skipped-tests"})
 }
 
 // installCommand is the command installing the JS dependencies of a suite rooted at

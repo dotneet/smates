@@ -129,6 +129,19 @@ func (g *Graph) deps(p string) (direct, runtime []string) {
 	return d, r
 }
 
+// Analyzes reports whether an analyzer reads one of the paths. When none does, their
+// closure is the paths themselves and tells nothing about what they reach.
+func (g *Graph) Analyzes(paths ...string) bool {
+	for _, p := range paths {
+		for _, l := range g.langs {
+			if l.Handles(p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Closure returns the transitive dependencies of the start files, including them.
 func (g *Graph) Closure(start ...string) []string {
 	return g.closure(g.Direct, start)

@@ -214,7 +214,9 @@ fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`,
 | `toolchain-go`, `toolchain-bun`, `toolchain-python`, `suite-engines-node` | toolchains, and the Node version against `engines.node` |
 | `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses; variables it reads that are not set |
 | `suite-server-dependency` | an end-to-end-looking suite without `depends_on`, `serves` or `rules` |
+| `suite-rule-reaches` | how many test units each rule with `reaches` applies to; a warning for one that applies to none |
 | `state-recorded` | a recorded state exists, and from which commit |
+| `state-skipped` | test units that skipped themselves in their last run (not proven: they run every time until they pass) |
 | `agent`, `ci` | the agent is available; the CI detected and whether it runs everything by default |
 | `workflow-test-step` | a GitHub workflow step that runs the tests without smates |
 

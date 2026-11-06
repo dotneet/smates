@@ -799,7 +799,7 @@ func showState(st *state.State, store *stateStore, asJSON bool, w io.Writer) err
 	}
 	for _, name := range slices.Sorted(maps.Keys(info.Suites)) {
 		si := info.Suites[name]
-		fmt.Fprintf(w, "suite %s: %d tests (pass %d, fail %d, unknown %d), ~%d deps each\n", name, si.Tests, si.Status["pass"], si.Status["fail"], si.Status["unknown"], si.Deps)
+		fmt.Fprintf(w, "suite %s: %d tests (pass %d, fail %d, skip %d, unknown %d), ~%d deps each\n", name, si.Tests, si.Status[state.Pass], si.Status[state.Fail], si.Status[state.Skip], si.Status[state.Unknown], si.Deps)
 	}
 	return nil
 }

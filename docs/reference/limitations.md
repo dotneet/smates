@@ -14,7 +14,11 @@ Workaround: declare the server's code with `depends_on` or `serves`. See
 
 **Data outside the repository.** What a test reads from databases or external services
 is not tracked. Workaround: declare the files it depends on with `rules` or `inputs`,
-or let such changes reach the agent as [orphans](../guides/orphans.md).
+or let such changes reach the agent as [orphans](../guides/orphans.md). For a schema
+applied before the tests run, a rule with `reaches` gives the migrations to the tests
+that import the database helper; a test that connects in a way the rule does not name
+is then not run for a migration change (see
+[Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database)).
 
 **Code that runs in a browser.** Code executed in a browser (vitest browser mode,
 Playwright) is covered by the static import graph only.
@@ -131,6 +135,19 @@ See [Go test functions](../guides/go-test-functions.md).
 **Runner arguments may filter tests.** Arguments passed through to the runner
 (`smates run -- -t name`) may skip tests, so such runs never record a test as passed.
 Workaround: put permanent flags in the suite's `command`.
+
+**A skipped test counts as passed, except for Go test functions.** A Go test function
+recorded in its own process (`granularity: func`) that skips itself is recorded as not
+proven and runs again (see [Skipped tests](../guides/go-test-functions.md#skipped-tests)).
+Everywhere else a skip is a pass: a Go package (`granularity: package`, or a package
+recorded as a whole) whose tests all skip, a pytest `skip`/`xfail`, a vitest or jest file
+whose tests all skip. Such a test is not run again until its dependencies change, unless
+the gate is an environment variable it reads (a dependency) or a file it probes.
+Workaround: list it in `volatile`, or set `max_age`.
+
+**Time is not tracked.** A test whose outcome depends on the date or the clock is not
+selected when only the time changes. Workaround: list it in `volatile` (it runs every
+time), or set `max_age` so recorded runs expire.
 
 **Jest** occasionally runs two files back to back in one worker even when recycling
 workers. Their dependencies are then merged: still correct, but less precise.

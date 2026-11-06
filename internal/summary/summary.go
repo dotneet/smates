@@ -544,6 +544,12 @@ func reasonLabel(r string) string {
 	switch r {
 	case selector.ReasonFailed:
 		return "Failed or unfinished last time"
+	case selector.ReasonUnproven:
+		return "Skipped last time (not proven)"
+	case selector.ReasonVolatile:
+		return "Volatile (runs every time)"
+	case selector.ReasonExpired:
+		return "Last run older than max_age"
 	case selector.ReasonNew:
 		return "Never recorded"
 	case selector.ReasonAgent:

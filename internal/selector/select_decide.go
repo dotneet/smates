@@ -6,9 +6,11 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -100,9 +102,34 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changed)
 	}
+	s.runAnyway(t, ss, u)
 	s.reportConfig(t, u.via)
 	explain(t, ss.sr, u.via, sets)
 	return t
+}
+
+// runAnyway selects a unit decide left out that runs whatever changed: the suite's
+// volatile lists it (a compile check is never volatile: it does not run the tests), or
+// its last recorded run is older than the suite's max_age.
+func (s *selection) runAnyway(t *Test, ss *suiteSel, u *unitSel) {
+	su := ss.sr.Suite
+	if t.Selected {
+		return
+	}
+	if len(su.Volatile) > 0 && !runner.IsBuildCheck(u.id) && UnitMatches(su, u.id, ss.sr.Files[u.id], su.Volatile) {
+		t.Selected, t.Reason, t.Detail = true, ReasonVolatile, "listed in volatile: runs every time"
+		return
+	}
+	if su.MaxAge > 0 && u.entry != nil {
+		now := s.in.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if age := now.Sub(u.entry.At); age > su.MaxAge {
+			t.Selected, t.Reason = true, ReasonExpired
+			t.Detail = fmt.Sprintf("last run %s ago, older than max_age %s", age.Round(time.Minute), su.MaxAge)
+		}
+	}
 }
 
 // reportConfig reports a changed settings key (depkey.Config) among t.Changed as the
@@ -131,7 +158,7 @@ func (s *selection) reportConfig(t *Test, via map[string]string) {
 // ModeAll; in ModeDiff, a test with a changed dependency (a Go file's declarations
 // change with the file); otherwise a test with no recorded entry, a test with a
 // dependency whose hash differs from the recorded one (or that was not recorded) and a
-// test that did not pass last time.
+// test that did not pass last time (skipping itself is no pass: ReasonUnproven).
 func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
 	switch mode {
 	case ModeAll:
@@ -169,6 +196,8 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	switch {
 	case len(t.Changed) > 0:
 		t.Selected, t.Reason = true, ReasonChanged
+	case entry.Status == state.Skip:
+		t.Selected, t.Reason, t.Detail = true, ReasonUnproven, "skipped last run: not proven to pass"
 	case entry.Status != state.Pass:
 		t.Selected, t.Reason, t.Detail = true, ReasonFailed, "last run: "+entry.Status
 	default:

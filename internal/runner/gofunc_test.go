@@ -108,7 +108,7 @@ func TestGoOutcomesPlain(t *testing.T) {
 		{"example.com/m/broken", "TestB", state.Fail, false, true},
 		{"example.com/m/slow", "TestSlow", state.Unknown, true, true},
 		{"example.com/m/verbose", "TestV", state.Pass, false, true},
-		{"example.com/m/verbose", "TestSkip", state.Pass, false, true},
+		{"example.com/m/verbose", "TestSkip", state.Skip, false, true}, // skipped itself: not proven
 		{"example.com/m/other", "TestX", "", false, false},
 	} {
 		st, inf, ran := g.status(c.ip, c.name)
