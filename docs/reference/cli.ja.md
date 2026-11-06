@@ -110,7 +110,7 @@ smates select [flags]
 | `text` | 選択されたテスト ID を 1 行に 1 つ。選択のまとめは stderr に出ます。 |
 | `files` | 選択されたテスト ID を 1 行に 1 つ。stderr には何も出ません。 |
 | `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断。 |
-| `github` | `selected`、`total`、`run-all`、`skip`、`tests` をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。 |
+| `github` | `selected`、`total`、`run-all`、`skip`、`tests`、`suites` をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。[出力](../ci/github-actions.md#outputs) を参照してください。 |
 | `markdown` | プルリクエストのコメントに使う Markdown のまとめ。 |
 
 ### smates watch { #smates-watch }

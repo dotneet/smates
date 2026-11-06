@@ -131,7 +131,7 @@ Plus the [common flags](#common-flags).
 | `text` | One selected test ID per line; the selection summary goes to stderr. |
 | `files` | One selected test ID per line, nothing on stderr. |
 | `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision. |
-| `github` | `selected`, `total`, `run-all`, `skip` and `tests` as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. |
+| `github` | `selected`, `total`, `run-all`, `skip`, `tests` and `suites` as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. See [Outputs](../ci/github-actions.md#outputs). |
 | `markdown` | The Markdown summary used for pull request comments. |
 
 ### smates watch

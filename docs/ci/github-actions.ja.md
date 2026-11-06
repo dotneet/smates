@@ -73,6 +73,8 @@ jobs:
 | `total` | 既知のテストユニットの数。 |
 | `run-all` | すべてが選択されたとき `true`。 |
 | `skip` | 何も選択されなかったとき `true`。 |
+| `tests` | JSON オブジェクト: スイートごとの、選択されたテストユニットの ID。 |
+| `suites` | JSON オブジェクト。スイートごとに 1 エントリ: `{"selected": 2, "total": 40, "all": false, "skip": false}`。`skip` が `true` になるのは、そのスイートで何も選択されなかったときだけです（[これでゲートします](#gate-jobs-per-suite)）。 |
 | `exit-code` | smates コマンドの終了コード。 |
 | `flaky` | `run` が flaky と証明したテストユニットの数（入力が変わらないのに結果が反転したもの）。 |
 | `flaky-tests` | それらのユニットの JSON 配列（`"suite: unit"`）。`smates flaky` も参照してください。 |
@@ -129,13 +131,70 @@ jobs:
           command: select
   test:
     needs: select
-    if: needs.select.outputs.skip != 'true'
+    # select ジョブが成功し、何も選択されなかったと言ったときだけスキップする。
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     steps:
       # ... チェックアウト、ツールチェーン、そして smates のステップ
 ```
 
-必須のステータスチェックでジョブがスキップされても問題ない場合だけ使ってください（GitHub はスキップされたジョブを成功として扱います）。
+条件はこの形で書いてください。`!cancelled()` がないと、select ジョブが失敗したときに `needs:` のジョブはスキップされます。GitHub はスキップされたジョブを成功として扱うので、そのジョブを必須チェックにしていると、テストを 1 本も実行しないまま緑になります。`!cancelled()` があれば、select ジョブが失敗してもテストジョブはゲートがない場合と同じように実行されます（そのときは自分で選択します）。必須のステータスチェックでジョブがスキップされても問題ない場合だけ使ってください。
+
+### スイートごとにジョブをゲートする { #gate-jobs-per-suite }
+
+`suites` 出力は、スイートごとに何か選択されたかを示します。スイートを 1 つずつ実行するジョブ（`args: --suite <name>`）を、1 つずつスキップできます。
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        uses: dotneet/smates@vX.Y.Z
+        with:
+          command: select
+  api:
+    needs: plan
+    if: >-
+      ${{ !cancelled() && (needs.plan.result != 'success' ||
+      fromJSON(needs.plan.outputs.suites || '{}')['api'].skip != true) }}
+    runs-on: ubuntu-latest
+    steps:
+      # ... そして args: --suite api と cache-key: api を付けた smates のステップ
+```
+
+ジョブをスキップするのは、出力がそのスイートで何も選択されなかったと明示しているときだけにします。
+
+- **`.skip != true` でゲートし、`.selected > 0` や `.selected != 0` は使わないでください。** 出力にないスイート（名前の誤り、`--suite` で外したスイート、空の出力）は `null` になり、ワークフローの式は `null` を `0` として扱います。`selected` の条件ではジョブがスキップされますが、`null != true` なら実行されます。
+- **plan ジョブが成功しなかったときは実行します**（`needs.plan.result != 'success'`。一緒にスキップされないよう `!cancelled()` も付けます）。smates は自身のエラー（設定、環境）で 2 から 4 で終了し、そのとき出力は何も言いません。
+- `|| '{}'` は、出力が空のときに `fromJSON` が失敗しないようにします。
+
+smates はスイートをまたいで選択します。共有パッケージへの変更は、それに依存するすべてのスイートのテストを選択します。手書きの path filter はこうした依存先を見落とすので、通常はそれより多く実行されます。path filter を残すなら、smates が選択したスイートを決してスキップしない粗い外側のゲートとしてだけ使ってください。
+
+**必須のステータスチェック。** スキップされたジョブは成功として数えられます。集約ジョブ 1 つを必須チェックにするなら、plan がそう言ったときだけスキップを受け入れるようにします。
+
+```yaml
+  tests-passed:
+    needs: [plan, api, web]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          SUITES: ${{ needs.plan.outputs.suites }}
+          API: ${{ needs.api.result }}
+          WEB: ${{ needs.web.result }}
+        run: |
+          ok() { # result suite
+            [ "$1" = success ] && return 0
+            [ "$1" = skipped ] && [ "$PLAN" = success ] &&
+              [ "$(jq -r --arg s "$2" '.[$s].skip' <<<"$SUITES")" = true ]
+          }
+          ok "$API" api && ok "$WEB" web
+```
 
 ### シャードとマトリクス { #shards-and-matrices }
 

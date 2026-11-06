@@ -97,6 +97,8 @@ restored by prefix `...-<branch>-`, then `...-<default branch>-`.
 | `total` | Number of known test units. |
 | `run-all` | `true` when everything was selected. |
 | `skip` | `true` when nothing was selected. |
+| `tests` | JSON object: each suite's selected test unit IDs. |
+| `suites` | JSON object, one entry per suite: `{"selected": 2, "total": 40, "all": false, "skip": false}`. `skip` is `true` only when the suite selected nothing ([gate on it](#gate-jobs-per-suite)). |
 | `exit-code` | Exit code of the smates command. |
 | `flaky` | Number of test units `run` proved flaky (outcome flipped with unchanged inputs). |
 | `flaky-tests` | JSON array of those units (`"suite: unit"`); see `smates flaky`. |
@@ -159,14 +161,84 @@ jobs:
           command: select
   test:
     needs: select
-    if: needs.select.outputs.skip != 'true'
+    # Skip only when the select job succeeded and said nothing is selected.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     steps:
       # ... checkout, toolchains, then the smates step
 ```
 
-Use this only if a skipped job is acceptable for your required status checks (GitHub
-treats a skipped job as passing).
+Write the condition this way. Without `!cancelled()`, a `needs:` job is skipped when
+the select job fails, and GitHub treats a skipped job as passing, so a required check
+on it turns green with no test run. With it, a failed select job lets the test job run
+as it would without the gate (it then selects on its own). Use this only if a skipped
+job is acceptable for your required status checks.
+
+### Gate jobs per suite { #gate-jobs-per-suite }
+
+The `suites` output says, for each suite, whether it selected anything. Jobs that run
+one suite each (`args: --suite <name>`) can then be skipped one by one:
+
+```yaml
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        uses: dotneet/smates@vX.Y.Z
+        with:
+          command: select
+  api:
+    needs: plan
+    if: >-
+      ${{ !cancelled() && (needs.plan.result != 'success' ||
+      fromJSON(needs.plan.outputs.suites || '{}')['api'].skip != true) }}
+    runs-on: ubuntu-latest
+    steps:
+      # ... then the smates step with args: --suite api and cache-key: api
+```
+
+Skip a job only when the output explicitly says its suite selected nothing:
+
+- **Gate on `.skip != true`, never on `.selected > 0` or `.selected != 0`.** A suite
+  missing from the output (a typo, a suite `--suite` left out, an empty output) reads as
+  `null`, and a workflow expression treats `null` as `0`: a `selected` condition would
+  skip the job, while `null != true` runs it.
+- **Run when the plan job did not succeed** (`needs.plan.result != 'success'`, with
+  `!cancelled()` so that the job is not skipped along with it). smates exits 2 to 4 on
+  its own errors (configuration, environment), and then the outputs say nothing.
+- `|| '{}'` keeps `fromJSON` from failing on an empty output.
+
+smates selects across suites: a change to a shared package selects the tests of every
+suite that depends on it. This usually runs more than hand-written path filters, which
+miss such dependents; keep path filters, if at all, only as a coarse outer gate that
+never skips a suite smates selects.
+
+**Required status checks.** A skipped job counts as passing. If one aggregate job is
+the required check, have it accept a skipped job only when the plan said so:
+
+```yaml
+  tests-passed:
+    needs: [plan, api, web]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          SUITES: ${{ needs.plan.outputs.suites }}
+          API: ${{ needs.api.result }}
+          WEB: ${{ needs.web.result }}
+        run: |
+          ok() { # result suite
+            [ "$1" = success ] && return 0
+            [ "$1" = skipped ] && [ "$PLAN" = success ] &&
+              [ "$(jq -r --arg s "$2" '.[$s].skip' <<<"$SUITES")" = true ]
+          }
+          ok "$API" api && ok "$WEB" web
+```
 
 ### Shards and matrices
 

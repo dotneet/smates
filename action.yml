@@ -111,6 +111,15 @@ outputs:
   skip:
     description: '"true" when nothing was selected; use it to skip downstream test jobs.'
     value: ${{ steps.smates.outputs.skip }}
+  tests:
+    description: JSON object mapping each suite to the IDs of its selected test units.
+    value: ${{ steps.smates.outputs.tests }}
+  suites:
+    description: >-
+      JSON object with one entry per suite smates selected for: {"selected": n, "total":
+      n, "all": bool, "skip": bool}. Gate a job on `.skip == true` only: a suite missing
+      from the object (left out by --suite, a failed step) then runs.
+    value: ${{ steps.smates.outputs.suites }}
   exit-code:
     description: Exit code of the smates command (for "run" 1 when tests failed; 2-4 are smates' own errors, see https://dotneet.github.io/smates/reference/exit-codes/).
     value: ${{ steps.smates.outputs.exit-code }}

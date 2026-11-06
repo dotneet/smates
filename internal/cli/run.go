@@ -1206,23 +1206,42 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 }
 
-// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
-func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+// suiteOutput is one suite of the `suites` GitHub output. Skip is true only when the
+// suite selected nothing. A workflow skips a job only when `.skip` is true, never when
+// `.selected` is 0: a suite the output does not list (left out by --suite, a plan job
+// that failed) reads as null, which equals 0 in a workflow expression but not true.
+type suiteOutput struct {
+	Selected int  `json:"selected"`
+	Total    int  `json:"total"`
+	All      bool `json:"all"`
+	Skip     bool `json:"skip"`
+}
+
+// githubOutputs are the selection's step outputs, as name=value lines.
+func githubOutputs(sel *selection) []string {
 	s, t := sel.res.Counts()
 	runAll := true
 	tests := map[string][]string{}
+	suites := map[string]suiteOutput{}
 	for _, su := range sel.res.Suites {
 		if !su.All {
 			runAll = false
 		}
-		tests[su.Name] = append([]string{}, su.Selected()...)
+		ids := append([]string{}, su.Selected()...)
+		tests[su.Name] = ids
+		suites[su.Name] = suiteOutput{Selected: len(ids), Total: len(su.Tests), All: su.All && len(su.Tests) > 0, Skip: len(ids) == 0}
 	}
 	tj, _ := json.Marshal(tests)
-	lines := []string{
+	sj, _ := json.Marshal(suites)
+	return []string{
 		fmt.Sprintf("selected=%d", s), fmt.Sprintf("total=%d", t), fmt.Sprintf("run-all=%t", runAll && t > 0),
-		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj),
+		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj), "suites=" + string(sj),
 	}
-	lines = append(lines, extra...)
+}
+
+// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
+func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+	lines := append(githubOutputs(sel), extra...)
 	if out := os.Getenv("GITHUB_OUTPUT"); out != "" {
 		f, err := os.OpenFile(out, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
