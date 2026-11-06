@@ -121,8 +121,9 @@ type Suite struct {
 	MaxAge time.Duration `yaml:"max_age" json:"-"`
 	// Requires are preconditions of the environment (a database listening, a browser
 	// installed): when one is not met, `smates run` does not start the units it covers
-	// and leaves them selected.
-	Requires []Requirement `yaml:"requires"`
+	// and leaves them selected. Left out of the settings hash when empty, so that the
+	// hash of a suite that does not use it is the one an older smates recorded.
+	Requires []Requirement `yaml:"requires" json:",omitempty"`
 }
 
 // Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
