@@ -101,17 +101,17 @@ func pushReaches(cfg *yaml.Node, def string) bool {
 		in := false
 		for _, p := range seqValues(br) {
 			if neg, ok := strings.CutPrefix(p, "!"); ok {
-				if branchMatch(neg, def) {
+				if m, ok := branchMatch(neg, def); m && ok {
 					in = false
 				}
-			} else if branchMatch(p, def) {
+			} else if m, ok := branchMatch(p, def); m || !ok {
 				in = true
 			}
 		}
 		return in
 	}
 	for _, p := range seqValues(ign) {
-		if branchMatch(p, def) {
+		if m, ok := branchMatch(p, def); m && ok {
 			return false
 		}
 	}
@@ -132,29 +132,63 @@ func seqValues(n *yaml.Node) []string {
 	return nil
 }
 
-// branchMatch matches a branch against a GitHub filter pattern (* stops at /, **
-// does not).
-func branchMatch(pat, branch string) bool {
+// branchMatch matches a branch against a GitHub filter pattern: * stops at /, **
+// does not, ? and + make the preceding character optional or repeated, [...] is one
+// letter, digit or range, and \ escapes the next character. ok is false for a
+// pattern smates cannot read.
+func branchMatch(pat, branch string) (match, ok bool) {
 	var b strings.Builder
 	b.WriteString("^")
-	for i := 0; i < len(pat); i++ {
-		switch c := pat[i]; {
-		case c == '*' && i+1 < len(pat) && pat[i+1] == '*':
-			b.WriteString(".*")
+	rs := []rune(pat)
+	atom := false // ? and + may follow: the last thing written matches one character
+	for i := 0; i < len(rs); i++ {
+		switch c := rs[i]; c {
+		case '*':
+			if i+1 < len(rs) && rs[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString("[^/]*")
+			}
+			atom = false
+		case '?', '+':
+			if !atom {
+				return false, false
+			}
+			b.WriteRune(c)
+			atom = false
+		case '[':
+			end := slices.Index(rs[i+1:], ']')
+			if end < 1 {
+				return false, false
+			}
+			class := rs[i+1 : i+1+end]
+			for _, r := range class {
+				if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+					return false, false
+				}
+			}
+			b.WriteString("[" + string(class) + "]")
+			i += 1 + end
+			atom = true
+		case '\\':
+			if i+1 == len(rs) {
+				return false, false
+			}
 			i++
-		case c == '*':
-			b.WriteString("[^/]*")
-		case c == '?':
-			b.WriteString(".?")
-		case c == '+':
-			b.WriteString("+")
+			b.WriteString(regexp.QuoteMeta(string(rs[i])))
+			atom = true
 		default:
 			b.WriteString(regexp.QuoteMeta(string(c)))
+			atom = true
 		}
 	}
 	b.WriteString("$")
 	re, err := regexp.Compile(b.String())
-	return err == nil && re.MatchString(branch)
+	if err != nil {
+		return false, false
+	}
+	return re.MatchString(branch), true
 }
 
 // flowFilter renders a path filter of an event (paths: or paths-ignore:, key) as one

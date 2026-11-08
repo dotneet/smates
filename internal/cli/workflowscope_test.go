@@ -140,6 +140,29 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "turbo run test:e2e", skip: "is not the plain unit-test command", other: true},
 		{run: "node --test scripts/", skip: "node --test runs the files it is given"},
 		{run: "cd web && pnpm test", skip: "chained with other commands"},
+		// Wrappers: the tests run in a container, as another user, under a display or
+		// in a shell the smates step would not have.
+		{run: "docker compose run --rm app go test ./...", skip: "through docker compose run --rm app"},
+		{run: "docker exec -t db-test pytest", skip: "through docker exec -t db-test"},
+		{run: "sudo -E go test ./...", skip: "through sudo -E"},
+		{run: "xvfb-run -a pnpm test", skip: "through xvfb-run -a"},
+		{run: "nix develop -c go test ./...", skip: "through nix develop -c"},
+		{run: "timeout 20m go test ./...", skip: "through timeout 20m"},
+		{run: "./scripts/with-db.sh go test ./...", skip: "through ./scripts/with-db.sh"},
+		{run: "env sudo go test ./...", skip: "through sudo"},
+		{run: "GOFLAGS=-p=1 timeout 20m go test ./...", skip: "through timeout 20m"},
+		{run: "npx -y xvfb-run vitest run", skip: "through npx -y xvfb-run"},
+		// Launchers that only find the runner.
+		{run: "npx vitest run"},
+		{run: "pnpm exec vitest run"},
+		{run: "yarn jest"},
+		{run: "bun x vitest run"},
+		{run: "python -m pytest -x"},
+		{run: "uv run --frozen pytest"},
+		{run: "poetry run pytest"},
+		{run: "time go test ./..."},
+		{run: "/usr/bin/time -p go test ./..."},
+		{run: "exec go test ./..."},
 	}
 	for _, c := range cases {
 		steps := parseWorkflowSteps("ci.yml", []byte(head+"      - run: "+yamlStr(c.run)+"\n"))
@@ -510,6 +533,51 @@ func TestMakefileShellWords(t *testing.T) {
 	}
 }
 
+// TestBranchMatch: GitHub's filter pattern syntax, and patterns smates cannot read.
+func TestBranchMatch(t *testing.T) {
+	cases := []struct {
+		pat, branch string
+		match, ok   bool
+	}{
+		{"main", "main", true, true},
+		{"main", "mainline", false, true},
+		{"release/*", "release/1.2", true, true},
+		{"release/*", "release/1/2", false, true},
+		{"release/**", "release/1/2", true, true},
+		{"**", "feature/x/y", true, true},
+		// ? and + apply to the preceding character.
+		{"release?", "releas", true, true},
+		{"release?", "release", true, true},
+		{"release?", "releaseX", false, true},
+		{"v1+", "v111", true, true},
+		{"v1+", "v", false, true},
+		// [...] is one character of a class or range.
+		{"v[0-9]", "v1", true, true},
+		{"v[0-9]", "va", false, true},
+		{"v[0-9]?", "v", true, true},
+		{"[a-zA-Z]x", "Bx", true, true},
+		{"v[0-9]+.*", "v12.x", true, true},
+		// Other characters are literal; \ escapes the next one.
+		{"v1.0", "v1x0", false, true},
+		{"a\\*", "a*", true, true},
+		{"a\\*", "ab", false, true},
+		{"rel-ü?", "rel-", true, true},
+		// Patterns smates cannot read.
+		{"?main", "main", false, false},
+		{"*?", "main", false, false},
+		{"v[", "v[", false, false},
+		{"v[]", "v", false, false},
+		{"v[a_b]", "va", false, false},
+		{"v[z-a]", "va", false, false},
+		{"main\\", "main", false, false},
+	}
+	for _, c := range cases {
+		if m, ok := branchMatch(c.pat, c.branch); m != c.match || ok != c.ok {
+			t.Errorf("branchMatch(%q, %q) = %t, %t; want %t, %t", c.pat, c.branch, m, ok, c.match, c.ok)
+		}
+	}
+}
+
 func TestWorkflowSeed(t *testing.T) {
 	cases := []struct {
 		on   string
@@ -527,6 +595,13 @@ func TestWorkflowSeed(t *testing.T) {
 		{"on:\n  pull_request:\n  push:\n    branches: ['**', '!main']\n", seedNo, true},
 		{"on:\n  pull_request:\n  push:\n    branches-ignore: [main]\n", seedNo, true},
 		{"on:\n  pull_request:\n  push:\n    branches-ignore: [develop]\n", seedYes, true},
+		{"on:\n  pull_request:\n  push:\n    branches: ['mai?n']\n", seedYes, true},
+		{"on:\n  pull_request:\n  push:\n    branches: ['m[a-z]in']\n", seedYes, true},
+		{"on:\n  pull_request:\n  push:\n    branches: ['mai?']\n", seedNo, true},
+		// A pattern smates cannot read lets the push through, and excludes nothing.
+		{"on:\n  pull_request:\n  push:\n    branches: ['m[a_]in']\n", seedYes, true},
+		{"on:\n  pull_request:\n  push:\n    branches: ['**', '!m[a_]in']\n", seedYes, true},
+		{"on:\n  pull_request:\n  push:\n    branches-ignore: ['?main']\n", seedYes, true},
 		{"on:\n  pull_request:\n  push:\n    tags: ['v*']\n", seedNo, true},
 		{"on:\n  pull_request:\n  push:\n    paths: ['pkg/**']\n", seedYes, true},
 		{"on:\n  pull_request:\n  schedule:\n    - cron: '0 0 * * *'\n", seedYes, true},

@@ -325,6 +325,14 @@ func envName(s string) bool {
 // the carried ones (goCarry) and those that do not change what runs or passes.
 var goCarryFlags = []string{"p", "tags", "race", "timeout", "count", "v", "failfast", "shuffle"}
 
+// testLaunchers are the words (flags left out) that may come before a test command:
+// they find and start the runner without changing where or as whom it runs.
+var testLaunchers = []string{
+	"npx", "pnpx", "bunx", "npm exec", "pnpm exec", "pnpm dlx", "yarn", "yarn exec", "yarn dlx", "bun x",
+	"python", "python3", "uv run", "poetry run", "pipenv run", "pdm run",
+	"time", "command", "exec",
+}
+
 // checkTestCmd reads the test command line cmd of a workflow step; match is the test
 // command testCmdRe found in it ("go test", "pnpm test", "turbo run test", ...).
 func checkTestCmd(cmd, match string) testCmdCheck {
@@ -382,6 +390,31 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 		pre = pre[1:]
 		if len(pre) > 0 && strings.HasPrefix(pre[0], "-") {
 			c.skip = "it runs the tests through env " + pre[0] + ", which changes their environment: run them without it, then use the smates action"
+			return c
+		}
+	}
+	// Any other word before the test command (docker compose run, sudo, xvfb-run,
+	// timeout, nix develop -c, a script) wraps it in a container, user, display or
+	// shell the smates step would not have; launchers that only find the runner pass.
+	from := len(pre)
+	for i, w := range pre {
+		if name, _, ok := strings.Cut(w, "="); !ok || !envName(name) {
+			from = i
+			break
+		}
+	}
+	if from < len(pre) {
+		var wrap []string
+		for _, w := range pre[from:] {
+			if !strings.HasPrefix(w, "-") {
+				wrap = append(wrap, w)
+			}
+		}
+		if len(wrap) > 0 {
+			wrap[0] = path.Base(wrap[0])
+		}
+		if !slices.Contains(testLaunchers, strings.Join(wrap, " ")) {
+			c.skip = "it runs the tests through " + strings.Join(pre[from:], " ") + ", whose container, user, display or shell the smates step would not have: run smates inside it by hand"
 			return c
 		}
 	}
