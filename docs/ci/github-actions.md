@@ -39,9 +39,13 @@ steps with the action instead of adding a second workflow (see
    the release's `checksums.txt` and its build provenance attestation (see
    [`verify`](#verification)) and puts it on `PATH`. The archive is cached per version,
    OS and architecture, and verified again on every cache hit (which still needs network
-   access for `checksums.txt`). With `version: source`,
-   or when the download fails and Go is on `PATH`, it is built from the action's own
-   checkout instead. A failed verification always fails the job; it never falls back.
+   access for `checksums.txt`). It is built from the action's own checkout instead when
+   `version: source` is set, when no release fits the action ref (a pinned commit with
+   no release tag or several, a moving tag such as `@v1` with no release yet, a `latest`
+   that cannot be resolved), on runners that are neither X64 nor ARM64, or when the
+   download fails.
+   A source build needs Go on `PATH` (`actions/setup-go`); without it the job fails. A
+   failed verification always fails the job; it never falls back.
 2. **Restore state** (`.smates/`) from the Actions cache: the newest state of this
    branch, else (for a pull request into another branch than the default) of its base
    branch, else of the default branch, else none (cold start; see
@@ -54,8 +58,10 @@ steps with the action instead of adding a second workflow (see
 
 Every run also writes the summary to the job page (`$GITHUB_STEP_SUMMARY`).
 
-On the default branch `smates run` runs every test and writes a complete state; every
-new pull request starts from it. On other branches it selects. Override with
+On the default branch (or, when `full_run_branches` is set, those branches instead)
+`smates run` runs every test for any event that is not a pull request (`push`, `schedule`,
+`workflow_dispatch`) and writes a complete state; every new pull request starts from it.
+`pull_request*` and `merge_group` events, and other branches, select. Override with
 `args: --all` or `args: --select`.
 
 ### Why branch fallback is safe
@@ -84,14 +90,17 @@ state.
 | `openrouter-api-key` | | Same, for OpenRouter (`OPENROUTER_API_KEY`). With several keys, `agent.provider` in `smates.yml` picks one (default: Anthropic, then OpenAI, then OpenRouter). |
 | `cache` | `true` | Restore/save state with the Actions cache. `false` if you store it yourself. |
 | `cache-key` | | Extra cache key component, for jobs that run different tests on the same OS (matrix entries, a fixed number of shards). Jobs a plan job selects for (sized shards, suites gated per job) share one key with it instead, see [Size the shards to the selection](#size-the-shards-to-the-selection). |
-| `state-path` | `.smates` | State directory, relative to `working-directory`. Must match `state` in `smates.yml`. |
+| `state-path` | `.smates` | State directory, relative to the repository root (the git top level of `working-directory`) unless absolute. Must be the directory holding the `state` file set in `smates.yml`. |
 | `comment` | `false` | `true` posts the summary as a pull request comment, updated in place ([below](#pull-request-comment)). |
 | `comment-key` | | Separates the comments of several smates jobs in one pull request. |
 | `github-token` | `github.token` | Token used for the comment and to look up attestations. |
 
-Cache key: `smates-state-<runner.os>-[<cache-key>-]<branch>-<run_id>-<run_attempt>`,
-restored by prefix `...-<branch>-`, then `...-<base branch>-` (pull requests into another
-branch than the default), then `...-<default branch>-`.
+Cache key:
+`smates-state-<runner.os>-[<cache-key>-]<branch>-<run_id>-<run_attempt>-<job>-<command>-<random>`.
+The tail makes every step's key unique, so two smates steps in one run both save.
+Restores match by prefix and take the newest entry: `...-<branch>-`, then
+`...-<base branch>-` (pull requests into another branch than the default), then
+`...-<default branch>-`.
 
 ## Outputs
 
@@ -321,9 +330,9 @@ selects three tests. `smates select --max-shards N` sizes the shard count to the
 selection: `0` when nothing is selected, else the recorded duration of the selected
 tests divided by `--shard-time` (default `10m`), rounded up and kept within `1` to `N`.
 A selected test without a recorded duration counts as the median of its suite; if a
-suite with selected tests has no recorded duration at all, the count is `N`. On a push
-build of the default branch (or a `full_run_branches` branch), where `smates run` runs
-every test, the count is sized for all of them.
+suite with selected tests has no recorded duration at all, the count is `N`. On a
+non-pull-request build of the default branch (or, when `full_run_branches` is set, those
+branches instead), where `smates run` runs every test, the count is sized for all of them.
 
 The count only decides how many jobs share the selection: every selected test still runs
 in one of them. It is sized for the selection, so do not feed it to `--shadow` legs,
@@ -604,7 +613,11 @@ Long lists are cut with counts. Details:
 - It works with `command: run` and `command: select`. The comment is found again by a
   hidden marker (`<!-- smates-summary -->`), so there is one per pull request.
 - Several smates jobs in one pull request (matrix entries, suites split across jobs)
-  overwrite each other's comment unless each sets its own `comment-key`.
+  overwrite each other's comment unless each sets its own `comment-key`. With a key
+  the marker is `<!-- smates-summary:<key> -->` (characters other than letters, digits,
+  `.`, `_` and `-` become `_`).
+- The body is cut at 60000 bytes, below GitHub's comment limit, with a note pointing to
+  the job summary.
 - **Shards** each post their own comment (the key gets `shard-I-of-N`), covering the
   tests that shard owns: with a `cache-key` per shard, each shard's state only knows
   its own tests, so one shard cannot speak for the others. If one comment matters
@@ -687,7 +700,12 @@ request per run.
   for 7 days are evicted by GitHub; the state is a small gzip file.
 - **Debugging.** `args: --explain` prints why each test was selected. If every run on a
   pull request runs everything, check the "Restore smates state" step log for a cache
-  hit, and that `state-path` matches `smates.yml`.
+  hit, and that `state-path` is the directory of the `state` file in `smates.yml`.
+- **Do not set `state_shared: true` for CI.** It is for parallel worktrees on one
+  machine: the per-test entries then live in the git common directory
+  (`.git/smates/`), even in a plain clone, and only the snapshot stays in `.smates/`.
+  The action caches only `state-path`, so the entries are lost when the job ends and
+  the next run has no recorded tests to skip.
 
 ## Security model
 

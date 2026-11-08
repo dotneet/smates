@@ -102,7 +102,8 @@ suites:
 - `env_ignore` adds names or globs to the default list. It applies when recording and
   when comparing, so adding a name stops it from selecting tests at once.
 - `env_track` takes names out of the default list. It only matters for a variable that
-  is read by name.
+  is read by name. It cannot override `env_ignore`: a name that `env_ignore` lists, at
+  the top level or in the suite, stays ignored.
 - Both work at the top level and per suite; a suite's lists add to the top-level ones.
 - `env_ignore: ["*"]` turns environment tracking off.
 

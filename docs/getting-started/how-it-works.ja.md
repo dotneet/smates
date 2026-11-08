@@ -81,12 +81,24 @@ smates はテストユニット `T` ごとに依存（入力）の集合 `D(T)` 
 | `new: no recorded run` | ステートにそのテストの記録がない。 |
 | `diff: <files>` | 記録がなく、テストが静的に依存するファイルがベースブランチから変わっている（下記参照）。 |
 | `reference: references <file>` | オーファン（どのテストにも紐づかない変更）のファイル名にテストが言及している。 |
-| `orphan: <file>` | オーファンのポリシーにより、スイート全体を実行した。 |
+| `orphan: unattributed change: <file>` | オーファンのポリシーにより、スイート全体を実行した。 |
 | `agent: …` | オーファンについて LLM エージェントがテストを追加した。 |
 | `caller: added by caller` | `smates run --add` で追加された。 |
 | `only: --only` | `smates run --only` で指定された。 |
 | `all` | 全件実行: `--all`、または CI でのデフォルトブランチ。 |
-| `rerun: rerun` | `smates watch` が前回の選択を再実行した。 |
+
+??? note "詳細: あまり見ない理由"
+    | 理由 | 意味 |
+    |---|---|
+    | `unproven: skipped last run: not proven to pass` | Go のみ: 前回テスト関数が自分自身をスキップした（`granularity: func`）か、ビルドの構成によってパッケージのテストが除外されたので、成功が証明されていない。それ以外のスキップ（pytest、vitest、jest、すべてのテストがスキップした Go のパッケージ）は成功として記録されます。 |
+    | `volatile: listed in volatile: runs every time` | スイートの [`volatile`](../reference/configuration.md#suite-keys) に含まれている。 |
+    | `expired: last run <age> ago, older than max_age <max_age>` | 最後に記録した実行が、スイートの [`max_age`](../reference/configuration.md#suite-keys) より古い。 |
+    | `new: no recorded run, and tests read <file> (changed since the base revision)` | 記録がなく、import するファイルもベースブランチから変わっていないが、同じスイートの記録済みのテストが読むファイルが変わっていて、このテストも読む可能性がある（下記参照）。 |
+    | `all: runs with <test>, of a project whose test files smates cannot list` | 選択したテストが、テストファイルを推測でしか決められないプロジェクト（smates が読めない Storybook のストーリー）に属するので、スイート全体を実行した。 |
+    | `rerun: rerun` | `smates watch` が前回の選択を再実行した。 |
+    | `failed: rerun of failed tests` | `smates watch` が成功していないテストを再実行した（`f` キー）。 |
+
+    `smates select --format json` の理由のコードは [JSON 出力](../reference/json-output.md#selection-reasons) にあります。
 
 ??? note "詳細: `new` と `diff` の違い"
     CI では、記録のないテストは `new` として選択されます。手元のマシンのステートは
@@ -95,7 +107,9 @@ smates はテストユニット `T` ごとに依存（入力）の集合 `D(T)` 
     変わっていれば選択されます（`diff`）。追加したばかりのテストファイルはそれ自体が
     変更なので、必ず実行されます。ステートがまったくない場合は、すべてのテストがこの
     方法で判定されます。CI でも `--base` を渡せば同じです（1 つのジョブでスイートを
-    1 つずつ導入する場合）。
+    1 つずつ導入する場合）。また、同じスイートの記録済みのテストが読むデータファイルが
+    ベースブランチから変わっている場合も、このテストがそれを読む可能性があるので選択されます
+    （`new`）。
 
 ## git diff ではなく内容ハッシュ { #content-hashes-not-git-diff }
 
@@ -149,9 +163,11 @@ smates はテストユニット `T` ごとに依存（入力）の集合 `D(T)` 
 
 ## テストのトレース方法 { #how-tests-are-traced }
 
-smates はいつものテストコマンドを実行し、その実行の間だけ環境変数（`NODE_OPTIONS`、
-`PYTHONPATH`、`GOFLAGS`）経由でトレース用のフックを注入します。プロジェクトには何も
-インストールしません。
+smates はいつものテストコマンドを実行し、その実行の間だけ、環境変数（`NODE_OPTIONS`、
+`PYTHONPATH`、`GOFLAGS`）といくつかの引数（[smates がコマンドに追加するもの](../guides/runners.md#what-smates-adds-to-the-command)
+を参照）でトレース用のフックを加えます。プロジェクトには何もインストールしません。
+`.smates/` を除いてプロジェクト内に書き込むのは、vitest のレポーターの一時的なコピーだけで、
+実行後に削除します。
 
 | 言語 | 依存の記録方法 |
 |---|---|

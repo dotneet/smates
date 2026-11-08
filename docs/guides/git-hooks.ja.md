@@ -48,6 +48,9 @@ push（またはコミット）のたびに、フックは次を行います。
 2. **影響するテストを実行する。** インストール時のフラグで `smates run` を実行します。
 3. テストが失敗したら **push を止める。**
 
+リモートの ref を削除するだけの push（`git push origin --delete <branch>`）では何もテストせず、pre-push
+フックはすぐに終了コード 0 で終わります。
+
 !!! warning "フックがテストするのは push するコミットではなく作業ツリーです"
     smates はディスク上のファイルをハッシュします。コミットしていない変更（pre-commit ではステージして
     いない変更）や untracked のファイルもテスト対象に含まれます。そうした変更があるとき、また push する
@@ -85,13 +88,16 @@ smates hook install --claude
 
 ### 動作 { #how-it-behaves }
 
-フックは `smates hook claude-stop` を実行し、これが `smates run --output failures --no-agent --max-time 8m` に
-`--` 以降のフラグを加えて呼び出します。
+フックは `smates hook claude-stop` を実行し、これが `smates run --output failures --max-time 8m` に
+`--no-agent`（`--agent` を付けてインストールした場合は付きません）と `--` 以降のフラグを加えて呼び出します。
+そこで `--max-time` を指定すると 8 分の上限を置き換え、`--shadow` では上限がなくなります。`--user` では
+`smates.yml` のないプロジェクトを飛ばします。
 
 - **テストが失敗した場合:**
   `{"decision": "block", "reason": "<failing tests and the rerun command>"}` を出力して終了コード 0 で
   終わります。これは Claude に作業を続けさせるための、Claude Code の公式な方法です。Claude は reason を
-  読んでテストを直します。
+  読んでテストを直します。reason に入れる出力は末尾の 16 KiB までなので、最後にある再実行のコマンドは
+  残ります。
 - **二度はブロックしません。** フックの入力に `stop_hook_active` がある（Claude が既に Stop フックに
   よって作業を続けている）ときは、すぐに戻ります。そのためループしません。
 - **何も選択されなかった場合:** ステートを書き込まずにすぐ戻ります。`state_shared: true` の場合も

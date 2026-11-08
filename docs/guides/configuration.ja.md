@@ -31,6 +31,38 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 
 検出が何かを見落としたりまとめすぎたりするとき、ランナーに特定のコマンドが必要なとき、トレースでは見えないものにテストが依存しているときに `smates.yml` を書きます。`smates init` を使うと検出結果から書き出せるので、そこから始めるのが簡単です。smates はリポジトリのルートで `smates.yml`、`smates.yaml`、`.smates.yml`、`.smates.yaml` を探します。
 
+### スイートの検出方法 { #how-suites-are-detected }
+
+検出では、Go のモジュール（`go.mod`）、テストランナーを使う JS のパッケージ（`package.json`）、Python のプロジェクトごとに 1 つずつスイートを作り、テストファイルがあるものを残します。
+
+??? note "詳細: 検出のルール"
+    `testdata/` や `vendor/` ディレクトリの中にある Go のモジュールと Python のプロジェクトはスキップします。
+
+    JS のパッケージには、最初に一致した行のランナーを使います。
+
+    | パッケージにある手がかり | ランナー |
+    |---|---|
+    | `vitest` の依存、`test` スクリプト中の `vitest`、または `vitest.config.*`、`vite.config.*`、`vitest.workspace.*` | `vitest` |
+    | `test` スクリプト中の `react-scripts test`、`craco test`、`react-app-rewired test`（Create React App） | そのコマンドで `jest`。`package.json` で `jest.testMatch` を設定しているか、CRACO や react-app-rewired でその設定ファイルがある場合を除き、テストは `src/` 以下だけ |
+    | `jest` の依存、`test` スクリプト中の `jest`、`jest.config.*`、または `package.json` の `jest` キー | `jest` |
+    | `test` スクリプト中の `bun test` | `bun` |
+    | `test` スクリプト中の `node --test` | `node` |
+    | プロジェクトごとの vitest 設定（`vitest.<name>.config.*`）だけ | `vitest` |
+    | `bun.lock`、`bun.lockb`、`bunfig.toml` | `bun` |
+
+    上位のパッケージの vitest や jest の設定が既にそのテストを含んでいるとき、そのパッケージには独自のスイートを作りません。
+
+    Python のプロジェクトは、`pyproject.toml`、`setup.cfg`、`setup.py`、`pytest.ini`、`[pytest]` セクションのある `tox.ini` のいずれかがあるディレクトリ、または requirements ファイル、`Pipfile`、`manage.py`、`conftest.py` があり、（`fixtures/` ディレクトリ以下ではない）自分のテストファイルを持つディレクトリです。別の Python のプロジェクトのスイートの中にあるプロジェクトには、独自のスイートを作りません。Python のスイートは、次のいずれかに当てはまれば `pytest` で実行します。
+
+    - プロジェクトに `pytest.ini` か `conftest.py` がある。
+    - プロジェクトまたはその上のディレクトリにあるマニフェスト、ロックファイル、requirements ファイルが pytest に言及している。
+    - GitHub のワークフローがそのプロジェクトで pytest を実行している。
+    - `pytest` を import するか、モジュールレベルの `test_` 関数を定義するテストファイルがある。
+
+    それ以外は `unittest` で実行します。
+
+    pytest の手がかりがない Django のプロジェクト（プロジェクトに `manage.py` がある）にはスイートを作りません。そのテストには `manage.py test` が用意する設定が必要なためです。`smates.yml` にスイートを書いてください。pytest-django でテストが動くなら `pytest` のスイート、そうでなければ `tests:` と、テストファイルのパスを受け取るコマンドを持つ `custom` のスイートです。
+
 ## スイートを定義する { #define-a-suite }
 
 `suites:` の各エントリに必須なのは `runner` だけです。
@@ -45,7 +77,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 
 ## テストファイルを選ぶ { #choose-the-test-files }
 
-既定では、smates はランナー自身の設定からテストファイルを読み取ります。そのため、ランナーが実行するのと同じファイルを数えます。上書きするには `tests` と `exclude` を使います。どちらもスイートの root からの相対 glob です。
+既定では、smates はランナー自身の設定からテストファイルを読み取ります。そのため、ランナーが実行するのと同じファイルを数えます。上書きするには `tests` と `exclude` を使います。どちらもスイートの root からの相対 glob です（先頭に `./` を付けると、ここでは何にも一致しなくなります）。
 
 ```yaml
   - name: web
@@ -54,6 +86,8 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
     tests: ["src/**/*.test.ts"]
     exclude: ["src/legacy/**"]
 ```
+
+`tests:` は、ランナーの設定が含めるものと除外するものの*両方*を置き換えます。smates はその設定からテストファイルを取らなくなり、ランナーの既定の除外（`node_modules/` など）と `exclude:` だけが適用されます。設定の除外が必要なら `exclude:` に写してください。`tests:` なしの `exclude:` はランナーの設定を使ったまま、その除外に追加されます。
 
 !!! note
     `custom` ランナーには既定値がありません。`custom` スイートには `tests:` が必要で、ないとテストユニットが 0 件になります。
@@ -68,7 +102,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 | `vitest` | コマンドの `--config`。なければスイートの root から上へ向かって最も近い `vitest.config.*` / `vite.config.*` | `root`、`test.root`、`test.dir`、`test.include`、`test.exclude`（`...configDefaults.exclude` も解釈）、プロジェクト（`test.projects`、`test.workspace`、`vitest.workspace.*`。コマンドの `--project` で絞り込み）、Storybook の Vitest プラグインのストーリー（[ブラウザモードと Storybook](runners.md#browser-mode-and-storybook) を参照） |
 | `pytest` | スイートの root から上へ向かって最初に見つかる `pytest.ini`、`.pytest.ini`、`pyproject.toml`（`[tool.pytest.ini_options]` / `[tool.pytest]`）、`tox.ini`（`[pytest]`）、`setup.cfg`（`[tool:pytest]`） | `python_files`、`norecursedirs`。`testpaths` はそのファイルがスイートの root にあるときだけ（pytest も rootdir で起動したときだけ使うため） |
 | `unittest` | `python -m unittest discover …` コマンドの `-s`/`-p`/`-t` | 既定はスイートの root 以下の `test*.py` |
-| `go` | `testdata/` と `vendor/` を除く `**/*_test.go` | スイートの中に入れ子になったモジュールは、`go.work` のワークスペースに含まれるときだけそのスイートに属する |
+| `go` | `testdata/`、`vendor/`、名前が `_` か `.` で始まるディレクトリを除く `**/*_test.go`（`go test ./...` と同じくスキップ） | スイートの中に入れ子になったモジュールは、`go.work` のワークスペースに含まれるときだけそのスイートに属する |
 | `node` | node の既定パターン（`*.test.*`、`*-test.*`、`*_test.*`、`test-*.*`、`test.*`、`test/` 以下のファイル） | `test/` 以下のヘルパーとフィクスチャは除外 |
 | `bun` | bun の既定パターン（`*.test.*`、`*.spec.*`、`*_test.*`、`*_spec.*`） | |
 
@@ -115,7 +149,7 @@ smates は選択したテストファイルをコマンドの末尾に追加し�
         deps: ["migrations/**"]
 ```
 
-- `inputs`: スイートのすべてのテストが依存する glob です。スイートの root からの相対パスで、先頭に `/` を付けるとリポジトリルートからの相対パスになります。ロックファイル、マニフェスト、ランナー自身の設定ファイルは既定で inputs に入っています。
+- `inputs`: スイートのすべてのテストが依存する glob です。スイートの root からの相対パスで、先頭に `/` を付けるとリポジトリルートからの相対パスになります。書いたリストは、ランナーの[既定の inputs](../reference/configuration.md#default-inputs)（ロックファイル、マニフェスト、ランナー自身の設定ファイル）に追加されます。
 - `rules`: 一部のテストだけの依存です。`tests` はスイートの root からの相対 glob、`deps` はリポジトリルートからの相対 glob です。`reaches` を使うと、置き場所ではなく import するものでテストを選べます（次の節）。
 
 ネットワーク越しにテストがアクセスするサーバーは別のケースです。そのコードは `depends_on` か `serves` で宣言します（[サーバーを叩くテスト](servers.md) を参照）。
@@ -134,7 +168,7 @@ smates は選択したテストファイルをコマンドの末尾に追加し�
 
 静的 import の閉包が `internal/testdb/` に届くテスト（直接、別のヘルパー経由、または同じ Go パッケージのほかのテストファイルから）と、前回記録した実行で `APP_DB_*` に一致する変数を読んだテストが、マイグレーションとシードデータを依存として得ます。するとマイグレーションの変更はそれらのテストを選び、オーファンではなくなります。
 
-リストを漏れなく書く必要があるのはこのためです。別の方法で接続するテスト（自前の `sql.Open`、ルールが挙げていないヘルパー、子プロセス）は deps を得ず、マイグレーションがカバーされた後はその変更でも実行されません。ヘルパーをすべて挙げ、接続が読む変数も加えてください。その変数を読むテストは、glob に一致するものを何も import していなくても残ります（Go が記録しない `TestMain` や `init` での読み取りや、設定ローダーによる読み取りでも、ソースに変数名があれば十分です。`envconfig.Process("APP", ...)` や `env_prefix="APP_"` のように、文字列リテラルに変数名の接頭辞があっても同じです）。それ以外の方法で名前を組み立てるローダーには気づかないので、そうしたテストは `tests:` で指定してください。ランナーがすべてのテストのために読み込むセットアップファイル（Vitest の `setupFiles`、`jest.config.*` または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル）は、すべてのテストが import するものとして扱います。smates が判断できないときはルールを適用します。静的解析が無効なとき、テストのファイルを読むアナライザがないとき（シェルのテスト）、JavaScript や TypeScript で smates が解決できないもの（バンドラのエイリアス）をテストやセットアップファイルが import するとき、ランナーの設定を読めないとき（パースできない JSON ファイル）、そして `$NAME` の項目でテストがまだ一度も実行されていないとき、変数が `env_ignore` にあるとき、またはランナーにかかわらずテストのソースを読めないときです。Python、Go、Java で smates が解決できない import には気づきません。`sys.path` 経由でヘルパーを見つける Python のテストは、そのヘルパーに届くものとして扱われないので、そうしたテストは `tests:` で指定してください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールや、どのファイルにも一致しない glob（誤記、ディレクトリではなく import パス）を警告します。
+リストを漏れなく書く必要があるのはこのためです。別の方法で接続するテスト（自前の `sql.Open`、ルールが挙げていないヘルパー、子プロセス）は deps を得ず、マイグレーションがカバーされた後はその変更でも実行されません。ヘルパーをすべて挙げ、接続が読む変数も加えてください。その変数を読むテストは、glob に一致するものを何も import していなくても残ります（Go が記録しない `TestMain` や `init` での読み取りや、設定ローダーによる読み取りでも、ソースに変数名があれば十分です。`envconfig.Process("APP", ...)` や `env_prefix="APP_"` のように、文字列リテラルに変数名の接頭辞があっても同じです）。それ以外の方法で名前を組み立てるローダーには気づかないので、そうしたテストは `tests:` で指定してください。ランナーがすべてのテストのために読み込むセットアップファイル（Vitest の `setupFiles`、`jest.config.*` または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル）は、すべてのテストが import するものとして扱います。smates が判断できないときはルールを適用します。静的解析が無効なとき、テストのファイルを読むアナライザがないとき（シェルのテスト）、JavaScript や TypeScript で smates が解決できないもの（バンドラのエイリアス）をテストやセットアップファイルが import するとき、ランナーの設定を読めないとき（パースできない JSON ファイル）、そして `$NAME` の項目でテストがまだ一度も実行されていないとき、変数が `env_ignore` にあるとき、またはランナーにかかわらずテストのソースを読めないときです。Python、Go、Java で smates が解決できない import には気づきません。`sys.path` 経由でヘルパーを見つける Python のテストは、そのヘルパーに届くものとして扱われません。テストが `sys.path` に加えるディレクトリをスイートの `python_roots` に加えるか（pytest の `pythonpath` も読み取ります）、そうしたテストを `tests:` で指定してください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールや、どのファイルにも一致しない glob（誤記、ディレクトリではなく import パス）を警告します。
 
 ## 環境変数を設定する { #set-environment-variables }
 
@@ -173,7 +207,7 @@ smates は選択したテストファイルをコマンドの末尾に追加し�
     junit: reports/junit.xml
 ```
 
-ファイルは、テストケースまたはテストスイートの `file` 属性から取ります。それがなければ、既存のファイルを指していればスイート名かクラス名を使います。
+ファイルは、テストケースまたはテストスイートの `file` 属性から取ります。それがなければ、既存のファイルを指していればスイート名かクラス名を使います。レポートがない、または読めないときは、エラーではなく警告です。ランナー自身のレポーターにも同じファイルの結果があるときは、悪いほう（fail > unknown > pass）を採用します。
 
 ## 1 つのリポジトリに複数のスイート { #several-suites-in-one-repository }
 
@@ -210,7 +244,7 @@ full_run_branches: [main, release]
 
 - `ignore`: *オーファン*（どのテストにも紐づかない変更。[どのテストにも紐づかない変更](orphans.md) を参照）として扱わない変更ファイルです。ドキュメント、ライセンス、エディタ設定、lint やフォーマッタの設定といった組み込みの既定値に追加されます。ignore したファイルでも、それを読むテストはそのファイルに依存したままです。
 - `inputs`: すべてのスイートのすべてのテストが依存する、リポジトリルートからの相対 glob です。CI のワークフローやツールチェーンのバージョン指定などに使います。
-- `full_run_branches`: CI 上で `smates run` がすべてを実行するブランチです（プルリクエストではなく push のビルド。既定はリポジトリのデフォルトブランチ）。そこでのフル実行によって、記録されたステートが完全に保たれます。手元では、`smates run` は常に選択します。
+- `full_run_branches`: CI 上で `smates run` がすべてを実行するブランチです（既定はリポジトリのデフォルトブランチ）。名前は完全一致で、glob は使えません。プルリクエスト以外のビルド（push、スケジュール実行、手動で開始したビルドなど）に適用され、GitHub の `merge_group` のビルドはプルリクエストとして扱います。そこでのフル実行によって、記録されたステートが完全に保たれます。手元では、`smates run` は常に選択します。
 
 その他のトップレベルのキー（`orphans`、`untested`、`env_ignore`、`env_track`、`state*`、`flaky`、`agent`）はそれぞれのページと [リファレンス](../reference/configuration.md) で説明しています。
 
@@ -220,12 +254,13 @@ full_run_branches: [main, release]
 
 | 編集した箇所 | 結果 |
 |---|---|
-| スイートのエントリ（`command`、`env`、`tests`、`isolate` など） | そのスイートのすべてのテストが再実行される |
+| スイートのエントリ（`command`、`env`、`tests`、`inputs`、`rules`、`depends_on`、`isolate` など） | そのスイートのすべてのテストが再実行される |
 | トップレベルの `env_track` | すべてのテストが再実行される |
+| トップレベルの `inputs` | glob で追加したファイルがすべてのテストの新しい依存になり、すべてのテストが 1 回実行される。glob を外しても何も再実行されない |
 | 別のスイートのエントリ | このスイートには影響しない |
-| `ignore`、`orphans`、`untested`、`agent`、`flaky`、トップレベルの `env_ignore` | 何も実行されない |
+| `ignore`、`orphans`、`untested`、`agent`、`flaky`、`full_run_branches`、トップレベルの `env_ignore` | 何も実行されない |
 | スイートの `volatile` や `max_age` | それらが選ぶユニットだけ（テストをいつ実行するかを決めるだけで、どう実行するかは変えない） |
-| `inputs` または `rules` | 追加したファイルが新しい依存になり、それを得たテストが 1 回実行される |
+| スイートの `requires` | 何も実行されない（テストをどこで実行できるかを決めるだけで、どう実行するかは変えない） |
 
 smates が補う既定値（検出したコマンドやテストの glob）はハッシュに含まれません。既定値はマシンに依存する（たとえば virtualenv があるかどうか）ため、含めると CI で記録したステートをノート PC で使ったときにすべてのスイートが再実行されてしまいます。`smates.yml` 自体を読むテストは、他のファイルと同じくその内容に依存します。
 

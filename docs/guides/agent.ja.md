@@ -50,11 +50,15 @@ agent:
 
 ## コストと所要時間 { #cost-and-latency }
 
-既定では推論の effort を low にし、プロンプトキャッシュを使います。推論しないモデルでは effort の
-指定を外します。1 回の呼び出しは通常 $0.01 を大きく下回り、数秒で終わります。
+既定では推論の effort を low にし、プロンプトキャッシュを使います。OpenAI と OpenRouter では、effort を
+受け付けないモデルにはそれを外して送り直します。Anthropic では effort を拒否されると呼び出しが失敗し、
+ほかの失敗と同じくフォールバックします（[制約とフォールバック](#bounds-and-fallbacks) を参照）。
+1 回の呼び出しは通常 $0.01 を大きく下回り、数秒で終わります。
 
-`smates stats` はエージェントの呼び出し回数とトークン数、そしてバックエンドが報告する場合はコストも
-集計します（[シャドーモード・flaky・統計](trust.md#stats) を参照）。
+`smates stats` はエージェントの呼び出し回数とトークン数を集計します（[シャドーモード・flaky・統計](trust.md#stats)
+を参照）。組み込みの Anthropic・OpenAI・OpenRouter のクライアントはコストを報告しないので、`stats` に
+コストが出るのは、出力に `total_cost_usd` を含む [`agent.command`](#an-external-agent-agentcommand) を
+使う場合だけです。
 
 ## エージェントにできること { #what-the-agent-can-do }
 
@@ -83,9 +87,11 @@ agent:
 
 ## キャッシュ { #caching }
 
-回答はステートにキャッシュされます。キーはオーファン（パス、状態、内容）、モデルまたはコマンド、
-`agent.instructions`、テスト一覧です。テスト一覧が同じなら、同じ変更について二度問い合わせることは
-ありません。そのときのログは `agent: reusing cached decision for N orphan file(s)` です。
+回答はステートにキャッシュされます。キーはオーファン（パス、状態、内容）、プロバイダー・モデル・effort
+（`agent.command` を使う場合はそのコマンド）、`agent.instructions`、テスト一覧、smates のプロンプトの
+バージョンです。テスト一覧が同じなら、同じ変更について二度問い合わせることはありません。そのときのログは
+`agent: reusing cached decision for N orphan file(s)` です。プロンプトを変えた smates のリリースでは
+問い合わせ直します。
 
 失敗の説明も同様に、テスト、変更された入力、失敗出力をキーにキャッシュされます。
 
@@ -119,9 +125,16 @@ agent:
 
 - smates はリポジトリのルートで `sh -c` によりコマンドを実行し、プロンプトを標準入力に書き込み、
   回答を標準出力から読みます。プロンプトの末尾には回答の JSON スキーマ（`decision` は `none`・
-  `tests`・`run_all` のいずれか、ほかに `tests`・`no_impact`・`summary`）が付きます。
+  `tests`・`run_all` のいずれか、ほかに `tests`・`no_impact`・`summary`）が付きます。`tests` の
+  エントリに `"test": "*"` を指定すると、そのスイート全体を追加します。
+- 回答は、標準出力のうちトップレベルに `decision` キーを持つ最後の JSON オブジェクトです（そのままでも、
+  markdown のコードブロックの中でも構いません）。標準出力全体が `decision` を持たない 1 つの JSON
+  オブジェクトなら、それはエンベロープとして扱います。smates は回答をその `final_output` か `result`
+  フィールド（文字列でもオブジェクトでも可）から取り出し、`smates stats` のために `usage`
+  （`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`）、
+  `num_turns`、`total_cost_usd` を読みます。
 - タイムアウト、検証、キャッシュ、フォールバックは組み込みのクライアントと同じです。
-- コマンドを使うのはオーファンだけです。失敗の説明には組み込みのバックエンドが必要です。
+- コマンドを使うのはオーファンだけです（[失敗の説明](#failure-explanations) は無効になります）。
 
 プロセスの扱いは、smates に端末があるかどうかで変わります。
 
@@ -138,7 +151,8 @@ GitHub はフォークからの pull request にシークレットを渡さな�
 ## 失敗の説明 { #failure-explanations }
 
 API キーがあり `--no-agent` でなければ、1 回の実行につき最大 `agent.explain_max` 件（既定 3）の
-失敗テストを説明します。`agent.explain_failures: false` で無効にできます。説明は失敗ごとにツールなしの 1 リクエストで、上限 30 秒、後続のスイートの実行中にバックグラウンドで
+失敗テストを説明します。`agent.explain_failures: false` で無効にできます。説明には組み込みの
+クライアントしか使わないので、`agent.command` を設定した場合も、どのキーがあっても無効になります。説明は失敗ごとにツールなしの 1 リクエストで、上限 30 秒、後続のスイートの実行中にバックグラウンドで
 行います。送る内容と返ってくる内容は [失敗ヒント](failure-hints.md#agent-explanations) を参照して
 ください。
 

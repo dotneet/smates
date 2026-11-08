@@ -49,8 +49,11 @@ branch. On a detached HEAD without any of these, `smates state push` needs `--re
 
 
 Default branch detection: `smates run` runs everything on the default branch, detected
-from the CI environment or `origin/HEAD`. If your CI checks out without that
-information, pass `--all` or `--select` explicitly (see the Jenkins example).
+from the CI environment or `origin/HEAD`.
+[CI detection](../reference/environment-variables.md#ci-detection) lists, per CI, the
+variables smates reads for the default branch, pull requests and the base branch. If
+your CI checks out without that information, pass `--all` or `--select` explicitly (see
+the Jenkins example).
 
 ## GitLab CI
 

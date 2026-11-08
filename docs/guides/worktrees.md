@@ -18,7 +18,8 @@ smates: selected 3 of 412 test unit(s) across 3 suite(s) (99% skipped)
 Each worktree has its own state, `.smates/state.json.gz`, so a fresh worktree would
 start with no recording, and select every test. Instead, the first command that needs the
 state in a linked worktree that has none *seeds* it, and prints one line saying where the
-seed came from.
+seed came from. With [`state_shared: true`](#share-one-state-between-worktrees), a
+missing shared file is seeded the same way, in any worktree.
 
 ### Where the seed comes from
 
@@ -54,8 +55,8 @@ state_shared: true
 
 | what | where it lives |
 |---|---|
-| per-test entries, agent answers, run records | one file under the git common directory: `.git/smates/state.json.gz` |
-| the full-tree snapshot | per worktree: `.smates/state.snapshot.json.gz` |
+| per-test entries, agent answers, run records | one file in `smates/` under the git common directory, named like the `state:` file: `.git/smates/state.json.gz` by default |
+| the full-tree snapshot | per worktree, at the `state:` path with `.snapshot` inserted before the first extension: `.smates/state.snapshot.json.gz` by default |
 
 Each worktree keeps its own snapshot, so a run on one branch never makes another
 branch's changes look like this one's.

@@ -39,6 +39,49 @@ specific command, or when tests depend on things tracing cannot see. `smates ini
 writes one from what detection found, which is the easiest starting point. smates looks
 for `smates.yml`, `smates.yaml`, `.smates.yml` or `.smates.yaml` at the repository root.
 
+### How suites are detected
+
+Detection makes one suite per Go module (`go.mod`), per JS package (`package.json`)
+that uses a test runner, and per Python project, and keeps those that have test files.
+
+??? note "Details: detection rules"
+    Go modules and Python projects inside a `testdata/` or `vendor/` directory are
+    skipped.
+
+    A JS package gets the runner of the first row that matches:
+
+    | sign in the package | runner |
+    |---|---|
+    | a `vitest` dependency, `vitest` in the `test` script, or a `vitest.config.*`, `vite.config.*` or `vitest.workspace.*` | `vitest` |
+    | `react-scripts test`, `craco test` or `react-app-rewired test` in the `test` script (Create React App) | `jest` with that command; tests under `src/` only, unless `package.json` sets `jest.testMatch` or, under CRACO or react-app-rewired, their config file is present |
+    | a `jest` dependency, `jest` in the `test` script, a `jest.config.*`, or a `jest` key in `package.json` | `jest` |
+    | `bun test` in the `test` script | `bun` |
+    | `node --test` in the `test` script | `node` |
+    | only a per-project vitest config (`vitest.<name>.config.*`) | `vitest` |
+    | `bun.lock`, `bun.lockb` or `bunfig.toml` | `bun` |
+
+    A package gets no suite of its own when the vitest or jest configuration of a
+    package above it already covers its tests.
+
+    A Python project is a directory with `pyproject.toml`, `setup.cfg`, `setup.py`,
+    `pytest.ini` or a `tox.ini` with a `[pytest]` section, or one with a requirements
+    file, `Pipfile`, `manage.py` or `conftest.py` and test files of its own (not under a
+    `fixtures/` directory). A project inside another Python project's suite gets no
+    suite of its own. A Python suite runs with `pytest` when:
+
+    - the project has a `pytest.ini` or `conftest.py`;
+    - a manifest, lockfile or requirements file of the project, or of a directory above
+      it, names pytest;
+    - a GitHub workflow runs pytest for it;
+    - or a test file imports `pytest` or defines module-level `test_` functions.
+
+    Otherwise it runs with `unittest`.
+
+    A Django project (`manage.py` in the project) without a sign of pytest gets no
+    suite: its tests need the settings `manage.py test` sets up. Write its suite in
+    `smates.yml`: a `pytest` suite if the tests run under pytest-django, or a `custom`
+    suite with `tests:` and a command that takes test file paths.
+
 ## Define a suite
 
 Each entry under `suites:` needs a `runner`; the rest is optional.
@@ -56,7 +99,8 @@ Names must be unique. What each runner traces and how it reports results is on
 
 By default smates reads the test files from the runner's own configuration, so it
 counts the same files the runner would run. Override it with `tests` and `exclude`,
-both globs relative to the suite root:
+both globs relative to the suite root (without a leading `./`, which makes a glob match
+nothing here):
 
 ```yaml
   - name: web
@@ -65,6 +109,12 @@ both globs relative to the suite root:
     tests: ["src/**/*.test.ts"]
     exclude: ["src/legacy/**"]
 ```
+
+`tests:` replaces what the runner configuration includes *and* excludes: smates no
+longer takes test files from that configuration, and only the runner's default
+excludes (such as `node_modules/`) and your `exclude:` apply. Copy the configuration's
+excludes into `exclude:` when you need them. `exclude:` without `tests:` keeps the runner
+configuration and adds to its excludes.
 
 !!! note
     The `custom` runner has no defaults: a `custom` suite needs `tests:`, or it has no
@@ -81,7 +131,7 @@ never executed.
 | `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), projects (`test.projects`, `test.workspace` or `vitest.workspace.*`, narrowed by `--project` in the command), and the stories of Storybook's Vitest plugin (see [Browser mode and Storybook](runners.md#browser-mode-and-storybook)) |
 | `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`, `norecursedirs`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
 | `unittest` | the `-s`/`-p`/`-t` of a `python -m unittest discover …` command | default: `test*.py` below the suite root |
-| `go` | `**/*_test.go`, without `testdata/` and `vendor/` | a module nested in the suite's belongs to it only through the `go.work` workspace |
+| `go` | `**/*_test.go`, without `testdata/`, `vendor/` and directories whose name starts with `_` or `.` (as `go test ./...` skips them) | a module nested in the suite's belongs to it only through the `go.work` workspace |
 | `node` | node's default patterns: `*.test.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*`, files under `test/` | helpers and fixtures under `test/` are excluded |
 | `bun` | bun's default patterns: `*.test.*`, `*.spec.*`, `*_test.*`, `*_spec.*` | |
 
@@ -148,8 +198,9 @@ cannot observe:
 ```
 
 - `inputs`: globs every test of the suite depends on. They are relative to the suite
-  root; a leading `/` makes a glob repository-relative. Lockfiles, manifests and the
-  runner's own config are inputs by default.
+  root; a leading `/` makes a glob repository-relative. Your list is added to the
+  runner's [default inputs](../reference/configuration.md#default-inputs): lockfiles,
+  manifests and the runner's own config.
 - `rules`: dependencies for some tests only. `tests` are globs relative to the suite
   root, `deps` are repository-relative globs. `reaches` picks the tests by what they
   import instead of where they live (next section).
@@ -198,7 +249,9 @@ the runner's configuration cannot be read (a JSON file that does not parse), or,
 `$NAME` entry, the test has never run, the variable is in `env_ignore`, or no source of
 the test can be read, whatever its runner. An import smates cannot resolve
 in Python, Go or Java is not noticed: a Python test that finds a helper through
-`sys.path` does not count as reaching it, so name such tests with `tests:`. `smates doctor` prints how many test units each such rule applies to and
+`sys.path` does not count as reaching it. Add the directory the test puts on `sys.path`
+to the suite's `python_roots` (pytest's `pythonpath` is read too), or name such tests
+with `tests:`. `smates doctor` prints how many test units each such rule applies to and
 warns when a rule applies to none, or when one of its globs matches no file (a typo, an
 import path instead of a directory).
 
@@ -250,7 +303,9 @@ and smates reads per-file results from it:
 ```
 
 Files are taken from the `file` attribute of test cases or suites, else from the suite
-name or class name when it names an existing file.
+name or class name when it names an existing file. A report that is missing or cannot
+be read is a warning, not an error. When the runner's own reporter also has a result
+for a file, the worse of the two wins (fail beats unknown, which beats pass).
 
 ## Several suites in one repository
 
@@ -296,9 +351,11 @@ full_run_branches: [main, release]
   ignored file still depends on it.
 - `inputs`: repository-relative globs every test of every suite depends on, such as a
   CI workflow or a toolchain pin.
-- `full_run_branches`: branches on which `smates run` runs everything on CI (push
-  builds, not pull requests; default: the repository's default branch). A full run
-  there keeps the recorded state complete. Locally, `smates run` always selects.
+- `full_run_branches`: branches on which `smates run` runs everything on CI (default:
+  the repository's default branch). Names match exactly, without globs. It applies to
+  any build that is not a pull request: a push, scheduled or manually started
+  build. A GitHub `merge_group` build counts as a pull request. A full run there keeps
+  the recorded state complete. Locally, `smates run` always selects.
 
 Other top-level keys (`orphans`, `untested`, `env_ignore`, `env_track`, `state*`,
 `flaky`, `agent`) are covered on their own pages and in the
@@ -312,12 +369,13 @@ top-level `env_track`, not the whole file:
 
 | you edit | effect |
 |---|---|
-| a suite's entry (`command`, `env`, `tests`, `isolate`, …) | every test of that suite runs again |
+| a suite's entry (`command`, `env`, `tests`, `inputs`, `rules`, `depends_on`, `isolate`, …) | every test of that suite runs again |
 | top-level `env_track` | every test runs again |
+| top-level `inputs` | the files a glob adds are new dependencies of every test, so every test runs once; removing a glob reruns nothing |
 | another suite's entry | nothing of this suite |
-| `ignore`, `orphans`, `untested`, `agent`, `flaky`, top-level `env_ignore` | nothing runs |
+| `ignore`, `orphans`, `untested`, `agent`, `flaky`, `full_run_branches`, top-level `env_ignore` | nothing runs |
 | a suite's `volatile` or `max_age` | only the units they select now: they choose when tests run, not how |
-| `inputs` or `rules` | the files they add are new dependencies: tests that gain one run once |
+| a suite's `requires` | nothing runs: it decides where tests can run, not how |
 
 The defaults smates fills in (a detected command, test globs) are not part of the
 hash. They depend on the machine, for example on whether a virtualenv exists, and a

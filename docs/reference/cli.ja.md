@@ -35,7 +35,7 @@
 | `--suite` | name | すべてのスイート | 対象をそのスイートに絞ります。複数指定できます。存在しない名前は終了コード 3 になります。 |
 | `-v` | | オフ | 詳細な出力（`run` / `select` では、`--explain` と同様に選択されたテストと理由を表示）。 |
 
-`--format` を持つコマンドはどれも `text`（デフォルト）か `json` を受け付けます。例外は形式の多い `smates select` です。JSON のレポートは stdout に、ログは stderr に出力されます。
+`--format` を持つコマンドはどれも `text`（デフォルト）か `json` を受け付けます。例外は形式の多い `smates select` です。JSON のレポートは stdout に、ログは stderr に出力されます。各フィールドは [JSON 出力](json-output.md) で説明しています。
 
 終了コードはすべてのコマンドで共通です。[終了コード](exit-codes.md) を参照してください。
 
@@ -47,7 +47,7 @@
 smates run [flags] [-- runner args]
 ```
 
-変更が影響しうるテストを選択し、トレースしながら実行して、各テストが使ったものを記録します。CI でデフォルトブランチ（または [`full_run_branches`](configuration.md#top-level-keys) に挙げたブランチ）への push をビルドするときは、代わりにすべてのテストを実行します。[選択の仕組み](../getting-started/how-it-works.md) も参照してください。
+変更が影響しうるテストを選択し、トレースしながら実行して、各テストが使ったものを記録します。CI でデフォルトブランチ（または [`full_run_branches`](configuration.md#top-level-keys) に挙げたブランチ）を、プルリクエスト以外のビルド（push、スケジュール実行、手動実行）でビルドするときは、代わりにすべてのテストを実行します。GitHub のマージキューのビルド（`merge_group`）はプルリクエストとして扱います。[選択の仕組み](../getting-started/how-it-works.md) も参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -64,7 +64,7 @@ smates run [flags] [-- runner args]
 | `--shard` | `I/N` | | 選択されたテストのうち、`N` 分割した `I` 番目のシャードを実行します。テストはスイートとテスト ID の安定したハッシュでシャードに割り当てられます。割り当ては `N` によって変わるので、1 回の実行の全シャードは同じ `N` を使います。シャード実行ではエージェントを呼びません。 |
 | `--fail-fast` | | オフ | あるバッチが失敗したら、それ以降のバッチを開始しません。テストは失敗しそうなものから順に実行されます。 |
 | `--output` | `full`、`failures` | `$SMATES_OUTPUT`、なければ `full` | `full` はランナーの出力をそのまま流します。`failures` は失敗したテストの出力だけを表示し、最後にそれらを再実行するコマンド付きの短いまとめを出します。`agent` は `failures` の別名として受け付けます。 |
-| `--report` | file | | JSON のレポート（選択結果、テストごとの結果、シャドーモードでの見逃し、`exit_code`）を `file` に書き出します。`-` を指定すると stdout に書き、ほかの出力はすべて stderr に回します。 |
+| `--report` | file | | [JSON のレポート](json-output.md#smates-run-report)（選択結果、テストごとの結果、シャドーモードでの見逃し、`exit_code`）を `file` に書き出します。`-` を指定すると stdout に書き、ほかの出力はすべて stderr に回します。 |
 | `--markdown` | file | | まとめを Markdown で `file` に書き出します（上書き）。プルリクエストのコメント用です。 |
 | `--summary` | file | GitHub Actions では `$GITHUB_STEP_SUMMARY` | Markdown のまとめを `file` に追記します。 |
 | `--budget` | duration | `90s` | 選択されたテストの記録済み所要時間の合計がこれを超えると、実行前に分割方法を表示します。`0` で無効になります。 |
@@ -79,7 +79,7 @@ smates run [flags] [-- runner args]
 - `--shadow` と `--fail-fast`、`--max-time`
 - `--dry-run` と `--report`、`--markdown`、`--summary`（代わりに `smates select --format json|markdown` を使います）
 
-`--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行ではテストを成功として記録しません。常に使うフラグはスイートの `command` に書いてください。
+`run` と `watch` では、`--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行やウォッチの各回の実行ではテストを成功として記録しません。常に使うフラグはスイートの `command` に書いてください。
 
 ??? note "詳細: `--output failures` の出力内容"
     ランナーのバッチごとに出力をバッファし、バッチが失敗したときだけ表示します。失敗したテストごとの出力を報告できるランナー（vitest、jest、pytest、`go test`、JUnit）ではその部分だけを、それ以外ではバッチの出力を最大 200 行（先頭 30 行と末尾 170 行）表示します。smates 自身の進捗行は省略されます。出力のないまま 30 秒経つと `smates: still running <suite> (...)` を表示します。間隔は `SMATES_HEARTBEAT` で変えられます。[コーディングエージェントから使う](../guides/coding-agents.md) を参照してください。
@@ -88,16 +88,16 @@ smates run [flags] [-- runner args]
 
 `--max-time 8m` を付けると、実行をおよそ 8 分以内に収めます。
 
-- 各スイートのテストを、記録済みの所要時間をもとに、上限のおよそ 4 分の 1 ずつのバッチに分けます。最後の成功、失敗、スキップが 0 ミリ秒より長い所要時間で記録されたテストを、測られたものとして数えます。それ以外のテスト（記録がない、別の結果で記録された、0 ミリ秒で記録された）は、そのスイートの測られたテストの平均として数えます。そのため、ランナーがすべてのテストを 0 ミリ秒と報告するスイートは、所要時間がまったく記録されていないことになります。所要時間がまったく記録されていないスイートは 1 つのバッチのままで、使った時間が上限の半分未満のときだけ開始します。記録された所要時間にはテストバイナリのコンパイルとリンクが含まれないので、バッチがビルドする Go のパッケージごとに 1 秒を加えます。
+- 各スイートのテストを、記録済みの所要時間をもとに、上限のおよそ 4 分の 1 ずつのバッチに分けます。最後の成功、失敗、スキップが 0 ミリ秒より長い所要時間で記録されたテストを、測られたものとして数えます。それ以外のテスト（記録がない、別の結果で記録された、0 ミリ秒で記録された）は、そのスイートの測られたテストの平均として数えます。測られたテストが 1 つもないスイート（ランナーがすべてのテストを 0 ミリ秒と報告する場合など）は 1 つのバッチのままで、使った時間が上限の半分未満のときだけ開始します。記録された所要時間にはテストバイナリのコンパイルとリンクが含まれないので、バッチがビルドする Go のパッケージごとに 1 秒を加えます。
 - バッチはいつもどおり失敗しそうなものから順に開始します。各バッチの前に、上限より後に終わるかを確かめます。見積もりには、実行したバッチが見積もりより長くかかった時間の、バッチあたりの平均を加えます（ランナーの起動やビルドは、短いバッチでも長いバッチでもほぼ同じ時間がかかるためです）。同じスイートのバッチの平均を使い、スイートの最初のバッチではすべてのスイートの平均を使います。requires は先に確かめます。満たされない requires で一部のユニットが外れたバッチは実行するユニットで見積もり、ユニットが 1 つも残らないバッチは上限の判定に数えません（次のバッチを確かめます）。上限より後に終わるなら、それ以降は何も開始しません。
 - 最初のバッチは必ず開始するので、どの実行でも少しは進みます。実行中のバッチを止めることはありません。
-- 外れたテストは実行も記録もされず、選択されたまま残ります。後の実行は通常の順序（優先度、次に記録された実行時間の短い順）で実行するので、新しい変更がほかのテストを選択し続けると、長いテストはまた外れることがあります。CI ではすべて実行します。ログ、サマリー（`Time limit`）、レポート（`max_time_reached`、`not_run`）に表示されます。
+- 外れたテストは実行も記録もされず、選択されたまま残ります。後の実行は通常の順序（優先度、次に記録された実行時間の短い順）で実行するので、新しい変更がほかのテストを選択し続けると、長いテストはまた外れることがあります。CI ではすべて実行します。ログ、サマリー（`Time limit`）、[レポート](json-output.md#smates-run-report)（`max_time_reached`、`not_run`）に表示されます。
 
 実行したものがすべて成功すれば、終了コードは 0 です。CI でマージの可否を決めるのには `--max-time` を使わないでください。外れたテストは実行されていません。Claude Code と Codex の Stop フックは、デフォルトで `--max-time 8m` を使います（[git フック](../guides/git-hooks.md#claude-code-stop-hook) を参照）。
 
 #### 前提条件を満たさないスイート { #unmet-requires }
 
-[`requires`](configuration.md#requires) を満たさないスイートのユニットは開始しません。選択されたまま残り、記録もされません。ログには失敗したチェックがそれぞれ表示されます。テストが失敗していなければ終了コードは 4、失敗していれば 1 です。レポートでは、チェックが `unmet_requires` に、ユニットが `not_run` に入ります。
+[`requires`](configuration.md#requires) を満たさないスイートのユニットは開始しません。選択されたまま残り、記録もされません。ログには失敗したチェックがそれぞれ表示されます。テストが失敗していなければ終了コードは 4、失敗していれば 1 です。[レポート](json-output.md#smates-run-report)では、チェックが `unmet_requires` に、ユニットが `not_run` に入ります。
 
 ### smates select { #smates-select }
 
@@ -105,7 +105,7 @@ smates run [flags] [-- runner args]
 smates select [flags]
 ```
 
-何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。[全件実行するブランチ](configuration.md#top-level-keys)への push のビルドでは、`smates run` がそこで全テストを実行するので、全テストを選択します。ジョブをゲートする出力（`skip`、`suites`）が、ステートを更新する全件実行をスキップさせることはありません。
+何も実行せずに選択結果を表示します。エージェントを呼ぶことはあり、その場合は回答をステートに保存するので、同じ変更に対する次の `smates run` はそれを再利用します。CI で [全件実行するブランチ](configuration.md#top-level-keys) をプルリクエスト以外でビルドするとき（マージキューのビルドはプルリクエストとして扱います）は、`smates run` がそこで全テストを実行するので、全テストを選択します。ジョブをゲートする出力（`skip`、`suites`）が、ステートを更新する全件実行をスキップさせることはありません。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -117,7 +117,7 @@ smates select [flags]
 | `--orphans` | `agent`、`full`、`skip` | `smates.yml` の `orphans:` | `run` と同じです。 |
 | `--no-agent` | | オフ | エージェントを呼びません。 |
 | `--shard` | `I/N` | | 選択結果のうち `I/N` のシャード分だけを対象にします。 |
-| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。全件実行するブランチへの push のビルドでは、選択と同じく全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
+| `--max-shards` | `N`（1〜256） | | 選択に合わせたシャード数も求めます。何も選択されなければ `0`、それ以外は選択されたテストの記録済み実行時間を `--shard-time` で割って切り上げ、`1` から `N` に収めた値です。そうした全件実行のビルドでは、選択と同じく全テストを前提に求めます。[シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。`--shard` とは併用できません。 |
 | `--shard-time` | 期間 | `10m` | `--max-shards` のとき: 1 シャードあたりの記録済みテスト時間の目安。実行時間が記録されていない選択済みテストはスイートの中央値として数えます。選択されたテストがあり、実行時間が 1 つも記録されていないスイートがあれば `N` になります。 |
 | `--markdown` | file | | Markdown のまとめを `file` にも書き出します。 |
 
@@ -127,7 +127,7 @@ smates select [flags]
 |---|---|
 | `text` | 選択されたテスト ID を 1 行に 1 つ。選択のまとめは stderr に出ます。 |
 | `files` | 選択されたテスト ID を 1 行に 1 つ。stderr には何も出ません。 |
-| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断、`--max-shards` のときは `shards`。 |
+| `json` | 選択結果のすべて: `selected`、`total`、`selected_tests`（スイートごと）、テストごとの理由、`orphan_candidates`、エージェントの判断、`--max-shards` のときは `shards`。[JSON 出力](json-output.md#smates-select) を参照してください。 |
 | `github` | `selected`、`total`、`run-all`、`skip`、`tests`、`suites`（`--max-shards` のときは `shards` と `shard-matrix` も）をステップの出力として `$GITHUB_OUTPUT` に書き込みます（未設定なら stdout）。まとめは `$GITHUB_STEP_SUMMARY` に追記されます。[出力](../ci/github-actions.md#outputs) を参照してください。 |
 | `markdown` | プルリクエストのコメントに使う Markdown のまとめ。 |
 
@@ -137,7 +137,7 @@ smates select [flags]
 smates watch [flags] [-- runner args]
 ```
 
-作業ツリーをポーリングし、変更のたびに影響を受けるテストを再実行します。stdin が端末のときはキー操作ができます: `a` で全件実行、`f` で失敗したテストを再実行、Enter で再実行、`q` で終了。[ウォッチモード](../guides/watch.md) を参照してください。
+作業ツリーをポーリングし、変更のたびに影響を受けるテストを再実行します。stdin が端末のときはキー操作ができます: `a` で全件実行、`f` で失敗したテストを再実行、Enter または `r` で再実行、`q` で終了。[ウォッチモード](../guides/watch.md) を参照してください。
 
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
@@ -159,7 +159,7 @@ smates why [flags] <file | $VAR>
 
 ファイルに依存するテストと、その依存の種類（`static`、`recorded`、`depends_on` の宣言など）を一覧します。`'$TZ'` のように指定すると（シェルに展開されないようクォートします）、環境変数 `TZ` を読むテストを一覧します。
 
-フラグ: `--format text|json` と [共通フラグ](#common-flags)。
+フラグ: `--format text|json`（[JSON 出力](json-output.md#smates-why-deps-list)）と [共通フラグ](#common-flags)。
 
 ### smates deps { #smates-deps }
 
@@ -169,7 +169,7 @@ smates deps [flags] <test unit>
 
 1 つのテストユニットの依存を一覧します。テストユニットはテストファイル、Go のパッケージディレクトリ、`granularity: func` のスイートでは `pkg#TestName` です。各行には、その依存が `static`（静的解析、`inputs`、`rules`、`depends_on`）か `recorded`（テスト実行中に観測）か、またはその両方かが付きます。テストユニットでない名前は終了コード 3 になります。
 
-フラグ: `--format text|json` と [共通フラグ](#common-flags)。
+フラグ: `--format text|json`（[JSON 出力](json-output.md#smates-why-deps-list)）と [共通フラグ](#common-flags)。
 
 ### smates list { #smates-list }
 
@@ -177,7 +177,7 @@ smates deps [flags] <test unit>
 smates list [flags]        # 別名: smates ls
 ```
 
-スイートごとに 1 行、名前、ランナー、ルート、ユニット数、コマンド、テストのパターンの出どころ（`tests=jest.config.js testMatch`）を表示します。`-v` を付けるとパターンとすべてのユニットも表示します。smates が読めなかった設定は、検出の警告として stderr に出ます。JSON のレポートには `tests_source`、`test_patterns`、`units`、`discovery_warning` が含まれます。
+スイートごとに 1 行、名前、ランナー、ルート、ユニット数、コマンド、テストのパターンの出どころ（`tests=jest.config.js testMatch`）を表示します。`-v` を付けるとパターンとすべてのユニットも表示します。smates が読めなかった設定は、検出の警告として stderr に出ます。[JSON のレポート](json-output.md#smates-why-deps-list)には `tests_source`、`test_patterns`、`units`、`discovery_warning` が含まれます。
 
 フラグ: `--format text|json` と [共通フラグ](#common-flags)。
 
@@ -187,7 +187,7 @@ smates list [flags]        # 別名: smates ls
 smates doctor [flags]
 ```
 
-セットアップを診断し、チェックごとに 1 行表示します。失敗したチェックがあると終了コード 1 になります（警告だけなら 0 です）。JSON では各チェックに安定した `id`、`status`（`ok`、`warn`、`fail`）、`message`、`fix`（`command`、`config` のキーと値、または `doc`）が付きます。
+セットアップを診断し、チェックごとに 1 行表示します。失敗したチェックがあると終了コード 1 になります（警告だけなら 0 です）。[JSON](json-output.md#smates-doctor) では各チェックに安定した `id`、`status`（`ok`、`warn`、`fail`）、`message`、`fix`（`command`、`config` のキーと値、または `doc`）が付きます。
 
 | チェックの `id` | 確認する内容 |
 |---|---|
@@ -196,6 +196,7 @@ smates doctor [flags]
 | `suite-not-detected` | `smates.yml` がないとき、テストランナーを設定している（vitest や jest の設定ファイル、プロジェクトごとの `vitest.*.config.*`、vitest を import するか `test` を設定する `vite.config.*`。ただの Vite アプリは含みません）のにスイートにならなかったパッケージ（smates が見つけられるテストファイルがない）。`smates init` も同じ注意を出します |
 | `suite-tests-source`、`suite-test-discovery` | テストのパターンの出どころと、smates が読めなかったランナー設定 |
 | `suite-launcher`、`suite-dependencies-installed` | スイートのコマンドを起動できること、`node_modules` がインストールされていること |
+| `toolchain-node` | vitest、jest、node のスイートがあるとき: `node` が `PATH` にあり、バージョン 18 以上であること（トレースに必要） |
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
 | `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
@@ -220,7 +221,7 @@ smates flaky --clear [unit...]
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
 | `--clear` | | オフ | 指定したユニット（指定がなければすべて）の flaky の証拠を消去します。ユニットの指定は `--clear` のときだけ受け付けます。 |
-| `--format` | `text`、`json` | `text` | 出力形式。 |
+| `--format` | `text`、`json` | `text` | 出力形式（[JSON](json-output.md#smates-flaky)）。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
 
@@ -238,7 +239,7 @@ smates stats [flags]
 | `--branch` | branch | すべて | そのブランチでの実行だけを対象にします。 |
 | `--ci` | | オフ | CI での実行だけを対象にします。 |
 | `--recent` | n | `5` | テキスト出力で直近 `n` 件の実行を一覧します。 |
-| `--format` | `text`、`json` | `text` | 出力形式。 |
+| `--format` | `text`、`json` | `text` | 出力形式（[JSON](json-output.md#smates-stats)）。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
 | `--state` | file | `.smates/state.json.gz` | ステートファイル。 |
 
@@ -259,7 +260,7 @@ smates orphans --apply [--dry-run]
 | `--since` | rev | | `rev` より後のコミットを再生します。`--history` を明示しなければ件数の上限はありません。 |
 | `--apply` | | オフ | 提案された `ignore:` のグロブを `smates.yml` に追加します（それ以外は変更しません）。コメントとレイアウトは保たれます。 |
 | `--dry-run` | | オフ | `--apply` と併用し、書き込まずに差分を表示します。 |
-| `--format` | `text`、`json` | `text` | 出力形式。 |
+| `--format` | `text`、`json` | `text` | 出力形式（[JSON](json-output.md#smates-orphans)）。 |
 
 加えて [共通フラグ](#common-flags) も使えます。
 
@@ -280,7 +281,7 @@ smates init [flags]
 | `--agents-md` | | オフ | コーディングエージェント向けの短い smates の節を `AGENTS.md`（または `CLAUDE.md`）に追加します。 |
 | `--force` | | オフ | 既存の `smates.yml` を上書きします。 |
 | `--stdout` | | オフ | 書き出さずに設定を表示します。 |
-| `--format` | `text`、`json` | `text` | `json` はスイート、書き出したファイル、`needs_review` の項目（根拠と推奨される変更付き）を報告します。 |
+| `--format` | `text`、`json` | `text` | `json` はスイート、書き出したファイル、`needs_review` の項目（根拠と推奨される変更付き）を報告します（[JSON 出力](json-output.md#smates-init)）。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
 
 ### smates config { #smates-config }
@@ -302,7 +303,7 @@ YAML を手で編集せずに `smates.yml` を変更します。コメントと�
 | フラグ | 値 | デフォルト | 意味 |
 |---|---|---|---|
 | `--dry-run` | | オフ | 差分を表示し、何も書き込みません。 |
-| `--format` | `text`、`json` | `text` | 出力形式。 |
+| `--format` | `text`、`json` | `text` | 出力形式（[JSON](json-output.md#smates-config)）。 |
 | `--config` | file | リポジトリルートの `smates.yml` | 編集する設定ファイル。存在している必要があります（先に `smates init` を実行してください）。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
 
@@ -352,7 +353,7 @@ smates state clear
 | `--remote` | name | `origin` | `pull` / `push`: git のリモート。 |
 | `--ref` | ref | `refs/smates/state/<branch>` | `pull` / `push`: git の ref。 |
 | `-o` | file | ステートファイル | `merge`: 出力先のファイル。 |
-| `--format` | `text`、`json` | `text` | `show`: 出力形式。 |
+| `--format` | `text`、`json` | `text` | `show`: 出力形式（[JSON](json-output.md#smates-state-show)）。 |
 | `--json` | | オフ | `show`: `--format json` の非推奨の別名。 |
 | `--state` | file | `.smates/state.json.gz` | ステートファイル。 |
 | `-C` | dir | カレントディレクトリ | `dir` で起動したものとして動作します。 |
@@ -393,5 +394,6 @@ smates hook status
 ## 関連項目 { #see-also }
 
 - [smates.yml](configuration.md): すべての設定キー
+- [JSON 出力](json-output.md): JSON のレポートのすべてのフィールド
 - [終了コード](exit-codes.md)
 - [smates が読む環境変数](environment-variables.md)

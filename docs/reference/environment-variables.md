@@ -38,9 +38,11 @@ process, whichever provider is used. A suite that needs one can set it in its `e
 
 ## CI detection
 
-smates detects the CI it runs on to tell push builds from pull requests, to find the
-branch and the default branch, and to choose a base revision. On CI, a push build of the
-default branch runs every test; locally, tests without a recording are compared against
+smates detects the CI it runs on to tell pull requests from other builds, to find the
+branch and the default branch, and to choose a base revision. On CI, a build that is not
+a pull request (a push, scheduled or manually started build) of a branch in
+[`full_run_branches`](configuration.md#top-level-keys) (default: the default branch) runs
+every test; locally, tests without a recording are compared against
 the base branch instead of all running as new.
 
 | CI | Detected by | Variables read |

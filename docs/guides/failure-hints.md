@@ -30,7 +30,12 @@ Candidates are ranked by kind:
 5. configuration (suite inputs, manifests, lockfiles);
 6. directory listings.
 
-Within a kind, the most recently modified file comes first.
+Within a kind, the most recently modified file comes first; ties go to the file closest
+to the test (the most leading directories in common with it), then to path order.
+
+At most 10 candidates are kept per test; `--report` gives the number left out as `more`.
+The run log, the step summary and the short summary of `--output failures` show the first
+5, followed by how many more there are.
 
 ## When none of its inputs changed
 
@@ -65,8 +70,8 @@ line, reason, confidence) to the first few failures:
     → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
 ```
 
-This happens when an API key is set, the run is not `--no-agent`, and
-`agent.explain_failures` is not `false`.
+This happens when an API key is set, the run is not `--no-agent`,
+`agent.explain_failures` is not `false`, and `agent.command` is not set.
 
 ```yaml
 agent:
@@ -82,7 +87,8 @@ agent:
 - **Cached.** Answers are cached by content in the state, so the same failure is not
   explained twice.
 - **Harmless when it fails.** An error prints one note and never changes the exit code.
-- **Built-in backend only.** An external `agent.command` is not used for explanations.
+- **Built-in backend only.** Setting `agent.command` turns explanations off, even with an
+  API key set.
 
 ## See also
 

@@ -323,7 +323,7 @@ type whyReport struct {
 type whyTest struct {
 	Suite string `json:"suite"`
 	Test  string `json:"test"`
-	// Kind of dependency: content | listing | existence | tree.
+	// Kind of dependency: content | declarations | listing | existence | tree.
 	Kind string `json:"kind"`
 	// How: the explanations the text output shows ("static/inputs", "recorded", a
 	// depends_on/serves declaration, ...).

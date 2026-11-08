@@ -122,10 +122,10 @@ What it counts:
 
 | section | contents |
 |---|---|
-| Runs | runs by mode (selective, full, shadow) and source (CI, local, watch) |
+| Runs | runs by mode (selective, static without state, full, shadow) and source (CI, local, watch) |
 | Selection | test units run out of the total (the skip rate); the recorded time of the skipped units (the time saved), also extrapolated to 30 days |
 | Shadow mode | shadow runs, misses and the miss rate |
-| Orphans | orphans by how they were handled (reference scan, untested code, agent, full suite run, skipped by caller); agent calls with tokens, and their cost when the backend reports one (e.g. `claude -p`) |
+| Orphans | orphans by how they were handled (reference scan, untested code, agent, full suite run, skipped by caller); agent calls with tokens, and their cost when an `agent.command` reports one (`total_cost_usd`; the built-in clients report none) |
 | Flaky tests | flips detected, and tests currently marked flaky |
 | Recent runs | the last few runs, one line each |
 
@@ -136,6 +136,10 @@ What it counts:
 | `--ci` | only runs on CI |
 | `--recent N` | list the last N runs (default 5) |
 | `--format json` | machine-readable output |
+
+In `--format json`, `by_mode` uses the recorded mode names: `state` (selective), `diff`
+(static, no state), `all` (full) and `shadow`. See
+[JSON output](../reference/json-output.md#smates-stats) for every field.
 
 ### Where the numbers come from
 

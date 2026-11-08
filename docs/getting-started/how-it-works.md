@@ -79,12 +79,25 @@ suite) selects nothing.
 | `new: no recorded run` | The state has no entry for the test. |
 | `diff: <files>` | No recorded run, and a file the test statically depends on changed since the base branch (see below). |
 | `reference: references <file>` | An orphan: the test names a changed file that is not among any test's inputs. |
-| `orphan: <file>` | An orphan the policy handled by running the suite in full. |
+| `orphan: unattributed change: <file>` | An orphan the policy handled by running the suite in full. |
 | `agent: …` | The LLM agent added the test for an orphan. |
 | `caller: added by caller` | Added with `smates run --add`. |
 | `only: --only` | Named with `smates run --only`. |
 | `all` | A full run: `--all`, or the default branch in CI. |
-| `rerun: rerun` | `smates watch` reran the previous selection. |
+
+??? note "Details: less common reasons"
+    | Reason | Meaning |
+    |---|---|
+    | `unproven: skipped last run: not proven to pass` | Go only: last time the test function skipped itself (`granularity: func`), or the build configuration left the package's tests out, so its pass is not proven. Any other skip (pytest, vitest, jest, a Go package whose tests all skip) is recorded as a pass. |
+    | `volatile: listed in volatile: runs every time` | The suite's [`volatile`](../reference/configuration.md#suite-keys) lists it. |
+    | `expired: last run <age> ago, older than max_age <max_age>` | Its last recorded run is older than the suite's [`max_age`](../reference/configuration.md#suite-keys). |
+    | `new: no recorded run, and tests read <file> (changed since the base revision)` | No recorded run and nothing it imports changed since the base branch, but recorded tests of its suite read a file that did, and this test may read it too (see below). |
+    | `all: runs with <test>, of a project whose test files smates cannot list` | A selected test belongs to a project whose test files are a guess (Storybook stories smates cannot read), so the whole suite runs. |
+    | `rerun: rerun` | `smates watch` reran the previous selection. |
+    | `failed: rerun of failed tests` | `smates watch` reran the tests that have not passed (the `f` key). |
+
+    The reason codes in `smates select --format json` are listed in
+    [JSON output](../reference/json-output.md#selection-reasons).
 
 ??? note "Details: `new` versus `diff`"
     In CI a test with no recorded run is selected as `new`. On your machine the state only
@@ -92,7 +105,9 @@ suite) selects nothing.
     against the base branch instead: it is selected (`diff`) when its test file or a file
     it imports changed since then. A test file you just added is such a change, so it
     still runs. The same applies to every test when there is no state at all, and in CI
-    when you pass `--base` (to adopt suites one at a time in one job).
+    when you pass `--base` (to adopt suites one at a time in one job). It is also
+    selected (`new`) when a data file that recorded tests of its suite read changed since
+    then, since it may read that file too.
 
 ## Content hashes, not git diff
 
@@ -144,9 +159,12 @@ Frequent orphans belong in `ignore:`; `smates orphans` suggests the globs. See
 
 ## How tests are traced
 
-smates runs your own test command and injects its tracing hooks through environment
-variables (`NODE_OPTIONS`, `PYTHONPATH`, `GOFLAGS`) for that run only. Nothing is
-installed into your project.
+smates runs your own test command, adding its tracing hooks through environment
+variables (`NODE_OPTIONS`, `PYTHONPATH`, `GOFLAGS`) and a few arguments (see
+[What smates adds to the command](../guides/runners.md#what-smates-adds-to-the-command))
+for that run only. Nothing is installed into your project: apart from `.smates/`, the
+only file it writes there is a temporary copy of its vitest reporter, removed after the
+run.
 
 | Language | How dependencies are recorded |
 |---|---|
