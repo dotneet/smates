@@ -44,7 +44,7 @@ command name.
 
 `--format` takes `text` (the default) or `json` on every command that has it, except
 `smates select`, which has more formats. A JSON report goes to stdout; log lines go to
-stderr.
+stderr. [JSON output](json-output.md) describes every field.
 
 Exit codes are the same for every command: see [Exit codes](exit-codes.md).
 
@@ -57,8 +57,10 @@ smates run [flags] [-- runner args]
 ```
 
 Selects the tests your changes can affect, runs them with tracing, and records what
-each test used. On CI, a push build of the default branch (or of a
-[`full_run_branches`](configuration.md#top-level-keys) branch) runs every test instead.
+each test used. On CI, a build of the default branch (or of a
+[`full_run_branches`](configuration.md#top-level-keys) branch) that is not for a pull
+request (a push, a scheduled or a manually started build) runs every test instead. A
+GitHub merge queue build (`merge_group`) counts as a pull request.
 See [How smates decides](../getting-started/how-it-works.md).
 
 | Flag | Value | Default | Meaning |
@@ -76,7 +78,7 @@ See [How smates decides](../getting-started/how-it-works.md).
 | `--shard` | `I/N` | | Run shard `I` of `N` of the selected tests. Tests are assigned to shards by a stable hash of suite and test ID; the assignment depends on `N`, so all shards of a run use the same `N`. Sharded runs do not call the agent. |
 | `--fail-fast` | | off | Start no further test batch after one fails. Tests run likeliest-to-fail first. |
 | `--output` | `full`, `failures` | `$SMATES_OUTPUT`, else `full` | `full` streams the runner output. `failures` prints only the output of failing tests, then a short summary with a command that reruns them. `agent` is accepted as an alias of `failures`. |
-| `--report` | file | | Write a JSON report (selection, per-test results, shadow escapes, `exit_code`) to `file`. `-` writes it to stdout and moves all other output to stderr. |
+| `--report` | file | | Write a [JSON report](json-output.md#smates-run-report) (selection, per-test results, shadow escapes, `exit_code`) to `file`. `-` writes it to stdout and moves all other output to stderr. |
 | `--markdown` | file | | Write the summary as Markdown to `file` (replaced), for a pull request comment. |
 | `--summary` | file | `$GITHUB_STEP_SUMMARY` on GitHub Actions | Append the Markdown summary to `file`. |
 | `--budget` | duration | `90s` | When the recorded durations of the selected tests add up to more than this, print how to split the run first. `0` turns it off. |
@@ -92,9 +94,9 @@ Combinations that are rejected (exit code 2):
 - `--dry-run` with `--report`, `--markdown` or `--summary` (use
   `smates select --format json|markdown` instead).
 
-Arguments after `--` reach every suite's runner (`smates run -- -t name`). They may
-filter tests, so a run with them never records a test as passed. Put permanent flags in
-the suite's `command` instead.
+In `run` and `watch`, arguments after `--` reach every suite's runner
+(`smates run -- -t name`). They may filter tests, so a run or a watch cycle with them
+never records a test as passed. Put permanent flags in the suite's `command` instead.
 
 ??? note "Details: what `--output failures` prints"
     Each runner batch's output is buffered and printed only when the batch fails. For
@@ -112,9 +114,8 @@ the suite's `command` instead.
   durations recorded for them. A test counts as measured when its last pass, failure
   or skip was recorded with a duration above 0 ms; any other test (never recorded,
   recorded with another outcome, or recorded at 0 ms) counts as the mean of the
-  suite's measured tests. A suite whose runner reports 0 ms for every test therefore
-  has no durations at all. A suite with no
-  durations at all stays one batch, which starts only while less than half the limit is
+  suite's measured tests. A suite with no measured test (e.g. its runner reports 0 ms
+  for every test) stays one batch, which starts only while less than half the limit is
   used. Each Go package a batch builds adds a second, as recorded durations leave out
   compiling and linking the test binaries.
 - Batches start in the usual order, the likeliest to fail first. Before each one,
@@ -131,8 +132,8 @@ the suite's `command` instead.
 - The tests left out are not run and not recorded. They stay selected, and a later run
   runs them in the usual order (by priority, then shortest recorded duration first), so
   a long test can be left out again while new changes keep selecting others; CI runs
-  them all. The log, the summary (`Time limit`) and the report
-  (`max_time_reached`, `not_run`) list them.
+  them all. The log, the summary (`Time limit`) and the
+  [report](json-output.md#smates-run-report) (`max_time_reached`, `not_run`) list them.
 
 When everything that ran passed, the run exits 0. Do not use `--max-time` to gate a
 merge on CI: tests it left out did not run. The Claude Code and Codex Stop hooks use
@@ -142,8 +143,8 @@ merge on CI: tests it left out did not run. The Claude Code and Codex Stop hooks
 
 Units of a suite whose [`requires`](configuration.md#requires) are not met do not
 start. They stay selected and are not recorded; the log names each failed check. The
-run exits 4 when no test failed, else 1. The report lists the checks under
-`unmet_requires` and the units under `not_run`.
+run exits 4 when no test failed, else 1. The [report](json-output.md#smates-run-report)
+lists the checks under `unmet_requires` and the units under `not_run`.
 
 ### smates select
 
@@ -153,8 +154,8 @@ smates select [flags]
 
 Prints the selection without running anything. It may still call the agent, and then
 saves its answer in the state so the next `smates run` on the same change reuses it.
-On a push build of a [full-run branch](configuration.md#top-level-keys) it selects every
-test, as `smates run` runs them all there: outputs that gate jobs (`skip`, `suites`)
+On a CI build of a [full-run branch](configuration.md#top-level-keys) that is not for a
+pull request (a merge queue build counts as a pull request), it selects every test, as `smates run` runs them all there: outputs that gate jobs (`skip`, `suites`)
 never skip the full run that refreshes the state.
 
 | Flag | Value | Default | Meaning |
@@ -167,7 +168,7 @@ never skip the full run that refreshes the state.
 | `--orphans` | `agent`, `full`, `skip` | `orphans:` in `smates.yml` | As for `run`. |
 | `--no-agent` | | off | Do not call the agent. |
 | `--shard` | `I/N` | | Only shard `I` of `N` of the selection. |
-| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On a push build of a full-run branch it is sized for every test, as the selection is. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
+| `--max-shards` | `N` (1-256) | | Also size a shard count for the selection: `0` when nothing is selected, else the recorded duration of the selected tests divided by `--shard-time`, rounded up, within `1` to `N`. On such a full-run build it is sized for every test, as the selection is. See [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection). Not with `--shard`. |
 | `--shard-time` | duration | `10m` | With `--max-shards`: recorded test time to aim for per shard. A selected test without a recorded duration counts as its suite's median; a suite with selected tests and no recorded duration at all gives `N`. |
 | `--markdown` | file | | Also write the Markdown summary to `file`. |
 
@@ -177,7 +178,7 @@ Plus the [common flags](#common-flags).
 |---|---|
 | `text` | One selected test ID per line; the selection summary goes to stderr. |
 | `files` | One selected test ID per line, nothing on stderr. |
-| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision, and `shards` with `--max-shards`. |
+| `json` | The full selection: `selected`, `total`, `selected_tests` (per suite), per-test reasons, `orphan_candidates`, the agent's decision, and `shards` with `--max-shards`. See [JSON output](json-output.md#smates-select). |
 | `github` | `selected`, `total`, `run-all`, `skip`, `tests` and `suites` (and with `--max-shards`, `shards` and `shard-matrix`) as step outputs, written to `$GITHUB_OUTPUT` (stdout when it is unset); the summary is appended to `$GITHUB_STEP_SUMMARY`. See [Outputs](../ci/github-actions.md#outputs). |
 | `markdown` | The Markdown summary used for pull request comments. |
 
@@ -188,8 +189,8 @@ smates watch [flags] [-- runner args]
 ```
 
 Polls the working tree and reruns the affected tests after every change. Keys (when
-stdin is a terminal): `a` runs all, `f` reruns the failed tests, Enter reruns, `q`
-quits. See [Watch mode](../guides/watch.md).
+stdin is a terminal): `a` runs all, `f` reruns the failed tests, Enter or `r` reruns,
+`q` quits. See [Watch mode](../guides/watch.md).
 
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
@@ -213,7 +214,8 @@ Lists the tests that depend on a file, and how (`static`, `recorded`, a `depends
 declaration, ...). With `'$TZ'` (quoted, so the shell does not expand it) it lists the
 tests that read the environment variable `TZ`.
 
-Flags: `--format text|json`, plus the [common flags](#common-flags).
+Flags: `--format text|json` ([JSON output](json-output.md#smates-why-deps-list)), plus the
+[common flags](#common-flags).
 
 ### smates deps
 
@@ -226,7 +228,8 @@ Lists the dependencies of one test unit: a test file, a Go package directory, or
 dependency is `static` (static analysis, `inputs`, `rules`, `depends_on`), `recorded`
 (seen while the test ran) or both. A name that is not a test unit exits with code 3.
 
-Flags: `--format text|json`, plus the [common flags](#common-flags).
+Flags: `--format text|json` ([JSON output](json-output.md#smates-why-deps-list)), plus the
+[common flags](#common-flags).
 
 ### smates list
 
@@ -237,8 +240,8 @@ smates list [flags]        # alias: smates ls
 Prints one line per suite: name, runner, root, number of units, command and where the
 test patterns come from (`tests=jest.config.js testMatch`). With `-v` it also prints
 the patterns and every unit. A configuration smates could not read is reported as a
-discovery warning on stderr. The JSON report has `tests_source`, `test_patterns`,
-`units` and `discovery_warning`.
+discovery warning on stderr. The [JSON report](json-output.md#smates-why-deps-list) has
+`tests_source`, `test_patterns`, `units` and `discovery_warning`.
 
 Flags: `--format text|json`, plus the [common flags](#common-flags).
 
@@ -249,8 +252,9 @@ smates doctor [flags]
 ```
 
 Checks the setup and prints one line per check. It exits with code 1 when a check
-fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`, `warn`,
-`fail`), a `message` and a `fix` (`command`, `config` key and value, or `doc`).
+fails (warnings do not). In [JSON](json-output.md#smates-doctor) each check has a stable
+`id`, a `status` (`ok`, `warn`, `fail`), a `message` and a `fix` (`command`, `config` key
+and value, or `doc`).
 
 | Check `id` | What it checks |
 |---|---|
@@ -259,6 +263,7 @@ fails (warnings do not). In JSON each check has a stable `id`, a `status` (`ok`,
 | `suite-not-detected` | without `smates.yml`: a package configures a test runner (a vitest or jest configuration file, a per-project `vitest.*.config.*`, a `vite.config.*` that imports vitest or sets `test`; not a plain Vite app) but got no suite (no test file smates can find there); `smates init` prints the same note |
 | `suite-tests-source`, `suite-test-discovery` | where the test patterns come from; a runner config smates could not read |
 | `suite-launcher`, `suite-dependencies-installed` | the suite command can start; `node_modules` is installed |
+| `toolchain-node` | with a vitest, jest or node suite: `node` is on `PATH` and is version 18 or later (tracing needs it) |
 | `toolchain-go`, `toolchain-bun`, `toolchain-python`, `suite-engines-node` | toolchains, and the Node version against `engines.node` |
 | `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses; variables it reads that are not set |
 | `suite-server-dependency` | an end-to-end-looking suite without `depends_on`, `serves` or `rules` |
@@ -285,7 +290,7 @@ evidence (flips, last commit, recent outcomes, environment variables read). See
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
 | `--clear` | | off | Forget the flake evidence of the given units (of all units when none is given). Units are only accepted with `--clear`. |
-| `--format` | `text`, `json` | `text` | Output. |
+| `--format` | `text`, `json` | `text` | Output ([JSON](json-output.md#smates-flaky)). |
 
 Plus the [common flags](#common-flags).
 
@@ -305,7 +310,7 @@ and cost, flaky flips.
 | `--branch` | branch | all | Only runs on this branch. |
 | `--ci` | | off | Only runs on CI. |
 | `--recent` | n | `5` | Text output: list the last `n` runs. |
-| `--format` | `text`, `json` | `text` | Output. |
+| `--format` | `text`, `json` | `text` | Output ([JSON](json-output.md#smates-stats)). |
 | `-C` | dir | current directory | Run as if started in `dir`. |
 | `--state` | file | `.smates/state.json.gz` | State file. |
 
@@ -329,7 +334,7 @@ that would have been orphans (changes no test depends on), and prints a ready-to
 | `--since` | rev | | Replay the commits after `rev`. Without an explicit `--history`, there is no count limit. |
 | `--apply` | | off | Add the suggested `ignore:` globs to `smates.yml` (and nothing else). Comments and layout are kept. |
 | `--dry-run` | | off | With `--apply`: print the diff instead of writing. |
-| `--format` | `text`, `json` | `text` | Output. |
+| `--format` | `text`, `json` | `text` | Output ([JSON](json-output.md#smates-orphans)). |
 
 Plus the [common flags](#common-flags).
 
@@ -358,7 +363,7 @@ runs smates, `--github` writes no second one (unless `--force`). It refuses to o
 | `--agents-md` | | off | Add a short smates section to `AGENTS.md` (or `CLAUDE.md`) for coding agents. |
 | `--force` | | off | Overwrite an existing `smates.yml`. |
 | `--stdout` | | off | Print the config instead of writing it. |
-| `--format` | `text`, `json` | `text` | `json` reports the suites, the files written and `needs_review` items, each with its evidence and a recommended change. |
+| `--format` | `text`, `json` | `text` | `json` reports the suites, the files written and `needs_review` items, each with its evidence and a recommended change ([JSON output](json-output.md#smates-init)). |
 | `-C` | dir | current directory | Run as if started in `dir`. |
 
 ### smates config
@@ -381,7 +386,7 @@ result is validated before it is written. Flags may come after the arguments.
 | Flag | Value | Default | Meaning |
 |---|---|---|---|
 | `--dry-run` | | off | Print the diff, write nothing. |
-| `--format` | `text`, `json` | `text` | Output. |
+| `--format` | `text`, `json` | `text` | Output ([JSON](json-output.md#smates-config)). |
 | `--config` | file | `smates.yml` at the repository root | Config file to edit. It must exist (run `smates init` first). |
 | `-C` | dir | current directory | Run as if started in `dir`. |
 
@@ -432,7 +437,7 @@ smates state clear
 | `--remote` | name | `origin` | `pull`/`push`: git remote. |
 | `--ref` | ref | `refs/smates/state/<branch>` | `pull`/`push`: git ref. |
 | `-o` | file | the state file | `merge`: output file. |
-| `--format` | `text`, `json` | `text` | `show`: output. |
+| `--format` | `text`, `json` | `text` | `show`: output ([JSON](json-output.md#smates-state-show)). |
 | `--json` | | off | `show`: deprecated alias of `--format json`. |
 | `--state` | file | `.smates/state.json.gz` | State file. |
 | `-C` | dir | current directory | Run as if started in `dir`. |
@@ -487,5 +492,6 @@ All of them do nothing when `SMATES_SKIP_HOOK` is set to a value other than `0` 
 ## See also
 
 - [smates.yml](configuration.md): every configuration key
+- [JSON output](json-output.md): every field of the JSON reports
 - [Exit codes](exit-codes.md)
 - [Variables smates reads](environment-variables.md)

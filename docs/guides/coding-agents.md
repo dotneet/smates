@@ -107,9 +107,11 @@ failed, and the run exits 4 when no other test failed.
 ## Stop hooks
 
 `smates hook install --claude` and `smates hook install --codex` add a Stop hook that
-runs the affected tests whenever the agent ends its turn, and keeps it going while some
-fail. Tests left out by `requires` or by the hook's time limit (8 minutes by default)
-do not block. See [Git hooks and Claude Code](git-hooks.md#claude-code-stop-hook).
+runs the affected tests whenever the agent ends its turn, sends the failures back to it,
+and keeps it going while some fail. Tests left out by `requires` or by the hook's time
+limit (8 minutes by default) do not block. See
+[Git hooks and Claude Code](git-hooks.md#claude-code-stop-hook) and
+[Codex Stop hook](git-hooks.md#codex-stop-hook).
 
 ## Exit codes
 
@@ -203,12 +205,6 @@ Like any handled orphan, they are not reported again on the same branch.
 
 When orphans make whole suites run and the caller decided nothing (for example, without
 an API key), the log says how to decide instead.
-
-## Stop hooks
-
-With Claude Code, a Stop hook can run the affected tests each time Claude ends its turn,
-and send failures back to it: `smates hook install --claude`. See
-[Git hooks and Claude Code](git-hooks.md#claude-code-stop-hook).
 
 ## See also
 

@@ -91,6 +91,7 @@ plugins:
             Reference: リファレンス
             Commands: コマンド
             smates.yml: smates.yml
+            JSON output: JSON 出力
             Exit codes: 終了コード
             Variables smates reads: smates が読む環境変数
             Limitations: 制限事項
@@ -149,6 +150,7 @@ nav:
   - Reference:
       - Commands: reference/cli.md
       - smates.yml: reference/configuration.md
+      - JSON output: reference/json-output.md
       - Exit codes: reference/exit-codes.md
       - Variables smates reads: reference/environment-variables.md
       - Limitations: reference/limitations.md

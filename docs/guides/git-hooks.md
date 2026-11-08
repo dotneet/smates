@@ -51,6 +51,9 @@ On each push (or commit), the hook:
 2. **Runs the affected tests** with `smates run` and the flags it was installed with.
 3. **Stops the push** when a test fails.
 
+A push that only deletes remote refs (`git push origin --delete <branch>`) tests
+nothing: the pre-push hook exits 0 at once.
+
 !!! warning "The hook tests the working tree, not the pushed commits"
     smates hashes the files on disk. Uncommitted changes (for pre-commit: unstaged
     changes) and untracked files are part of what is tested. The hook warns when there
@@ -90,12 +93,16 @@ the rerun command, and goes on to fix them.
 ### How it behaves
 
 The hook runs `smates hook claude-stop`, which calls
-`smates run --output failures --no-agent --max-time 8m`, plus any flags given after `--`.
+`smates run --output failures --max-time 8m` with `--no-agent` (unless installed with
+`--agent`) and any flags given after `--`. A `--max-time` there replaces the 8-minute
+limit, and with `--shadow` there is none. With `--user` it skips projects without a
+`smates.yml`.
 
 - **Tests fail:** it prints
   `{"decision": "block", "reason": "<failing tests and the rerun command>"}` and exits 0.
   This is Claude Code's documented way to keep Claude going. Claude reads the reason and
-  fixes the tests.
+  fixes the tests. The reason keeps at most the last 16 KiB of the output, so the
+  rerun command at its end is kept.
 - **It never blocks twice.** When the hook input has `stop_hook_active` (Claude is
   already continuing because of a Stop hook), it returns at once. This means it cannot
   loop.

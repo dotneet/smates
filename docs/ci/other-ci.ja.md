@@ -27,7 +27,7 @@ CI ではバージョンを固定してください。指定しなければ、�
 ブランチは `$SMATES_BRANCH`、なければ CI が報告するブランチ、それもなければチェックアウト中のブランチです。いずれもない detached HEAD では、`smates state push` に `--ref` が必要です。
 
 
-デフォルトブランチの検出: `smates run` はデフォルトブランチではすべてを実行します。デフォルトブランチは CI の環境変数か `origin/HEAD` から検出します。CI がその情報なしでチェックアウトする場合は、`--all` か `--select` を明示してください（Jenkins の例を参照）。
+デフォルトブランチの検出: `smates run` はデフォルトブランチではすべてを実行します。デフォルトブランチは CI の環境変数か `origin/HEAD` から検出します。smates が CI ごとにデフォルトブランチ、プルリクエストかどうか、ベースブランチを知るために読む変数は、[CI の検出](../reference/environment-variables.md#ci-detection) にまとめてあります。CI がその情報なしでチェックアウトする場合は、`--all` か `--select` を明示してください（Jenkins の例を参照）。
 
 ## GitLab CI { #gitlab-ci }
 

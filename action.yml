@@ -78,7 +78,8 @@ inputs:
   state-path:
     description: >-
       Directory holding the smates state (.smates/state.json.gz by default), relative to
-      working-directory unless absolute. Must match the "state" setting in smates.yml.
+      the repository root (the git top level of working-directory) unless absolute.
+      Must be the directory holding the "state" file set in smates.yml.
     required: false
     default: .smates
   comment:

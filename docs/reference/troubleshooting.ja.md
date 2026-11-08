@@ -91,7 +91,7 @@ smates: web: the runner exited with code 127 before any test reported a result: 
 
 ステートが復元されておらず、すべてのテストが新規扱いになっている可能性が高いです。
 
-- **GitHub Actions:** 「Restore smates state」ステップのログでキャッシュがヒットしたか確認します。`state-path` は `smates.yml` の `state` と一致している必要があります。異なるテストを実行するジョブ（マトリクスの各エントリ、固定数のシャード、ジョブに分けたスイート）には、それぞれ別の `cache-key` が必要です。ただし plan ジョブがそれらのために選択する場合（`--max-shards` で数を決めるシャード、ジョブごとにゲートするスイート）は、plan とそれらのジョブが 1 つのキーを共有し、マージのジョブがステートをまとめます。[GitHub Actions](../ci/github-actions.md) と [シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。
+- **GitHub Actions:** 「Restore smates state」ステップのログでキャッシュがヒットしたか確認します。`state-path` は `smates.yml` の `state` で指定したファイルがあるディレクトリでなければなりません。異なるテストを実行するジョブ（マトリクスの各エントリ、固定数のシャード、ジョブに分けたスイート）には、それぞれ別の `cache-key` が必要です。ただし plan ジョブがそれらのために選択する場合（`--max-shards` で数を決めるシャード、ジョブごとにゲートするスイート）は、plan とそれらのジョブが 1 つのキーを共有し、マージのジョブがステートをまとめます。[GitHub Actions](../ci/github-actions.md) と [シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。
 - **その他の CI:** `smates run` の前に `.smates/` を復元し、後で保存します。テストが失敗したときも保存してください。[その他の CI](../ci/other-ci.md) を参照してください。
 - **確認:** `smates state show` はステートの場所と記録内容を表示します。`smates doctor` は `no recorded state` と警告します。
 - **初回の実行:** ステートがまったくないとき、smates はベースブランチと比較します。これには履歴が必要です（`fetch-depth: 0`）。履歴がなければ、1 回目はすべてを実行します。

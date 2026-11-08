@@ -101,9 +101,10 @@ suites:
 ## Stop フック { #stop-hooks }
 
 `smates hook install --claude` と `smates hook install --codex` は、エージェントがターンを終えるたびに
-影響するテストを実行し、失敗があれば作業を続けさせる Stop フックを追加します。`requires` やフックの
-時間の上限（既定 8 分）で外れたテストではブロックしません。
-[git フックと Claude Code](git-hooks.md#claude-code-stop-hook) を参照してください。
+影響するテストを実行し、失敗をエージェントに返して、失敗がある間は作業を続けさせる
+Stop フックを追加します。`requires` やフックの時間の上限（既定 8 分）で外れたテストではブロックしません。
+[git フックと Claude Code](git-hooks.md#claude-code-stop-hook) と
+[Codex の Stop フック](git-hooks.md#codex-stop-hook) を参照してください。
 
 ## 終了コード { #exit-codes }
 
@@ -198,12 +199,6 @@ smates run --output failures --orphans=skip --add api:tests/test_users.py
 
 オーファンのためにスイートが丸ごと実行され、呼び出し側が何も判断しなかった場合（API キーがない場合
 など）は、ログに代わりの判断方法が表示されます。
-
-## Stop フック { #stop-hooks }
-
-Claude Code では、Claude がターンを終えるたびに影響するテストを実行し、失敗を Claude に返す Stop
-フックを使えます（`smates hook install --claude`）。[git フックと Claude Code](git-hooks.md#claude-code-stop-hook)
-を参照してください。
 
 ## 関連項目 { #see-also }
 

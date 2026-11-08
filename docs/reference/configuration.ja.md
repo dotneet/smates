@@ -74,10 +74,16 @@ agent:
   # command: "my-agent --json"         # 組み込みの代わりに外部のエージェントを使う
 ```
 
-未知のキーはエラーです。値が不正な場合も同様で、smates はキー名を示して終了コード 3 で終了します（[終了コード](exit-codes.md)）。`smates config set` と `smates config add-ignore` はファイルを編集し、書き込む前に検証します（[コマンド](cli.md#smates-config)）。
+未知のキーはエラーです。smates がファイルの読み込み時に検証する値が不正な場合も同様です。たとえば、キーの選択肢にない値（`orphans`、`granularity`、未知の `runner`）、負の `record_jobs`、`max_age`、`explain_max`、0〜5 の範囲外の `flaky.retry`、[グロブ](#globs) で検証すると書いた箇所の不正なグロブ、形式の誤った `requires` のエントリです。このとき smates はキー名を示して終了コード 3 で終了します（[終了コード](exit-codes.md)）。検証しない値もあります。[グロブ](#globs) で検証しないと書いたグロブと、そのままプロバイダーに渡す `agent.model` と `agent.effort` です。`smates config set`、`smates config add-ignore`、`smates config add-input` はファイルを編集し、書き込む前に検証します（[コマンド](cli.md#smates-config)）。
 
 !!! note "編集で再実行されるもの"
-    スイートのエントリを編集すると、そのスイートのテストが再実行されます。各テストは、書かれたとおりのスイートの設定（とトップレベルの `env_track`）に依存しているためです。ただし `volatile`、`max_age`、`requires` はテストをいつ実行するかを決めるだけなので除きます。それ以外のトップレベルのキー（`ignore`、`orphans`、`agent` など）や別のスイートを編集しても、何も再実行されません。`smates.yml` 自体を読むテストは、通常どおりその内容に依存します。
+    スイートのエントリを編集すると、そのスイートのテストが再実行されます。各テストは、書かれたとおりのスイートの設定（とトップレベルの `env_track`）に依存しているためです。スイートの `inputs`、`rules`、`depends_on`、`serves` もこれに含まれます。例外は、テストをいつ実行するかを決めるだけの `volatile` と `max_age`、どこで実行できるかを決める `requires` です。トップレベルの `inputs` にグロブを追加すると、それに一致するファイルがすべてのテストの新しい依存になるので、すべてのテストが 1 回実行されます。それ以外のトップレベルのキー（`ignore`、`orphans`、`agent` など）や別のスイートを編集しても、何も再実行されません。`smates.yml` 自体を読むテストは、通常どおりその内容に依存します。
+
+## グロブ { #globs }
+
+グロブは区切りに `/` を使い、`**` は任意の深さに一致します。キーが示すディレクトリ（リポジトリルートまたはスイートの `root`）からの相対で、先頭に `./` を付けずに書いてください。
+
+`rules`、`depends_on`、`serves`、`volatile`、`requires` の `tests` のグロブは、smates がファイルを読み込むときに検証します。不正なものは設定のエラー（終了コード 3）になり、先頭の `./` は取り除かれます。トップレベルの `ignore` と `inputs`、スイートの `tests`、`exclude`、`inputs` のグロブは書かれたとおりに使います。不正なものや `./` で始まるものは、エラーにならずに何にも一致しません（`smates config add-ignore` と `add-input` はそうしたグロブを受け付けません）。`requires` の `file` はグロブを含められるパスです。不正なグロブは設定のエラーになり、先頭に `./` があっても問題ありません。
 
 ## トップレベルのキー { #top-level-keys }
 
@@ -87,13 +93,13 @@ agent:
 | `suites` | [スイート](#suite-keys) のリスト | 設定ファイルがなければ自動検出 | テストスイート。スイートのない設定ファイルは、スイートが必要なコマンドでエラーになります。 |
 | `ignore` | グロブのリスト（リポジトリルートから） | `[]` | オーファン（どのテストにも紐づかない変更）として扱わない変更。[組み込みのデフォルト](#built-in-ignore-globs) に追加されます。そのファイルを実際に読むテストは、変更されれば選択されます。[どのテストにも紐づかない変更](../guides/orphans.md) を参照してください。 |
 | `inputs` | グロブのリスト（リポジトリルートから） | `[]` | すべてのスイートのすべてのテストが依存するファイル: CI のワークフロー、ツールチェーンのバージョン指定、共有のフィクスチャなど。 |
-| `orphans` | `agent`、`all`、`ignore` | `agent` | どのテストにも紐づかない変更の扱い。[エージェント](../guides/agent.md) に尋ねる（使えないか失敗したら `all` にフォールバック）、影響しうるスイートを丸ごと実行する、何もしない、のいずれかです。`smates run --orphans` で 1 回の実行に限り上書きできます。 |
+| `orphans` | `agent`、`all`、`ignore` | `agent` | どのテストにも紐づかない変更の扱い。[エージェント](../guides/agent.md) に尋ねる（使えないか失敗したら `all` にフォールバック）、影響しうるスイートを丸ごと実行する、何もしない、のいずれかです。`smates run --orphans` で 1 回の実行に限り上書きできます。フラグの値は異なり、`agent`、`full`（`all` に相当）、`skip`（`ignore` と同様で、出力には "skipped by caller" と表示）です。 |
 | `untested` | `skip`、`orphan` | `skip` | どのテストも import も実行もしていないソースファイルの変更の扱い。`skip` はテストされていないコードとして報告し、何も実行しません。`orphan` はほかのオーファンと同じく扱います。 |
 | `env_ignore` | 名前またはグロブのリスト | `[]` | 変更されても何も選択しない環境変数。[組み込みのリスト](../guides/environment.md#variables-ignored-by-default) に追加されます。`"*"` で環境変数の追跡を無効にします。パターンは `path.Match` の構文で、大文字小文字を区別します。 |
-| `env_track` | 名前またはグロブのリスト | `[]` | 組み込みの無視リストに含まれていても追跡する変数（例: `LANG`）。 |
-| `full_run_branches` | ブランチ名のリスト | デフォルトブランチ | CI 上の `smates run`（プルリクエストではなく push のビルド）がすべてのテストを実行するブランチ。 |
-| `state` | パス（リポジトリルートから） | `.smates/state.json.gz` | ステートファイルの場所。名前が `.gz` なら gzip で圧縮されます。 |
-| `state_seed` | bool | `true` | ステートのないリンクされた git worktree で、空から始める代わりにメイン worktree のステート（またはリモートのステート）から始めます。`SMATES_NO_STATE_SEED=1` でも無効にできます。[並行する worktree](../guides/worktrees.md) を参照してください。 |
+| `env_track` | 名前またはグロブのリスト | `[]` | 組み込みの無視リストに含まれていても追跡する変数（例: `LANG`）。組み込みのリストから名前を外すだけなので、`env_ignore` にある名前は無視されたままです。 |
+| `full_run_branches` | ブランチ名のリスト | デフォルトブランチ | `smates run` がすべてのテストを実行するブランチ。CI を検出し、ビルドがプルリクエストでないとき（push、スケジュール実行、手動で開始したビルドなど）に適用されます。GitHub の `merge_group` のビルドはプルリクエストとして扱います。名前は完全一致で、グロブは使えません。 |
+| `state` | パス（リポジトリルートから） | `.smates/state.json.gz` | ステートファイルの場所。名前が `.gz` なら gzip で圧縮されます。`state_shared` のときは、共有ファイルが git の共通ディレクトリ配下の `smates/` にこのファイル名で置かれ、各 worktree のスナップショットはこのパスの最初の拡張子の前に `.snapshot` を挟んだ名前になります（デフォルトでは `.git/smates/state.json.gz` と `.smates/state.snapshot.json.gz`）。 |
+| `state_seed` | bool | `true` | ステートのないリンクされた git worktree で、または `state_shared` の共有ファイルがまだないときに、空から始める代わりにメイン worktree のステート（またはリモートのステート）から始めます。`SMATES_NO_STATE_SEED=1` でも無効にできます。[並行する worktree](../guides/worktrees.md) を参照してください。 |
 | `state_shared` | bool | `false` | テストごとのエントリを git の共通ディレクトリ配下の 1 ファイルに置き、すべての worktree で共有します。スナップショットは worktree ごとに持ちます。 |
 | `flaky` | [マップ](#flaky) | | flaky と分かっているテストの扱い。 |
 | `agent` | [マップ](#agent) | | オーファンと失敗ヒントのために smates が呼ぶ LLM エージェント。 |
@@ -109,8 +115,8 @@ agent:
 | `root` | パス（リポジトリルートから） | `.` | コマンドを実行するディレクトリ。リポジトリ内である必要があります。 |
 | `command` | string | ランナーから推定 | ベースとなるコマンドライン。選択したテストファイルを末尾に追加するか、コマンドに `{tests}` があればそこに置き換えます。`custom` では必須です。 |
 | `tests` | グロブのリスト（`root` から） | ランナーの設定から読む。読めなければランナーのデフォルト | どのファイルがテストファイルか。[どのファイルがテストか](../guides/configuration.md#which-files-are-tests) を参照してください。 |
-| `exclude` | グロブのリスト（`root` から） | `[]` | テストファイルとして扱わないファイル。ランナーの設定で除外されるものに追加されます。 |
-| `inputs` | グロブのリスト | `[]` | スイートのすべてのテストが依存するファイル。`root` からの相対で、先頭に `/` を付けるとリポジトリルートからになります。 |
+| `exclude` | グロブのリスト（`root` から） | `[]` | テストファイルとして扱わないファイル。`tests:` がなければ、ランナーの設定で除外されるものに追加されます。`tests:` があるとテストファイルをランナーの設定から取らないので、ランナーのデフォルトの除外（`node_modules/` など）とこのリストだけが適用されます。 |
+| `inputs` | グロブのリスト | `[]` | スイートのすべてのテストが依存するファイル。ランナーの[デフォルトの inputs](#default-inputs)（ロックファイル、マニフェスト、ランナーの設定ファイル）に追加されます。`root` からの相対で、先頭に `/` を付けるとリポジトリルートからになります。 |
 | `rules` | [ルール](#rules) のリスト | `[]` | 一部のテストについて、トレースでは見えない依存。 |
 | `depends_on` | [依存](#depends_on) のリスト | `[]` | テストがプロセス境界を越えて使うコード（docker compose で起動するサーバー、HTTP API など）。[サーバーを叩くテスト](../guides/servers.md) を参照してください。 |
 | `serves` | グロブのリスト（リポジトリルートから） | `[]` | `depends_on: [{paths: [...]}]` の省略形。 |
@@ -120,13 +126,27 @@ agent:
 | `granularity` | `package`、`func` | `package` | Go のみ。`func` にするとトップレベルのテスト関数がそれぞれ 1 ユニットになります（`function` も別名として使えます）。[Go のテスト関数単位の選択](../guides/go-test-functions.md) を参照してください。 |
 | `static` | bool | `true` | トレースに加えて静的な import グラフを使います。 |
 | `trust_browser_passes` | bool | `false` | vitest のみ。ブラウザでだけ動くテスト（ブラウザモード、Storybook のストーリー）はトレースを残しません。その pass を、smates が静的に分かる依存とともに記録し、依存のどれかが変わるまでスキップします。オフのときは、そうしたテストを毎回実行します。[ブラウザモードと Storybook](../guides/runners.md#browser-mode-and-storybook) を参照してください。 |
-| `junit` | パス（`root` から） | | コマンドが書き出す JUnit XML のレポート。ランナーがファイルごとの成否を報告できない場合に、smates はここから読み取ります。 |
+| `junit` | パス（`root` から） | | コマンドが書き出す JUnit XML のレポート。ランナーがファイルごとの成否を報告できない場合に、smates はここから読み取ります。レポートがない、または読めないときは、エラーではなく警告です。ランナーのレポーターにも同じファイルの結果があるときは、悪いほう（fail > unknown > pass）を採用します。 |
 | `python_roots` | パスのリスト（`root` から） | `[]` | Python の静的解析で使う追加の import ルート（src レイアウトの `src` など）。 |
 | `env_ignore` | 名前またはグロブのリスト | `[]` | トップレベルのキーと同じで、このスイートだけに追加されます。 |
 | `env_track` | 名前またはグロブのリスト | `[]` | トップレベルのキーと同じで、このスイートだけに追加されます。 |
 | `volatile` | グロブのリスト（`root` から） | `[]` | 何が変わっても毎回実行するテストユニット（理由 `volatile`）。日付など smates が追跡できないものに依存するテスト向けです。ルールの `tests` と同じく照合します。ユニット ID に加え、Go のテスト関数（`pkg#TestName`）ではパッケージディレクトリとテストファイルにも一致します。コンパイルチェックには適用されません。 |
 | `max_age` | 期間（`168h`、`30m`） | `0`（期限なし） | 前回記録した実行がこれより古いテストユニットは、何が変わっていなくても再実行します（理由 `expired`）。 |
 | `requires` | [前提条件](#requires) のリスト | `[]` | テストの実行に環境が用意すべきもの（データベース、ブラウザなど）。満たされない前提条件を必要とするテストは実行されず、選択されたまま残ります。 |
+
+### デフォルトの inputs { #default-inputs }
+
+スイートのすべてのテストは、書かなくても次のファイルに依存します。表で別の場所を示していなければ、名前はスイートの root で探します。
+
+| ランナー | デフォルトの inputs |
+|---|---|
+| `vitest`、`jest`、`node`、`bun` | スイートの root とその上のリポジトリルートまでの各ディレクトリにある `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`package-lock.json`、`npm-shrinkwrap.json`、`yarn.lock`、`bun.lock`、`bun.lockb`、`.npmrc`、`.yarnrc.yml`、`.nvmrc`、`.node-version`、`.tool-versions`、`bunfig.toml`。スイートの root の `tsconfig*.json`、`.env`、`.env.*`。リポジトリルートの `tsconfig*.json` |
+| `vitest`（追加） | `vitest.config.*`、`vite.config.*`、`vitest.*.config.*`、`vite.*.config.*`、`vitest.workspace.*`、`vitest.setup.*`。リポジトリルートの `vitest.config.*` と `vitest.workspace.*` |
+| `jest`（追加） | `jest.config.*`、`jest.setup.*`、`babel.config.*`、`.babelrc`、`.babelrc.*`、`.swcrc`。リポジトリルートの `jest.config.*` と `babel.config.*` |
+| `pytest` | `pyproject.toml`、`uv.lock`、`setup.cfg`、`setup.py`、`pytest.ini`、`tox.ini`、`requirements*.txt`、`.python-version`。リポジトリルートの `pyproject.toml`、`uv.lock`、`.python-version`、`requirements*.txt`、`pytest.ini`、`.tool-versions` |
+| `unittest` | `pytest` と同じで、どちらの `pytest.ini` も含まない |
+| `go` | `go.mod`、`go.sum`。リポジトリルートの `go.work`、`go.work.sum`、`.tool-versions`。`GOWORK` が（スイートの `env` か環境で）設定されていれば、その `go.work`、その `go.work.sum`、そのモジュールの `go.mod` と `go.sum`、ローカルの `replace` 先それぞれの `go.mod` |
+| `custom` | なし |
 
 ### rules { #rules }
 
@@ -147,7 +167,7 @@ rules:
     deps: ["db/migrations/**"]
 ```
 
-`reaches` はファイル単位の閉包をたどります。ほかのヘルパーや、Go パッケージのほかのテストファイルが import するもの、ランナーが設定を通じてすべてのテストのために読み込むファイル（Vitest の `setupFiles` と `globalSetup`、`jest.config.*`（JSON も含む）または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル、それらが import するもの）も含みます。`granularity: func` ではパッケージ単位で照合します。ワイルドカードのない glob がディレクトリを指すとき（`internal/testdb`）は、その配下に一致します。`$NAME` の項目は、閉包のソースがそうした変数名を含むテスト（`os.Getenv("APP_DB_DSN")`）や、文字列リテラルにその接頭辞を含むテスト（`envconfig.Process("APP", &cfg)`、`viper.SetEnvPrefix("app")`、`env_prefix="APP_"`）にも一致します。Go は `m.Run` より前（`TestMain`、`init`、パッケージレベルの初期化）の読み取りや `os.Environ` の走査を記録せず、シェル、Bun、ブラウザの中の読み取りはトレースされず、環境を走査する設定ローダーは読み取りとして数えられないためです。それ以外の方法で名前を組み立てるローダーはソースに跡を残さないので、そうしたテストは `tests:` で指定してください。smates が判断できないときはルールを適用します。静的解析が無効（`static: false`）なとき、テストのファイルを読むアナライザがないとき、閉包（またはランナーが読み込むセットアップファイル）に smates が解決できない JavaScript や TypeScript の import（バンドラのエイリアス、仮想モジュール、存在しないファイル）があるとき、ランナーの設定を読めないとき（パースできない JSON ファイル、文字列ではない bun の preload、変数から来る `--preload`）、そして `$NAME` の項目でテストにまだ記録された実行がないとき、パターンが `env_ignore`（またはデフォルトの無視リスト）によってどの記録にも残らない変数を指しうるとき、またはランナーにかかわらずテストのソースを読めないとき（静的解析が無効、またはそのファイルを読むアナライザがない）です。Python、Go、Java で smates が解決できない import は、跡を残さずに閉包から外れます。`sys.path` 経由でヘルパーに届く Python のテスト（`support/` をパスに加えて `from dbkit import reset`）は、ルールから見ると `support/dbkit.py` に届きません。そうしたテストは別のルールの `tests:` で指定するか、ヘルパーをリポジトリ内のパスで import してください。ルールが挙げていない経路でデータベースに届くテスト（自前の `sql.Open`、リストにないヘルパー、子プロセス）は deps を得ないので、入口をすべて挙げ、データベース接続が読む変数も加えてください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールと、リポジトリのどのファイルにも一致しない glob を警告します。[データベースを使うテスト](../guides/configuration.md#tests-backed-by-a-database) を参照してください。
+`reaches` はファイル単位の閉包をたどります。ほかのヘルパーや、Go パッケージのほかのテストファイルが import するもの、ランナーが設定を通じてすべてのテストのために読み込むファイル（Vitest の `setupFiles` と `globalSetup`、`jest.config.*`（JSON も含む）または `package.json` の `jest` キーにある Jest の `setupFilesAfterEnv`、`bunfig.toml` の `preload` や `--preload` で指定する bun のファイル、それらが import するもの）も含みます。`granularity: func` ではパッケージ単位で照合します。ワイルドカードのない glob がディレクトリを指すとき（`internal/testdb`）は、その配下に一致します。`$NAME` の項目は、閉包のソースがそうした変数名を含むテスト（`os.Getenv("APP_DB_DSN")`）や、文字列リテラルにその接頭辞を含むテスト（`envconfig.Process("APP", &cfg)`、`viper.SetEnvPrefix("app")`、`env_prefix="APP_"`）にも一致します。Go は `m.Run` より前（`TestMain`、`init`、パッケージレベルの初期化）の読み取りや `os.Environ` の走査を記録せず、シェル、Bun、ブラウザの中の読み取りはトレースされず、環境を走査する設定ローダーは読み取りとして数えられないためです。それ以外の方法で名前を組み立てるローダーはソースに跡を残さないので、そうしたテストは `tests:` で指定してください。smates が判断できないときはルールを適用します。静的解析が無効（`static: false`）なとき、テストのファイルを読むアナライザがないとき、閉包（またはランナーが読み込むセットアップファイル）に smates が解決できない JavaScript や TypeScript の import（バンドラのエイリアス、仮想モジュール、存在しないファイル）があるとき、ランナーの設定を読めないとき（パースできない JSON ファイル、文字列ではない bun の preload、変数から来る `--preload`）、そして `$NAME` の項目でテストにまだ記録された実行がないとき、パターンが `env_ignore`（またはデフォルトの無視リスト）によってどの記録にも残らない変数を指しうるとき、またはランナーにかかわらずテストのソースを読めないとき（静的解析が無効、またはそのファイルを読むアナライザがない）です。Python、Go、Java で smates が解決できない import は、跡を残さずに閉包から外れます。`sys.path` 経由でヘルパーに届く Python のテスト（`support/` をパスに加えて `from dbkit import reset`）は、ルールから見ると `support/dbkit.py` に届きません。そのディレクトリをスイートの `python_roots`（または smates も読む pytest の `pythonpath`）に加えるか、そうしたテストを別のルールの `tests:` で指定するか、ヘルパーをリポジトリ内のパスで import してください。ルールが挙げていない経路でデータベースに届くテスト（自前の `sql.Open`、リストにないヘルパー、子プロセス）は deps を得ないので、入口をすべて挙げ、データベース接続が読む変数も加えてください。`smates doctor` はこうしたルールごとに適用されるテストユニットの数を表示し、1 つにも適用されないルールと、リポジトリのどのファイルにも一致しない glob を警告します。[データベースを使うテスト](../guides/configuration.md#tests-backed-by-a-database) を参照してください。
 
 ### depends_on { #depends_on }
 
@@ -159,7 +179,7 @@ rules:
 | `paths` | グロブのリスト（リポジトリルートから） | テストがこれらのファイルに依存します。先頭の `/` や `..` は使えません。 |
 | `tests` | グロブのリスト（スイートの `root` から） | 依存を持たせるテストを絞り込みます（デフォルト: すべて）。 |
 
-グロブはどこでも区切りに `/` を使います（`**` は任意の深さに一致します）。`depends_on`、`serves`、`requires` の `tests` のグロブ先頭の `./` は取り除かれます。
+グロブの書き方と検証については [グロブ](#globs) を参照してください。
 
 ### requires { #requires }
 
@@ -187,7 +207,7 @@ requires:
     tests: ["e2e/**"]
 ```
 
-判定できないチェック（コマンドが見つからない、タイムアウトした、アドレスを解釈できないなど）は、満たされないものとして扱います。各チェックは 1 回の実行につき 1 度だけ行います（`--dry-run` では行いません）。テストが外れ、どのテストも失敗していなければ、`smates run` は終了コード 4（環境の問題）で終了します（[`smates run`](cli.md#unmet-requires) を参照）。git フックと Claude Code・Codex の Stop フックはブロックせず、それらについて 1 行表示します。前提条件を追加したり変えたりしても、何も再実行されません。スイートの設定のハッシュに含まれないためです。
+判定できないチェック（コマンドが見つからない、タイムアウトした、変数を含むアドレスが展開後に解釈できないなど）は、満たされないものとして扱います。何も実行せずに分かる誤りは、代わりに設定のエラー（終了コード 3）になります。変数を含まない `tcp` のアドレスが `host:port` でない、`env` が変数名でない、`file` が正しいグロブでない、`env` や `file` のエントリに `timeout` がある、`timeout` が負、エントリを文字列だけで書いた（`- 127.0.0.1:5432`。`- tcp: 127.0.0.1:5432` と書きます）といった場合です。各チェックは 1 回の実行につき 1 度だけ行います（`--dry-run` では行いません）。テストが外れ、どのテストも失敗していなければ、`smates run` は終了コード 4（環境の問題）で終了します（[`smates run`](cli.md#unmet-requires) を参照）。git フックと Claude Code・Codex の Stop フックはブロックせず、それらについて 1 行表示します。前提条件を追加したり変えたりしても、何も再実行されません。スイートの設定のハッシュに含まれないためです。
 
 ## agent { #agent }
 
@@ -198,7 +218,7 @@ requires:
 | `enabled` | `auto`、`always`、`never` | `auto` | `never` でエージェントを無効にします。`auto` は認証情報（または `command`）があれば使います。`always` は現状 `auto` と同じ動作です。 |
 | `provider` | `auto`、`anthropic`、`openai`、`openrouter` | `auto` | 組み込みのバックエンド。`auto` は Anthropic、OpenAI、OpenRouter のうち API キーが設定されている最初のものを使います（[smates が読む環境変数](environment-variables.md#agent-credentials)）。 |
 | `model` | string | プロバイダーごと: `claude-haiku-5-5`、`gpt-6-luna`、`anthropic/claude-haiku-5.5` | モデル名。 |
-| `effort` | `low`、`medium`、`high` | `low` | 推論の effort。受け付けないモデルでは送りません。 |
+| `effort` | string（`low`、`medium`、`high` など） | `low` | 推論の effort。書かれたとおりにプロバイダーに渡し、smates は値を検証しません。OpenAI と OpenRouter では、モデルが受け付けなければこれを外して再試行します。Anthropic では、受け付けられない値だと呼び出しが失敗します。 |
 | `max_turns` | int | `12` | 1 回の呼び出しでのツール利用のターン数。`0` はデフォルトの意味です。 |
 | `timeout` | duration（`120s`、`2m`） | `120s` | 1 回の呼び出しの実時間の上限。 |
 | `instructions` | string | | エージェントのシステムプロンプトに追加する、プロジェクト固有のヒント。 |

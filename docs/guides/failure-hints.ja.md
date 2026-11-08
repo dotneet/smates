@@ -30,7 +30,11 @@ smates: failure hints for 1 failing test unit(s):
 5. 設定（スイートの inputs、マニフェスト、ロックファイル）
 6. ディレクトリの列挙
 
-同じ種類の中では、更新時刻の新しいものが先です。
+同じ種類の中では、更新時刻の新しいもの、テストに近いもの（先頭から共通するディレクトリが多いもの）、
+パスの順に並べます。
+
+候補はテストごとに最大 10 個までです。`--report` では、省いた数を `more` として出します。実行ログ、
+ステップサマリー、`--output failures` の短いサマリーには先頭の 5 個を出し、残りの数を添えます。
 
 ## 入力が何も変わっていない場合 { #when-none-of-its-inputs-changed }
 
@@ -62,7 +66,8 @@ flaky かどうかの確認は [flaky なテスト](trust.md#flaky-tests) を参
     → agent (high confidence): src/price.ts:12 — roundCents now truncates instead of rounding, so the total is off by one cent
 ```
 
-API キーが設定されていて、`--no-agent` でなく、`agent.explain_failures` が `false` でないときに行います。
+API キーが設定されていて、`--no-agent` でなく、`agent.explain_failures` が `false` でなく、`agent.command`
+が設定されていないときに行います。
 
 ```yaml
 agent:
@@ -76,7 +81,7 @@ agent:
   上限は 1 件 30 秒です。
 - **キャッシュあり。** 回答は内容をキーにステートへキャッシュされ、同じ失敗を二度説明することはありません。
 - **失敗しても害はありません。** エラーは注記を 1 行出すだけで、終了コードは変わりません。
-- **組み込みのバックエンドのみ。** 外部の `agent.command` は説明には使いません。
+- **組み込みのバックエンドのみ。** `agent.command` を設定すると、API キーがあっても説明は行いません。
 
 ## 関連項目 { #see-also }
 

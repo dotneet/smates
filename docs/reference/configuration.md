@@ -77,17 +77,40 @@ agent:
   # command: "my-agent --json"         # an external agent instead of the built-in one
 ```
 
-Unknown keys are an error. So is any invalid value: smates exits with code 3 and names
-the key (see [Exit codes](exit-codes.md)). `smates config set` and
-`smates config add-ignore` edit the file and validate it before writing (see
-[Commands](cli.md#smates-config)).
+Unknown keys are an error, and so are the invalid values smates checks when it loads
+the file, such as a value outside a key's list (`orphans`, `granularity`, an unknown
+`runner`), a negative `record_jobs`, `max_age` or `explain_max`, a `flaky.retry` outside
+0–5, a bad glob where [Globs](#globs) says it is checked, or a malformed `requires`
+entry. smates then exits with code 3 and names the key (see
+[Exit codes](exit-codes.md)). Some values are not checked: the globs listed as unchecked
+under [Globs](#globs), and `agent.model` and `agent.effort`, which go to the provider
+as written. `smates config set`, `smates config add-ignore` and `smates config add-input`
+edit the file and validate it before writing (see [Commands](cli.md#smates-config)).
 
 !!! note "What an edit reruns"
     Editing a suite's entry reruns that suite's tests: every test depends on its suite's
-    settings as written (and on the top-level `env_track`), except `volatile`, `max_age`
-    and `requires`, which only decide when tests run. Editing the other top-level
-    keys (`ignore`, `orphans`, `agent`, ...) or another suite reruns nothing. A test
-    that reads `smates.yml` itself depends on its content as usual.
+    settings as written (and on the top-level `env_track`), its `inputs`, `rules`,
+    `depends_on` and `serves` included. The exceptions are `volatile` and `max_age`,
+    which only decide when tests run, and `requires`, which decides where they can run.
+    A glob added to the top-level `inputs` makes the files it matches new dependencies
+    of every test, so every test runs once. Editing the other top-level keys (`ignore`,
+    `orphans`, `agent`, ...) or another suite reruns nothing. A test that reads
+    `smates.yml` itself depends on its content as usual.
+
+## Globs
+
+Globs use `/` as the separator, and `**` matches any depth. Write them relative to the
+directory the key names (the repository root or the suite `root`), without a leading
+`./`.
+
+The globs of `rules`, `depends_on`, `serves`, `volatile` and the `tests` of `requires`
+are checked when smates loads the file: an invalid one is a configuration error
+(exit 3), and a leading `./` is removed. The globs of the top-level `ignore` and
+`inputs`, and of a suite's `tests`, `exclude` and `inputs`, are used as written: one that
+is invalid or starts with `./` matches nothing, without an error.
+(`smates config add-ignore` and `add-input` refuse such globs.) A `requires` `file` is
+a path that may hold a glob: an invalid glob there is a configuration error, and a
+leading `./` does no harm.
 
 ## Top-level keys
 
@@ -97,13 +120,13 @@ the key (see [Exit codes](exit-codes.md)). `smates config set` and
 | `suites` | list of [suites](#suite-keys) | auto-detected when there is no config file | The test suites. A config file without suites is an error when smates needs them. |
 | `ignore` | list of globs (repo-relative) | `[]` | Changed files that are never orphans (changes no test depends on), added to the [built-in defaults](#built-in-ignore-globs). A test that does read such a file is still selected when it changes. See [Changes no test explains](../guides/orphans.md). |
 | `inputs` | list of globs (repo-relative) | `[]` | Files every test of every suite depends on: CI workflow, toolchain pins, shared fixtures. |
-| `orphans` | `agent`, `all`, `ignore` | `agent` | What to do with changes no test depends on: ask the [agent](../guides/agent.md) (falls back to `all` when it is unavailable or fails), run the suites they may affect in full, or do nothing. `smates run --orphans` overrides it for one run. |
+| `orphans` | `agent`, `all`, `ignore` | `agent` | What to do with changes no test depends on: ask the [agent](../guides/agent.md) (falls back to `all` when it is unavailable or fails), run the suites they may affect in full, or do nothing. `smates run --orphans` overrides it for one run; the flag's values differ: `agent`, `full` (as `all`) and `skip` (like `ignore`, noted as "skipped by caller" in the output). |
 | `untested` | `skip`, `orphan` | `skip` | A changed source file that no test imports or executed: `skip` reports it as untested code and runs nothing for it; `orphan` handles it like any other orphan. |
 | `env_ignore` | list of names or globs | `[]` | Environment variables whose changes select nothing, added to the [built-in list](../guides/environment.md#variables-ignored-by-default). `"*"` turns environment tracking off. Patterns use `path.Match` syntax and are case-sensitive. |
-| `env_track` | list of names or globs | `[]` | Variables to track although the built-in ignore list has them (e.g. `LANG`). |
-| `full_run_branches` | list of branch names | the default branch | Branches on which `smates run` on CI (push builds, not pull requests) runs every test. |
-| `state` | path (repo-relative) | `.smates/state.json.gz` | Where the state file lives. A `.gz` name is gzip-compressed. |
-| `state_seed` | bool | `true` | In a linked git worktree without a state, start from the main worktree's state (or the remote one) instead of cold. `SMATES_NO_STATE_SEED=1` turns it off too. See [Parallel worktrees](../guides/worktrees.md). |
+| `env_track` | list of names or globs | `[]` | Variables to track although the built-in ignore list has them (e.g. `LANG`). It only takes names out of the built-in list: a name `env_ignore` lists stays ignored. |
+| `full_run_branches` | list of branch names | the default branch | Branches on which `smates run` runs every test, when it detects a CI and the build is not a pull request (a push, scheduled or manually started build; a GitHub `merge_group` build counts as a pull request). Names match exactly; globs are not supported. |
+| `state` | path (repo-relative) | `.smates/state.json.gz` | Where the state file lives. A `.gz` name is gzip-compressed. With `state_shared`, the shared file takes its file name, in `smates/` under the git common directory, and each worktree's snapshot sits at this path with `.snapshot` inserted before the first extension (by default `.git/smates/state.json.gz` and `.smates/state.snapshot.json.gz`). |
+| `state_seed` | bool | `true` | In a linked git worktree without a state, or when the shared file of `state_shared` does not exist yet, start from the main worktree's state (or the remote one) instead of cold. `SMATES_NO_STATE_SEED=1` turns it off too. See [Parallel worktrees](../guides/worktrees.md). |
 | `state_shared` | bool | `false` | Keep the per-test entries in one file under the git common directory, shared by all worktrees; each worktree keeps its own snapshot. |
 | `flaky` | [map](#flaky) | | How to treat tests known to be flaky. |
 | `agent` | [map](#agent) | | The LLM agent smates calls for orphans and failure hints. |
@@ -119,8 +142,8 @@ One entry of `suites:`.
 | `root` | path (repo-relative) | `.` | Directory the command runs in. Must be inside the repository. |
 | `command` | string | inferred from the runner | Base command line. Selected test files are appended, or substituted for `{tests}` when the command contains it. Required for `custom`. |
 | `tests` | list of globs (relative to `root`) | read from the runner's configuration, else the runner's defaults | Which files are test files. See [Which files are tests](../guides/configuration.md#which-files-are-tests). |
-| `exclude` | list of globs (relative to `root`) | `[]` | Files that are never test files, added to what the runner configuration excludes. |
-| `inputs` | list of globs | `[]` | Files every test of the suite depends on. Relative to `root`; a leading `/` makes a glob repo-relative. |
+| `exclude` | list of globs (relative to `root`) | `[]` | Files that are never test files. Without `tests:`, added to what the runner configuration excludes. With `tests:`, the test files are not taken from the runner configuration: only the runner's default excludes (such as `node_modules/`) and this list apply. |
+| `inputs` | list of globs | `[]` | Files every test of the suite depends on, added to the runner's [default inputs](#default-inputs) (lockfiles, manifests, the runner's config). Relative to `root`; a leading `/` makes a glob repo-relative. |
 | `rules` | list of [rules](#rules) | `[]` | Dependencies of some tests that tracing cannot see. |
 | `depends_on` | list of [dependencies](#depends_on) | `[]` | Code the tests exercise across a process boundary (a server started by docker compose, an HTTP API). See [Tests that talk to a server](../guides/servers.md). |
 | `serves` | list of globs (repo-relative) | `[]` | Shorthand for `depends_on: [{paths: [...]}]`. |
@@ -130,13 +153,28 @@ One entry of `suites:`.
 | `granularity` | `package`, `func` | `package` | Go only. `func` makes each top-level test function a unit (`function` is accepted as an alias). See [Go test functions](../guides/go-test-functions.md). |
 | `static` | bool | `true` | Use the static import graph in addition to tracing. |
 | `trust_browser_passes` | bool | `false` | vitest only. Record a pass of a test that runs only in a browser (browser mode, Storybook stories), which leaves no trace, with the dependencies smates knows statically, so that it is skipped until one of them changes. Off, such a test runs again on every run. See [Browser mode and Storybook](../guides/runners.md#browser-mode-and-storybook). |
-| `junit` | path (relative to `root`) | | A JUnit XML report the command writes. smates reads per-file pass/fail from it when the runner cannot report it otherwise. |
+| `junit` | path (relative to `root`) | | A JUnit XML report the command writes. smates reads per-file pass/fail from it when the runner cannot report it otherwise. A report that is missing or cannot be read is a warning, not an error. When the runner's reporter also has a result for a file, the worse one wins (fail beats unknown, which beats pass). |
 | `python_roots` | list of paths (relative to `root`) | `[]` | Extra import roots for Python static analysis (for example `src` in a src layout). |
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
 | `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
 | `requires` | list of [requirements](#requires) | `[]` | What the environment must provide for the tests to run (a database, a browser). Tests whose requirements are not met do not run and stay selected. |
+
+### Default inputs
+
+Every test of a suite depends on these files without your listing them. Names are
+looked up in the suite root unless the table says otherwise.
+
+| runner | default inputs |
+|---|---|
+| `vitest`, `jest`, `node`, `bun` | `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `bun.lock`, `bun.lockb`, `.npmrc`, `.yarnrc.yml`, `.nvmrc`, `.node-version`, `.tool-versions` and `bunfig.toml`, in the suite root and every directory above it up to the repository root; `tsconfig*.json`, `.env` and `.env.*` in the suite root; `tsconfig*.json` at the repository root |
+| `vitest` (also) | `vitest.config.*`, `vite.config.*`, `vitest.*.config.*`, `vite.*.config.*`, `vitest.workspace.*`, `vitest.setup.*`; `vitest.config.*` and `vitest.workspace.*` at the repository root |
+| `jest` (also) | `jest.config.*`, `jest.setup.*`, `babel.config.*`, `.babelrc`, `.babelrc.*`, `.swcrc`; `jest.config.*` and `babel.config.*` at the repository root |
+| `pytest` | `pyproject.toml`, `uv.lock`, `setup.cfg`, `setup.py`, `pytest.ini`, `tox.ini`, `requirements*.txt`, `.python-version`; at the repository root `pyproject.toml`, `uv.lock`, `.python-version`, `requirements*.txt`, `pytest.ini`, `.tool-versions` |
+| `unittest` | as `pytest`, without either `pytest.ini` |
+| `go` | `go.mod`, `go.sum`; at the repository root `go.work`, `go.work.sum`, `.tool-versions`; with `GOWORK` set (in the suite's `env` or the environment), that `go.work`, its `go.work.sum`, the `go.mod` and `go.sum` of its modules, and the `go.mod` of each local `replace` target |
+| `custom` | none |
 
 ### rules
 
@@ -182,8 +220,9 @@ read (static analysis off, or no analyzer for its files), whatever its runner. I
 Java that smates cannot resolve are dropped from the closure without a trace: a Python
 test that reaches a helper through `sys.path` (`from dbkit import reset`, with
 `support/` added to the path) does not reach `support/dbkit.py` as far as the rule can
-tell, so name such a test with `tests:` in another rule, or import the helper by its
-repository path. A test that reaches the database in a way the rule does not
+tell. Add the directory to the suite's `python_roots` (or to pytest's `pythonpath`,
+which smates reads too), name such a test with `tests:` in another rule, or import the
+helper by its repository path. A test that reaches the database in a way the rule does not
 name (its own `sql.Open`, a helper not in the list, a child process) does not get the
 deps, so name every entry point, and add the variables the database connection reads.
 `smates doctor` reports how many test units each such rule applies to, warns about one
@@ -199,8 +238,7 @@ Each entry has exactly one of `suite` and `paths`. A plain string is a suite nam
 | `paths` | list of globs (repo-relative) | The tests depend on these files. No leading `/` or `..`. |
 | `tests` | list of globs (relative to the suite `root`) | Narrow the tests that get the dependency (default: all). |
 
-Globs everywhere use `/` as the separator (`**` matches any depth). A leading `./` is
-removed from `depends_on`, `serves` and `requires` `tests` globs.
+See [Globs](#globs) for how globs are written and checked.
 
 ### requires
 
@@ -243,9 +281,14 @@ requires:
     tests: ["e2e/**"]
 ```
 
-A check that cannot tell (a command that is not found or times out, an address that
-does not parse) counts as not met. Each check runs once per run (`--dry-run` runs none). When tests were left
-out and no test failed, `smates run` exits 4 (an environment problem); see
+A check that cannot tell (a command that is not found or times out, an address with
+variables that does not parse once they are expanded) counts as not met. Mistakes smates
+can see without running anything are configuration errors (exit 3) instead: a `tcp`
+address without variables that is not `host:port`, an `env` that is not a variable
+name, a `file` that is not a valid glob, a `timeout` on an `env` or `file` entry, a
+negative `timeout`, and an entry written as a plain string (`- 127.0.0.1:5432`; write
+`- tcp: 127.0.0.1:5432`). Each check runs once per run (`--dry-run` runs none). When
+tests were left out and no test failed, `smates run` exits 4 (an environment problem); see
 [`smates run`](cli.md#unmet-requires). The git hooks and the Claude Code and Codex Stop
 hooks print one line about them instead of blocking. Adding a requirement or changing
 one reruns nothing: it is not part of the suite's settings hash.
@@ -260,7 +303,7 @@ to explain a few failures.
 | `enabled` | `auto`, `always`, `never` | `auto` | `never` turns the agent off. `auto` uses it when credentials (or `command`) are present; `always` currently behaves like `auto`. |
 | `provider` | `auto`, `anthropic`, `openai`, `openrouter` | `auto` | Built-in backend. `auto` takes the first of Anthropic, OpenAI and OpenRouter whose API key is set (see [Variables smates reads](environment-variables.md#agent-credentials)). |
 | `model` | string | per provider: `claude-haiku-5-5`, `gpt-6-luna`, `anthropic/claude-haiku-5.5` | Model name. |
-| `effort` | `low`, `medium`, `high` | `low` | Reasoning effort. It is dropped for models that reject it. |
+| `effort` | string (`low`, `medium`, `high`, ...) | `low` | Reasoning effort, passed to the provider as written: smates does not check the value. On OpenAI and OpenRouter, smates retries without it when the model rejects it; on Anthropic, a rejected value makes the call fail. |
 | `max_turns` | int | `12` | Tool-use turns per call. `0` means the default. |
 | `timeout` | duration (`120s`, `2m`) | `120s` | Wall-clock limit per call. |
 | `instructions` | string | | Appended to the agent's system prompt: project-specific hints. |

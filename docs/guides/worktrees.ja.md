@@ -18,7 +18,8 @@ smates: selected 3 of 412 test unit(s) across 3 suite(s) (99% skipped)
 ステート（`.smates/state.json.gz`）は worktree ごとにあるので、新しい worktree は記録のない状態から
 始まり、すべてのテストを選択してしまいます。そうならないよう、ステートのないリンクされた worktree で
 最初にステートを必要とするコマンドが、ステートを *シード*（初期化）し、どこから取得したかを 1 行で
-表示します。
+表示します。[`state_shared: true`](#share-one-state-between-worktrees) のときは、共有ファイルがなければ
+どの worktree でも同じようにシードします。
 
 ### シードの取得元 { #where-the-seed-comes-from }
 
@@ -54,8 +55,8 @@ state_shared: true
 
 | 内容 | 置き場所 |
 |---|---|
-| テストごとのエントリ、エージェントの回答、実行記録 | git の共通ディレクトリにある 1 つのファイル: `.git/smates/state.json.gz` |
-| ツリー全体のスナップショット | worktree ごと: `.smates/state.snapshot.json.gz` |
+| テストごとのエントリ、エージェントの回答、実行記録 | git の共通ディレクトリ配下の `smates/` にある、`state:` と同じファイル名の 1 つのファイル: デフォルトでは `.git/smates/state.json.gz` |
+| ツリー全体のスナップショット | worktree ごと。`state:` のパスの最初の拡張子の前に `.snapshot` を挟んだもの: デフォルトでは `.smates/state.snapshot.json.gz` |
 
 スナップショットは worktree ごとに持つので、あるブランチでの実行が、別のブランチの変更をこのブランチの
 変更のように見せることはありません。

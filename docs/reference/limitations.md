@@ -75,7 +75,8 @@ then checked too; a declaration file, a manual mock or a tsconfig path to anothe
 does not count), and any
 package for its types only (`import type`), but not another package such as a shared
 preset. Storybook's Vitest plugin is seen when it is `@storybook/addon-vitest` 10 or
-later, its configuration directory can be told, and that directory's `main.*` sets no
+later (the older `@storybook/experimental-addon-test` never is), its configuration
+directory can be told, and that directory's `main.*` sets no
 `viteFinal` and no `typescript` options and names only Storybook's own addons (docs,
 a11y, links, themes, onboarding, vitest) and the `react-vite`, `html-vite` or
 `web-components-vite` framework; `STORYBOOK_COMPONENT_PATHS` in the suite `env` counts as
@@ -175,7 +176,11 @@ selected when only the time changes. Workaround: list it in `volatile` (it runs 
 time), or set `max_age` so recorded runs expire.
 
 **Jest** occasionally runs two files back to back in one worker even when recycling
-workers. Their dependencies are then merged: still correct, but less precise.
+workers. Their dependencies are then merged: still correct, but less precise. Workers are
+not recycled at all on Jest 28 or older, when tests run in band (`--runInBand`, `-i`),
+when you set `workerIdleMemoryLimit`, or when the command names a configuration smates
+cannot see (see [jest](../guides/runners.md#jest)): every file then depends on what its
+whole worker ran.
 Workaround: `isolate: true` makes it exact, at the cost of one jest start per file
 while recording.
 

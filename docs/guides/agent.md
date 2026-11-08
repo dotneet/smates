@@ -52,12 +52,17 @@ For a single run, use `smates run --no-agent`.
 
 ## Cost and latency
 
-Requests use low reasoning effort and prompt caching by default. smates drops the effort
-setting for models that do not reason. A typical call costs well under $0.01 and takes a
-few seconds.
+Requests use low reasoning effort and prompt caching by default. On OpenAI and
+OpenRouter, smates retries without the effort setting when a model rejects it. On
+Anthropic, a rejected effort fails the call, which falls back like any other failure
+(see [Bounds and fallbacks](#bounds-and-fallbacks)). A typical call costs well under
+$0.01 and takes a few seconds.
 
-`smates stats` counts agent calls, tokens and the cost, when the backend reports a cost
-(see [Shadow mode, flaky tests and stats](trust.md#stats)).
+`smates stats` counts agent calls and tokens (see
+[Shadow mode, flaky tests and stats](trust.md#stats)). The built-in Anthropic, OpenAI and
+OpenRouter clients report no cost, so `stats` shows one only for an
+[`agent.command`](#an-external-agent-agentcommand) whose output carries
+`total_cost_usd`.
 
 ## What the agent can do
 
@@ -88,9 +93,11 @@ test, never hide one.
 ## Caching
 
 Answers are cached in the state, keyed by the orphans (path, status and content), the
-model or command, `agent.instructions` and the test inventory. The same change on the same
+provider, model and effort (or, with `agent.command`, the command), `agent.instructions`,
+the test inventory and the version of smates' prompt. The same change on the same
 inventory never asks twice. The log then says
-`agent: reusing cached decision for N orphan file(s)`.
+`agent: reusing cached decision for N orphan file(s)`. A smates release that changes the
+prompt asks again.
 
 Failure explanations are cached the same way, keyed by the test, its changed inputs and
 its failure output.
@@ -127,9 +134,16 @@ agent:
 - smates runs the command with `sh -c` in the repository root, writes the prompt to its
   stdin, and reads the answer from its stdout. The prompt ends with the JSON schema of the
   answer (`decision`: `none`, `tests` or `run_all`, plus `tests`, `no_impact` and
-  `summary`).
+  `summary`). A `tests` entry with `"test": "*"` adds the whole suite.
+- The answer is the last JSON object in stdout with a top-level `decision` key, bare or
+  inside a markdown fence. When stdout is one JSON object without `decision`, it is an
+  envelope: smates takes the answer from its `final_output` or `result` field (a string
+  or an object), and reads `usage` (`input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens`), `num_turns` and
+  `total_cost_usd` from it for `smates stats`.
 - The same timeout, validation, caching and fallback apply.
-- The command is used for orphans only. Failure explanations need the built-in backend.
+- The command is used for orphans only ([failure explanations](#failure-explanations)
+  stay off).
 
 Process handling depends on whether smates has a terminal:
 
@@ -146,10 +160,12 @@ simply falls back to the orphan policy without the agent. Nothing fails.
 ## Failure explanations
 
 With an API key, and without `--no-agent`, smates explains up to `agent.explain_max`
-(default 3) failing tests per run; `agent.explain_failures: false` turns this off. Each
-explanation is one request without tools, capped at 30 s and made in the background
-while later suites run. See [Failure hints](failure-hints.md#agent-explanations) for
-what is sent and what you get back.
+(default 3) failing tests per run; `agent.explain_failures: false` turns this off.
+Explanations use only the built-in clients, so a configured `agent.command` turns them
+off too, whatever keys are set. Each explanation is one request without tools, capped
+at 30 s and made in the background while later suites run. See
+[Failure hints](failure-hints.md#agent-explanations) for what is sent and what you get
+back.
 
 ## Letting the calling agent decide
 

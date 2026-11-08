@@ -26,7 +26,16 @@ Which files count as tests is read from each runner's own configuration; see
 
 smates injects a preload (`--require`) into Node processes. It collects V8 coverage for
 the code each test file executes and hooks `fs` for the files it reads, lists and
-probes. The static analyzer adds the import graph, so a new import counts at once.
+probes. The static analyzer adds the import graph, so a new import counts at once (see
+[What the import graph understands](#what-the-import-graph-understands)).
+
+Code the runner process runs itself, outside any test file, is a dependency of every
+test of the suite: its configuration, global setup and what they import, custom
+reporters and resolvers. So is everything such a helper uses (its code and the files it
+reads) when it runs repository code but belongs to no test, such as a server started by
+global setup. Files the runner process only reads are not dependencies, except reads
+made in global setup: the runner reads every test and source file to crawl or transform
+them.
 
 ### vitest
 
@@ -35,9 +44,14 @@ exactly. Reads made in `globalSetup` count for every test. If your project sets 
 `isolate: false` (shared workers), set `isolate: true` on the suite so that smates runs
 each file on its own while recording.
 
-smates adds a reporter next to yours for per-file results. When you configure
-`reporters` yourself, it does not add one, and a failing run then marks every recorded
-file failed.
+smates adds a reporter next to yours for per-file results. Older Vitest loads reporters
+only from inside the project, so smates copies its reporter into
+`node_modules/.cache/smates` for the run and removes it afterwards. When you configure
+`reporters` yourself, or the command names a configuration (`--config`, `-c`) or a root
+(`--root`, `--dir`) whose settings smates cannot see, or there is no `node_modules`
+directory to place the reporter in, it does not add one, and a failing run then marks
+every recorded file failed. See also
+[What smates adds to the command](#what-smates-adds-to-the-command).
 
 Vitest and Vite configuration files in the suite directory (`vitest.config.*`,
 `vite.config.*`, per-project files such as `vitest.e2e.config.ts` or
@@ -50,7 +64,8 @@ whatever they import, are never treated as untested code: a change to one goes t
 ### Browser mode and Storybook
 
 A vitest project that runs its tests in a browser (`test.browser`) or with Storybook's
-Vitest plugin (`storybookTest()` from `@storybook/addon-vitest`) is read like any other,
+Vitest plugin (`storybookTest()` from `@storybook/addon-vitest`, or the older
+`@storybook/experimental-addon-test`) is read like any other,
 with two differences.
 
 - **Stories are tests.** The plugin reads the stories of the Storybook configuration
@@ -95,13 +110,24 @@ left out.
 
 Jest workers run many files each, which would merge their dependencies. While
 recording, smates makes jest restart a worker after every file
-(`--workerIdleMemoryLimit=0` on Jest 30, a tiny limit on Jest 29). Jest occasionally
+(`--workerIdleMemoryLimit=0` on Jest 30+, a tiny limit on Jest 29). Jest occasionally
 still runs two files back to back in one worker; their dependencies are then merged,
 which is still correct, only coarser.
+
+smates does not recycle workers on Jest 28 or older (or when it cannot find jest's
+version in `node_modules`), when you set `workerIdleMemoryLimit` yourself, when the
+tests run in band (`--runInBand`, `-i`, or `runInBand` in `jest.config.*`), or when the
+command names a configuration smates cannot see (`--config`, `-c`, `--projects`,
+`--rootDir`). Each test file then depends on everything its worker ran (in band, on
+everything the run used), and smates warns that dependencies were merged.
 
 `isolate: true` makes it exact: one jest process per file while recording, at the cost
 of one jest start per file. `record_jobs` bounds how many run at once (default: the CPU
 count, or 1 with `--runInBand`).
+
+smates reads `testMatch` and the other test patterns from your jest configuration, not
+from a `preset` it names. When a preset sets them, set `testMatch` in your own
+configuration, or `tests:` on the suite.
 
 ### node --test
 
@@ -125,11 +151,48 @@ usual (per-file status then needs a JUnit report).
 - smates never lets `npx` or `bunx` download a runner. If the command would fetch a
   tool from the registry, the run stops with a message to install it first.
 - npm/pnpm/yarn/bun workspaces and tsconfig `paths` are resolved by the static
-  analyzer, so imports between packages of a monorepo are followed.
-- Lockfiles, `package.json`, `tsconfig*.json`, `.npmrc`, `.nvmrc` and similar files, in
-  the suite directory and every directory above it, are inputs of every test.
+  analyzer, so imports between packages of a monorepo are followed (see
+  [What the import graph understands](#what-the-import-graph-understands)).
+- Lockfiles, manifests and tsconfig files are inputs of every test; see
+  [Default inputs](../reference/configuration.md#default-inputs) for the exact list. A
+  tsconfig that is not among them (a nested package's, or one they extend) still steers
+  the import graph through its `paths`.
 - In vitest and bun suites, imports used only for types (`import type`) are not
   dependencies; see [Limitations](../reference/limitations.md#what-tracing-reaches).
+
+### What the import graph understands { #what-the-import-graph-understands }
+
+The static analyzer resolves imports the way TypeScript, Node and bundlers do, and when a
+specifier may mean several files, the test depends on all of them.
+
+??? note "Details: what the analyzer reads"
+    - `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.mts`, `.cts`, `.tsx`, and in `.vue`,
+      `.svelte` and `.astro` components the `<script>` blocks, Astro's frontmatter and
+      relative `src` attributes;
+    - `import`, `export … from`, `import()`, `require()`, `require.resolve()` and
+      `import.meta.resolve()`;
+    - tsconfig and jsconfig `paths` and `baseUrl`, through `extends`, of the nearest
+      config directory: `tsconfig.json`, `jsconfig.json`, sibling `tsconfig.*.json` files
+      (such as `tsconfig.app.json`) and the projects they list in `references`;
+    - package.json `imports` (`#internal/x`);
+    - workspace packages by name, through `exports` (every condition), `main` and
+      `module`. Every directory with a `package.json` counts, so no workspace
+      configuration is read. When the entry point does not exist in the working tree (an
+      unbuilt `dist/`), the import depends on all of the package's source files;
+    - `@/x` and `~/x` as `src/x` (else `x`) of the nearest package, and `$lib/x` as
+      `src/lib/x`, when nothing else resolves them (aliases usually set in a bundler
+      config);
+    - `import.meta.glob(...)` patterns, `require.context(dir)`, template-literal imports
+      (`` import(`./locales/${lang}.json`) `` depends on every file that matches),
+      `new URL("./file", import.meta.url)` and `/// <reference path="...">`;
+    - `jest.mock`, `vi.mock` and their relatives (`doMock`, `requireActual`, …): the
+      module, and its manual mock in the adjacent `__mocks__` directory;
+    - for any bare import (`lodash`, `@scope/pkg`), `__mocks__/<name>` at the package root
+      and at the repository root, which Jest and Vitest may load instead.
+
+    Packages in `node_modules` are no dependencies (the lockfile stands for them). An
+    alias only a bundler config defines, beyond the ones above, is not resolved: tracing
+    still sees the files it loads while recording.
 
 ### The cost of recording
 
@@ -145,8 +208,8 @@ speed. Selection is the same, but the state is left as it was: the tests that ra
 recorded (neither their new dependencies nor their results), so the next recorded run
 selects them again, and tests that have never been recorded stay new. Use it for quick
 local iterations, and let a recorded run (CI, or a plain `smates run`) bring the state up
-to date. Runners that report per-file status without tracing (vitest, jest) still report
-which files failed.
+to date. Runners that report per-file status without tracing (vitest, jest, pytest,
+`go test`, and any suite with a `junit:` report) still report which files failed.
 
 ## Python
 
@@ -171,6 +234,9 @@ A Python suite uses `pytest` when anything points to it, and `unittest` otherwis
 pytest runs with a plugin that attributes what runs to each test, each fixture and each
 collected module. Data a module reads at import time, or behind a cache such as
 `functools.cache`, belongs to that module and counts for every test that imports it.
+What happens outside any test counts for every test of the process: data read there (by
+a `conftest.py` at import time), processes started there (a server a session hook
+starts), and fixtures no test declares (requested with `request.getfixturevalue`).
 pytest-xdist (`-n auto`) works: the plugin loads in every worker.
 
 ### unittest
@@ -203,6 +269,32 @@ importing a module into a failure of that module instead of the end of the run.
     suggesting `runner: pytest`. A run in which no module ran a test fails (unittest's
     exit code 5) only when one of them is written for pytest.
 
+### How imports are resolved { #how-python-imports-are-resolved }
+
+The static analyzer resolves a module name against every directory that pytest or a
+typical environment may put on `sys.path`, and keeps every match. When your layout puts
+code on `sys.path` some other way, add the directory to the suite's
+[`python_roots`](../reference/configuration.md#suite-keys).
+
+??? note "Details: import roots and dynamic imports"
+    The roots are:
+
+    - the repository root, every Python project directory (`pyproject.toml`,
+      `setup.py`, `setup.cfg`) and its `src/`, and the repository's `src/`;
+    - pytest's `pythonpath` (in `pyproject.toml`, `pytest.ini`, `tox.ini` or
+      `setup.cfg`) and the package locations of setuptools (`packages.find.where`,
+      `package-dir`), poetry (`packages = [{ from = … }]`) and hatch (`packages`);
+    - the suite's `python_roots`;
+    - the parent of the importing file's top-level package and, for a test file, the
+      directory of every `conftest.py` pytest loads for it (pytest's default `prepend`
+      import mode);
+    - the importing file's own directory.
+
+    `from a import b` depends on both `a` and the submodule `a.b`.
+    `importlib.import_module`, `__import__` and `pytest.importorskip` with a literal name
+    are followed; with a literal prefix (`import_module(f"app.plugins.{name}")`) the test
+    depends on every module under it.
+
 ### Interpreters and virtualenvs
 
 The default command is `uv run pytest` when the project uses uv (`uv.lock`, or a
@@ -225,19 +317,36 @@ A Go unit is a package. Its dependencies are the static import closure, which is
 for Go, plus what the test binary reports through `-test.testlogfile` (files read,
 directories listed, environment variables), via `go test -exec`. Node and Python
 processes a test starts are traced too. Build failures are attributed to their packages.
-`go.mod`, `go.sum`, `go.work` and `.tool-versions` are inputs.
+The files that pin versions (`go.mod`, `go.sum`, `go.work`, `go.work.sum`) count for
+every package that builds with them.
 
-In a `go.work` workspace, Go picks one version of each dependency for all the modules
-the workspace uses, so a `require` bump in one module can change what another builds
-even when it never imports the first. Every Go file of the workspace therefore depends
-on the `go.mod` and `go.sum` of every module listed by `use`, and on the `go.mod` of
-each local `replace` target: a dependency bump in any of them selects every test of the
-workspace. A `go.work` smates cannot parse makes every module below it count. Go uses
-the `go.work` nearest the directory it runs in, so a file counts the pins of every
-`go.work` at or above it (a nested `svc/go.work` and the root's). A `go.work` that
-`GOWORK` names elsewhere (in the suite's `env:` or smates' environment) has its pins
-made inputs of every test of the suite. `GOWORK=auto` is the same as leaving it unset:
-the nearest `go.work` is used, and the nested modules it lists stay in the suite.
+??? note "Details: the static closure"
+    The static closure holds the package's own files, those of every package it imports
+    (through the repository's `go.mod` files, or `vendor/` when the module or workspace
+    vendors its dependencies), the files its `//go:embed` directives name, and the C
+    headers a cgo preamble includes from a `-I${SRCDIR}/…` directory outside the
+    package. Build constraints are not evaluated there: files for every platform and tag
+    count. The files that pin versions (`go.mod`, `go.sum`, `go.work`, `go.work.sum`,
+    and `vendor/modules.txt` when vendoring) are static dependencies of every package of
+    the module. `go.mod` and `go.sum` of the suite directory, and `go.work`,
+    `go.work.sum` and `.tool-versions` at the repository root, are also inputs of every
+    test.
+
+In a `go.work` workspace, a dependency bump in any module the workspace uses selects
+every test of the workspace.
+
+??? note "Details: `go.work` workspaces"
+    Go picks one version of each dependency for all the modules the workspace uses, so a
+    `require` bump in one module can change what another builds even when it never
+    imports the first. Every Go file of the workspace therefore depends on the `go.mod`
+    and `go.sum` of every module listed by `use`, and on the `go.mod` of each local
+    `replace` target. A `go.work` smates cannot parse makes every module below it count.
+    Go uses the `go.work` nearest the directory it runs in, so a file counts the pins of
+    every `go.work` at or above it (a nested `svc/go.work` and the root's). A `go.work`
+    that `GOWORK` names elsewhere (in the suite's `env:` or smates' environment) has its
+    pins made inputs of every test of the suite. `GOWORK=auto` is the same as leaving it
+    unset: the nearest `go.work` is used, and the nested modules it lists stay in the
+    suite.
 
 When one package holds most of the tests, set `granularity: func` to select individual
 test functions instead. See [Go test functions](go-test-functions.md).
@@ -263,25 +372,35 @@ Each matching directory is then a unit: `go test ./cmd/app` compiles it and repo
 closure like any package. smates records `[no test files]` as a pass (with `go test
 -json` too), so the unit runs when a package it imports changes, or when its own files
 do. With `granularity: func` the directory becomes a compile check (`cmd/app#(build)`)
-with no function units. A directory whose Go files the suite's build constraints all
-exclude (`//go:build` lines, `_linux.go` names, with the tags of `GOFLAGS`, the command
-and arguments passed through) is no unit. When smates cannot tell, it stays one: go list
-fails, or the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
-`sh -c "..."`) or passes words after `--`, where tags reach go test unseen. When go test
-then reports "build constraints exclude all Go files" for such a directory, that is no
-test failure: the unit is recorded as a skip (its test functions too, with `granularity:
-func`). The run exits 0 only when smates can tell nothing else failed: the command exits
-with go test's own code 1 (`make` exits 2 when a recipe fails), go test's summary lines
-(plain, or the events of `go test -json`) reach smates and report every other package as
-passing or without test files, and each `[setup failed]` of the directory follows such a
-report. Output a wrapper reformats (gotestsum's own lines) or another exit code keeps
-the run failing. A wrapper that runs go test again with the tag compiles the directory,
-and a test or build that fails there fails the run. A directory whose test files the configuration all leaves out (a tag in
-`GOFLAGS`, a `_linux_test.go` name on another platform) reports `[no test files]` too,
-but it is recorded as a skip, not a pass, so it runs again on the next run: the
-environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
-and the platform are no dependencies, and a configuration that compiles those tests
-must run them.
+with no function units.
+
+A directory whose Go files the suite's build constraints all exclude is no unit, and
+one whose test files they all exclude is recorded as a skip, so it runs again next time.
+
+??? note "Details: build constraints"
+    A directory whose Go files the suite's build constraints all exclude (`//go:build`
+    lines, `_linux.go` names, with the tags of `GOFLAGS`, the command and arguments
+    passed through) is no unit. When smates cannot tell, it stays one: go list fails, or
+    the command is not `go test` itself (`gotestsum -- -tags=...`, `make test`,
+    `sh -c "..."`) or passes words after `--`, where tags reach go test unseen.
+
+    When go test then reports "build constraints exclude all Go files" for such a
+    directory, that is no test failure: the unit is recorded as a skip (its test
+    functions too, with `granularity: func`). The run exits 0 only when smates can tell
+    nothing else failed: the command exits with go test's own code 1 (`make` exits 2 when
+    a recipe fails), go test's summary lines (plain, or the events of `go test -json`)
+    reach smates and report every other package as passing or without test files, and
+    each `[setup failed]` of the directory follows such a report. Output a wrapper
+    reformats (gotestsum's own lines) or another exit code keeps the run failing. A
+    wrapper that runs go test again with the tag compiles the directory, and a test or
+    build that fails there fails the run.
+
+    A directory whose test files the configuration all leaves out (a tag in `GOFLAGS`, a
+    `_linux_test.go` name on another platform) reports `[no test files]` too, but it is
+    recorded as a skip, not a pass, so it runs again on the next run: the environment's
+    `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain and the
+    platform are no dependencies, and a configuration that compiles those tests must run
+    them.
 
 A package that compiles only after code generation fails like any build failure (exit
 1), not as an environment error: smates cannot tell a missing generated file from a real
@@ -305,13 +424,39 @@ The `custom` runner runs any command, with the selected test files appended or p
 While recording, the Node and Python processes the command starts are traced. Status
 comes from the overall exit code unless you give a [JUnit report](configuration.md#per-file-results-from-a-junit-report-junit).
 
+## What smates adds to the command { #what-smates-adds-to-the-command }
+
+Besides the test files, smates adds a few arguments to your command, for that run only:
+
+| runner | added | when |
+|---|---|---|
+| vitest | `--reporter=default`, `--reporter=<smates' reporter>`, and `--reporter=github-actions` on GitHub Actions | unless you configure reporters, or the command names a configuration or root (`--config`, `-c`, `--root`, `--dir`), or there is no `node_modules` directory to place the reporter in (see [vitest](#vitest)) |
+| jest | `--reporters=default --reporters=<smates' reporter>` | unless you configure `reporters`, or the command names a configuration (`--config`, `-c`, `--projects`, `--rootDir`) |
+| jest | `--workerIdleMemoryLimit=0` (Jest 30+), `=1KB` (Jest 29) | while recording, see [jest](#jest) |
+| jest | `--runTestsByPath` | when not running everything, so that the selected files are taken as paths, not patterns |
+| bun | `--config=<copy of bunfig.toml>` (smates' preload first, no coverage threshold), `--coverage --coverage-reporter=lcov --coverage-dir=…` | while recording, once per file |
+| pytest | `--continue-on-collection-errors` | unless the command has `-x`/`--exitfirst`: one module that fails to import does not stop the other files |
+| go (package granularity; see [Go test functions](go-test-functions.md) for `granularity: func`) | `-exec=<smates' wrapper> -count=1` in `GOFLAGS`, and `-overlay=<file>` that adds one test file to each package with tests (your own `-overlay` merged in) | `-exec` and `-overlay` while recording (the overlay lets re-executions of the test binary keep a test log of their own); `-count=1` while recording and with `--shadow`, so no cached result is reused |
+
+`node --test`, unittest and custom suites get only the test files (a unittest run that
+records goes through `python -m smates_unittest`, see [unittest](#unittest)). When not
+running everything, pytest's exit code 5 (no tests collected) is no failure.
+
+A vitest or jest run that fails before any test file ran and without loading smates'
+reporter (for example because the runner rejects an added argument) is run again without
+the arguments smates added, except `--runTestsByPath`. Per-file status then falls back to
+the overall exit code, and smates says so.
+
 ## Child processes
 
 Tests that start other processes are followed everywhere:
 
 - Node, Bun and Python children trace themselves, in any suite (a pytest test running
-  `node`, a Node test running `python3` or `bun`), also when started through a shell
-  (`sh -c "node x | tr"`), and are attributed to the test that started them.
+  `node`, a Node test running `python3`, `pypy3` or `bun`), also when started through a
+  shell (`sh -c "node x | tr"`) or `npm`, `npx`, `pnpm` and `yarn`, and are attributed
+  to the test that started them.
+- Launchers (`uv run`, `uvx`, `bunx`) and the commands of `find -exec` are analyzed as
+  the command they start.
 - Shell scripts, `grep`, `cat` and other read-only commands are analyzed from their
   command line and script contents: the test depends on the files they name. A script
   called with arguments follows its positional parameters (`$1`, `"$@"`).

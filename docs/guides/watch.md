@@ -29,7 +29,7 @@ When stdin is a terminal:
 |---|---|
 | `a` | run every test |
 | `f` | rerun the tests that have not passed |
-| `Enter` | rerun the last selection |
+| `Enter` or `r` | rerun the last selection |
 | `q` | quit |
 | Ctrl-C | stop the running tests (their whole process tree) and exit |
 
@@ -49,7 +49,7 @@ When stdin is a terminal:
 ## Options
 
 ```bash
-smates watch --fail-fast -- -v
+smates watch --fail-fast --clear
 ```
 
 | flag | effect |
@@ -60,7 +60,14 @@ smates watch --fail-fast -- -v
 | `--agent` | ask the [LLM agent](agent.md) about orphans (see below) |
 | `--clear` | clear the screen before each run |
 | `-C`, `--config`, `--state`, `--suite`, `-v` | as for `smates run` |
-| `-- <args>` | passed on to the runner |
+| `-- <args>` | passed on to the runner (see the warning below) |
+
+!!! warning "Runner arguments stop recording passes"
+    Arguments after `--` go to the runner in every cycle, and they may filter tests
+    (`-t name`, `-k expr`, `-run Test`), so no test is recorded as passed while they are
+    given: a test that passes is recorded as unknown instead (see
+    [Limitations](../reference/limitations.md#runners)). Every test a cycle runs is then
+    selected again in the next one. Put permanent flags in the suite's `command` instead.
 
 ## Orphans while watching
 
