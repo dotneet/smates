@@ -91,7 +91,8 @@ suite) selects nothing.
     knows the tests that ran there, so a test with no entry is judged by static analysis
     against the base branch instead: it is selected (`diff`) when its test file or a file
     it imports changed since then. A test file you just added is such a change, so it
-    still runs. The same applies to every test when there is no state at all.
+    still runs. The same applies to every test when there is no state at all, and in CI
+    when you pass `--base` (to adopt suites one at a time in one job).
 
 ## Content hashes, not git diff
 

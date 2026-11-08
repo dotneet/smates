@@ -643,12 +643,14 @@ func TestCommandHelp(t *testing.T) {
 		{args: []string{"config", "add-ignore", "-h"}, errOut: []string{"-dry-run"}},
 		{args: []string{"state", "-h"}, out: []string{"smates state show", "smates state merge", "-remote"}},
 		{args: []string{"state", "--help"}, out: []string{"smates state pull|push"}},
-		{args: []string{"hook", "-h"}, out: []string{"smates hook install", "smates hook status", "-append", "-claude"}},
+		{args: []string{"hook", "-h"}, out: []string{"smates hook install", "smates hook status", "-append", "-claude", "-codex"}},
 		{args: []string{"hook", "install", "--help"}, errOut: []string{"-append", "-agent", "-claude"}},
 		{args: []string{"hook", "uninstall", "--help"}, errOut: []string{"-claude"}, notErr: "-append"},
 		{args: []string{"hook", "status", "-h"}, errOut: []string{"-hook"}, notErr: "-agent"},
 		{args: []string{"hook", "run", "-h"}, out: []string{"smates hook run pre-push|pre-commit"}},
 		{args: []string{"hook", "claude-stop", "-h"}, out: []string{"smates hook claude-stop"}},
+		{args: []string{"hook", "codex-stop", "-h"}, out: []string{"smates hook codex-stop"}},
+		{args: []string{"run", "-h"}, errOut: []string{"-max-time"}},
 	} {
 		var out, errb bytes.Buffer
 		code := Main(c.args, &out, &errb)

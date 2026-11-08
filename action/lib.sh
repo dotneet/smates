@@ -69,6 +69,21 @@ smates_release_for_commit() {
   fi
 }
 
+# smates_restore_base PREFIX BRANCH BASE DEFAULT prints the state cache restore key for
+# the base branch of a pull request (PREFIX BASE-), between the branch's own key and the
+# default branch's. Without a base (push and schedule runs), or when the base is the
+# branch itself or the default branch, it prints the branch's key again: an empty base
+# would give PREFIX-, which matches the state of every branch and cache-key. Commas,
+# which cache keys may not contain, become underscores.
+smates_restore_base() {
+  local prefix=$1 branch=${2//,/_} base=${3//,/_} def=${4//,/_}
+  if [ -n "$base" ] && [ "$base" != "$branch" ] && [ "$base" != "$def" ]; then
+    printf '%s%s-\n' "$prefix" "$base"
+  else
+    printf '%s%s-\n' "$prefix" "$branch"
+  fi
+}
+
 smates_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'

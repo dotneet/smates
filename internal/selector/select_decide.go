@@ -6,9 +6,11 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/pathutil"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
 )
 
@@ -49,6 +51,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 		files = append(files, f)
 	}
 	sort.Strings(files)
+	known := depkey.NewCoverIndex(s.knownCovered)
 	out := map[string][]string{}
 	n := 0
 	for _, f := range files {
@@ -57,7 +60,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 		}
 		// Whether f was added since Base is not known: only a deletion counts as an
 		// existence change, as for diff mode's orphans (existedBefore).
-		if depkey.Covers(s.knownCovered, f, in.Snap[f] == "") != depkey.CoverNone || slices.ContainsFunc(res.declared, func(d *ServiceDeps) bool { return d.match(f) }) {
+		if known.Covers(f, in.Snap[f] == "") != depkey.CoverNone || slices.ContainsFunc(res.declared, func(d *ServiceDeps) bool { return d.match(f) }) {
 			continue
 		}
 		if !res.Explains(f, in.Snap[f] == "" || !existedBefore(in, f)) {
@@ -100,15 +103,40 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changed)
 	}
-	s.reportConfig(t, u.via)
-	explain(t, ss.sr, u.via, sets)
+	s.runAnyway(t, ss, u)
+	s.reportConfig(t, u.known)
+	explain(t, ss.sr, u.known, sets)
 	return t
 }
 
+// runAnyway selects a unit decide left out that runs whatever changed: the suite's
+// volatile lists it (a compile check is never volatile: it does not run the tests), or
+// its last recorded run is older than the suite's max_age.
+func (s *selection) runAnyway(t *Test, ss *suiteSel, u *unitSel) {
+	su := ss.sr.Suite
+	if t.Selected {
+		return
+	}
+	if len(su.Volatile) > 0 && !runner.IsBuildCheck(u.id) && UnitMatches(su, u.id, ss.sr.Files[u.id], su.Volatile) {
+		t.Selected, t.Reason, t.Detail = true, ReasonVolatile, "listed in volatile: runs every time"
+		return
+	}
+	if su.MaxAge > 0 && u.entry != nil {
+		now := s.in.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if age := now.Sub(u.entry.At); age > su.MaxAge {
+			t.Selected, t.Reason = true, ReasonExpired
+			t.Detail = fmt.Sprintf("last run %s ago, older than max_age %s", age.Round(time.Minute), su.MaxAge)
+		}
+	}
+}
+
 // reportConfig reports a changed settings key (depkey.Config) among t.Changed as the
-// configuration file, which reaches the test as an input unless via explains it
+// configuration file, which reaches the test as an input unless known explains it
 // otherwise.
-func (s *selection) reportConfig(t *Test, via map[string]string) {
+func (s *selection) reportConfig(t *Test, known *unitKnown) {
 	path := s.in.Config.Path
 	if path == "" {
 		return
@@ -121,8 +149,8 @@ func (s *selection) reportConfig(t *Test, via map[string]string) {
 	if !slices.Contains(t.Changed, path) {
 		t.Changed = append(t.Changed, path)
 		sort.Strings(t.Changed)
-		if via[path] == "" {
-			via[path] = ViaInput
+		if known.how(path) == "" {
+			known.rest[path] = ViaInput
 		}
 	}
 }
@@ -131,7 +159,7 @@ func (s *selection) reportConfig(t *Test, via map[string]string) {
 // ModeAll; in ModeDiff, a test with a changed dependency (a Go file's declarations
 // change with the file); otherwise a test with no recorded entry, a test with a
 // dependency whose hash differs from the recorded one (or that was not recorded) and a
-// test that did not pass last time.
+// test that did not pass last time (skipping itself is no pass: ReasonUnproven).
 func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
 	switch mode {
 	case ModeAll:
@@ -169,6 +197,8 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	switch {
 	case len(t.Changed) > 0:
 		t.Selected, t.Reason = true, ReasonChanged
+	case entry.Status == state.Skip:
+		t.Selected, t.Reason, t.Detail = true, ReasonUnproven, "skipped last run: not proven to pass"
 	case entry.Status != state.Pass:
 		t.Selected, t.Reason, t.Detail = true, ReasonFailed, "last run: "+entry.Status
 	default:
@@ -176,12 +206,12 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 	}
 }
 
-// explain sets how each changed dependency reached t: via holds the known deps by
+// explain sets how each changed dependency reached t: known holds the known deps by
 // strongest explanation (anything else was traced). A changed set key stands for the
 // files of its declaration that changed (sets, against the snapshot or base revision
 // decide compared with), each named with the declaration; it stays as the key only
 // when none can be named (they changed between the test's run and the snapshot).
-func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]string) {
+func explain(t *Test, sr *Suite, known *unitKnown, sets map[*ServiceDeps][]string) {
 	if len(t.Changed) == 0 {
 		return
 	}
@@ -204,11 +234,11 @@ func explain(t *Test, sr *Suite, via map[string]string, sets map[*ServiceDeps][]
 	// test itself keeps that stronger explanation over the declaration's.
 	var setKeys []*ServiceDeps
 	for _, c := range t.Changed {
-		if d := sr.service(c); d != nil && via[c] == ViaService {
+		if d := sr.service(c); d != nil && known.how(c) == ViaService {
 			setKeys = append(setKeys, d)
 			continue
 		}
-		how := via[c]
+		how := known.how(c)
 		if how == "" {
 			how = ViaTraced
 		}

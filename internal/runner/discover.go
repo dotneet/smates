@@ -30,6 +30,22 @@ type Matcher struct {
 	TestRegex []*regexp.Regexp
 	// IgnoreRegex excludes paths matched like TestRegex.
 	IgnoreRegex []*regexp.Regexp
+	// Browser is set when the project runs its tests in a browser (Vitest's browser
+	// mode, Storybook's Vitest plugin): no trace sees what they load.
+	Browser bool
+	// Whole is set when the files the project runs could not be listed (a Storybook
+	// project whose stories smates cannot read): Tests are a guess, so whenever one of
+	// its tests is selected the whole suite runs, which is sure to run them all.
+	Whole bool
+	// Deps are repo-relative globs of files every test the matcher selects depends on,
+	// and Starts repo-relative files whose static import closure they depend on: what a
+	// browser project loads besides the test file (Storybook's configuration directory
+	// and static directories; its preview.*).
+	Deps, Starts []string
+	// Unsure says why Deps, Starts and the static import closure of a test may not be
+	// all it loads ("" when they are): its passes are then never trusted (see
+	// config.Suite.TrustBrowserPasses).
+	Unsure string
 }
 
 // Match reports whether the repo-relative path f is selected by m.
@@ -119,6 +135,9 @@ type Discovery struct {
 	// Warning says why a configuration that exists could not be read (the defaults are
 	// used then).
 	Warning string
+	// Files are the configuration files read (repo-relative): a project's file may have
+	// any name.
+	Files []string
 }
 
 // discoverer is implemented by adapters that read their runner's configuration.
@@ -132,6 +151,62 @@ const (
 	SourceDefaults = "runner defaults"
 	SourceConfig   = "smates.yml tests"
 )
+
+// matchersOf returns the Discovered matchers that select one of files.
+func (s *Suite) matchersOf(files []string) []*Matcher {
+	var out []*Matcher
+	for i := range s.Discovered {
+		m := &s.Discovered[i]
+		for _, f := range files {
+			if m.Match(f) {
+				out = append(out, m)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// BrowserUnit reports whether the unit made of the test files files runs only in a
+// browser: every project of the suite that runs one of them is a browser project
+// (Matcher.Browser).
+func (s *Suite) BrowserUnit(files []string) bool {
+	ms := s.matchersOf(files)
+	for _, m := range ms {
+		if !m.Browser {
+			return false
+		}
+	}
+	return len(ms) > 0
+}
+
+// RunsWhole reports whether a project that runs one of files cannot be run file by
+// file (Matcher.Whole).
+func (s *Suite) RunsWhole(files []string) bool {
+	for _, m := range s.matchersOf(files) {
+		if m.Whole {
+			return true
+		}
+	}
+	return false
+}
+
+// BrowserDeps returns what the browser projects running one of files make it depend
+// on besides its static import closure (Matcher.Deps and Matcher.Starts), and why
+// that may not be all ("" when it is).
+func (s *Suite) BrowserDeps(files []string) (globs, starts []string, unsure string) {
+	for _, m := range s.matchersOf(files) {
+		if !m.Browser {
+			continue
+		}
+		globs = append(globs, m.Deps...)
+		starts = append(starts, m.Starts...)
+		if unsure == "" {
+			unsure = m.Unsure
+		}
+	}
+	return globs, starts, unsure
+}
 
 // TestPatterns describes the suite's test file patterns for people.
 func (s *Suite) TestPatterns() []string {

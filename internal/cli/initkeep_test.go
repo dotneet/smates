@@ -17,7 +17,7 @@ import (
 func TestInitGitHubKeepsConfig(t *testing.T) {
 	clearCI(t)
 	noAgentCredentials(t)
-	const cfg = "# hand-written, keep me\nversion: 1\nsuites:\n  - name: unit   # custom name\n    runner: go\n    root: .\n"
+	const cfg = "# hand-written, keep me\nversion: 1\nsuites:\n  - name: unit   # custom name\n    runner: go\n    root: .\n    command: go test -race\n"
 	setup := func(files map[string]string) *gitRepo {
 		g := newGitRepo(t)
 		files["smates.yml"] = cfg
@@ -86,7 +86,7 @@ func TestDoctorWorkflowFixCommand(t *testing.T) {
 		".github/workflows/ci.yml": ciWorkflow,
 		"go.mod":                   "module example.com/x\n\ngo 1.22\n",
 		"x_test.go":                "package x\n",
-		"smates.yml":               "version: 1\nsuites:\n  - name: go\n    runner: go\n    root: .\n",
+		"smates.yml":               "version: 1\nsuites:\n  - name: go\n    runner: go\n    root: .\n    command: go test -race\n",
 	})
 	g.git("add", ".")
 	g.commit("files")

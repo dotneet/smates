@@ -309,6 +309,45 @@ func TestDoctorJSON(t *testing.T) {
 	}
 }
 
+// doctor counts the units each rule with reaches applies to, and warns about one that
+// applies to none.
+func TestDoctorRuleReaches(t *testing.T) {
+	clearCI(t)
+	noAgentCredentials(t)
+	g := newGitRepo(t)
+	writeTree(t, g.dir, map[string]string{
+		"go.mod":                    "module example.com/m\n\ngo 1.22\n",
+		"internal/testdb/testdb.go": "package testdb\n",
+		"pkg/app/repo/repo_test.go": "package repo\n\nimport (\n\t\"testing\"\n\n\t_ \"example.com/m/internal/testdb\"\n)\n\nfunc TestRepo(t *testing.T) {}\n",
+		"pkg/app/pure/pure_test.go": "package pure\n\nimport \"testing\"\n\nfunc TestPure(t *testing.T) {}\n",
+		"db/migrations/001.sql":     "create table t()",
+		"smates.yml": "version: 1\nsuites:\n  - name: go\n    runner: go\n    rules:\n" +
+			"      - reaches: [\"internal/testdb/**\"]\n        deps: [\"db/migrations/**\"]\n" +
+			"      - reaches: [\"internal/testdbs/**\"]\n        deps: [\"db/migrations/**\"]\n" +
+			// One glob matches, the other (an import path) names nothing.
+			"      - reaches: [\"internal/testdb\", \"example.com/m/internal/other\"]\n        deps: [\"db/seeds/**\"]\n",
+	})
+	g.git("add", ".")
+	g.commit("files")
+	_, out, errs := smatesCmd(t, g.dir, "doctor", "--format", "json")
+	rep := decodeJSON[doctorReport](t, out)
+	got := map[string]*doctorCheck{}
+	for _, c := range rep.Checks {
+		if c.ID == "suite-rule-reaches" {
+			got[c.Subject] = c
+		}
+	}
+	if c := got["go: rules[0]"]; c == nil || c.Status != "ok" || !strings.Contains(c.Message, "applies to 1 of 2 test units") {
+		t.Errorf("rules[0]: %+v %s", c, errs)
+	}
+	if c := got["go: rules[1]"]; c == nil || c.Status != "warn" || !strings.Contains(c.Message, "applies to no test unit") || c.Fix == nil {
+		t.Errorf("rules[1]: %+v %s", c, errs)
+	}
+	if c := got["go: rules[2]"]; c == nil || c.Status != "warn" || !strings.Contains(c.Message, "applies to 1 of 2 test units, but its reaches example.com/m/internal/other match no file") || c.Fix == nil {
+		t.Errorf("rules[2]: %+v %s", c, errs)
+	}
+}
+
 func TestReadCommandsJSON(t *testing.T) {
 	clearCI(t)
 	noAgentCredentials(t)

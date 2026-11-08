@@ -30,6 +30,10 @@ suites:
     root: services/api
     granularity: func                  # one unit per test function (default: package)
     record_jobs: 4                     # with func: functions recorded at once (default 1)
+    requires:                          # left for later where these are not met
+      - tcp: 127.0.0.1:5432            # something must accept connections here
+        tests: ["internal/store/**"]   # only these tests need it (default: all)
+      - env: DATABASE_URL              # must be set and non-empty
   - name: e2e
     runner: custom
     root: e2e
@@ -80,7 +84,8 @@ the key (see [Exit codes](exit-codes.md)). `smates config set` and
 
 !!! note "What an edit reruns"
     Editing a suite's entry reruns that suite's tests: every test depends on its suite's
-    settings as written (and on the top-level `env_track`). Editing the other top-level
+    settings as written (and on the top-level `env_track`), except `volatile`, `max_age`
+    and `requires`, which only decide when tests run. Editing the other top-level
     keys (`ignore`, `orphans`, `agent`, ...) or another suite reruns nothing. A test
     that reads `smates.yml` itself depends on its content as usual.
 
@@ -124,23 +129,65 @@ One entry of `suites:`.
 | `record_jobs` | int (≥ 0) | see meaning | How many per-file processes run at once while recording with one process per file: `1` for `bun` and for commands that run files serially (`--runInBand`, `--no-file-parallelism`, `--test-isolation=none`, `--test-concurrency=1`), else the CPU count. With `granularity: func`: how many test functions of one package are recorded at once (default `1`). `0` means the default. |
 | `granularity` | `package`, `func` | `package` | Go only. `func` makes each top-level test function a unit (`function` is accepted as an alias). See [Go test functions](../guides/go-test-functions.md). |
 | `static` | bool | `true` | Use the static import graph in addition to tracing. |
+| `trust_browser_passes` | bool | `false` | vitest only. Record a pass of a test that runs only in a browser (browser mode, Storybook stories), which leaves no trace, with the dependencies smates knows statically, so that it is skipped until one of them changes. Off, such a test runs again on every run. See [Browser mode and Storybook](../guides/runners.md#browser-mode-and-storybook). |
 | `junit` | path (relative to `root`) | | A JUnit XML report the command writes. smates reads per-file pass/fail from it when the runner cannot report it otherwise. |
 | `python_roots` | list of paths (relative to `root`) | `[]` | Extra import roots for Python static analysis (for example `src` in a src layout). |
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
+| `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
+| `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
+| `requires` | list of [requirements](#requires) | `[]` | What the environment must provide for the tests to run (a database, a browser). Tests whose requirements are not met do not run and stay selected. |
 
 ### rules
 
 | Key | Type | Meaning |
 |---|---|---|
 | `tests` | list of globs (relative to the suite `root`) | The tests the rule applies to. |
-| `deps` | list of globs (repo-relative) | Files those tests depend on. |
+| `reaches` | list of globs (repo-relative) or `$NAME` patterns | The rule applies only to the tests whose static import closure reaches a file a glob matches, or, for a `$NAME` entry (a glob over variable names, such as `$DB_*`), whose last recorded run read that environment variable. With `tests`, a test must match both. |
+| `deps` | list of globs (repo-relative) | Files those tests depend on. **Required.** |
+
+A rule needs `tests` or `reaches`. A leading `./` is removed from its globs.
 
 ```yaml
 rules:
   - tests: ["src/db/**"]
     deps: ["migrations/**"]
+  # Every test that imports the database test helper, wherever it lives.
+  - reaches: ["internal/testdb/**", "$APP_DB_*"]
+    deps: ["db/migrations/**"]
 ```
+
+`reaches` follows the file-level closure, including what other helpers and the other
+test files of a Go package import, and the files the runner loads for every test through
+its configuration (Vitest `setupFiles` and `globalSetup`, Jest `setupFilesAfterEnv` in
+`jest.config.*`, JSON included, or the `jest` key of `package.json`, bun's `preload` in
+`bunfig.toml` or `--preload`, and what they import); for `granularity: func` it matches
+at the package level. A glob without a wildcard that names a directory
+(`internal/testdb`) matches what is below it. A `$NAME` entry also matches a test
+whose closure's source names such a variable (`os.Getenv("APP_DB_DSN")`), or names a
+prefix of it in a string literal (`envconfig.Process("APP", &cfg)`,
+`viper.SetEnvPrefix("app")`, `env_prefix="APP_"`): Go records no read made before
+`m.Run` (in `TestMain`, `init` or a package-level initializer), nor a scan of
+`os.Environ`; shell, Bun and in-browser reads are not traced; settings loaders that
+scan the environment are not counted as reads. A loader that builds the name another
+way leaves no trace in the source: name such tests with `tests:`. When smates cannot
+tell, the rule applies: static analysis is off (`static: false`), no analyzer reads the
+test's files, the closure (or a setup file the runner loads) has a JavaScript or
+TypeScript import smates cannot resolve (a bundler alias, a virtual module, a missing
+file), the runner's configuration cannot be read (a JSON file that does not parse, a
+bun preload that is no string, a `--preload` from a variable), or, for a `$NAME` entry,
+the test has no recorded run yet, the pattern may name a variable `env_ignore` (or the
+default ignore list) keeps out of every recorded run, or the test's source cannot be
+read (static analysis off, or no analyzer for its files), whatever its runner. Imports in Python, Go and
+Java that smates cannot resolve are dropped from the closure without a trace: a Python
+test that reaches a helper through `sys.path` (`from dbkit import reset`, with
+`support/` added to the path) does not reach `support/dbkit.py` as far as the rule can
+tell, so name such a test with `tests:` in another rule, or import the helper by its
+repository path. A test that reaches the database in a way the rule does not
+name (its own `sql.Open`, a helper not in the list, a child process) does not get the
+deps, so name every entry point, and add the variables the database connection reads.
+`smates doctor` reports how many test units each such rule applies to, warns about one
+that applies to none, and about each glob that matches no file of the repository. See [Tests backed by a database](../guides/configuration.md#tests-backed-by-a-database).
 
 ### depends_on
 
@@ -153,7 +200,55 @@ Each entry has exactly one of `suite` and `paths`. A plain string is a suite nam
 | `tests` | list of globs (relative to the suite `root`) | Narrow the tests that get the dependency (default: all). |
 
 Globs everywhere use `/` as the separator (`**` matches any depth). A leading `./` is
-removed from `depends_on` and `serves` globs.
+removed from `depends_on`, `serves` and `requires` `tests` globs.
+
+### requires
+
+Preconditions of the environment: a database the tests connect to, a browser they
+start, a variable they read. `smates run` checks them before it starts the suite's
+tests. Where one is not met, the tests that need it do not run: they are not recorded
+(never as passed) and stay selected, so the next run where it is met (or CI) runs them.
+The rest of the run goes on. Each entry has exactly one of `tcp`, `cmd`, `env` and
+`file`.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `tcp` | `host:port` | Something must accept a TCP connection there. smates retries until `timeout`, so a server that is still starting can make it. |
+| `cmd` | shell command | Must exit 0 within `timeout`. It runs with `sh -c` (`cmd /C` on Windows) in the suite `root`, with the suite's `env`. Use it for checks a port cannot show, such as a database schema at the expected migration. |
+| `env` | variable name | Must be set to a non-empty value, in the environment or in the suite's `env`. |
+| `file` | path or glob | Must match an existing file or directory. Relative to the suite `root`, or absolute. |
+| `tests` | list of globs (relative to the suite `root`) | Only these tests need it (default: all of the suite). Matched like [`rules`](#rules). |
+| `timeout` | duration | For `tcp` (default `2s`) and `cmd` (default `10s`). |
+
+`tcp` and `file` values may use `$VAR` and `${VAR}`, expanded from the environment and
+the suite's `env`. A variable they name that is not set (or empty) makes the requirement
+not met: `${DB_HOST}:5432` would otherwise dial this machine. No other shell form is
+expanded: a default (`${DB_HOST:-localhost}`, `${DB_HOST-localhost}`), `${DB_HOST:?}`,
+`$1`, `$$` or a `$` on its own is a configuration error (exit 3), since it would read as
+a variable that is never set. For a default, set the variable in the environment that
+runs smates (`DB_HOST=localhost` in your shell or `.envrc`, while CI sets its own), or
+use a `cmd` requirement, whose shell expands it
+(`cmd: 'nc -z "${DB_HOST:-localhost}" 5432'`). The suite's `env` is no default: it
+overrides the environment, so `env: {DB_HOST: localhost}` would also replace the
+`DB_HOST` CI sets, for the check and for the tests.
+
+```yaml
+requires:
+  - tcp: 127.0.0.1:5432
+    tests: ["internal/store/**", "internal/repo/**"]
+  - cmd: ./scripts/schema-is-current.sh
+    tests: ["internal/store/**"]
+    timeout: 30s
+  - file: ${HOME}/.cache/ms-playwright
+    tests: ["e2e/**"]
+```
+
+A check that cannot tell (a command that is not found or times out, an address that
+does not parse) counts as not met. Each check runs once per run (`--dry-run` runs none). When tests were left
+out and no test failed, `smates run` exits 4 (an environment problem); see
+[`smates run`](cli.md#unmet-requires). The git hooks and the Claude Code and Codex Stop
+hooks print one line about them instead of blocking. Adding a requirement or changing
+one reruns nothing: it is not part of the suite's settings hash.
 
 ## agent
 

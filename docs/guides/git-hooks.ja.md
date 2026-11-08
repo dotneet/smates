@@ -11,7 +11,8 @@ installed the smates pre-push hook in /home/me/src/shop/.git/hooks/pre-push
 ```
 
 これ以降、`git push` はまず `smates run --no-agent` を実行し、選択されたテストが失敗すると push を
-止めます。
+止めます。スイートの [`requires`](../reference/configuration.md#requires) を満たさず、このマシンで実行できない
+テストでは止めません。それらは後に回され（1 行で知らせます）、選択されたまま残るので CI が実行します。
 
 | オプション | 動作 |
 |---|---|
@@ -63,7 +64,7 @@ push（またはコミット）のたびに、フックは次を行います。
 ### 状態の確認と削除 { #status-and-removal }
 
 ```bash
-smates hook status      # フックの場所と、Claude Code のフックが入っているか
+smates hook status      # フックの場所と、Claude Code と Codex のフックが入っているか
 smates hook uninstall   # smates が書いた部分だけを削除
 ```
 
@@ -84,7 +85,7 @@ smates hook install --claude
 
 ### 動作 { #how-it-behaves }
 
-フックは `smates hook claude-stop` を実行し、これが `smates run --output failures --no-agent` に
+フックは `smates hook claude-stop` を実行し、これが `smates run --output failures --no-agent --max-time 8m` に
 `--` 以降のフラグを加えて呼び出します。
 
 - **テストが失敗した場合:**
@@ -95,6 +96,15 @@ smates hook install --claude
   よって作業を続けている）ときは、すぐに戻ります。そのためループしません。
 - **何も選択されなかった場合:** ステートを書き込まずにすぐ戻ります。`state_shared: true` の場合も
   同じで、そのときは worktree ごとに動きます。
+- **時間の上限があります。** フックのタイムアウトは 600 秒です。
+  [`--max-time 8m`](../reference/cli.md#time-limit) により、記録済みの所要時間から見て 8 分より後に
+  終わるバッチは開始しません。そのため、リポジトリの大部分を選択する変更でもタイムアウトに達しません。
+  `-- --max-time 4m` で別の上限を、`-- --max-time 0` で上限なしを指定できます。
+- **後回しにしたテストではブロックしません。** 時間の上限で外れたテストや、スイートの
+  [`requires`](../reference/configuration.md#requires) をこの環境で満たさないテスト（この worktree に
+  ないデータベースやブラウザなど）は、実行も記録もされず、次の実行または CI のために選択されたまま
+  残ります。フックはそれらについて stderr に 1 行表示し、ほかのテストが失敗していなければ Claude を
+  止めさせます。
 - **smates 自身のエラー**（`smates run` が 2、3、4 で終わるケース）は、Claude をブロックせず、
   終了コード 1 でユーザーに伝えます。ステートを保存できなかっただけなら、失敗したテストは引き続き
   ブロックします。
@@ -114,6 +124,22 @@ smates は自分のエントリを `settings.json` のテキストに直接差�
   `Stop`）は、報告するだけで手を付けません。
 
 `smates hook status` はプロジェクトとユーザーの両方のフックを表示します。
+
+## Codex の Stop フック { #codex-stop-hook }
+
+```bash
+smates hook install --codex
+```
+
+`.codex/hooks.json` に同じ Stop フックを追加します。Codex は信頼済みのプロジェクトでこのファイルを
+読みます（Codex のバージョンによっては、設定でフックを有効にする必要もあります）。フックは
+`smates hook codex-stop` を実行し、上の `claude-stop` と同じように動きます。失敗したテストでブロックし、
+二度はブロックせず、この環境で実行できないものは後回しにし、smates がインストールされていない環境では
+何もしません。`--agent` と `-- <run のフラグ>` は `--claude` と同じように使えます。`--user` は使えません。
+
+コマンドは `PATH` から `smates` を探し、Codex が渡すディレクトリで動くので、コミットした同じ
+`.codex/hooks.json` がリポジトリのどの worktree でも動きます。ファイル内のほかのフックは 1 バイトも
+変わらず、`smates hook uninstall --codex` は smates のエントリだけを削除します。
 
 ## 関連項目 { #see-also }
 

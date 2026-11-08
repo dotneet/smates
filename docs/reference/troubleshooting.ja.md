@@ -41,7 +41,8 @@ smates deps src/cart.test.ts
 
 - **テストが毎回作り直すファイル。** git-ignored のパスにある、テスト（やビルド）が毎回書き直すファイルを読むテストは、そのたびに新しい内容に依存します。git-ignored のパスの存在を確かめてから作成するテストは、もう 1 回だけ実行されて落ち着きます。自分で生成したものを読むテストは、新しくチェックアウトするたびに実行されます。
 - **`dir/**` への依存。** smates が中を見られないコマンド（`make`、バイナリ）を使うと、テストはそのディレクトリ配下のすべてのファイルに依存します。本当の入力を `rules` で宣言してツールを直接呼ぶか、余分な実行を受け入れてください。
-- **ログの警告。** `N test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time` は、smates が使ったものを保存する前にテストプロセスが終了したことを示します（テスト内の `process.exit()`、強制終了されたワーカーなど）。
+- **ログの警告。** `N test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time` は、smates が使ったものを保存する前にテストプロセスが終了したことを示します（テスト内の `process.exit()`、強制終了されたワーカーなど）。`N test unit(s) ran and passed but left no trace`（または `N test file(s) passed but none left a trace`）は、そのバッチのテストプロセスがひとつもトレースされなかったことを示します。スイートの command が、smates のトレース用の環境変数（`NODE_OPTIONS`、`NODE_V8_COVERAGE`、`SMATES_*`）を落とすラッパー（turbo や nx などのタスクランナー、`env -i`、コンテナ）経由でテストを実行しているか、キャッシュした結果を再生している可能性が高いです。スイートの `command` をテストランナー自体にして `root:` をそのパッケージにするか、その環境変数を引き継いでください。`custom` のスイートでは、代わりに、記録はコマンドが起動する Node と Python のプロセス、または `junit:` のレポートからだけ行うと表示します。シェルスクリプトや JVM のビルドはどちらも残しません。こうしたユニットは未記録のまま残ります。CI で `--base` がなければ次回も新しいテストとして実行されますが、ローカル（または `--base` 付き）ではベースリビジョンに対する静的解析で判定され、実行時に読むものは見えません。
+- **ブラウザのテスト。** `N test file(s) ran in a browser, which smates cannot trace; they will run again next time` は、ブラウザモードのテストか Storybook のストーリーを示します。ブラウザの中は何もトレースされないので、実行のたびに結果が不明になります。スイートに `trust_browser_passes: true` を設定すると、pass を静的な依存とともに記録します。`smates run --shadow` で確かめてください（[ブラウザモードと Storybook](../guides/runners.md#browser-mode-and-storybook) を参照）。この設定がオンのとき、`N browser test(s) passed but are not trusted` は、それでも記録しないストーリーとその理由（smates が解決できない import、`main.*` の `viteFinal` など）を示します。
 - **ランナーへの引数。** `--` 以降に引数を付けた実行では、テストを成功として記録しません。常に使うフラグはスイートの `command` に移してください。
 - **pytest 向けに書かれた unittest のモジュール。** 状態が不明のままなので毎回実行されます。ログで `runner: pytest` が提案されます。
 - **flaky なテスト。** `smates flaky` は、入力が変わらないのに結果が反転したテストを一覧します。[シャドーモード・flaky・統計](../guides/trust.md) を参照してください。
@@ -90,7 +91,7 @@ smates: web: the runner exited with code 127 before any test reported a result: 
 
 ステートが復元されておらず、すべてのテストが新規扱いになっている可能性が高いです。
 
-- **GitHub Actions:** 「Restore smates state」ステップのログでキャッシュがヒットしたか確認します。`state-path` は `smates.yml` の `state` と一致している必要があります。異なるテストを実行するジョブ（マトリクスの各エントリ、シャード、ジョブに分けたスイート）には、それぞれ別の `cache-key` が必要です。[GitHub Actions](../ci/github-actions.md) を参照してください。
+- **GitHub Actions:** 「Restore smates state」ステップのログでキャッシュがヒットしたか確認します。`state-path` は `smates.yml` の `state` と一致している必要があります。異なるテストを実行するジョブ（マトリクスの各エントリ、固定数のシャード、ジョブに分けたスイート）には、それぞれ別の `cache-key` が必要です。ただし plan ジョブがそれらのために選択する場合（`--max-shards` で数を決めるシャード、ジョブごとにゲートするスイート）は、plan とそれらのジョブが 1 つのキーを共有し、マージのジョブがステートをまとめます。[GitHub Actions](../ci/github-actions.md) と [シャード数を選択に合わせる](../ci/github-actions.md#size-the-shards-to-the-selection) を参照してください。
 - **その他の CI:** `smates run` の前に `.smates/` を復元し、後で保存します。テストが失敗したときも保存してください。[その他の CI](../ci/other-ci.md) を参照してください。
 - **確認:** `smates state show` はステートの場所と記録内容を表示します。`smates doctor` は `no recorded state` と警告します。
 - **初回の実行:** ステートがまったくないとき、smates はベースブランチと比較します。これには履歴が必要です（`fetch-depth: 0`）。履歴がなければ、1 回目はすべてを実行します。

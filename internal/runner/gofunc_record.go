@@ -313,7 +313,7 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	profile, testLog := filepath.Join(work, "cover.out"), filepath.Join(work, "test.log")
 	argv := append(slices.Clone(fr.flags.exec), bin, "-test.run=^"+regexp.QuoteMeta(name)+"$", "-test.coverprofile="+profile,
 		"-test.testlogfile="+testLog, "-test.paniconexit0")
-	argv = append(append(argv, fr.flags.test...), fr.flags.tail...)
+	argv = append(append(argv, verboseFlags(fr.flags.test)...), fr.flags.tail...)
 	env := []string{"GOCOVERDIR=" + covDir, childCoverEnv + "=" + covDir, trace.GoChildLogEnv + "=" + childDir, "SMATES_TRACE_PARENT=" + trace.GoParentPrefix + pkgDir}
 	env = append(env, childTraceEnv(rc, work)...)
 	var buf bytes.Buffer
@@ -331,6 +331,10 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 	setUnitExit(o, code)
 	if code != 0 {
 		o.Failure = string(lastMessage(buf.Bytes()))
+	} else if o.Status == state.Pass {
+		// A process that passed proves the function passed only if it ran and did not
+		// skip itself.
+		o.Status = funcOutcome(buf.Bytes(), name)
 	}
 	files, envs := trace.GoTestLogs(testLog, pkgDir, bin, childDir)
 	addTestLog(o, rc.Repo.Root, files, envs)
@@ -544,10 +548,15 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 		for _, n := range funcs[d] {
 			unit := FuncUnit(d, n)
 			st, inferred, ran := oc.status(ip, n)
+			if r.excluded[d] {
+				// Build constraints exclude its package: nothing ran (see skipped).
+				fr.res.Observations[unit] = &Observation{Files: map[string]bool{}, Status: state.Skip}
+				continue
+			}
 			if po == nil && !ran {
 				continue
 			}
-			o := &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n)}
+			o := &Observation{Files: map[string]bool{}, Status: st, Inferred: inferred, Failure: oc.failure(ip, n), BuildFailed: st == state.Fail && oc.buildFailed(ip)}
 			if po != nil {
 				for f := range po.Files {
 					o.AddFile(f)

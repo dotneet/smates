@@ -78,7 +78,7 @@ never executed.
 | runner | read from | options |
 |---|---|---|
 | `jest` | `--config` of the command, else the nearest `jest.config.{js,ts,mjs,cjs,mts,cts,json}` or `package.json` `"jest"` from the suite root up (jest stops at the nearest `package.json`) | `rootDir`, `roots`, `testMatch` (micromatch extglobs such as `?(x)` and `+(spec\|test)` are converted; `!` patterns exclude), `testRegex`, `testPathIgnorePatterns` (`<rootDir>` substituted) |
-| `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), and projects: `test.projects`, `test.workspace` or `vitest.workspace.*` |
+| `vitest` | `--config` of the command, else the nearest `vitest.config.*` / `vite.config.*` from the suite root up | `root`, `test.root`, `test.dir`, `test.include`, `test.exclude` (`...configDefaults.exclude` understood), projects (`test.projects`, `test.workspace` or `vitest.workspace.*`, narrowed by `--project` in the command), and the stories of Storybook's Vitest plugin (see [Browser mode and Storybook](runners.md#browser-mode-and-storybook)) |
 | `pytest` | the first of `pytest.ini`, `.pytest.ini`, `pyproject.toml` (`[tool.pytest.ini_options]` / `[tool.pytest]`), `tox.ini` (`[pytest]`), `setup.cfg` (`[tool:pytest]`) from the suite root up | `python_files`, `norecursedirs`; `testpaths` when that file is in the suite root (pytest uses them only when started in its rootdir) |
 | `unittest` | the `-s`/`-p`/`-t` of a `python -m unittest discover …` command | default: `test*.py` below the suite root |
 | `go` | `**/*_test.go`, without `testdata/` and `vendor/` | a module nested in the suite's belongs to it only through the `go.work` workspace |
@@ -151,10 +151,56 @@ cannot observe:
   root; a leading `/` makes a glob repository-relative. Lockfiles, manifests and the
   runner's own config are inputs by default.
 - `rules`: dependencies for some tests only. `tests` are globs relative to the suite
-  root, `deps` are repository-relative globs.
+  root, `deps` are repository-relative globs. `reaches` picks the tests by what they
+  import instead of where they live (next section).
 
 A server that tests reach over the network is a different case: declare its code with
 `depends_on` or `serves` (see [Tests that talk to a server](servers.md)).
+
+### Tests backed by a database
+
+A database schema is usually applied before the tests run, by a migration tool in a
+separate step (`make migrate`, a CI job), and test data may be loaded the same way. No
+test process reads those files, so a change to a migration is an
+[orphan](orphans.md): the agent decides, or the whole suite runs. Path globs rarely
+describe "the tests that use the database": they sit next to tests that do not. What
+they share is a helper they import to connect, so name the helper with `reaches`:
+
+```yaml
+  - name: go
+    runner: go
+    rules:
+      - reaches: ["internal/testdb/**", "$APP_DB_*"]
+        deps: ["db/migrations/**", "db/seeds/**"]
+```
+
+A test gets the migrations and seeds as dependencies when its static import closure
+reaches `internal/testdb/` (directly, through another helper, or from another test
+file of its Go package), or when its last recorded run read a variable matching
+`APP_DB_*`. A change to a migration then selects those tests and is no longer an
+orphan.
+
+That last part is why the list must be complete. A test that connects some other way
+(its own `sql.Open`, a helper the rule does not name, a child process) does not get the
+deps, and once the migration is covered it is not run for it either. Name every helper,
+and add the variables the connection reads: a test that reads them is kept even when it
+imports nothing the globs match (also when it reads them in `TestMain` or `init`, which
+Go does not record, or through a settings loader: the variable's name in its source is
+enough, and so is a prefix of it in a string literal, as `envconfig.Process("APP", ...)`
+or `env_prefix="APP_"` take it). A loader that builds the name any other way is not
+seen: name such tests with `tests:`. A setup file the runner loads for every test
+(Vitest `setupFiles`, Jest `setupFilesAfterEnv` in `jest.config.*` or the `jest` key of
+`package.json`, bun's `preload` in `bunfig.toml` or `--preload`) counts as imported by
+every test. When smates cannot tell, the rule applies to the test: static analysis is
+off, no analyzer reads the test's files (a shell test), the test or a setup file
+imports something smates cannot resolve in JavaScript or TypeScript (a bundler alias),
+the runner's configuration cannot be read (a JSON file that does not parse), or, for a
+`$NAME` entry, the test has never run, the variable is in `env_ignore`, or no source of
+the test can be read, whatever its runner. An import smates cannot resolve
+in Python, Go or Java is not noticed: a Python test that finds a helper through
+`sys.path` does not count as reaching it, so name such tests with `tests:`. `smates doctor` prints how many test units each such rule applies to and
+warns when a rule applies to none, or when one of its globs matches no file (a typo, an
+import path instead of a directory).
 
 ## Set environment variables
 
@@ -270,6 +316,7 @@ top-level `env_track`, not the whole file:
 | top-level `env_track` | every test runs again |
 | another suite's entry | nothing of this suite |
 | `ignore`, `orphans`, `untested`, `agent`, `flaky`, top-level `env_ignore` | nothing runs |
+| a suite's `volatile` or `max_age` | only the units they select now: they choose when tests run, not how |
 | `inputs` or `rules` | the files they add are new dependencies: tests that gain one run once |
 
 The defaults smates fills in (a detected command, test globs) are not part of the

@@ -52,7 +52,27 @@ Common causes of a test that never settles:
 - **A warning in the log.** `N test file(s) passed but left no trace (their process was
   likely killed before writing it); they will run again next time` means the test
   process exited before smates could save what it used (a `process.exit()` in a test, a
-  killed worker).
+  killed worker). `N test unit(s) ran and passed but left no trace` (or `N test file(s)
+  passed but none left a trace`) means no test process of the batch was traced at all:
+  the suite command most likely runs the tests through a wrapper that drops smates'
+  tracing environment (`NODE_OPTIONS`, `NODE_V8_COVERAGE`, `SMATES_*`; a task runner
+  such as turbo or nx, `env -i`, a container) or replays cached results. Point the
+  suite's `command` at the test runner itself, with `root:` set to its package, or pass
+  that environment through. For a `custom` suite the warning says instead that it is
+  recorded only through the Node and Python processes its command starts, or a
+  `junit:` report: a shell script or a JVM build leaves neither. Such units stay
+  unrecorded: in CI without `--base` they run again as new, but locally (or with
+  `--base`) they are decided against the base revision by static analysis, which does
+  not see what they read at run time.
+- **Browser tests.** `N test file(s) ran in a browser, which smates cannot trace; they
+  will run again next time` means browser-mode tests or Storybook stories: nothing in
+  the browser is traced, so their outcome is unknown after every run. Set
+  `trust_browser_passes: true` on the suite to record their passes with their static
+  dependencies, and check it with `smates run --shadow` (see
+  [Browser mode and Storybook](../guides/runners.md#browser-mode-and-storybook)). With
+  the setting on, `N browser test(s) passed but are not trusted` names the stories it
+  still does not record, and why (an import smates cannot resolve, `viteFinal` in
+  `main.*`, ...).
 - **Runner arguments.** A run with arguments after `--` never records a test as passed.
   Move permanent flags into the suite's `command`.
 - **A unittest module written for pytest.** Its status stays unknown, so it runs every
@@ -125,8 +145,11 @@ The state was probably not restored, so every test is new.
 
 - **GitHub Actions:** open the "Restore smates state" step log and check for a cache
   hit. `state-path` must match `state` in `smates.yml`. Jobs that run different tests
-  (matrix entries, shards, suites split across jobs) each need their own `cache-key`.
-  See [GitHub Actions](../ci/github-actions.md).
+  (matrix entries, a fixed number of shards, suites split across jobs) each need their
+  own `cache-key`, except when a plan job selects for them (shards sized with
+  `--max-shards`, suites gated per job): the plan and those jobs then share one key, and a
+  merge job combines their states. See [GitHub Actions](../ci/github-actions.md) and
+  [Size the shards to the selection](../ci/github-actions.md#size-the-shards-to-the-selection).
 - **Other CI:** restore `.smates/` before `smates run`, save it after, also when tests
   failed. See [Other CI systems](../ci/other-ci.md).
 - **Check:** `smates state show` prints where the state is and what it recorded;

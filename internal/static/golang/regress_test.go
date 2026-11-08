@@ -35,7 +35,8 @@ func TestGoWorkReplace(t *testing.T) {
 		"forks/dep/d.go":   goSrc("dep"),
 	})
 	a := New(h, Options{})
-	assertDeps(t, deps(a, h, "app/a.go"), []string{"app/go.mod", "go.work", "forks/dep/d.go"})
+	// The replacement's go.mod takes part in version selection.
+	assertDeps(t, deps(a, h, "app/a.go"), []string{"app/go.mod", "go.work", "forks/dep/d.go", "forks/dep/go.mod"})
 }
 
 func TestGoFileLiteralForms(t *testing.T) {

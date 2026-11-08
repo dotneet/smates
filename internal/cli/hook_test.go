@@ -93,7 +93,8 @@ func TestHookExistingScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _, errs := hookCmd(t, g.dir, "install")
-	if code == 0 || !strings.Contains(errs, "--append") || !strings.Contains(errs, "smates hook run pre-push") {
+	// A setup problem (exit 4), never "tests failed" (1).
+	if code != ExitEnv || !strings.Contains(errs, "--append") || !strings.Contains(errs, "smates hook run pre-push") {
 		t.Errorf("install over a foreign hook: %d %s", code, errs)
 	}
 	if readFile(t, path) != mine {

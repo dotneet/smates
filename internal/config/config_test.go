@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,19 @@ func TestParseErrors(t *testing.T) {
 		{"wrong type", "suites: 3\n", ""},
 		{"bad env pattern", "env_ignore: [\"A[\"]\n", "bad environment variable pattern"},
 		{"empty suite env pattern", "suites:\n  - runner: go\n    env_track: [\"\"]\n", "bad environment variable pattern"},
+		{"rule without tests or reaches", "suites:\n  - runner: go\n    rules: [{deps: [m/**]}]\n", "needs tests or reaches"},
+		{"rule with empty lists", "suites:\n  - runner: go\n    rules: [{tests: [], reaches: [], deps: [m/**]}]\n", "needs tests or reaches"},
+		{"rule without deps", "suites:\n  - runner: go\n    rules: [{tests: [\"**\"]}]\n", "needs deps"},
+		{"rule absolute deps", "suites:\n  - runner: go\n    rules: [{tests: [\"**\"], deps: [/m/**]}]\n", "rules[0]: deps"},
+		{"rule parent reaches", "suites:\n  - runner: go\n    rules: [{reaches: [../kit/**], deps: [m/**]}]\n", "rules[0]: reaches"},
+		{"rule bad reaches glob", "suites:\n  - runner: go\n    rules: [{reaches: [\"kit/[\"], deps: [m/**]}]\n", "bad glob"},
+		{"rule empty variable", "suites:\n  - runner: go\n    rules: [{reaches: [\"$\"], deps: [m/**]}]\n", "bad environment variable pattern"},
+		{"rule bad variable pattern", "suites:\n  - runner: go\n    rules: [{reaches: [\"$DB_[\"], deps: [m/**]}]\n", "bad environment variable pattern"},
+		{"rule bad tests glob", "suites:\n  - runner: go\n    rules: [{tests: [\"a\\\\b\"], deps: [m/**]}]\n", "path separator"},
+		{"unknown rule field", "suites:\n  - runner: go\n    rules: [{test: [\"**\"], deps: [m/**]}]\n", "field test not found"},
+		{"bad volatile glob", "suites:\n  - runner: go\n    volatile: [\"a[\"]\n", "volatile"},
+		{"negative max_age", "suites:\n  - runner: go\n    max_age: -1h\n", "max_age"},
+		{"bad max_age", "suites:\n  - runner: go\n    max_age: 7d\n", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -217,5 +231,142 @@ func TestBool(t *testing.T) {
 	tr, fa := true, false
 	if !Bool(nil, true) || Bool(nil, false) || !Bool(&tr, false) || Bool(&fa, true) {
 		t.Fatal("Bool")
+	}
+}
+
+func TestParseRequires(t *testing.T) {
+	c, err := Parse([]byte(`
+suites:
+  - runner: go
+    requires:
+      - tcp: 127.0.0.1:5432
+        tests: ["./store/**"]
+        timeout: 500ms
+      - tcp: "[::1]:6379"
+      - tcp: ${DB_HOST}:5432
+      - cmd: ./scripts/db-ready.sh
+      - env: DATABASE_URL
+      - file: .env.test
+      - file: /opt/browsers/*/chrome
+      - file: ${HOME}/.cache/browsers
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := c.Suites[0].Requires
+	if len(req) != 8 {
+		t.Fatalf("requires: %+v", req)
+	}
+	for i, tc := range []struct {
+		kind, str string
+		timeout   time.Duration
+	}{
+		{"tcp", "tcp 127.0.0.1:5432", 500 * time.Millisecond},
+		{"tcp", "tcp [::1]:6379", DefaultTCPTimeout},
+		{"tcp", "tcp ${DB_HOST}:5432", DefaultTCPTimeout},
+		{"cmd", "cmd ./scripts/db-ready.sh", DefaultCmdTimeout},
+		{"env", "env DATABASE_URL", DefaultTCPTimeout},
+		{"file", "file .env.test", DefaultTCPTimeout},
+		{"file", "file /opt/browsers/*/chrome", DefaultTCPTimeout},
+		{"file", "file ${HOME}/.cache/browsers", DefaultTCPTimeout},
+	} {
+		if r := req[i]; r.Kind() != tc.kind || r.String() != tc.str || r.TimeoutOrDefault() != tc.timeout {
+			t.Errorf("requires[%d] = %s (%s, %s), want %s (%s, %s)", i, r, r.Kind(), r.TimeoutOrDefault(), tc.str, tc.kind, tc.timeout)
+		}
+	}
+	if got := req[0].Tests; len(got) != 1 || got[0] != "store/**" {
+		t.Errorf("tests globs are trimmed of ./: %q", got)
+	}
+}
+
+func TestParseRequiresErrors(t *testing.T) {
+	suite := "suites:\n  - runner: go\n    requires:\n"
+	cases := []struct{ name, entry, want string }{
+		{"unknown kind", "      - http: localhost:8080\n", `unknown key "http" in requires entry`},
+		{"misspelled key", "      - tcp: localhost:1\n        test: [a]\n", `unknown key "test"`},
+		{"no kind", "      - tests: [a/**]\n", "set exactly one of tcp, cmd, env and file"},
+		{"empty kind", "      - tcp:\n", "set exactly one of tcp, cmd, env and file"},
+		{"blank kind", "      - cmd: \"  \"\n", "cmd is empty"},
+		{"two kinds", "      - tcp: localhost:1\n        env: A\n", "set exactly one of tcp, cmd, env and file"},
+		{"tcp without port", "      - tcp: localhost\n", "want host:port"},
+		{"tcp without host", "      - tcp: \":5432\"\n", "the host is missing"},
+		{"tcp bad port", "      - tcp: localhost:http\n", `bad port "http"`},
+		{"tcp port out of range", "      - tcp: localhost:70000\n", `bad port "70000"`},
+		{"tcp port zero", "      - tcp: localhost:0\n", `bad port "0"`},
+		{"env not a name", "      - env: 1DB\n", "is not a variable name"},
+		{"env with value", "      - env: A=1\n", "is not a variable name"},
+		{"file bad glob", "      - file: \"a[\"\n", "bad glob"},
+		{"file backslash", "      - file: 'a\\b'\n", "use / as the path separator"},
+		// Shell forms smates does not expand would be an unset variable everywhere.
+		{"tcp default", "      - tcp: \"${DB_HOST:-localhost}:5432\"\n", "${DB_HOST:-localhost} is not a variable reference"},
+		// The hint must not send a default into the suite's env, which overrides the
+		// environment (a CI value would be replaced).
+		{"tcp default hint", "      - tcp: \"${DB_HOST:-localhost}:5432\"\n", "use a cmd requirement, whose shell expands it; a suite env value overrides the environment, so it is no default"},
+		{"tcp default without colon", "      - tcp: \"${DB_HOST-localhost}:5432\"\n", "${DB_HOST-localhost} is not a variable reference"},
+		{"tcp error form", "      - tcp: \"${DB_HOST:?}:5432\"\n", "${DB_HOST:?} is not a variable reference"},
+		{"tcp positional", "      - tcp: \"$1:5432\"\n", `"$1" is not a variable reference`},
+		{"tcp empty braces", "      - tcp: \"${}:5432\"\n", "${} is not a variable reference"},
+		{"tcp unclosed brace", "      - tcp: \"${DB_HOST:5432\"\n", "has no closing }"},
+		{"file pid", "      - file: \"/tmp/$$/sock\"\n", `"$$" is not a variable reference`},
+		{"file trailing dollar", "      - file: \"cache$\"\n", `"$" is not a variable reference`},
+		{"file default", "      - file: \"${CERT_DIR:-certs}/ca.pem\"\n", "${CERT_DIR:-certs} is not a variable reference"},
+		{"negative timeout", "      - tcp: localhost:1\n        timeout: -1s\n", "must not be negative"},
+		{"timeout on env", "      - env: A\n        timeout: 1s\n", "timeout applies to tcp and cmd only"},
+		{"timeout on file", "      - file: a\n        timeout: 1s\n", "timeout applies to tcp and cmd only"},
+		{"bad timeout", "      - tcp: localhost:1\n        timeout: soon\n", ""},
+		{"bad tests glob", "      - env: A\n        tests: [\"a[\"]\n", "bad glob"},
+		{"not a list", "      tcp: localhost:1\n", ""},
+		{"scalar entry", "      - \"127.0.0.1:5432\"\n", "a requires entry is a mapping with one of tcp, cmd, env and file (for an address, write `tcp: 127.0.0.1:5432`)"},
+		{"sequence entry", "      - [a, b]\n", "a requires entry is a mapping"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse([]byte(suite + c.entry))
+			if err == nil {
+				t.Fatalf("no error")
+			}
+			if c.want != "" && !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %q, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+func TestParseRules(t *testing.T) {
+	c, err := Parse([]byte(`
+suites:
+  - runner: go
+    volatile: ["./pkg/clock#TestToday", "pkg/calendar"]
+    max_age: 168h
+    rules:
+      - reaches: ["./internal/testdb/**", "$APP_DB_*"]
+        deps: ["./db/migrations/**"]
+      - tests: ["./pkg/app/**"]
+        reaches: ["internal/testdb/**"]
+        deps: ["db/seeds/**"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Suites[0]
+	if want := []string{"pkg/clock#TestToday", "pkg/calendar"}; !reflect.DeepEqual(s.Volatile, want) {
+		t.Errorf("volatile %v, want %v", s.Volatile, want)
+	}
+	if s.MaxAge != 168*time.Hour {
+		t.Errorf("max_age %v", s.MaxAge)
+	}
+	r := s.Rules[0]
+	if want := []string{"internal/testdb/**", "$APP_DB_*"}; !reflect.DeepEqual(r.Reaches, want) {
+		t.Errorf("reaches %v, want %v", r.Reaches, want)
+	}
+	if want := []string{"db/migrations/**"}; !reflect.DeepEqual(r.Deps, want) {
+		t.Errorf("deps %v, want %v", r.Deps, want)
+	}
+	files, env := r.ReachesEnv()
+	if !reflect.DeepEqual(files, []string{"internal/testdb/**"}) || !reflect.DeepEqual(env, []string{"APP_DB_*"}) {
+		t.Errorf("ReachesEnv: %v %v", files, env)
+	}
+	if want := []string{"pkg/app/**"}; !reflect.DeepEqual(s.Rules[1].Tests, want) {
+		t.Errorf("tests %v, want %v", s.Rules[1].Tests, want)
 	}
 }

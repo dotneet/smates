@@ -13,10 +13,14 @@ function with `granularity: func`, see "Go test functions" below) smates stores 
 inputs it was observed to depend on, with the content hash (git blob SHA-1) each had when
 `T` last ran, and whether `T` passed:
 
-    T -> { deps: {key: hash}, status: pass|fail|unknown, duration_ms, commit }
+    T -> { deps: {key: hash}, status: pass|fail|skip|unknown, duration_ms, commit }
 
 A test is **skipped** iff it last passed and every input it depends on hashes the same
-today. Otherwise it is selected, with the reason. This is the rule of Go's test cache and
+today. Otherwise it is selected, with the reason. Two suite settings select tests that
+would be skipped (`runAnyway`): `volatile` globs (matched like a rule's `tests`; compile
+checks excluded) run every time, for inputs smates cannot track such as the date
+(reason `volatile`), and `max_age` selects a unit whose entry is older than it (reason
+`expired`; a unit with no entry is new anyway). This is the rule of Go's test cache and
 Bazel, but with inputs *discovered* by tracing real runs, across languages, and with
 content hashes rather than mtimes (so fresh CI checkouts do not invalidate everything).
 
@@ -40,7 +44,9 @@ those are the same, until the test runs again. A test that reads smates.yml itse
 records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
-comparing), so editing them selects nothing. Diff mode (no recorded state) still
+comparing), so editing them selects nothing. A suite's `volatile`, `max_age` and
+`requires` are left out of the hash too (they choose when tests run, not how), and so is an empty
+rule `reaches`, so an upgrade does not change the hash. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
 hash instead of the key; it counts as unchanged while the file is, until the test runs
 again.
@@ -112,6 +118,40 @@ its files) render it. A changed file a declaration matches is covered for the or
 into `Result.Covered` once, and `Result.Explains` (used by selection and `smates orphans`)
 also matches deleted ones. Older smates versions read
 the key as a missing file and select the test, which is safe.
+
+A rule's deps are expanded once per selection (`newSuiteRules`) and added to `Known` as
+inputs. `tests:` narrows a rule by path; `reaches:` by what the unit reaches, ANDed with
+`tests:` when both are set (`suiteRule.applies`): the unit's file-level static closure
+(before `MapStatic` keys it by declaration, so a Go function unit matches by its
+package's test files and imports), or a file the runner loads for every test through
+its configuration (`runner.ConfigOf`: setup files and their closure), holds a file a
+glob matches (memoized per suite, as a file is in many closures; a glob without a
+wildcard naming a directory also matches `dir/**`), or, for a `$NAME` pattern, the
+unit's recorded entry holds an environment key it matches or a file of its closure
+names such a variable (a word of its source, or a prefix of it in a string literal, as
+settings loaders given a prefix take it: `mentionsEnv`; Go's test log starts in
+`m.Run`, so reads in `TestMain`, `init` and package initializers, and `os.Environ`
+scans, never reach the entry, and shell, Bun and in-browser reads and environment scans
+of settings loaders are not recorded either). Files are never matched against the entry: it records
+the rule's own deps, so a rule reaching them would keep applying to every unit it ever
+applied to. A rule cannot only add here: once one unit has the deps, a change to them
+is covered and no longer an orphan, so a unit the rule misses is skipped on such a
+change. It therefore applies whenever it cannot tell: static analysis is off, no
+analyzer reads the unit's files (`static.Graph.Analyzes`), a file of the closure or a
+file the runner loads for every test has an import `static.Graph.Unresolved` reports
+(an alias only a bundler knows; only the JS/TS analyzer reports any, so an unresolved
+Python, Go or Java import goes unnoticed), or, for a `$NAME` pattern, the unit has no
+entry yet (it then records the deps once and drops them on its next recording), the
+pattern may match a variable `env_ignore` or the default list drops before recording
+(`envBlind`), or no source can be read (static analysis off, no graph, or no analyzer
+for the unit's files), whatever the runner: every runner's entries can miss reads. For
+a file glob it also applies when the runner's configuration cannot be read
+(`runner.RunnerConfig.Unsure`: a JSON configuration that does not parse, a bunfig
+preload or `--preload` smates cannot read); Jest's JSON configurations and the `jest`
+key of `package.json` are read for their string values, and bun's preloads
+(`bunfig.toml`, `--preload`) are its runner configuration. `smates doctor` counts the units each rule
+with `reaches:` applies to (`selector.RuleReach`), warns about a rule that applies to
+none, and about each glob that matches no file (`selector.UnmatchedReaches`).
 
 Dependency keys:
 
@@ -280,7 +320,25 @@ file unchanged only when every suite it runs saw that content; a run of other su
 or of every suite, finds it changed (and, to the agent and failure hints, unrecorded),
 so a shared state (local runs, `state merge`, CI without a `cache-key` per job) never
 hides a change from the suites that have not compared it. Orphans a `--suite` run
-handles are recorded the same way.
+handles are recorded the same way, but as seen only by the suites the snapshot already
+holds a view of (`selector.Snapshotted`: `State.Commit` set, or a marker names the
+suite); a suite that never had a full recording is treated as left out there, so one
+handled orphan does not make it count as snapshotted (an orphan only it owns may be
+asked about again until it has one). A suite with no recorded entry compares nothing with
+a marker: in state mode its tests are decided against the base revision by static
+analysis (locally, or in CI with `--base`) or run as new. Nor does one whose entries all
+come from selective runs while no full run took a snapshot (`State.Commit` unset) and
+no marker names it: when changes are judged against a base revision it counts as never
+recorded too (its entries are decided by their own dependencies, which markers do not
+touch), so its first ordinary run does not bring the flood back; without a base its
+markers stay changes, and orphans, as before. So a marker every recorded
+suite of the run saw (and some suite saw) is no change for that run either
+(`selection.markerFilter`); otherwise one `--all --suite` recording would make every
+file of the tree an orphan of the next unscoped run. The files dropped this way that
+changed since the base revision, that no test explains and that a never-recorded suite
+owns are its orphans, as in diff mode (`neverRecordedOrphans`), and a note names those
+suites. In diff mode (no suite has an entry) the snapshot's changes decide every test,
+so markers keep their meaning there.
 
 Orphans go through, in order:
 
@@ -288,15 +346,20 @@ Orphans go through, in order:
    (fixtures, scripts, schemas referenced as strings) are selected. Files every test of a
    suite depends on (package.json, lockfiles, runner config) only count when no
    test-specific file mentions the orphan.
+   The names of all orphans are searched in one pass over each file (Aho-Corasick), so
+   the cost does not grow with their number.
 2. **Untested code** (`untested: skip`, the default): an orphan in a language a suite
    analyzes statically (Go, Python, JS/TS) under that suite's root is imported by no
    test, directly or transitively (every test's import closure is in its `D(T)`), and
    was neither read nor executed by any test in its last run. No test can be affected,
    so it selects nothing and is reported as a change to untested code. Code configuring
-   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), source under data
-   directories (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes
-   are left out, and so are files under the root of a suite with a test that has no
-recorded entry yet; so is everything without a recorded state, where `D(T)` holds only the
+   tools (`*.config.*`, `*rc.*`, `setup.py`, setup files, `.d.ts`), what a Vitest or
+   Jest configuration loads by name (`runner.RunnerConfig`: every repository file a
+   string literal in a configuration file names, such as setupFiles, plugins and alias
+   targets, plus the static closure of both), source under data directories
+   (`testdata/`, `fixtures/`, `__mocks__/`, ...) and files a suite excludes are left
+   out, and so are files under the root of a suite with a test that has no recorded
+   entry yet or whose configuration may run tests in a browser (never traced); so is everything without a recorded state, where `D(T)` holds only the
    import closure and files tests read as data are not known yet. Code run by another
    process must be declared (rules), as for any dependency tracing
    cannot see.
@@ -360,6 +423,52 @@ config's base directory, and falls back to its default globs, with a `doctor` wa
 when the config is not literal. Derived patterns do not mark the suite narrowed: a full
 run still lets the runner discover its tests, so an approximation (a converted
 extglob, a JS regex run by Go) can never make a full run skip a test the runner has.
+A vitest suite command's `--project` drops only the projects known to be named
+otherwise (a literal `test.name`, not a browser project, no pattern in the filter).
+
+**Browser projects.** A vitest project with `test.browser` (or a configuration
+`mentionsBrowser` when it cannot be read) or Storybook's Vitest plugin is a browser
+project (`Matcher.Browser`). Storybook's stories become units: `storybookMatchers` finds
+`storybookTest(...)` calls in the source (also inside `mergeConfig`, which
+`ConfigObject` cannot evaluate), evaluates `configDir` (`js.CallArgs`,
+`js.PathValue`), reads `stories` and `staticDirs` from `<configDir>/main.*` and converts
+each entry to a matcher (MDX excluded). Unreadable stories fall back to
+`**/*.stories.*` under the project, marked `Whole`: `Result.WholeSuites` then selects
+the whole suite whenever one of them is selected, so the runner, unfiltered, runs every
+story whatever the guess. Browser projects give their units `Deps` (the configuration
+directory and static directories, as globs) and `Starts` (`preview.*`, whose static
+closure is added), and a unit that runs only in browser projects also depends on what
+the suite's configuration loads (`RunnerConfig.Files`). Such a unit leaves no trace:
+`observeAll` makes its reported pass `unknown` (re-run every time) unless the suite sets
+`trust_browser_passes`, which records it as a `StaticOnly` pass with `Known` (plus the
+runner's global code) as its dependencies; `Record` keeps it `unknown` when
+`Suite.Untrusted` names a reason: a matcher's `Unsure` (stories or `staticDirs` not
+read), no static analysis, or a known dependency with an import `Graph.Unresolved`
+reports (no repository file, no installed package, no builtin: a Vite alias, a virtual
+module).
+
+A Go package unit is the directory of a test file, unless build constraints exclude every
+Go file of that directory in the suite's configuration (`go list -find` with the suite's
+build flags, as for test functions; when go list fails, when the command is not `go test`
+itself or passes words after `--` (a wrapper's flags are unseen), or when any Go file of
+the directory may compile, it stays a unit): `go test` would fail such a directory
+("build constraints exclude all Go files") and `./...` skips it. Widening `tests` to
+non-test files (`**/cmd/**/*.go`) makes packages without tests units that `go test`
+compiles; their `[no test files]` line (or a package-level `-json` skip event) is
+recorded as a pass whose dependencies are the known ones, as for a compile check, since
+no test binary runs to leave a trace. When the directory has `*_test.go` files, the
+line means the configuration left them out, and it is recorded as a skip instead: the
+environment's `GOFLAGS`, `GOOS`, `GOARCH` and `CGO_ENABLED`, `go env -w`, the toolchain
+and the platform are not dependencies, so a pass would hide those tests from a
+configuration that compiles them. A unit kept because a wrapper's flags are unseen,
+which go test then fails with "build constraints exclude all Go files" (read from its
+stderr), is recorded as a skip too (its function units as well), and the exit code 1
+is forgiven when every other package of the invocation is reported as passing or
+without test files, in plain summary lines or the output events of `go test -json`.
+Only go test's own code 1 is forgiven (`make` exits 2), and only when each `[setup
+failed]` of the package is matched by such a message and no other FAIL line names it: a
+wrapper running go test twice (the second time with the tag) compiles the package, and
+a test or build failure there stands.
 
 Processes are linked to their test even through untraced intermediaries: every traced
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
@@ -647,8 +756,20 @@ with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, im
 mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
 back to the whole package when unresolvable). Python imports including relative, dynamic
 with literal prefixes, conftest chains (and the directories pytest's prepend import mode puts
-on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`, and
-package directories or `.go` files named in test string literals (`go run ../../cmd/tool`).
+on `sys.path` for them). Go imports, embeds, cgo headers found through `-I${SRCDIR}/…`,
+package directories or `.go` files named in test string literals (`go run ../../cmd/tool`),
+and the files that pin dependency versions: the module's `go.mod`/`go.sum` and the `go.mod`
+of its local `replace` targets, and in a `go.work` workspace `go.work`/`go.work.sum` plus
+the `go.mod`/`go.sum` of every module it `use`s and the `go.mod` of their local replace
+targets (minimal version selection picks one version per dependency across them all, so a
+`require` bump in a module a package never imports can change what it links; another
+module's `go.sum` counts because the go command verifies checksums against all of them, so
+a removed line can fail the build). A `go.work` whose directives do not parse, or that
+uses nothing, counts every module below its directory. Every `go.work` at or above the
+file counts, not only the nearest: the go command takes the one nearest its working
+directory, which may be above a nested one. A `go.work` named by `GOWORK` (suite env or
+smates' own; `auto` means the search, as unset) is invisible to static analysis, so the go runner makes its pins (the same
+set) suite inputs. These are content keys: any edit selects every test of the workspace.
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
 into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript
@@ -663,22 +784,40 @@ included), through extends chains (installed configs read from `node_modules`); 
 unreadable config, or one extending a config that cannot be found while leaving an option
 unset, counts as keeping it. `typeof import("x")` and `import("x").T` cannot be told from
 value expressions at token level and stay. The analyzer returns both edge sets
-(`host.TypeAnalyzer`), and the graph serves `Closure` and `RuntimeClosure`. Selection uses
+(`host.TypeAnalyzer`), and the graph serves `Closure` and `RuntimeClosure`. Each condenses
+its edges into strongly connected components once per process (iterative Tarjan over the
+files reached so far; a type-only import can split a component, so the two have their own)
+and walks the component DAG, so a closure costs the components it reaches rather than
+every file edge (a Go file lists every sibling and every file of the packages it imports).
+`Warm` resolves every file the starts reach in parallel first. A suite's closures are
+covered as one union (`unitDeps`), and a suite `--suite` leaves out builds no `D(T)`:
+it only covers. Selection uses
 the runtime closure only for a suite whose runner is known to erase types without checking
 them (`runner.TypeEraser`): vitest run directly by the suite command, with no mention of
 type checking (typecheck, tsc, tsd, ts-node, the options above, `tsconfigRaw`) in the
 command, the arguments passed through or the suite env, nor in a vitest/vite config at or
 below the suite root or above it or anything those import, no workspace file, no config
-naming other configs by path (`projects:`, `workspace:`, `extends:`), no import of a package
-other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
-`vite-tsconfig-paths`) and Node's builtins (a preset, or a plugin whose config hook may
-return test settings), and no `*.test-d.*` / `*.spec-d.*` file in the suite; or
-`bun test` itself. The rule is deliberately coarse: any
+naming other configs by path (`projects:`, `workspace:`, `extends:`) except an aggregator
+`vitestAggregator` reads in full (a single literal `test.projects` of existing JS/TS files,
+which are scanned in turn, and inline projects with `extends: true`), no run-time import
+of a package other than vitest, vite, their official plugins (`@vitest/*`, `@vitejs/*`,
+`vite-tsconfig-paths`), `@tailwindcss/vite`, Node's builtins and packages the analyzer
+resolves to a source file of the workspace package of that name (`Sources.Resolve`,
+`packageSource`; their files are in the closure scanned; a `.d.ts`, a `__mocks__` file or
+a tsconfig path to another package's file is not what loads at run time) — a preset, or a plugin whose config hook may return test settings — and no
+`*.test-d.*` / `*.spec-d.*` file in the suite; or `bun test` itself. Storybook's Vitest
+plugin applies the Vite settings of `<configDir>/main.*` and of the addons and framework
+it names as strings, which no import reaches: `storybookKnown` accepts it only from
+`@storybook/addon-vitest` 10 on (which leaves react-docgen out), with a configuration
+directory it can tell and a `main.*` without `viteFinal` or `typescript` naming only
+allowlisted addons and frameworks, and scans that `main.*` as configuration. The rule is deliberately coarse: any
 mention keeps the type edges, which costs precision, never correctness (a type-only change
 can fail a type-checking run: vitest typecheck, ts-jest, ts-node). jest, node and custom
 suites always keep them. The files only the full closure reaches are added to `Covered`
 (a change to them is explained, not an orphan) but not to D(T) or `Known`, so recording
-does not write them either.
+does not write them either. A file the runner loads through its configuration
+(`runner.RunnerConfig`, a Vite plugin serving a mock API that a test imports only for its
+types) stays in the closure: erasing the import does not stop the runner loading it.
 
 ## 3. Status and shadow mode
 
@@ -693,9 +832,33 @@ finish) and files the pytest plugin saw only some tests of run. Go packages that
 build are failures (with `granularity: func`, of the package's compile check
 `dir#(build)` and of the functions that ran).
 
+A test that skips itself is not proven to pass. Go test functions recorded one per
+process run with `-test.v` (added unless the flags already print every result line:
+`-test.v`, or `test2json`, whose framing byte is dropped) and `funcOutcome` reads the
+output of a process that exited 0: a top-level `--- SKIP` in any `-count` iteration, or
+no `=== RUN` line for the function (a `TestMain` that exits before `m.Run`), records
+`skip`; a missing result line `unknown`; only `--- PASS` a pass. Lines are matched
+anywhere, since output without a final newline precedes the result line; text a test
+prints that looks like a skip can only cause a rerun. go test's own output (plain
+`--- SKIP` lines, `-json` test events) maps a top-level skip to `skip` the same way,
+fail > skip > pass across iterations; a package-level skip event (no test files) and a
+package with no tests to run stay passes. A `skip` entry is selected with reason
+`unproven` until a run passes; flake detection ignores it (`decisive`), and the
+outcome line counts the run's skips. Package granularity, and other runners, record a
+skip as a pass (the package's or the file's summary).
+
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
 tests whose failure was only inferred).
+
+With `--shard I/N` a shadow run runs every unit its shard owns (`cycle.units`), selected
+or not, so the shards of one run together run every unit once. `checkShadow` judges only
+owned units, against the selection before `applyShard` (`cycle.preShard`): a failure the
+runner reports for a unit another shard owns is never an escape here, since its owner
+reports it. A Go function failed because its package did not build
+(`Observation.BuildFailed`, from go test's build failure lines) while its package's
+selected compile check is another shard's is a possible escape: that shard reports the
+build failure. A function that ran and failed is an escape.
 
 ### Run order and `--fail-fast`
 
@@ -757,6 +920,63 @@ for the suites that ran (markers for files the others also own), and the orphans
 selective run handled are marked seen by those suites alone. A suite command line that
 cannot be parsed still ends the run as a configuration error (exit 3).
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
+
+### `--max-time` and `requires`: units left for later
+
+Both leave selected units unstarted on the same path as above, so neither can record a
+pass: the units get no observation, keep their old entry and are selected again.
+
+`--max-time D` needs calls short enough to stop between. Each suite's calls (after the
+`--fail-fast` split) are cut into consecutive calls whose recorded durations add up to
+about D/4; a unit with no measured duration (no entry, an entry without a pass, fail
+or skip, such as an outcome inferred from a failing batch, or one recorded at 0 ms)
+counts as the mean of the measured ones, and a suite with none measured stays one call of unknown length. A Go
+package adds one second per call that builds it (`goPackageCost`): recorded durations
+are the test binaries' run time, without compiling and linking them. Before each call
+smates checks that it would end within D (elapsed time plus its estimate plus the mean
+per-call overrun of the calls of its suite that ran, or of all calls before the suite's
+first: startup and builds are a cost per call, so a ratio taken from a short call would
+blow up a long one; a call that requires trimmed is re-estimated from the units it
+kept, so its overrun is measured on what ran); an unknown call starts only while less than
+D/2 is used. The first call always starts, so repeated capped runs make progress: what
+passed is deselected, and the units left out stay selected for a later run, in the
+usual order (no boost: new direct changes still come first).
+Like `--fail-fast`, the cap never kills a running call, and a stopped run leaves the
+snapshot alone. Where the cap stopped the run and everything that ran passed, smates
+exits 0: the caller asked for a partial run, and the report (`max_time_reached`,
+`not_run`), the summary and the log say what is left. Exit 4 would claim an environment
+problem that does not exist. The coding agent Stop hooks default to `--max-time 8m`, the
+600 s hook timeout less a margin for selection, recording and estimates that are off.
+
+A suite's `requires` are checked when a call of it is about to start, once per run for
+each distinct check (cached by root, check and env). A check that cannot tell (it fails
+to start, times out, its address does not parse) counts as unmet: running the tests
+anyway would record outcomes of a broken environment. Only the units a requirement's
+`tests` globs match (`UnitMatches`, as for rules) are taken out of the call; the call
+then passes explicit units. Their suite counts as left out for the snapshot, like a
+suite whose runner could not start, so the orphans it would have covered stay unseen
+for it. The run exits 4 when no test failed (`requiresError` inside an `envError`); a
+runner that could not start or a state that could not be saved is reported first. The
+Stop hooks tell `requiresError` apart and print one line instead of an error: in a
+worktree without the database, every turn would otherwise end with the same message.
+`--dry-run` does not run the checks (a `cmd` may be slow or have side effects).
+
+### Shard counts
+
+`--shard I/N` hashes suite and unit ID (FNV-1a) modulo `N`: ownership needs no
+coordination and no state, but it depends on `N`, so every shard of a run must use the
+same count. `smates select --max-shards N` sizes `N` for a CI matrix (`shardCount`): `0`
+when nothing is selected, else the recorded duration of the selected units over
+`--shard-time`, rounded up and kept within `1..N`. A selected unit without a duration
+weighs its suite's median; a suite with selected units and no duration at all yields `N`
+(nothing to size by). On a full-run branch it sizes for every unit, as the shards'
+`smates run` will run them all. For selective legs the count never changes what runs,
+only how many jobs share it, so a wrong estimate costs time, not coverage. It is sized
+for the selection, so it must not feed `run --shadow` legs, which run every unit their
+shard owns: with nothing selected it is `0`, and no shadow leg would run. The `shard-matrix` output carries
+the count in each value (`"2/3"`) so legs cannot disagree on it. Balancing shards by
+duration (instead of the hash) is not done: it would need a plan file every shard reads,
+and a single point of failure where the hash needs none.
 
 ### Flaky tests
 

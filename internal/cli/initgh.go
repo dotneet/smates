@@ -274,7 +274,7 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 name: tests
 on:
   push:
-    branches: [` + yamlFlowStr(repo.DefaultBranch()) + `]
+    branches: [` + yamlFlowStr(defaultBranch(repo)) + `]
   pull_request:
 
 jobs:
@@ -342,43 +342,68 @@ func initGitHub(repo *gitx.Repo, suites []config.Suite, files []string, force bo
 			steps = append(steps, st)
 		}
 	}
-	if len(steps) > 0 {
-		fmt.Fprintln(stderr, "smates: existing workflows already run tests:")
+	// Workflows that already run smates, but only on pull requests, get the triggers
+	// that record the state their runs start from.
+	def := defaultBranch(repo)
+	var seedOnly []string
+	for _, g := range smatesSeedGaps(repo.Root, def) {
+		seedOnly = append(seedOnly, g.File)
+	}
+	// A workflow already running smates (on pull requests only, say) would run the same
+	// tests as a new one, under the same default cache-key.
+	var running []string
+	for _, f := range smatesWorkflows(repo.Root) {
+		if f != wfRel {
+			running = append(running, f)
+		}
+	}
+	if len(steps) > 0 || len(seedOnly) > 0 {
+		if len(steps) > 0 {
+			fmt.Fprintln(stderr, "smates: existing workflows already run tests:")
+		}
 		duplicate := false
 		for _, st := range steps {
 			fmt.Fprintf(stderr, "  %s: job %q, step %q: %s\n", st.File, st.Job, st.Step, st.Command)
-			if st.Skip != "" {
-				fmt.Fprintf(stderr, "    not patched: %s\n", st.Skip)
-			} else if len(stepSuites(st, suites)) == 0 {
-				fmt.Fprintln(stderr, "    not patched: it runs tests of no suite smates detected")
+			names, why := stepPatch(st, suites)
+			if why != "" {
+				fmt.Fprintf(stderr, "    not patched: %s\n", why)
 			}
-			duplicate = duplicate || (!st.Other && len(stepSuites(st, suites)) > 0)
+			duplicate = duplicate || (!st.Other && len(names) > 0)
 		}
-		patch, notes := workflowPatch(repo.Root, steps, suites)
-		if duplicate {
+		patch, notes := workflowPatch(repo.Root, steps, suites, def, seedOnly...)
+		if duplicate || patch != "" {
 			res.Patch = patch
 		}
 		for _, n := range notes {
 			fmt.Fprintf(stderr, "  note: %s\n", n)
 		}
+		what := "adds the triggers that record the state to those workflows"
+		if duplicate {
+			what = "replaces those steps with the smates action"
+		}
 		switch {
-		case !duplicate:
-		case patch == "":
+		case patch == "" && duplicate:
 			fmt.Fprintf(stderr, "  replace those steps with `uses: %s` (with `args: --suite <name>` and a distinct `cache-key` per job when the suites run in separate jobs)\n", actSmates)
+		case patch == "":
 		case patchFile != "":
 			if err := os.WriteFile(patchFile, []byte(patch), 0o644); err != nil {
-				return nil, err
+				return nil, asEnvError(err)
 			}
 			res.PatchFile = patchFile
-			fmt.Fprintf(stderr, "  wrote %s: it replaces those steps with the smates action; review it, then `git apply %s`\n", patchFile, patchFile)
+			fmt.Fprintf(stderr, "  wrote %s: it %s; review it, then `git apply %s`\n", patchFile, what, patchFile)
 		default:
-			fmt.Fprintf(stderr, "  this patch replaces them with the smates action (review it, then save it and `git apply` it, or rerun with --patch FILE):\n\n%s\n", patch)
+			fmt.Fprintf(stderr, "  this patch %s (review it, then save it and `git apply` it, or rerun with --patch FILE):\n\n%s\n", what, patch)
 		}
 		if duplicate && !force {
 			fmt.Fprintf(stderr, "smates: not writing %s, which would run the same tests a second time (use --force to write it anyway)\n", wfRel)
 			res.Skipped = "existing workflows already run the tests: apply the patch instead (or rerun with --force)"
 			return res, nil
 		}
+	}
+	if len(running) > 0 && !force {
+		fmt.Fprintf(stderr, "smates: not writing %s: %s already runs smates, and a second workflow would run the same tests again (use --force to write it anyway)\n", wfRel, strings.Join(running, ", "))
+		res.Skipped = strings.Join(running, ", ") + " already runs smates (rerun with --force to write it anyway)"
+		return res, nil
 	}
 	if _, err := os.Stat(wf); err == nil && !force {
 		fmt.Fprintf(stderr, "smates: %s exists, not overwritten (use --force)\n", wfRel)

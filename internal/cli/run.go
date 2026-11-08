@@ -52,6 +52,12 @@ type runFlags struct {
 	// budget is --budget; heartbeat the progress interval of failures mode (0: none).
 	budget    time.Duration
 	heartbeat time.Duration
+	// maxTime is --max-time: no batch starts that would end after it (0: no limit).
+	maxTime time.Duration
+	// deferred receives, at the end of a run, one line saying which selected units did
+	// not run and stay selected (--max-time, unmet requires); the coding agent hooks
+	// print it instead of blocking.
+	deferred func(string)
 	// skipEmpty returns right after the selection when it runs nothing, saving only
 	// the agent's new answer and the orphans the policy handled (saveWithoutRun): the
 	// Claude Code Stop hook's fast path.
@@ -97,8 +103,12 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	fs.Var(&f.only, "only", "run exactly the test unit `SUITE:UNIT` (repeatable; recorded as usual)")
 	fs.StringVar(&f.markdown, "markdown", "", "write the summary as Markdown to `file`, e.g. for a pull request comment")
 	fs.DurationVar(&f.budget, "budget", defaultBudget, "print how to split the run when the recorded durations of the selected tests add up to more than this (0: never)")
+	fs.DurationVar(&f.maxTime, "max-time", 0, "start no test batch that would end after `duration` by recorded durations; the tests left out stay selected (0: no limit)")
 	if err := fs.Parse(args); err != nil {
 		return nil, usageError{err}
+	}
+	if f.maxTime < 0 {
+		return nil, usageError{fmt.Errorf("--max-time must not be negative (got %s)", f.maxTime)}
 	}
 	f.extra = fs.Args()
 	f.heartbeat = heartbeatInterval()
@@ -122,11 +132,11 @@ func parseRunFlags(args []string, stderr io.Writer) (*runFlags, error) {
 	if f.shardI, f.shardN, err = parseShard(f.shard); err != nil {
 		return nil, err
 	}
-	if f.shadow && f.shardN > 1 {
-		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --shard")}
-	}
 	if f.shadow && f.failFast {
 		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --fail-fast")}
+	}
+	if f.shadow && f.maxTime > 0 {
+		return nil, usageError{fmt.Errorf("--shadow runs every test and cannot be combined with --max-time")}
 	}
 	if f.dryRun && (f.report != "" || f.markdown != "" || f.summary != "") {
 		return nil, usageError{fmt.Errorf("--dry-run runs nothing and cannot be combined with --report, --markdown or --summary (use `smates select --format json|markdown` for the selection)")}
@@ -185,14 +195,20 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if hooks != nil {
 		sel.hint = false // smates watch: a person at the terminal, no calling agent
 	}
+	var preShard map[string]map[string]bool
+	if f.shadow && f.shardN > 1 {
+		preShard = selectedUnits(sel.res)
+	}
 	applyShard(sel.res, f.shardI, f.shardN)
 	printSelection(p, sel, stderr, f.explain)
 
-	c := &cycle{p: p, f: f, sel: sel, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
+	c := &cycle{p: p, f: f, sel: sel, preShard: preShard, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
-		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{}}
+		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{},
+		unmet: map[string][]string{}, unmetWhy: map[string][]string{}, checked: map[string]error{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
-	// sharded runs only this shard's share (applyShard narrowed the selection).
+	// sharded runs only this shard's share (applyShard narrowed the selection), and so
+	// does a sharded shadow run (units).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
 	prioritize(sel.res, p.state, p.direct())
 	batches := c.plan()
@@ -211,7 +227,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		}
 		return 0, nil
 	}
-	if hooks == nil {
+	if hooks == nil && f.maxTime <= 0 {
 		c.hintLongRun(batches)
 	}
 	c.total = 0
@@ -237,14 +253,12 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	}
 	c.hasher.PinBefore(p.state, ran, start)
 	for i, b := range batches {
-		if !c.stopped && ctx.Err() != nil {
-			c.interrupted, c.stopped = true, true // Ctrl-C between batches
-		}
-		if c.stopped {
-			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+		if !c.admit(ctx, b, batches[i:]) {
 			continue
 		}
+		batchStart := time.Now()
 		code, err := c.runBatch(ctx, i, b)
+		c.addRan(b, time.Since(batchStart))
 		var ce configError
 		if errors.As(err, &ce) {
 			return 1, err
@@ -274,6 +288,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		// What ran is recorded and reported; the run itself failed.
 		c.worst = max(c.worst, ExitFailed)
 	}
+	c.unmetErr = c.unmetError()
 	hooks.onRan(c.started)
 	c.failures.wait()
 	elapsed := time.Since(start).Round(time.Millisecond)
@@ -302,26 +317,43 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			return c.worst, fmt.Errorf("writing report: %w", err)
 		}
 	}
+	if f.deferred != nil {
+		if line := c.deferredLine(); line != "" {
+			f.deferred(line)
+		}
+	}
 	if c.interrupted {
-		for _, err := range []error{c.envErr, saveErr} {
+		for _, err := range []error{c.envErr, c.unmetErr, saveErr} {
 			if err != nil {
 				p.logf("%v", err)
 			}
 		}
 		return c.worst, errors.New("interrupted")
 	}
-	// A batch whose tests never started (notStarted) makes the run an environment
-	// error, reported after the usual failure handling and summary; when tests of
-	// another batch failed, they matter more (exit 1, the error as a note).
-	if c.envErr != nil {
+	// A batch whose tests never started (notStarted), or units whose requirements are
+	// not met, make the run an environment error, reported after the usual failure
+	// handling and summary; when tests of another batch failed, they matter more (exit
+	// 1, the error as a note). A runner that could not start, or a state that could not
+	// be saved, is reported before unmet requirements, which the hooks only note.
+	envErr := c.envErr
+	switch {
+	case envErr == nil && saveErr != nil && c.unmetErr != nil:
+		envErr, saveErr = saveErr, nil
+		p.logf("%v", c.unmetErr)
+	case envErr == nil:
+		envErr = c.unmetErr
+	case c.unmetErr != nil:
+		p.logf("%v", c.unmetErr)
+	}
+	if envErr != nil {
 		if saveErr != nil {
 			p.logf("%v", saveErr)
 		}
 		if c.testsFailed {
-			p.logf("%v", c.envErr)
+			p.logf("%v", envErr)
 			return c.worst, nil
 		}
-		return c.worst, c.envErr
+		return c.worst, envErr
 	}
 	if saveErr != nil && c.worst != 0 {
 		// Failing tests matter more: report them (exit 1) and the save error as a note.
@@ -333,10 +365,10 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 
 // exitCode is the exit code the log, the summary, the GitHub outputs and --report give
 // for the run: the runners' worst exit code, or ExitEnv when the run is an environment
-// error without failing tests (a runner could not start, the state could not be
-// saved), as smates exits then.
+// error without failing tests (a runner could not start, requirements are not met, the
+// state could not be saved), as smates exits then.
 func (c *cycle) exitCode(saveErr error) int {
-	if !c.interrupted && !c.testsFailed && (c.envErr != nil || saveErr != nil && c.worst == 0) {
+	if !c.interrupted && !c.testsFailed && (c.envErr != nil || c.unmetErr != nil || saveErr != nil && c.worst == 0) {
 		return ExitEnv
 	}
 	return c.worst
@@ -344,11 +376,14 @@ func (c *cycle) exitCode(saveErr error) int {
 
 // cycle is one `smates run` over the selected suites.
 type cycle struct {
-	p      *project
-	f      *runFlags
-	sel    *selection
-	stdout io.Writer // runner output (stderr with --report -)
-	stderr io.Writer
+	p   *project
+	f   *runFlags
+	sel *selection
+	// preShard is the selection before applyShard (suite -> unit), kept by a sharded
+	// shadow run to judge escapes against the whole run's selection.
+	preShard map[string]map[string]bool
+	stdout   io.Writer // runner output (stderr with --report -)
+	stderr   io.Writer
 	// reportOut is the real stdout, where --report - writes.
 	reportOut io.Writer
 	// quiet is --output failures: runner output is buffered per batch and printed only
@@ -380,9 +415,9 @@ type cycle struct {
 	envErr      error
 	testsFailed bool
 	started     map[string][]string     // suite -> units started
-	notRun      map[string][]string     // --fail-fast, interrupt, unstarted: suite -> units not started (or cut short)
-	unstarted   map[string][]string     // suite -> units of batches whose runner could not start (also in notRun)
-	stopped     bool                    // --fail-fast (or an interrupt) stopped the run
+	notRun      map[string][]string     // --fail-fast, --max-time, interrupt, unstarted: suite -> units not started (or cut short)
+	unstarted   map[string][]string     // suite -> units of batches whose runner could not start, or whose requirements are not met (also in notRun)
+	stopped     bool                    // --fail-fast, --max-time (or an interrupt) stopped the run
 	results     map[string]*suiteResult // suite -> outcomes to record
 	escapes     []string                // shadow: failing tests the selection would have skipped
 	possible    []string                // shadow: skipped tests failed only by the run's exit code
@@ -390,6 +425,18 @@ type cycle struct {
 	// interrupted: the run was cancelled (Ctrl-C); the batch it cut short counts as
 	// not run.
 	interrupted bool
+	// capped: --max-time stopped the run.
+	capped bool
+	// ran adds up the batches of known duration that ran, per suite name and for all
+	// of them ("\x00all"): overTime adds their mean overrun to later estimates.
+	batchTimes map[string]*ranTime
+	// unmet are the units (also in unstarted) left out because requirements they need
+	// are not met (suite -> units); unmetWhy the failed checks (suite -> descriptions);
+	// unmetErr the error the run reports for them; checked caches the checks of the run.
+	unmet    map[string][]string
+	unmetWhy map[string][]string
+	unmetErr error
+	checked  map[string]error
 }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
@@ -424,16 +471,36 @@ func (c *cycle) prepareTrace() (cleanup func(), err error) {
 }
 
 // units returns the units of a suite this cycle runs, and whether they are the whole
-// suite.
+// suite. A sharded shadow run runs every unit its shard owns, selected or not, so the
+// shards of one run together run every test once.
 func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
-	if c.runAll {
+	if c.runAll || c.shadowShard() {
 		ids := make([]string, 0, len(sr.Tests))
 		for _, t := range sr.Tests {
-			ids = append(ids, t.ID)
+			if c.runAll || t.Shard == c.f.shardI {
+				ids = append(ids, t.ID)
+			}
 		}
-		return ids, true
+		return ids, c.runAll
 	}
 	return sr.Selected(), sr.All && c.f.shardN <= 1
+}
+
+// shadowShard reports whether the cycle is a sharded shadow run (--shadow --shard).
+func (c *cycle) shadowShard() bool {
+	return c.f.shadow && c.f.shardN > 1
+}
+
+// selectedUnits is the set of selected units of a selection, per suite.
+func selectedUnits(res *selector.Result) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, sr := range res.Suites {
+		out[sr.Name] = map[string]bool{}
+		for _, id := range sr.Selected() {
+			out[sr.Name][id] = true
+		}
+	}
+	return out
 }
 
 func (c *cycle) runContext(sr *selector.Suite, units []string, full bool) *runner.RunContext {
@@ -581,7 +648,9 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
-		if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
+		if w := noTraceWarning(b.units, r, sr.Suite.Runner, c.sel.diffUnrecorded); w != "" {
+			p.logf("%s: %s", sr.Name, w)
+		} else if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
 		}
 		res := c.results[sr.Name]
@@ -624,9 +693,38 @@ func (c *cycle) recordSuites() {
 			continue
 		}
 		full := res.full && len(c.notRun[sr.Name]) == 0
+		if w := untrustedWarning(sr, res.obs); w != "" {
+			p.logf("%s: %s", sr.Name, w)
+		}
 		events := selector.Record(p.state, sr, res.obs, c.hasher.ForSuite(sr.Suite), selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
 	}
+}
+
+// untrustedWarning says which browser tests' passes trust_browser_passes does not
+// record as passed (their known dependencies may not be all, see Suite.Untrusted), and
+// why, for a few of them: they stay unknown and run again next time ("" when none).
+func untrustedWarning(sr *selector.Suite, obs map[string]*runner.Observation) string {
+	var units []string
+	for u, o := range obs {
+		if o.StaticOnly && o.Status == state.Pass && sr.Untrusted[u] != "" {
+			units = append(units, u)
+		}
+	}
+	if len(units) == 0 {
+		return ""
+	}
+	slices.Sort(units)
+	const shown = 3
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d browser test(s) passed but are not trusted (trust_browser_passes), so they will run again next time:", len(units))
+	for _, u := range units[:min(shown, len(units))] {
+		fmt.Fprintf(&b, " %s (%s);", u, sr.Untrusted[u])
+	}
+	if len(units) > shown {
+		fmt.Fprintf(&b, " and %d more", len(units)-shown)
+	}
+	return strings.TrimSuffix(b.String(), ";")
 }
 
 // settleOutcomes corrects the outcomes a run reported for its units before they are
@@ -672,6 +770,29 @@ func settleOutcomes(r *runner.RunResult, units []string, record, extraArgs bool)
 	}
 }
 
+// noTraceWarning warns about a recorded batch that passed while none of its units
+// left a trace or reported a result: they stay unrecorded, and selection never learns
+// what they depend on. What happens to them next depends on how unrecorded tests are
+// decided (diffUnrecorded: against the base revision by static analysis, which misses
+// what they read at run time; otherwise they run again as new). A custom suite is
+// traced only through the Node and Python processes its command starts: one whose
+// command starts none (a shell script, a JVM build) and writes no junit report can
+// never be recorded, which is said instead of blaming a wrapper.
+func noTraceWarning(units []string, r *runner.RunResult, runnerName string, diffUnrecorded bool) string {
+	if r.ExitCode != 0 || len(units) == 0 || len(r.Observations) > 0 {
+		return ""
+	}
+	next := "run again next time"
+	if diffUnrecorded {
+		next = "are decided against the base revision by static analysis next time, which does not see what they read at run time"
+	}
+	why := runner.NoTraceCauses
+	if runnerName == "custom" {
+		why = "a custom suite is recorded through the Node and Python processes its command starts, or a junit: report; this command left neither"
+	}
+	return fmt.Sprintf("%d test unit(s) ran and passed but left no trace, so they stay unrecorded and %s: %s", len(units), next, why)
+}
+
 // unreportedUnits returns the units of a failed run that nothing was observed for
 // (no trace, no reported status): any of them may have failed.
 func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
@@ -693,22 +814,40 @@ func unreportedUnits(r *runner.RunResult, units []string) map[string]bool {
 // selected test (they are possible escapes). A Go test function of a package whose
 // compile check was selected and failed is no escape: it failed because its package
 // does not build, which the check reports.
+//
+// A sharded shadow run judges only the units its shard owns, against the selection
+// before sharding (preShard). A unit another shard owns is that shard's to report,
+// whatever the runner said about it here. A function whose package's selected compile
+// check another shard owns may have failed because the package does not build, which
+// that shard reports: such a failure (the package did not build here either) is a
+// possible escape. A function that ran and failed on its own is an escape.
 func (c *cycle) checkShadow(sr *selector.Suite, obs map[string]*runner.Observation, unreported map[string]bool) {
+	owned := func(t *selector.Test) bool { return !c.shadowShard() || t.Shard == c.f.shardI }
+	selected := func(t *selector.Test) bool { return t.Selected || c.preShard[sr.Name][t.ID] }
 	brokenBuild := map[string]bool{} // package directories whose selected check failed
+	elsewhere := map[string]bool{}   // package directories whose selected check another shard runs
 	for _, t := range sr.Tests {
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && t.Selected && runner.IsBuildCheck(t.ID) && obs[t.ID] != nil && obs[t.ID].Status == state.Fail {
+		dir, _, ok := runner.SplitFuncUnit(t.ID)
+		if !ok || !selected(t) || !runner.IsBuildCheck(t.ID) {
+			continue
+		}
+		switch {
+		case !owned(t):
+			elsewhere[dir] = true
+		case obs[t.ID] != nil && obs[t.ID].Status == state.Fail:
 			brokenBuild[dir] = true
 		}
 	}
 	for _, t := range sr.Tests {
 		o := obs[t.ID]
-		if t.Selected || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
+		if selected(t) || !owned(t) || o == nil || (o.Status != state.Fail && !unreported[t.ID]) {
 			continue
 		}
-		if dir, _, ok := runner.SplitFuncUnit(t.ID); ok && brokenBuild[dir] {
+		dir, _, isFunc := runner.SplitFuncUnit(t.ID)
+		if isFunc && brokenBuild[dir] {
 			continue
 		}
-		if o.Inferred {
+		if o.Inferred || isFunc && elsewhere[dir] && o.BuildFailed {
 			c.possible = append(c.possible, sr.Name+": "+t.ID)
 		} else {
 			c.escapes = append(c.escapes, sr.Name+": "+t.ID)
@@ -779,11 +918,29 @@ func (c *cycle) ranSuites() (picked, left []*runner.Suite) {
 // branch does not ask again. Other files stay as recorded; per-test entries track
 // them. Orphans the policy was not applied to (a watch cycle's older changes, --only)
 // stay unseen. With suites left out (ranSuites) an orphan is recorded as seen by the
-// picked suites only.
+// picked suites only, and only by those the snapshot already holds a view of
+// (selector.Snapshotted): a marker naming a suite no full recording covered would make
+// it count as snapshotted, and every marker it has not seen a change for it again. Such
+// a suite is treated like one left out: an orphan only it owns may be asked about again.
 func (c *cycle) markHandledOrphans(picked, left []*runner.Suite) {
 	p, res := c.p, c.sel.res
 	if len(p.state.Files) == 0 {
 		return
+	}
+	if len(left) > 0 {
+		snapshotted := selector.Snapshotted(p.state)
+		var kept []*runner.Suite
+		left = slices.Clone(left)
+		for _, s := range picked {
+			if snapshotted(s.Name) {
+				kept = append(kept, s)
+			} else {
+				left = append(left, s)
+			}
+		}
+		if picked = kept; len(picked) == 0 {
+			return
+		}
 	}
 	own := selector.NewOwnership(picked, left)
 	for _, o := range res.Orphans {
@@ -871,33 +1028,54 @@ func runError(suite string, err error) error {
 	return envError{err}
 }
 
-// unstartedSection lists, for the summary, the suites whose runner could not start.
+// unstartedSection lists, for the summary, the suites whose runner could not start or
+// whose requirements are not met.
 func (c *cycle) unstartedSection() (sec summary.Section, ok bool) {
 	if len(c.unstarted) == 0 {
 		return sec, false
 	}
 	var b strings.Builder
-	b.WriteString("The runner could not start (see the log); these units did not run and stay selected:\n")
-	for _, sr := range c.sel.res.Suites {
-		if units := c.unstarted[sr.Name]; len(units) > 0 {
-			fmt.Fprintf(&b, "- `%s`: %d test unit(s)\n", sr.Name, len(units))
+	if countUnits(c.unstarted) > countUnits(c.unmet) {
+		b.WriteString("The runner could not start (see the log); these units did not run and stay selected:\n")
+		for _, sr := range c.sel.res.Suites {
+			if n := len(c.unstarted[sr.Name]) - len(c.unmet[sr.Name]); n > 0 {
+				fmt.Fprintf(&b, "- `%s`: %d test unit(s)\n", sr.Name, n)
+			}
+		}
+	}
+	if len(c.unmet) > 0 {
+		b.WriteString("Requirements (`requires`) are not met here; these units did not run and stay selected:\n")
+		for _, sr := range c.sel.res.Suites {
+			if units := c.unmet[sr.Name]; len(units) > 0 {
+				fmt.Fprintf(&b, "- `%s`: %d test unit(s), need %s\n", sr.Name, len(units), strings.Join(c.unmetWhy[sr.Name], ", "))
+			}
 		}
 	}
 	return summary.Section{Title: fmt.Sprintf(":warning: %d test unit(s) not run", countUnits(c.unstarted)), Body: b.String()}, true
 }
 
 // notStartedBy names what left the units of notStartedUnits not started (when the run
-// was not interrupted): --fail-fast, a runner that could not start (or exited 126/127
-// before any test reported a result), or both.
+// was not interrupted): --fail-fast or --max-time, unmet requirements, a runner that
+// could not start (or exited 126/127 before any test reported a result).
 func (c *cycle) notStartedBy() string {
-	switch {
-	case len(c.unstarted) == 0 && c.noResultUnits() == 0:
-		return "--fail-fast"
-	case countUnits(c.unstarted) == countUnits(c.notRun):
-		return "a runner that could not start"
-	default:
-		return "--fail-fast and a runner that could not start"
+	var by []string
+	if countUnits(c.notRun) > countUnits(c.unstarted) {
+		if c.capped {
+			by = append(by, "--max-time")
+		} else {
+			by = append(by, "--fail-fast")
+		}
 	}
+	if len(c.unmet) > 0 {
+		by = append(by, "unmet requirements")
+	}
+	if countUnits(c.unstarted) > countUnits(c.unmet) || c.noResultUnits() > 0 {
+		by = append(by, "a runner that could not start")
+	}
+	if len(by) == 0 {
+		return "--fail-fast"
+	}
+	return joinAnd(by)
 }
 
 // notStartedUnits counts the selected units that did not start: those of notRun and
@@ -917,6 +1095,24 @@ func (c *cycle) noResultUnits() int {
 		}
 	}
 	return n
+}
+
+// skippedNote is what the outcome line adds for the units that skipped themselves in
+// this run (state.Skip): they did not fail, but they are not proven to pass, so they
+// stay selected. "" when none did.
+func (c *cycle) skippedNote() string {
+	n := 0
+	for _, units := range c.ran {
+		for _, st := range units {
+			if st == state.Skip {
+				n++
+			}
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d skipped (not proven: they run again next time)", n)
 }
 
 // logShadowAndFlakes logs, in failures mode, what logOutcome logs besides the outcome
@@ -939,6 +1135,12 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 				fmt.Fprintf(c.stderr, "  - %s\n", e)
 			}
 		} else {
+			if c.shadowShard() {
+				// Out of the units this shard owns, all of which it ran.
+				var r state.Run
+				countSelection(&r, c.sel.res, c.f.shardI, c.f.shardN)
+				selected, total = r.Selected, r.Total
+			}
 			p.logf("shadow: every failing test was selected (%d/%d would have run)", selected, total)
 		}
 		if len(c.possible) > 0 {
@@ -947,9 +1149,9 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.exit, n)
 	} else if n := c.notStartedUnits(); n > 0 {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)", elapsed, selected-n, total, c.exit, c.notStartedBy(), n)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)%s", elapsed, selected-n, total, c.exit, c.notStartedBy(), n, c.skippedNote())
 	} else {
-		p.logf("done in %s: ran %d of %d test unit(s), exit code %d", elapsed, selected, total, c.exit)
+		p.logf("done in %s: ran %d of %d test unit(s), exit code %d%s", elapsed, selected, total, c.exit, c.skippedNote())
 	}
 	logFlakes(p, c.stderr, c.flakes)
 }
@@ -959,6 +1161,9 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 	p, f := c.p, c.f
 	sum := summaryInput(c.sel, f.shardI, f.shardN)
 	sum.Run = &summary.Run{ExitCode: c.exit, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted}
+	if c.capped {
+		sum.Run.MaxTime = f.maxTime
+	}
 	sum.Savings = cumulativeSavings(p.state.Runs)
 	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
@@ -1002,10 +1207,14 @@ func (c *cycle) writeReport() error {
 		Flaky    []flakeReport                `json:"flaky"`
 		Failures []*hints.Hint                `json:"failure_hints"`
 		FailFast bool                         `json:"fail_fast"`
-		NotRun   map[string][]string          `json:"not_run"` // --fail-fast, interrupt: selected units not run
+		NotRun   map[string][]string          `json:"not_run"` // --fail-fast, --max-time, interrupt, unmet requires: selected units not run
 		// Interrupted: the run was cancelled (Ctrl-C); what did not finish is in not_run.
 		Interrupted bool `json:"interrupted"`
-	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted}
+		// MaxTimeReached: --max-time left the units of not_run out (except unmet_requires).
+		MaxTimeReached bool `json:"max_time_reached"`
+		// UnmetRequires: suite -> the requirements not met (the units are in not_run).
+		UnmetRequires map[string][]string `json:"unmet_requires"`
+	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted, c.capped, c.unmetWhy}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}
@@ -1065,6 +1274,25 @@ type selectFlags struct {
 	shard    string
 	explain  bool
 	markdown string
+	// maxShards (--max-shards) asks for a shard count sized to the selection, at most
+	// this many; shardTime (--shard-time) is the recorded test time to aim for per shard.
+	maxShards int
+	shardTime time.Duration
+}
+
+// validateShards checks --max-shards and --shard-time (set: the flags given).
+func (f *selectFlags) validateShards(set map[string]bool) error {
+	switch {
+	case set["max-shards"] && (f.maxShards < 1 || f.maxShards > maxShardsLimit):
+		return usageError{fmt.Errorf("invalid --max-shards %d (want 1 to %d)", f.maxShards, maxShardsLimit)}
+	case set["shard-time"] && !set["max-shards"]:
+		return usageError{fmt.Errorf("--shard-time sizes --max-shards and needs it")}
+	case f.shardTime < time.Second:
+		return usageError{fmt.Errorf("invalid --shard-time %s (want at least 1s)", f.shardTime)}
+	case set["max-shards"] && f.shard != "":
+		return usageError{fmt.Errorf("--max-shards sizes the shards of the whole selection and cannot be combined with --shard")}
+	}
+	return nil
 }
 
 func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -1080,6 +1308,8 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	fs.StringVar(&f.shard, "shard", "", "only shard `I/N` of the selection")
 	fs.BoolVar(&f.explain, "explain", false, "print why each test was selected")
 	fs.StringVar(&f.markdown, "markdown", "", "also write the summary as Markdown to `file`, e.g. for a pull request comment")
+	fs.IntVar(&f.maxShards, "max-shards", 0, "also size a shard count for the selection: 0 when nothing is selected, else 1 to `N` (outputs shards and shard-matrix)")
+	fs.DurationVar(&f.shardTime, "shard-time", defaultShardTime, "with --max-shards: recorded test time to aim for per shard")
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
@@ -1090,6 +1320,11 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := f.callerFlags.validate(); err != nil {
 		return 2, err
 	}
+	set := map[string]bool{}
+	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	if err := f.validateShards(set); err != nil {
+		return 2, err
+	}
 	shardI, shardN, err := parseShard(f.shard)
 	if err != nil {
 		return 2, err
@@ -1098,11 +1333,29 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	sel, err := p.selectTests(ctx, selectOptions{all: f.all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
+	all := f.all
+	if !all {
+		// The selection (its skip and suites outputs, which gate jobs, and the shard
+		// count) is what `smates run` will run: everything where it runs everything by
+		// default (the default branch on CI), or a gated job would skip the full run
+		// that refreshes the state.
+		if full, branch := fullRunBranch(p.ci, p.repo, p.cfg.FullRunBranches); full {
+			p.logf("on %s (%s): selecting every test, as `smates run` runs every test there", branch, p.ci.Name)
+			all = true
+		}
+	}
+	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphans: f.orphans, adds: f.adds, sharded: shardN > 1})
 	if err != nil {
 		return 1, err
 	}
 	applyShard(sel.res, shardI, shardN)
+	var shardLines []string
+	if f.maxShards > 0 {
+		n := shardCount(sel.res, f.maxShards, f.shardTime)
+		p.logf("%d shard(s) for this selection (--max-shards %d, about %s of recorded test time per shard)", n, f.maxShards, f.shardTime)
+		shardLines = shardOutputs(n)
+		sel.shards = &n
+	}
 	if sel.agentDec != nil && !sel.agentCache {
 		// Keep the agent's answer for the next run on the same change.
 		if err := p.store.Save(p.state); err != nil {
@@ -1131,7 +1384,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return 0, enc.Encode(jsonSelection(sel))
 	case "github":
 		printSelection(p, sel, stderr, f.explain)
-		if err := writeGitHubOutputs(stdout, sel); err != nil {
+		if err := writeGitHubOutputs(stdout, sel, shardLines...); err != nil {
 			return 0, err
 		}
 		writeRunSummary(p, "", sum)
@@ -1151,11 +1404,13 @@ type jsonOut struct {
 	// Candidates describe the orphans for a calling agent that decides about them
 	// itself (--add, --orphans).
 	Candidates []orphanCandidate `json:"orphan_candidates"`
+	// Shards is the shard count `select --max-shards` sized (absent without it).
+	Shards *int `json:"shards,omitempty"`
 }
 
 func jsonSelection(sel *selection) jsonOut {
 	s, t := sel.res.Counts()
-	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates}
+	out := jsonOut{Result: sel.res, Selected: s, Total: t, Note: sel.agentNote, Tests: map[string][]string{}, Candidates: sel.candidates, Shards: sel.shards}
 	if out.Candidates == nil {
 		out.Candidates = []orphanCandidate{}
 	}
@@ -1206,23 +1461,42 @@ func printSelection(p *project, sel *selection, w io.Writer, explain bool) {
 	}
 }
 
-// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
-func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+// suiteOutput is one suite of the `suites` GitHub output. Skip is true only when the
+// suite selected nothing. A workflow skips a job only when `.skip` is true, never when
+// `.selected` is 0: a suite the output does not list (left out by --suite, a plan job
+// that failed) reads as null, which equals 0 in a workflow expression but not true.
+type suiteOutput struct {
+	Selected int  `json:"selected"`
+	Total    int  `json:"total"`
+	All      bool `json:"all"`
+	Skip     bool `json:"skip"`
+}
+
+// githubOutputs are the selection's step outputs, as name=value lines.
+func githubOutputs(sel *selection) []string {
 	s, t := sel.res.Counts()
 	runAll := true
 	tests := map[string][]string{}
+	suites := map[string]suiteOutput{}
 	for _, su := range sel.res.Suites {
 		if !su.All {
 			runAll = false
 		}
-		tests[su.Name] = append([]string{}, su.Selected()...)
+		ids := append([]string{}, su.Selected()...)
+		tests[su.Name] = ids
+		suites[su.Name] = suiteOutput{Selected: len(ids), Total: len(su.Tests), All: su.All && len(su.Tests) > 0, Skip: len(ids) == 0}
 	}
 	tj, _ := json.Marshal(tests)
-	lines := []string{
+	sj, _ := json.Marshal(suites)
+	return []string{
 		fmt.Sprintf("selected=%d", s), fmt.Sprintf("total=%d", t), fmt.Sprintf("run-all=%t", runAll && t > 0),
-		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj),
+		fmt.Sprintf("skip=%t", s == 0), "tests=" + string(tj), "suites=" + string(sj),
 	}
-	lines = append(lines, extra...)
+}
+
+// writeGitHubOutputs writes selection outputs to $GITHUB_OUTPUT (stdout when unset).
+func writeGitHubOutputs(stdout io.Writer, sel *selection, extra ...string) error {
+	lines := append(githubOutputs(sel), extra...)
 	if out := os.Getenv("GITHUB_OUTPUT"); out != "" {
 		f, err := os.OpenFile(out, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {

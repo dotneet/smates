@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +103,13 @@ type Suite struct {
 	Granularity string `yaml:"granularity"`
 	// Static enables import-graph analysis (default true).
 	Static *bool `yaml:"static"`
+	// TrustBrowserPasses records a vitest test that runs only in a browser (browser
+	// mode, Storybook stories), where no trace sees what it loads, as passed when the
+	// reporter says so, with its static dependencies; otherwise (the default) such a
+	// test is unknown after every run and runs again next time. Left out of the
+	// settings hash when unset, so that the hash of a suite that does not set it is the
+	// one an older smates recorded.
+	TrustBrowserPasses *bool `yaml:"trust_browser_passes" json:",omitempty"`
 	// Junit: optional path (relative to Root) of a JUnit XML report the command writes;
 	// used for per-file pass/fail when the runner cannot report it otherwise.
 	Junit string `yaml:"junit"`
@@ -108,13 +118,291 @@ type Suite struct {
 	// EnvIgnore and EnvTrack add to the top-level lists for this suite only.
 	EnvIgnore []string `yaml:"env_ignore"`
 	EnvTrack  []string `yaml:"env_track"`
+	// Volatile: globs (relative to Root, matched like the tests of a rule) of the test
+	// units that run every time, whatever changed: tests that depend on something
+	// smates cannot track, such as the date.
+	Volatile []string `yaml:"volatile" json:"-"`
+	// MaxAge: a unit whose last recorded run is older than this runs again, whatever
+	// changed (0: never). Neither it nor Volatile changes how the tests run, so they are
+	// left out of the settings hash (selector.ConfigHash).
+	MaxAge time.Duration `yaml:"max_age" json:"-"`
+	// Requires are preconditions of the environment (a database listening, a browser
+	// installed): when one is not met, `smates run` does not start the units it covers
+	// and leaves them selected. Like Volatile and MaxAge they choose when tests run, not
+	// how, so they are left out of the settings hash: adding a check or tuning its
+	// timeout reruns nothing.
+	Requires []Requirement `yaml:"requires" json:"-"`
 }
 
-// Rule declares dependencies tracing cannot see.
+// Rule declares dependencies tracing cannot see. It needs Tests or Reaches; with both,
+// a unit must match both.
 type Rule struct {
 	// Tests: globs relative to the suite root; Deps: repo-relative globs.
 	Tests []string `yaml:"tests"`
-	Deps  []string `yaml:"deps"`
+	// Reaches narrows the rule to the units whose static import closure reaches a file
+	// one of these repo-relative globs matches, or, for an entry "$NAME" (a glob over
+	// variable names), whose recorded run read that environment variable. A unit whose
+	// closure is unknown (static analysis off, no analyzer for its files) gets the deps.
+	// Left out of the settings hash when empty, so that the hash of a suite that does
+	// not use it is the one an older smates recorded.
+	Reaches []string `yaml:"reaches" json:",omitempty"`
+	Deps    []string `yaml:"deps"`
+}
+
+// ReachesEnv splits Reaches into file globs and environment variable name patterns
+// (the "$NAME" entries, without the "$").
+func (r Rule) ReachesEnv() (files, env []string) {
+	for _, g := range r.Reaches {
+		if name, ok := strings.CutPrefix(g, "$"); ok {
+			env = append(env, name)
+		} else {
+			files = append(files, g)
+		}
+	}
+	return files, env
+}
+
+// checkRules validates the rules of suite s, and strips a leading "./" from their
+// globs.
+func checkRules(s *Suite) error {
+	for i := range s.Rules {
+		r := &s.Rules[i]
+		at := fmt.Sprintf("suite %q: rules[%d]", s.Name, i)
+		trimDotSlash(r.Tests)
+		trimDotSlash(r.Deps)
+		for j, g := range r.Reaches {
+			if !strings.HasPrefix(g, "$") {
+				for strings.HasPrefix(g, "./") {
+					g = g[2:]
+				}
+				r.Reaches[j] = g
+			}
+		}
+		files, env := r.ReachesEnv()
+		switch {
+		case len(r.Tests) == 0 && len(r.Reaches) == 0:
+			return fmt.Errorf("%s: needs tests or reaches (a rule with neither applies to no test)", at)
+		case len(r.Deps) == 0:
+			return fmt.Errorf("%s: needs deps", at)
+		}
+		if err := checkGlobs(at+": tests", r.Tests); err != nil {
+			return err
+		}
+		if err := checkRepoGlobs(at+": deps", r.Deps); err != nil {
+			return err
+		}
+		if err := checkRepoGlobs(at+": reaches", files); err != nil {
+			return err
+		}
+		if err := checkEnvPatterns(at+": reaches", env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Requirement is one entry of Suite.Requires: something the environment must provide
+// for the suite's tests to run. Exactly one of TCP, Cmd, Env and File is set.
+type Requirement struct {
+	// TCP: "host:port" that must accept a TCP connection.
+	TCP string `yaml:"tcp"`
+	// Cmd: a shell command, run in the suite root with the suite's env, that must exit 0.
+	Cmd string `yaml:"cmd"`
+	// Env: an environment variable (or a key of the suite's env) that must be non-empty.
+	Env string `yaml:"env"`
+	// File: a path or glob, relative to the suite root or absolute, that must match an
+	// existing file or directory.
+	File string `yaml:"file"`
+	// Tests: globs relative to the suite root narrowing the units that need it
+	// (default: all).
+	Tests []string `yaml:"tests"`
+	// Timeout bounds a tcp or cmd check (default DefaultTCPTimeout, DefaultCmdTimeout).
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// Default timeouts of the requires checks.
+const (
+	DefaultTCPTimeout = 2 * time.Second
+	DefaultCmdTimeout = 10 * time.Second
+)
+
+// requirementKeys are the keys of a requires entry.
+var requirementKeys = []string{"tcp", "cmd", "env", "file", "tests", "timeout"}
+
+// UnmarshalYAML reports an unknown key of a requires entry with the keys it accepts.
+func (r *Requirement) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		hint := ""
+		if n.Kind == yaml.ScalarNode {
+			hint = fmt.Sprintf(" (for an address, write `tcp: %s`)", n.Value)
+		}
+		return fmt.Errorf("line %d: a requires entry is a mapping with one of tcp, cmd, env and file%s", n.Line, hint)
+	}
+	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
+	{
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if k := n.Content[i]; !slices.Contains(requirementKeys, k.Value) {
+				return fmt.Errorf("line %d: unknown key %q in requires entry (want one of tcp, cmd, env and file, with optional tests and timeout)", k.Line, k.Value)
+			}
+		}
+	}
+	type plain Requirement
+	return n.Decode((*plain)(r))
+}
+
+// Kind is the kind of check: "tcp", "cmd", "env" or "file" ("" when none is set).
+func (r Requirement) Kind() string {
+	kind, _ := r.kindValue()
+	return kind
+}
+
+func (r Requirement) kindValue() (string, string) {
+	switch {
+	case r.TCP != "":
+		return "tcp", r.TCP
+	case r.Cmd != "":
+		return "cmd", r.Cmd
+	case r.Env != "":
+		return "env", r.Env
+	case r.File != "":
+		return "file", r.File
+	}
+	return "", ""
+}
+
+// String describes the requirement in logs ("tcp 127.0.0.1:5432").
+func (r Requirement) String() string {
+	kind, v := r.kindValue()
+	return kind + " " + v
+}
+
+// TimeoutOrDefault is the time a tcp or cmd check may take.
+func (r Requirement) TimeoutOrDefault() time.Duration {
+	switch {
+	case r.Timeout > 0:
+		return r.Timeout
+	case r.Cmd != "":
+		return DefaultCmdTimeout
+	}
+	return DefaultTCPTimeout
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// checkRequires validates requires, and strips a leading "./" from its tests globs.
+func checkRequires(s *Suite) error {
+	for i := range s.Requires {
+		r := &s.Requires[i]
+		at := fmt.Sprintf("suite %q: requires[%d]", s.Name, i)
+		set := 0
+		for _, v := range []string{r.TCP, r.Cmd, r.Env, r.File} {
+			if v != "" {
+				set++
+			}
+		}
+		if set != 1 {
+			return fmt.Errorf("%s: set exactly one of tcp, cmd, env and file", at)
+		}
+		switch {
+		case strings.TrimSpace(r.TCP+r.Cmd+r.Env+r.File) == "":
+			return fmt.Errorf("%s: %s is empty", at, r.Kind())
+		case r.TCP != "":
+			if err := CheckVarRefs(r.TCP); err != nil {
+				return fmt.Errorf("%s: tcp %q: %v", at, r.TCP, err)
+			}
+			if err := checkHostPort(r.TCP); err != nil {
+				return fmt.Errorf("%s: tcp %q: %v", at, r.TCP, err)
+			}
+		case r.Env != "":
+			if !envNameRe.MatchString(r.Env) {
+				return fmt.Errorf("%s: env %q is not a variable name", at, r.Env)
+			}
+		case r.File != "":
+			if err := CheckVarRefs(r.File); err != nil {
+				return fmt.Errorf("%s: file %q: %v", at, r.File, err)
+			}
+			if strings.Contains(r.File, "\\") {
+				return fmt.Errorf("%s: file %q: use / as the path separator", at, r.File)
+			}
+			if !doublestar.ValidatePattern(r.File) {
+				return fmt.Errorf("%s: file: bad glob %q", at, r.File)
+			}
+		}
+		if r.Timeout < 0 {
+			return fmt.Errorf("%s: timeout must not be negative (got %s)", at, r.Timeout)
+		}
+		if r.Timeout > 0 && r.TCP == "" && r.Cmd == "" {
+			return fmt.Errorf("%s: timeout applies to tcp and cmd only", at)
+		}
+		trimDotSlash(r.Tests)
+		if err := checkGlobs(at+": tests", r.Tests); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CheckVarRefs checks that every "$" of a tcp or file requirement starts a variable
+// reference smates expands: $NAME or ${NAME}. Shell forms it does not expand (a
+// default as in ${NAME:-x} or ${NAME-x}, ${NAME:?}, $1, $$, ${}) would be read as an
+// unset variable on every machine, leaving the suite's tests out for good.
+func CheckVarRefs(v string) error {
+	const forms = "write $NAME or ${NAME} (smates expands no defaults such as ${NAME:-x}, no $1 and no $$; for a default, set the variable where smates runs, or use a cmd requirement, whose shell expands it; a suite env value overrides the environment, so it is no default)"
+	for i := 0; i < len(v); i++ {
+		if v[i] != '$' {
+			continue
+		}
+		rest := v[i+1:]
+		if strings.HasPrefix(rest, "{") {
+			end := strings.IndexByte(rest, '}')
+			if end < 0 {
+				return fmt.Errorf("%q has no closing }: %s", v[i:], forms)
+			}
+			if body := rest[1:end]; !envNameRe.MatchString(body) {
+				return fmt.Errorf("${%s} is not a variable reference: %s", body, forms)
+			}
+			i += end + 1
+			continue
+		}
+		n := 0
+		for n < len(rest) && (rest[n] == '_' || rest[n] >= 'a' && rest[n] <= 'z' || rest[n] >= 'A' && rest[n] <= 'Z' || n > 0 && rest[n] >= '0' && rest[n] <= '9') {
+			n++
+		}
+		if n == 0 {
+			ref := "$"
+			if rest != "" {
+				ref += rest[:1]
+			}
+			return fmt.Errorf("%q is not a variable reference: %s", ref, forms)
+		}
+		i += n
+	}
+	return nil
+}
+
+// checkHostPort validates a "host:port" address; one with environment variables is
+// checked once they are expanded, at run time.
+func checkHostPort(addr string) error {
+	if strings.Contains(addr, "$") {
+		return nil
+	}
+	return CheckHostPort(addr)
+}
+
+// CheckHostPort validates a tcp requirement's address once its variables are expanded:
+// a host and a port from 1 to 65535.
+func CheckHostPort(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("want host:port")
+	}
+	if host == "" {
+		return errors.New("want host:port (the host is missing)")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("bad port %q", port)
+	}
+	return nil
 }
 
 // Dependency is one entry of Suite.DependsOn: exactly one of Suite and Paths. A plain
@@ -135,11 +423,15 @@ type Dependency struct {
 
 // UnmarshalYAML accepts a suite name as a plain string.
 func (d *Dependency) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.ScalarNode {
+	switch n.Kind {
+	case yaml.ScalarNode:
 		return n.Decode(&d.Suite)
+	case yaml.MappingNode:
+	default:
+		return fmt.Errorf("line %d: a depends_on or serves entry is a suite name or a mapping with suite or paths", n.Line)
 	}
 	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
-	if n.Kind == yaml.MappingNode {
+	{
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			switch k := n.Content[i]; k.Value {
 			case "suite", "paths", "tests":
@@ -508,6 +800,22 @@ func (c *Config) Normalize() error {
 		}
 		if s.RecordJobs < 0 {
 			return fmt.Errorf("suite %q: record_jobs must not be negative (got %d)", s.Name, s.RecordJobs)
+		}
+		if s.MaxAge < 0 {
+			return fmt.Errorf("suite %q: max_age must not be negative (got %s)", s.Name, s.MaxAge)
+		}
+		trimDotSlash(s.Volatile)
+		if err := checkGlobs(fmt.Sprintf("suite %q: volatile", s.Name), s.Volatile); err != nil {
+			return err
+		}
+		if err := checkRules(s); err != nil {
+			return err
+		}
+		if err := checkRequires(s); err != nil {
+			return err
+		}
+		if Bool(s.TrustBrowserPasses, false) && s.Runner != "vitest" {
+			return fmt.Errorf("suite %q: trust_browser_passes is only supported by the vitest runner", s.Name)
 		}
 	}
 	for i := range c.Suites {

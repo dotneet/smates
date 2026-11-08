@@ -54,6 +54,12 @@ type selection struct {
 	// unrecordedReads are, by suite, the files decideTests selects the suite's units
 	// with no recorded entry for (see unrecordedReads).
 	unrecordedReads map[string][]string
+	// unseen are the changes markerFilter dropped because only suites with no
+	// recorded entry (neverRecorded) have not seen them: they are no change for the
+	// other suites, and orphans of those only when they changed since Base and no
+	// test explains them (see neverRecordedOrphans).
+	unseen        map[string]bool
+	neverRecorded []string
 	// globalInputs are the files every test depends on (top-level inputs and the
 	// settings key of the configuration file).
 	globalInputs []string

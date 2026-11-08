@@ -554,10 +554,10 @@ func (c *watchCycles) runFlags(req cycleReq) *runFlags {
 }
 
 // footer prints the outcome of a cycle from the recorded statuses. notStarted counts
-// the selected units --fail-fast did not start.
+// the selected units the run did not start (--fail-fast, unmet requires).
 func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, code int, err error, took time.Duration) {
 	var failed, unknown []string
-	passed := 0
+	passed, skipped := 0, 0
 	for suite, units := range ran {
 		for _, u := range units {
 			st := state.Unknown
@@ -569,6 +569,8 @@ func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, co
 				passed++
 			case state.Fail:
 				failed = append(failed, u)
+			case state.Skip:
+				skipped++
 			default:
 				unknown = append(unknown, u)
 			}
@@ -582,13 +584,16 @@ func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, co
 		parts = append(parts, "✗ error")
 	case len(failed) > 0 || code != 0:
 		parts = append(parts, fmt.Sprintf("✗ FAIL (exit %d)", code))
-	case passed+len(unknown) == 0:
+	case passed+skipped+len(unknown) == 0:
 		parts = append(parts, "· nothing to run")
 	default:
 		parts = append(parts, "✓ PASS")
 	}
 	if passed > 0 {
 		parts = append(parts, fmt.Sprintf("%d passed", passed))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped (not proven)", skipped))
 	}
 	if len(failed) > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed: %s", len(failed), strings.Join(limit(failed, 6), ", ")))
@@ -597,7 +602,7 @@ func (c *watchCycles) footer(p *project, ran map[string][]string, notStarted, co
 		parts = append(parts, fmt.Sprintf("%d without a result: %s", len(unknown), strings.Join(limit(unknown, 4), ", ")))
 	}
 	if notStarted > 0 {
-		parts = append(parts, fmt.Sprintf("%d not started (--fail-fast)", notStarted))
+		parts = append(parts, fmt.Sprintf("%d not started (still selected)", notStarted))
 	}
 	parts = append(parts, took.Round(100*time.Millisecond).String())
 	fmt.Fprintf(c.stderr, "── %s\n", strings.Join(parts, " · "))

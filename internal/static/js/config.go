@@ -3,6 +3,7 @@ package js
 import (
 	"bytes"
 	"encoding/json"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -355,10 +356,21 @@ func (p *cfgParser) value(i int) (any, int) {
 	if p.ident(i, "as") || p.ident(i, "satisfies") {
 		return v, p.skip(i)
 	}
-	if !p.end(i) {
+	if !p.end(i) && !p.newStatement(start, i) {
 		return p.unknown(start)
 	}
 	return v, i
+}
+
+// newStatement reports whether token i, after a value that starts at token start at
+// the top level, begins the next statement of code written without semicolons: an
+// identifier or keyword on a line of its own (const config = {...}<newline>export
+// default config).
+func (p *cfgParser) newStatement(start, i int) bool {
+	if p.level == nil || start >= len(p.level) || p.level[start] != 0 || i >= len(p.toks) || p.toks[i].kind != tIdent {
+		return false
+	}
+	return bytes.IndexByte(p.src[p.toks[i-1].e:p.toks[i].s], '\n') >= 0
 }
 
 // end reports whether token i ends an expression inside an object or array literal or
@@ -542,4 +554,88 @@ func DecodeJSONObject(b []byte) (*Object, error) {
 		o = &Object{Fields: map[string]any{}}
 	}
 	return o, nil
+}
+
+// CallArgs returns the first argument of every call of the function name in
+// JavaScript or TypeScript source, evaluated like the values of ConfigObject (an
+// identifier is resolved through a top-level const binding; nil for a call without
+// arguments): storybookTest({ configDir: ".storybook" }). A method of something else
+// (x.name(...)) or a declaration (function name(...)) is not a call of it.
+func CallArgs(src []byte, name string) []any {
+	l := lex(src)
+	p := &cfgParser{parser: parser{src: src, toks: l.toks}}
+	p.levels()
+	var out []any
+	for i := range p.toks {
+		if !p.ident(i, name) || p.punct(i-1, '.') || p.ident(i-1, "function") || !p.punct(i+1, '(') {
+			continue
+		}
+		if p.punct(i+2, ')') {
+			out = append(out, nil)
+			continue
+		}
+		v, _ := p.value(i + 2)
+		out = append(out, p.unwrap(v, i+2))
+	}
+	return out
+}
+
+// PathValue evaluates the source of an expression naming a path: a string literal
+// (fromFile false), or path.join / path.resolve (or a bare join / resolve) of
+// __dirname, import.meta.dirname or a binding named dirname followed by string
+// literals, which is relative to the file (fromFile true): path.join(dirname,
+// ".storybook") is ".storybook". ok is false for anything else, and for an absolute
+// segment.
+func PathValue(expr string) (p string, fromFile, ok bool) {
+	src := []byte(expr)
+	ps := parser{src: src, toks: lex(src).toks}
+	n := len(ps.toks)
+	if n == 1 && ps.literal(0) {
+		return ps.text(0), false, true
+	}
+	i := 0
+	if ps.ident(0, "path") && ps.punct(1, '.') {
+		i = 2
+	}
+	if !(ps.ident(i, "join") || ps.ident(i, "resolve")) || !ps.punct(i+1, '(') || !ps.punct(n-1, ')') {
+		return "", false, false
+	}
+	i += 2
+	switch {
+	case ps.ident(i, "__dirname"), ps.ident(i, "dirname"):
+		i++
+	case ps.ident(i, "import") && ps.punct(i+1, '.') && ps.ident(i+2, "meta") && ps.punct(i+3, '.') && ps.ident(i+4, "dirname"):
+		i += 5
+	default:
+		return "", false, false
+	}
+	segs := []string{"."}
+	for ; i < n-1; i += 2 {
+		if !ps.punct(i, ',') {
+			return "", false, false
+		}
+		if i+1 == n-1 {
+			break // trailing comma
+		}
+		if !ps.literal(i+1) || strings.HasPrefix(ps.text(i+1), "/") {
+			return "", false, false
+		}
+		segs = append(segs, ps.text(i+1))
+	}
+	return path.Join(segs...), true, true
+}
+
+// StringLiterals returns the values of the string literals (and template literals
+// without substitutions) in JavaScript or TypeScript source, in order, comments left
+// out: the paths a configuration names (setupFiles: ["./test/setup.ts"]).
+func StringLiterals(src []byte) []string {
+	l := lex(src)
+	p := parser{src: src, toks: l.toks}
+	var out []string
+	for i := range p.toks {
+		if p.literal(i) {
+			out = append(out, p.text(i))
+		}
+	}
+	return out
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
@@ -447,5 +448,173 @@ func BenchmarkPythonProjects(b *testing.B) {
 		if got := pythonProjects(repo, dirs, dirFiles); len(got) != 401 {
 			b.Fatalf("%d projects", len(got))
 		}
+	}
+}
+
+// TestDetectStoriesAndNotes: a package whose only tests are Storybook stories gets a
+// suite; a package that configures a runner but has no test smates can find gets a
+// note instead of being dropped silently.
+func TestDetectStoriesAndNotes(t *testing.T) {
+	sbConfig := `import { storybookTest } from "@storybook/addon-vitest/vitest-plugin"
+export default { plugins: [storybookTest()] }`
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []got
+		note  string // substring of the only note ("" = none)
+	}{
+		{
+			name: "stories-only package",
+			files: map[string]string{
+				"ui/package.json": vitestPkg, "ui/vitest.config.ts": sbConfig,
+				"ui/.storybook/main.ts":     `export default { stories: ["../src/**/*.stories.tsx"] }`,
+				"ui/src/button.stories.tsx": "", "ui/src/button.tsx": "",
+			},
+			want: []got{{"vitest", "ui", "vitest"}},
+		},
+		{
+			name: "configured package with no test file",
+			files: map[string]string{
+				"ui/package.json": vitestPkg, "ui/vitest.config.ts": `export default { test: { include: ["src/**/*.spec.ts"] } }`,
+				"ui/src/button.tsx": "",
+			},
+			note: "ui: no vitest suite: its configuration names no test file smates can find (test patterns: src/**/*.spec.ts)",
+		},
+		{
+			name:  "package without a runner configuration needs no note",
+			files: map[string]string{"ui/package.json": vitestPkg, "ui/src/button.tsx": ""},
+		},
+		// A plain Vite app does not configure a test runner.
+		{
+			name: "Vite app without vitest",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `import { defineConfig } from "vite"; export default defineConfig({})`,
+				"app/src/main.ts":    "",
+			},
+		},
+		{
+			name: "vite.config.* importing vitest",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `/// <reference types="vitest" />` + "\n" + `import { defineConfig } from "vitest/config"; export default defineConfig({ test: { include: ["src/**/*.spec.ts"] } })`,
+				"app/src/main.ts":    "",
+			},
+			note: "app: no vitest suite",
+		},
+		{
+			name: "vite.config.* with a test key",
+			files: map[string]string{
+				"app/package.json":   `{"devDependencies":{"vite":"^6"}}`,
+				"app/vite.config.ts": `export default { test: { include: ["src/**/*.spec.ts"] } }`,
+				"app/src/main.ts":    "",
+			},
+			note: "app: no vitest suite",
+		},
+		// Configured only by a per-project file: reported, never dropped silently.
+		{
+			name: "only a per-project vitest configuration",
+			files: map[string]string{
+				"ui/package.json":             `{"devDependencies":{"vitest":"^4"},"scripts":{"test":"vitest --config vitest.stories.config.ts"}}`,
+				"ui/vitest.stories.config.ts": sbConfig,
+				"ui/.storybook/main.ts":       `export default { stories: ["../src/**/*.stories.tsx"] }`,
+				"ui/src/button.stories.tsx":   "",
+			},
+			note: "vitest.stories.config.ts configures vitest only when named",
+		},
+		{
+			name: "only a per-project vitest configuration, no dependency",
+			files: map[string]string{
+				"ui/package.json":             `{}`,
+				"ui/vitest.stories.config.ts": sbConfig,
+				"ui/src/button.stories.tsx":   "",
+			},
+			note: "ui: no vitest suite",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var list []string
+			for f, content := range c.files {
+				testutil.Write(t, dir, f, content)
+				list = append(list, f)
+			}
+			sort.Strings(list)
+			suites, notes := Detect(&gitx.Repo{Root: dir}, list)
+			var out []got
+			for _, s := range suites {
+				out = append(out, got{s.Name, s.Root, s.Runner})
+			}
+			if !reflect.DeepEqual(out, c.want) {
+				t.Errorf("suites %v, want %v", out, c.want)
+			}
+			if c.note == "" && len(notes) > 0 || c.note != "" && (len(notes) != 1 || !strings.Contains(notes[0], c.note)) {
+				t.Errorf("notes %q, want one containing %q", notes, c.note)
+			}
+		})
+	}
+}
+
+// A per-project vitest file (vitest.stories.config.ts) configures vitest only when
+// named, so it does not decide the runner of a package whose tests something else runs.
+func TestDetectPerProjectVitestConfigRunner(t *testing.T) {
+	const sb = "export default { test: { include: [\"src/**/*.stories.tsx\"] } }\n"
+	cases := []struct {
+		name string
+		pkg  string
+		file string // an extra file of the package
+		want string // the runner of the suite rooted at ui
+	}{
+		// Must keep the jest suite: vitest would run jest's tests.
+		{"jest script", `{"scripts":{"test":"jest","test:stories":"vitest --config vitest.stories.config.ts"},"devDependencies":{"jest":"^29"}}`, "jest.config.js", "jest"},
+		{"jest configuration only", `{"scripts":{"test:stories":"vitest --config vitest.stories.config.ts"}}`, "jest.config.js", "jest"},
+		{"bun test", `{"scripts":{"test":"bun test"}}`, "", "bun"},
+		{"node --test", `{"scripts":{"test":"node --test"}}`, "", "node"},
+		{"react-scripts", `{"scripts":{"test":"react-scripts test"},"dependencies":{"react-scripts":"5"}}`, "", "jest"},
+		{"vitest dependency", `{"devDependencies":{"vitest":"^4"}}`, "", "vitest"},
+		{"nothing else names a runner", `{}`, "", "vitest"},
+		{"nothing else but a bun lockfile", `{}`, "bun.lock", "vitest"},
+		// A script whose name holds another runner's word names no runner: it runs a
+		// package script, which runs vitest here.
+		{"bun running a package script", `{"scripts":{"test":"bun test:unit","test:unit":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
+		{"npm run of a script named after jest", `{"scripts":{"test":"npm run test:jest-compat","test:jest-compat":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
+		{"yarn script named after jest", `{"scripts":{"test":"yarn test:jest-x","test:jest-x":"vitest --config vitest.stories.config.ts"}}`, "", "vitest"},
+		// Must keep the runner a script really invokes, directly or through a package
+		// script.
+		{"npm run of a script running jest", `{"scripts":{"test":"npm run test:jest","test:jest":"jest --ci"}}`, "", "jest"},
+		{"npx jest", `{"scripts":{"test":"npx jest"}}`, "", "jest"},
+		{"cross-env jest", `{"scripts":{"test":"cross-env TZ=UTC jest"}}`, "", "jest"},
+		{"jest through its bin file", `{"scripts":{"test":"node node_modules/jest/bin/jest.js"}}`, "", "jest"},
+		{"bun run of a script running bun test", `{"scripts":{"test":"bun run test:unit","test:unit":"bun test"}}`, "", "bun"},
+		{"pnpm script running bun test", `{"scripts":{"test":"pnpm test:unit","test:unit":"bun test --preload ./setup.ts"}}`, "", "bun"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{
+				"ui/package.json": c.pkg, "ui/vitest.stories.config.ts": sb,
+				"ui/src/a.test.ts": "test('a', () => {})\n", "ui/src/b.stories.tsx": "",
+			}
+			if c.file != "" {
+				files["ui/"+c.file] = "module.exports = {}\n"
+			}
+			var list []string
+			for f, content := range files {
+				testutil.Write(t, dir, f, content)
+				list = append(list, f)
+			}
+			sort.Strings(list)
+			suites, _ := Detect(&gitx.Repo{Root: dir}, list)
+			var runners []string
+			for _, s := range suites {
+				if s.Root == "ui" {
+					runners = append(runners, s.Runner)
+				}
+			}
+			if len(runners) != 1 || runners[0] != c.want {
+				t.Errorf("runners of ui %v, want [%s]", runners, c.want)
+			}
+		})
 	}
 }

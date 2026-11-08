@@ -32,3 +32,17 @@ type TypeAnalyzer interface {
 	// depends on at run time, once its type-only imports are erased.
 	SplitDeps(path string, src []byte) (all, runtime []string)
 }
+
+// ResolveReporter is implemented by analyzers that can tell which imports of a file
+// resolve to nothing they know of.
+type ResolveReporter interface {
+	// Unresolved returns the specifiers path imports at run time that resolve to no
+	// file of the repository nor to anything installed: what they load is unknown.
+	Unresolved(path string, src []byte) []string
+}
+
+// Resolver is implemented by analyzers that resolve a module specifier on its own.
+type Resolver interface {
+	// Resolve returns the repository files spec, imported from path, resolves to.
+	Resolve(path, spec string) []string
+}

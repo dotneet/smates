@@ -160,13 +160,61 @@ func TestGoModDirs(t *testing.T) {
 func TestGoWorkModules(t *testing.T) {
 	root := t.TempDir()
 	testutil.Write(t, root, "go.work", "go 1.22\n\nuse ./a\nuse \"b/c\" // comment\nuse (\n\t.\n\t// ./skipped\n\t../outside\n)\nreplace x => ./y\n")
-	got := goWorkModules(root, filepath.Join(root, "sub"), "")
 	want := map[string]bool{filepath.Join(root, "a"): true, filepath.Join(root, "b", "c"): true, root: true, filepath.Join(filepath.Dir(root), "outside"): true}
-	if !maps.Equal(got, want) {
-		t.Errorf("goWorkModules = %v, want %v", got, want)
+	for _, tt := range []struct {
+		name, gowork string
+		want         map[string]bool
+	}{
+		{"unset: the go.work search", "", want},
+		// Must keep: go treats "auto" as unset, not as a file named auto.
+		{"auto", "auto", want},
+		{"the file named", filepath.Join(root, "go.work"), want},
+		{"off", "off", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goWorkModules(root, filepath.Join(root, "sub"), tt.gowork); !maps.Equal(got, tt.want) {
+				t.Errorf("goWorkModules = %v, want %v", got, tt.want)
+			}
+		})
 	}
-	if got := goWorkModules(root, root, "off"); got != nil {
-		t.Errorf("GOWORK=off: %v", got)
+}
+
+// The modules of the go.work workspace stay in the suite (and in the arguments of a
+// full run) with GOWORK unset or "auto"; with GOWORK=off they are other modules.
+func TestNestedGoModulesGoWork(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := tempRepo(t)
+	testutil.Write(t, repo.Root, "go.mod", "module example.com/m\n")
+	testutil.Write(t, repo.Root, "go.work", "go 1.22\n\nuse (\n\t.\n\t./b\n)\n")
+	testutil.Write(t, repo.Root, "b/go.mod", "module example.com/b\n")
+	testutil.Write(t, repo.Root, "tools/go.mod", "module example.com/tools\n")
+	if _, err := repo.Git("init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name, gowork     string
+		other, workspace []string
+	}{
+		{"unset", "", []string{"tools"}, []string{"b"}},
+		// Must keep: b stays in the suite.
+		{"auto", "auto", []string{"tools"}, []string{"b"}},
+		{"off", "off", []string{"b", "tools"}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			other, ws := nestedGoModules(repo, repo.Root, tt.gowork)
+			if !slices.Equal(other, tt.other) || !slices.Equal(ws, tt.workspace) {
+				t.Errorf("other %v workspace %v, want %v %v", other, ws, tt.other, tt.workspace)
+			}
+			t.Setenv("GOWORK", tt.gowork)
+			d := (goTest{}).DefaultsForSuite(repo, config.Suite{Root: "."})
+			for _, m := range tt.workspace {
+				if slices.Contains(d.Exclude, m+"/**") {
+					t.Errorf("workspace module %s excluded: %v", m, d.Exclude)
+				}
+			}
+		})
 	}
 }
 
@@ -185,5 +233,35 @@ func TestAddTestLogSymlink(t *testing.T) {
 	addTestLog(o, root, []string{filepath.Join(root, "p", "testdata", "current.json")}, nil)
 	if got := slices.Sorted(maps.Keys(o.Files)); !slices.Equal(got, []string{"p/testdata/current.json", "p/testdata/v2.json"}) {
 		t.Errorf("files %v", got)
+	}
+}
+
+// A go.work that $GOWORK names (ci/go.work) governs version selection for every module
+// it uses, though no go.work is at or above their files: its pins are suite inputs.
+func TestGoWorkEnvPins(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir()) // as the repository root is
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.Write(t, root, "ci/go.work", "go 1.22\n\nuse ../a\nuse ../c\n\nreplace example.com/lib => ../forks/lib\n")
+	testutil.Write(t, root, "a/go.mod", "module example.com/a\n\nreplace (\n\texample.com/dep => ../forks/dep\n\texample.com/x => example.com/y v1.0.0\n)\n")
+	testutil.Write(t, root, "c/go.mod", "module example.com/c\n")
+	all := []string{"/ci/go.work", "/ci/go.work.sum", "/a/go.mod", "/a/go.sum", "/c/go.mod", "/c/go.sum", "/forks/lib/go.mod", "/forks/dep/go.mod"}
+	for _, tt := range []struct {
+		name, gowork string
+		want         []string
+	}{
+		{"absolute GOWORK", filepath.Join(root, "ci", "go.work"), all},
+		{"relative to the suite directory", "../ci/go.work", all},
+		{"unset", "", nil},
+		{"auto (the go.work search, as unset)", "auto", nil},
+		{"off", "off", nil},
+		{"outside the repository", filepath.Join(t.TempDir(), "go.work"), nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goWorkEnvPins(root, filepath.Join(root, "c"), tt.gowork); !slices.Equal(got, tt.want) {
+				t.Errorf("pins %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

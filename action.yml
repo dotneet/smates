@@ -63,13 +63,16 @@ inputs:
   cache:
     description: >-
       Restore and save the smates state with the Actions cache (per branch, falling back
-      to the default branch). Set to "false" to manage the state yourself.
+      to a pull request's base branch, then to the default branch). Set to "false" to
+      manage the state yourself.
     required: false
     default: 'true'
   cache-key:
     description: >-
       Extra component for the state cache key. Set it when several jobs of one workflow
-      run smates on the same OS with different tests (matrix entries, shards).
+      run smates on the same OS with different tests (matrix entries, a fixed number of
+      shards). Jobs a plan job selects for (shards sized with --max-shards, suites gated
+      per job) share one key with the plan instead, with a job merging their states.
     required: false
     default: ''
   state-path:
@@ -111,6 +114,25 @@ outputs:
   skip:
     description: '"true" when nothing was selected; use it to skip downstream test jobs.'
     value: ${{ steps.smates.outputs.skip }}
+  tests:
+    description: JSON object mapping each suite to the IDs of its selected test units.
+    value: ${{ steps.smates.outputs.tests }}
+  suites:
+    description: >-
+      JSON object with one entry per suite smates selected for: {"selected": n, "total":
+      n, "all": bool, "skip": bool}. Gate a job on `.skip == true` only: a suite missing
+      from the object (left out by --suite, a failed step) then runs.
+    value: ${{ steps.smates.outputs.suites }}
+  shards:
+    description: >-
+      With "select --max-shards N": how many shards the selection needs (0 when nothing
+      was selected, else 1 to N). Every shard of one run must use this same count.
+    value: ${{ steps.smates.outputs.shards }}
+  shard-matrix:
+    description: >-
+      With "select --max-shards N": a strategy.matrix with one "shard" value ("1/3",
+      "2/3", ...) per shard, to pass to --shard. Empty list when shards is 0.
+    value: ${{ steps.smates.outputs.shard-matrix }}
   exit-code:
     description: Exit code of the smates command (for "run" 1 when tests failed; 2-4 are smates' own errors, see https://dotneet.github.io/smates/reference/exit-codes/).
     value: ${{ steps.smates.outputs.exit-code }}
@@ -148,6 +170,7 @@ runs:
         SMATES_ACTION_REF: ${{ github.action_ref }}
         SMATES_ACTION_PATH: ${{ github.action_path }}
         SMATES_BRANCH: ${{ github.head_ref || github.ref_name }}
+        SMATES_BASE_BRANCH: ${{ github.base_ref }}
         SMATES_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
@@ -310,6 +333,9 @@ runs:
           # both save; restores pick the newest entry by prefix.
           echo "state-key=$prefix$branch-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${GITHUB_JOB}-${INPUT_COMMAND//[^A-Za-z0-9]/_}-$RANDOM"
           echo "state-restore-branch=$prefix$branch-"
+          # A pull request into another branch than the default starts from that
+          # branch's state (guarded: an empty base would match every branch's state).
+          echo "state-restore-base=$(smates_restore_base "$prefix" "$branch" "${SMATES_BASE_BRANCH:-}" "$default_branch")"
           echo "state-restore-default=$prefix$default_branch-"
         } >>"$GITHUB_OUTPUT"
 
@@ -515,6 +541,7 @@ runs:
         key: ${{ steps.resolve.outputs.state-key }}
         restore-keys: |
           ${{ steps.resolve.outputs.state-restore-branch }}
+          ${{ steps.resolve.outputs.state-restore-base }}
           ${{ steps.resolve.outputs.state-restore-default }}
 
     - name: smates ${{ inputs.command }}

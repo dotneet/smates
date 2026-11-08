@@ -90,6 +90,8 @@ type Suite struct {
 	TestsSource string
 	// DiscoveryWarning says why the runner configuration could not be read.
 	DiscoveryWarning string
+	// ConfigFiles are the runner configuration files discovery read (repo-relative).
+	ConfigFiles []string
 	// RepoRoot is the absolute repository root ("" when unknown), for adapters whose
 	// units are found in the test files' contents.
 	RepoRoot string
@@ -141,6 +143,10 @@ type RunResult struct {
 	// ReadsBy maps source files to dependency keys they read when they ran (see
 	// trace.Proc.ReadsBy); recording adds them to every unit depending on the reader.
 	ReadsBy map[string]map[string]bool
+	// excluded holds the Go package directories of the run whose Go files build
+	// constraints all exclude in the flags go test got, and that failed for nothing
+	// else (see buildFailures.onlyExcl): their tests did not run, a skip.
+	excluded map[string]bool
 }
 
 // Observation is what tracing saw for one unit.
@@ -153,6 +159,13 @@ type Observation struct {
 	Inferred bool
 	// Failure is the failure output a runner plugin reported for the unit (bounded).
 	Failure string
+	// BuildFailed is set for a Go test function failed because its package did not
+	// build (no test ran), as opposed to a failure the test itself reported.
+	BuildFailed bool
+	// StaticOnly is set for a pass trust_browser_passes took from the reporter alone (a
+	// test that runs in a browser, untraced): its dependencies are the known ones, and
+	// recording keeps it unknown when those may not be all (see selector.Record).
+	StaticOnly bool
 	// untraced: the runner reported the unit but its process left no trace (observeAll).
 	untraced bool
 }
@@ -230,7 +243,7 @@ func NewSuite(repo *gitx.Repo, c config.Suite) (*Suite, error) {
 		s.TestsSource = SourceDefaults
 		if dc, ok := a.(discoverer); ok && repo != nil {
 			disc := dc.Discover(repo, s)
-			s.DiscoveryWarning = disc.Warning
+			s.DiscoveryWarning, s.ConfigFiles = disc.Warning, disc.Files
 			if len(disc.Matchers) > 0 {
 				s.Discovered, s.TestsSource, s.Tests = disc.Matchers, disc.Source, nil
 				if disc.Exclude != nil {

@@ -47,7 +47,7 @@ Usage:
   smates config add-ignore|add-input <glob>... | set <key> <value> [--dry-run]  edit smates.yml safely
   smates state show [--format json]|path|pull|push|merge|clear
   smates hook install|uninstall|status  run the affected tests from a git pre-push hook
-                                        (--claude: from a Claude Code Stop hook)
+                                        (--claude, --codex: from a Claude Code or Codex Stop hook)
   smates guide                          how a coding agent should use smates
   smates doctor [--format json]         check setup
   smates version
@@ -60,7 +60,7 @@ Exit codes:
   4  environment problem (git missing, not a git repository, a suite command that cannot start,
      an npx/bunx tool missing from node_modules, or, in a recorded run of any runner but
      custom, a runner exiting 126/127 before any test reported a result; with --no-record
-     or the custom runner such an exit is a test failure)
+     or the custom runner such an exit is a test failure; a suite's requires not met)
 
 For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
 of failing tests, then a short summary with the command that reruns just those tests.
@@ -376,6 +376,23 @@ type selection struct {
 	candidates []orphanCandidate
 	// hint: suites run in full for orphans the caller has not decided about.
 	hint bool
+	// shards is the shard count `select --max-shards` sized for the selection.
+	shards *int
+	// diffUnrecorded: tests with no recorded entry were decided against the base
+	// revision (Input.DiffUnrecorded), not run as new.
+	diffUnrecorded bool
+}
+
+// checkBase checks that an explicit --base names a commit: a usage error when it does
+// not, an environment error when the clone is shallow (the base was not fetched).
+func checkBase(repo *gitx.Repo, base string) error {
+	if repo.RefExists(base) {
+		return nil
+	}
+	if out, err := repo.Git("rev-parse", "--is-shallow-repository"); err == nil && strings.TrimSpace(out) == "true" {
+		return envError{fmt.Errorf("--base %s: no such revision in this shallow clone; fetch it (actions/checkout with fetch-depth: 0, or git fetch origin <branch>)", base)}
+	}
+	return usageError{fmt.Errorf("--base %s: no such revision", base)}
 }
 
 func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selection, error) {
@@ -385,7 +402,15 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 	base := opt.base
 	// Locally the state only knows the tests that ran on this machine: tests it has
 	// not recorded yet are judged against the base branch instead of all running as new.
-	diffUnrecorded := p.ci.Name == "" && !opt.all
+	// In CI the state is the one the pipeline records, so a test it lacks is new,
+	// unless --base names a revision to judge such tests against (suites being
+	// adopted one at a time).
+	diffUnrecorded := (p.ci.Name == "" || opt.base != "") && !opt.all
+	if opt.base != "" && !opt.all {
+		if err := checkBase(p.repo, opt.base); err != nil {
+			return nil, err
+		}
+	}
 	// Without a recorded snapshot, changed files (and so orphans) come from the base.
 	if base == "" && !opt.all && (p.state.Empty() || diffUnrecorded || len(p.state.Files) == 0) {
 		base = autoBase(p.ci, p.repo)
@@ -399,15 +424,21 @@ func (p *project) selectTests(ctx context.Context, opt selectOptions) (*selectio
 		NoOrphanPolicy: opt.orphans == orphansSkip || opt.orphans == "" && p.cfg.Orphans == config.OrphansIgnore,
 	})
 	if err != nil {
+		// git failing to diff or list the repository: never "tests failed".
+		var ce configError
+		if !errors.As(err, &ce) {
+			err = asEnvError(err)
+		}
 		return nil, err
 	}
-	sel := &selection{res: res}
+	sel := &selection{res: res, diffUnrecorded: diffUnrecorded && base != ""}
 	if !opt.noOrphans {
 		p.handleOrphans(ctx, sel, opt, base)
 	}
 	if err := p.applyCallerAdds(res, opt.adds); err != nil {
 		return nil, err
 	}
+	res.Apply(res.WholeSuites())
 	sel.candidates = p.orphanCandidates(sel)
 	return sel, nil
 }

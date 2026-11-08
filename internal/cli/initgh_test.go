@@ -245,16 +245,16 @@ func TestWorkflowPatchApplies(t *testing.T) {
 	writeTree(t, g.dir, map[string]string{".github/workflows/ci.yml": ciWorkflow})
 	g.git("add", ".")
 	g.commit("ci")
-	suites := []config.Suite{{Name: "go", Runner: "go", Root: "."}, {Name: "web", Runner: "vitest", Root: "web"}}
-	patch, _ := workflowPatch(g.dir, workflowTestSteps(g.dir), suites)
+	suites := []config.Suite{{Name: "go", Runner: "go", Root: ".", Command: "go test -race"}, {Name: "web", Runner: "vitest", Root: "web"}}
+	patch, _ := workflowPatch(g.dir, workflowTestSteps(g.dir), suites, "main")
 	for _, s := range []string{
 		"--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n",
 		"-          go test -race ./...\n",
 		"+        uses: dotneet/smates@v1\n",
 		"+          args: --suite go\n",
-		"+          cache-key: test\n",
+		"+          cache-key: go\n",
 		"+          args: --suite web\n",
-		"+          cache-key: test-2\n",
+		"+          cache-key: web\n",
 	} {
 		if !strings.Contains(patch, s) {
 			t.Errorf("patch lacks %q:\n%s", s, patch)
@@ -318,7 +318,7 @@ func TestMakefileHints(t *testing.T) {
 	if !reflect.DeepEqual(got[0].Env, [][2]string{{"TZ", "UTC"}}) || !reflect.DeepEqual(got[1].Env, [][2]string{{"PYTHONHASHSEED", "0"}}) {
 		t.Errorf("env %v %v", got[0].Env, got[1].Env)
 	}
-	doc := renderConfig(suites, configHints(got))
+	doc := renderConfig(suites, configHints(got, nil, nil))
 	if _, err := config.Parse([]byte(doc)); err != nil {
 		t.Fatalf("config with hints does not parse: %v\n%s", err, doc)
 	}
@@ -529,7 +529,7 @@ func patchWorkflow(t *testing.T, workflow string, files map[string]string, suite
 	writeTree(t, g.dir, files)
 	g.git("add", ".")
 	g.commit("ci")
-	patch, notes := workflowPatch(g.dir, workflowTestSteps(g.dir), suites)
+	patch, notes := workflowPatch(g.dir, workflowTestSteps(g.dir), suites, "main")
 	if patch != "" {
 		pf := filepath.Join(t.TempDir(), "p.patch")
 		if err := os.WriteFile(pf, []byte(patch), 0o644); err != nil {
@@ -546,7 +546,7 @@ func patchWorkflow(t *testing.T, workflow string, files map[string]string, suite
 }
 
 func TestWorkflowPatchCases(t *testing.T) {
-	goWeb := []config.Suite{{Name: "go", Runner: "go", Root: "."}, {Name: "web", Runner: "vitest", Root: "web"}}
+	goWeb := []config.Suite{{Name: "go", Runner: "go", Root: ".", Command: "go test -race"}, {Name: "web", Runner: "vitest", Root: "web"}}
 	head := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n"
 	cases := []struct {
 		name     string
@@ -574,25 +574,85 @@ func TestWorkflowPatchCases(t *testing.T) {
 			want:    []string{"      - name: checks\n        id: checks\n        if: always()\n        run: |\n          go vet ./...\n          echo start\n      - name: 'checks (smates: affected tests only)'\n        if: always()\n        uses: dotneet/smates@v1\n", "      - run: echo after\n"},
 			notWant: []string{"go test", "        id: checks\n        if: always()\n        uses"},
 			note:    `only "go test -race ./..." moves`},
-		{name: "working-directory without its own smates.yml is a note",
+		{name: "working-directory picks the suites under it, without the action's working-directory",
 			steps:   "      - working-directory: web\n        run: pnpm test\n",
 			want:    []string{"          args: --suite web\n"},
-			notWant: []string{"working-directory"},
-			note:    "ran in working-directory web"},
-		{name: "working-directory with its own smates.yml maps to the input",
-			steps: "      - working-directory: web\n        run: pnpm test\n",
-			files: map[string]string{"web/smates.yml": "version: 1\n"},
-			want:  []string{"          working-directory: web\n"}},
-		{name: "test:unit and make test-unit are unit tests",
+			notWant: []string{"working-directory"}},
+		{name: "a smates.yml in the working-directory does not move the action there",
+			steps:   "      - working-directory: web\n        run: pnpm test\n",
+			files:   map[string]string{"web/smates.yml": "version: 1\n"},
+			want:    []string{"          args: --suite web\n"},
+			notWant: []string{"working-directory"}},
+		{name: "test:unit and make test-unit are unit tests, with a cache-key per set of suites",
 			steps:   "      - run: pnpm run test:unit\n      - run: make test-unit\n",
-			want:    []string{"cache-key: test\n", "cache-key: test-2\n"},
+			want:    []string{"cache-key: web\n", "cache-key: go-web\n"},
 			notWant: []string{"test:unit", "make"}},
+		{name: "steps running the same suites share their cache-key",
+			steps: "      - run: go test ./...\n      - run: pnpm test\n      - name: again\n        run: go test -count=1 ./...\n",
+			want:  []string{"          args: --suite go\n          cache-key: go\n", "          args: --suite web\n          cache-key: web\n"}, notWant: []string{"go-2"}},
+		// Must keep apart: jobs may run in other environments (a runtime version, other
+		// services), where a test passing in one fails in the other.
+		{name: "jobs running the same suites get their own cache-key",
+			steps:   "      - run: go test ./...\n  test-db2:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test ./...\n",
+			want:    []string{"          cache-key: go\n", "          cache-key: go-test-db2\n"},
+			notWant: []string{"go-2"}},
+		{name: "a matrix job's legs get a cache-key each",
+			steps:   "  legs:\n    strategy:\n      matrix:\n        node: [18, 22]\n        include:\n          - db: mysql\n    runs-on: ubuntu-latest\n    steps:\n      - working-directory: web\n        run: pnpm test\n",
+			want:    []string{"          cache-key: web-${{ matrix.db }}-${{ matrix.node }}\n"},
+			notWant: []string{"cache-key: web\n"}},
+		{name: "a matrix from an expression is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix: ${{ fromJson(needs.plan.outputs.m) }}\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: "the job's matrix comes from an expression"},
+		// Must refuse: legs built from an expression one level down cannot be named.
+		{name: "a matrix include from an expression is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        include: ${{ fromJSON(needs.plan.outputs.legs) }}\n    runs-on: ${{ matrix.os }}\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: "the job's matrix comes from an expression"},
+		{name: "a matrix dimension from an expression is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        os: ${{ fromJSON(needs.plan.outputs.oses) }}\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: `matrix dimension "os" comes from an expression`},
+		{name: "a matrix value from an expression is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, '${{ inputs.os }}']\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: `matrix dimension "os" has a value that is an expression`},
+		{name: "an include entry from an expression is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        include:\n          - os: ${{ fromJSON(needs.plan.outputs.os) }}\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: `the value of "os" in an include entry`},
+		// GitHub turns an object into "Object" in a key: the legs are named by its
+		// properties.
+		{name: "a matrix of objects is keyed by their properties",
+			steps:   "  legs:\n    strategy:\n      matrix:\n        platform:\n          - {os: ubuntu-latest, go: '1.22'}\n          - {os: macos-latest, go: '1.23'}\n    steps:\n      - run: go test ./...\n",
+			want:    []string{"          cache-key: go-${{ matrix.platform.go }}-${{ matrix.platform.os }}\n"},
+			notWant: []string{"${{ matrix.platform }}"}},
+		{name: "a matrix of lists is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        versions: [[1, 2], [3, 4]]\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: `matrix dimension "versions" has a value that is an expression, a list or a nested object`},
+		{name: "a matrix of nested objects is reported, not patched",
+			steps:    "  legs:\n    strategy:\n      matrix:\n        platform:\n          - {os: ubuntu-latest, tools: {go: '1.22'}}\n    steps:\n      - run: go test ./...\n",
+			noPatch:  true,
+			skipWant: `matrix dimension "platform" has a value that is an expression, a list or a nested object`},
+		// Must keep apart: a smates job the workflows already have keeps its own state.
+		{name: "a step patched next to an existing smates job gets a cache-key",
+			steps: "      - working-directory: web\n        run: pnpm test\n",
+			files: map[string]string{".github/workflows/pr.yml": "on: pull_request\njobs:\n  unit:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: dotneet/smates@v1\n        with:\n          args: --suite go\n"},
+			want:  []string{"          args: --suite web\n          cache-key: web\n"}},
+		{name: "a cache-key an existing smates job uses is not taken",
+			steps:   "      - working-directory: web\n        run: pnpm test\n",
+			files:   map[string]string{".github/workflows/pr.yml": "on: pull_request\njobs:\n  unit:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: dotneet/smates@v1\n        with:\n          args: --suite web\n          cache-key: web\n"},
+			want:    []string{"          args: --suite web\n          cache-key: web-test\n"},
+			notWant: []string{"          cache-key: web\n          anthropic"}},
+		{name: "go test flags the suite command lacks are reported, not patched",
+			steps: "      - run: go test -p 1 ./...\n", noPatch: true, skipWant: `with -p 1, which the command of suite "go" in smates.yml (go test -race) lacks: set ` + "`command: go test -p 1 -race`"},
 		{name: "test:e2e is reported, not patched",
 			steps: "      - run: npm run test:e2e\n", noPatch: true, skipWant: `"npm run test:e2e" is not the plain unit-test command`},
 		{name: "make test-integration is reported, not patched",
 			steps: "      - run: make test-integration\n", noPatch: true, skipWant: "not the plain unit-test command"},
 		{name: "commands after the tests are reported, not patched",
-			steps: "      - run: |\n          go test -coverprofile=cover.out ./...\n          go tool cover -func=cover.out\n", noPatch: true, skipWant: "commands after the test line use its output"},
+			steps: "      - run: |\n          go test ./...\n          ./scripts/upload-results.sh\n", noPatch: true, skipWant: "commands after the test line use its output"},
 		{name: "chained command is reported, not patched",
 			steps: "      - run: cd web && pnpm test\n", noPatch: true, skipWant: "chained with other commands"},
 	}
@@ -607,8 +667,11 @@ func TestWorkflowPatchCases(t *testing.T) {
 					t.Errorf("patched:\n%s", patch)
 				}
 				steps := parseWorkflowSteps("ci.yml", []byte(head+c.steps))
-				if len(steps) != 1 || !strings.Contains(steps[0].Skip, c.skipWant) {
-					t.Errorf("steps %+v, want skip %q", steps, c.skipWant)
+				if len(steps) != 1 {
+					t.Fatalf("steps %+v", steps)
+				}
+				if _, why := stepPatch(steps[0], goWeb); why == "" || !strings.Contains(why, c.skipWant) {
+					t.Errorf("not patched because %q, want %q", why, c.skipWant)
 				}
 				return
 			}

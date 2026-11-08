@@ -163,3 +163,41 @@ func TestCumulativeSavings(t *testing.T) {
 		t.Error("one run without savings must not show a line")
 	}
 }
+
+// TestShadowStatsSharded: the shards of a sharded shadow run count as one shadow run,
+// which has misses once however many of its shards found some; their failures and
+// escapes add up.
+func TestShadowStatsSharded(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	shard := func(id, commit, shard string, failed, escapes int) state.Run {
+		return state.Run{ID: id, At: t0, Commit: commit, Branch: "feat", CI: "github", Mode: "state", Shadow: true, Shard: shard, Failed: failed, Escapes: escapes}
+	}
+	cases := []struct {
+		name                                string
+		runs                                []state.Run
+		runsN, withEscapes, escapes, failed int
+	}{
+		{"3 shards, an escape in shard 2",
+			[]state.Run{shard("a", "c1", "1/3", 1, 0), shard("b", "c1", "2/3", 2, 1), shard("c", "c1", "3/3", 0, 0)},
+			1, 1, 1, 3},
+		{"escapes in two shards of one run",
+			[]state.Run{shard("a", "c1", "1/2", 1, 1), shard("b", "c1", "2/2", 1, 1)},
+			1, 1, 2, 2},
+		{"two sharded runs",
+			[]state.Run{shard("a", "c1", "1/2", 0, 0), shard("b", "c1", "2/2", 1, 1), shard("c", "c2", "1/2", 1, 1), shard("d", "c2", "2/2", 0, 0)},
+			2, 2, 2, 2},
+		{"unsharded runs count each",
+			[]state.Run{shard("a", "c1", "", 1, 1), shard("b", "c1", "", 1, 1)},
+			2, 2, 2, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := state.New()
+			st.Runs = c.runs
+			s := aggregateStats(st, statsFilter{}, t0.AddDate(0, 0, 1)).Shadow
+			if s.Runs != c.runsN || s.RunsWithEscapes != c.withEscapes || s.Escapes != c.escapes || s.Failed != c.failed {
+				t.Errorf("shadow %+v, want runs %d with misses %d escapes %d failed %d", s, c.runsN, c.withEscapes, c.escapes, c.failed)
+			}
+		})
+	}
+}

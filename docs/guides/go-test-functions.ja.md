@@ -94,6 +94,8 @@ FAIL	example.com/shop/internal/api [build failed]
 
 したがって、通常の本体の編集では、それを実行した関数と、変更したパッケージおよびそれを import するパッケージの軽いチェックが選択されます。ビルドの失敗はチェックが引き受け、関数は記録された結果を保つので、修正後はチェックだけが再実行されます。
 
+テストのないパッケージには、スイートの `tests` のグロブがそのファイルに届かない限りチェックがありません。[テストのない Go パッケージ](runners.md#go-packages-without-tests) を参照してください。
+
 ## 選択した関数の実行方法 { #how-selected-functions-run }
 
 記録しない実行では、選択した関数をパッケージのまとまりごとに 1 回の `go test` で実行します。
@@ -141,6 +143,33 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+```
+
+## スキップしたテスト { #skipped-tests }
+
+自分をスキップしたテストは失敗していませんが、何も証明していません。データベースに接続できないとスキップするテストは、データベースのないノート PC では成功扱いになり、コードが変わるまで再実行されなくなってしまいます。そこで記録中は、各関数のプロセスを `-test.v` 付きで実行し（コマンドにすでにあれば付けません）、その関数の結果行を読みます。
+
+- `--- PASS` は成功として記録します。
+- トップレベルの `--- SKIP` は、`-count` のどの回であっても `skip` として記録します。
+- 関数の `=== RUN` 行がないときも `skip` として記録します。`m.Run()` の前に 0 で終了する `TestMain` は何も実行していません。
+- どちらとも読み取れない出力は `unknown` として記録します。
+
+スキップした関数は、成功するまで次の実行でも選ばれます（理由は `unproven`、「skipped last run: not proven to pass」）。結果が不明な関数も同様です（理由は `failed`）。成功した関数の中でサブテストがスキップした場合は成功です。実行そのものは成功し、結果行にその数が表示されます。
+
+```text
+smates: PASSED 12 of 12 selected test unit(s) (240 in total) in 3.1s; 2 skipped (not proven: they run again next time)
+```
+
+そのため、常にスキップするテスト（`-short` で止めるテスト、サービスが起動していない統合テスト）は毎回実行されます。実行コストは小さく、`smates doctor` は前回の実行でスキップしたユニットを一覧します（`state-skipped`）。このように扱うのは関数単位の記録だけです。`granularity: func` で全体として記録されたパッケージは、go test が各関数のスキップを出力するとき（スイートのコマンドに `-v` か `-json` があるとき）はそれも記録し、そうでなければパッケージの結果を記録します。`granularity: package` のスイートは常にパッケージの結果を記録します（[制限事項](../reference/limitations.md) を参照）。
+
+日付のように smates が追跡しないものに結果が左右されるテストは `volatile` に挙げると毎回実行されます。`max_age` を設定すると、記録した実行は一定時間で期限切れになります。
+
+```yaml
+  - name: api
+    runner: go
+    granularity: func
+    volatile: ["internal/clock#TestToday"]   # ユニット、パッケージ、テストファイルの glob
+    max_age: 168h
 ```
 
 ## テストフラグ { #test-flags }

@@ -12,7 +12,9 @@ installed the smates pre-push hook in /home/me/src/shop/.git/hooks/pre-push
 ```
 
 From now on, `git push` runs `smates run --no-agent` first and stops the push when a
-selected test fails.
+selected test fails. Tests this machine cannot run because a suite's
+[`requires`](../reference/configuration.md#requires) are not met do not stop it: they are
+left for later (one line says so) and stay selected, so CI runs them.
 
 | option | effect |
 |---|---|
@@ -65,7 +67,7 @@ On each push (or commit), the hook:
 ### Status and removal
 
 ```bash
-smates hook status      # where the hook lives, and whether the Claude Code hook is installed
+smates hook status      # where the hook lives, and whether the Claude Code and Codex hooks are installed
 smates hook uninstall   # remove only what smates wrote
 ```
 
@@ -88,7 +90,7 @@ the rerun command, and goes on to fix them.
 ### How it behaves
 
 The hook runs `smates hook claude-stop`, which calls
-`smates run --output failures --no-agent`, plus any flags given after `--`.
+`smates run --output failures --no-agent --max-time 8m`, plus any flags given after `--`.
 
 - **Tests fail:** it prints
   `{"decision": "block", "reason": "<failing tests and the rerun command>"}` and exits 0.
@@ -99,6 +101,16 @@ The hook runs `smates hook claude-stop`, which calls
   loop.
 - **Nothing selected:** it returns at once without writing the state. This also holds
   with `state_shared: true`, where it runs per worktree.
+- **A time limit.** The hook's timeout is 600 s. With
+  [`--max-time 8m`](../reference/cli.md#time-limit), smates starts no test batch that
+  would end after eight minutes, by recorded durations, so a change that selects a large
+  part of the repository does not run into the timeout. `-- --max-time 4m` sets
+  another limit, `-- --max-time 0` none.
+- **Tests left for later do not block.** Tests the time limit left out, and tests whose
+  suite [`requires`](../reference/configuration.md#requires) are not met here (a
+  database or a browser this worktree lacks), are not run and not recorded. They stay
+  selected for the next run, or for CI. The hook prints one line about them to stderr and
+  lets Claude stop, unless other tests failed.
 - **smates' own errors** (the cases where `smates run` would exit 2, 3 or 4) go to the
   user with exit 1 instead of blocking Claude. Failing tests still block when only the
   state could not be saved.
@@ -118,6 +130,24 @@ smates splices its entry into the text of `settings.json`:
   is not an object, or a `Stop` that is not an array) is reported and left alone.
 
 `smates hook status` shows both the project and the user hook.
+
+## Codex Stop hook { #codex-stop-hook }
+
+```bash
+smates hook install --codex
+```
+
+This adds the same Stop hook to `.codex/hooks.json`, which Codex reads in a trusted
+project (some Codex versions also need hooks turned on in their configuration). The
+hook runs `smates hook codex-stop`, which behaves like `claude-stop` above: it blocks
+with the failing tests, never blocks twice, defers what it cannot run here, and does
+nothing where smates is not installed. `--agent` and `-- <run flags>` work as for
+`--claude`; `--user` does not apply.
+
+The command finds `smates` on `PATH` and runs in the directory Codex gives it, so the
+same committed `.codex/hooks.json` works in every worktree of the repository. Other
+hooks in the file stay byte for byte, and `smates hook uninstall --codex` removes only
+smates' entry.
 
 ## See also
 

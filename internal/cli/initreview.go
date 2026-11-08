@@ -214,8 +214,8 @@ func initReview(repo *gitx.Repo, existing *config.Config, suites []config.Suite,
 			it.Action.Description = "replace the step with `uses: " + actSmates + "`: review workflow.patch (or the --patch file), then git apply it"
 			it.Action.Command = ""
 		}
-		if st.Skip != "" {
-			it.Action = reviewAction{Description: "not patched automatically: " + st.Skip}
+		if names, why := stepPatch(st, suites); why != "" && (st.Skip != "" || len(names) > 0) {
+			it.Action = reviewAction{Description: "not patched automatically: " + why}
 		}
 		out = append(out, it)
 	}
