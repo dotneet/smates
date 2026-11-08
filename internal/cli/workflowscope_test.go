@@ -152,6 +152,21 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "env sudo go test ./...", skip: "through sudo"},
 		{run: "GOFLAGS=-p=1 timeout 20m go test ./...", skip: "through timeout 20m"},
 		{run: "npx -y xvfb-run vitest run", skip: "through npx -y xvfb-run"},
+		{run: "uv run --project=services/api pytest", skip: "through uv run --project=services/api"},
+		{run: "uv run --project services/api pytest", skip: "through uv run --project services/api"},
+		{run: "uv run --env-file=.env.test pytest", skip: "through uv run --env-file=.env.test"},
+		{run: "uv run --env-file .env.test pytest", skip: "through uv run --env-file .env.test"},
+		{run: "pnpm --filter=web exec vitest run", skip: "through pnpm --filter=web exec"},
+		{run: "pnpm --filter web exec vitest run", skip: "through pnpm --filter web exec"},
+		{run: "pnpm --dir=packages/a exec vitest run", skip: "through pnpm --dir=packages/a exec"},
+		{run: "pnpm --dir packages/a exec vitest run", skip: "through pnpm --dir packages/a exec"},
+		{run: "pnpm -r exec vitest run", skip: "through pnpm -r exec"},
+		{run: "yarn --cwd=packages/a vitest run", skip: "through yarn --cwd=packages/a"},
+		{run: "yarn --cwd packages/a vitest run", skip: "through yarn --cwd packages/a"},
+		{run: "npm exec --workspace=packages/a -- vitest run", skip: "through npm exec --workspace=packages/a --"},
+		{run: "npm exec --workspace packages/a -- vitest run", skip: "through npm exec --workspace packages/a --"},
+		{run: "poetry --directory=svc run pytest", skip: "through poetry --directory=svc run"},
+		{run: "poetry --directory svc run pytest", skip: "through poetry --directory svc run"},
 		// Launchers that only find the runner.
 		{run: "npx vitest run"},
 		{run: "pnpm exec vitest run"},
@@ -163,6 +178,10 @@ func TestCheckTestCmd(t *testing.T) {
 		{run: "time go test ./..."},
 		{run: "/usr/bin/time -p go test ./..."},
 		{run: "exec go test ./..."},
+		{run: "npx -y vitest run"},
+		{run: "npx --yes vitest run"},
+		{run: "npm exec -- vitest run"},
+		{run: "uv run --locked pytest"},
 	}
 	for _, c := range cases {
 		steps := parseWorkflowSteps("ci.yml", []byte(head+"      - run: "+yamlStr(c.run)+"\n"))

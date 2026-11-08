@@ -333,6 +333,11 @@ var testLaunchers = []string{
 	"time", "command", "exec",
 }
 
+// launcherFlags are the only flags a launcher may have: they change neither where nor
+// what runs. Any other one (pnpm --filter=web, yarn --cwd x, uv run --env-file=x,
+// pnpm -r) makes the step one the smates step cannot stand in for.
+var launcherFlags = []string{"--", "-m", "-y", "--yes", "-p", "--frozen", "--locked"}
+
 // checkTestCmd reads the test command line cmd of a workflow step; match is the test
 // command testCmdRe found in it ("go test", "pnpm test", "turbo run test", ...).
 func checkTestCmd(cmd, match string) testCmdCheck {
@@ -405,15 +410,19 @@ func checkTestCmd(cmd, match string) testCmdCheck {
 	}
 	if from < len(pre) {
 		var wrap []string
+		flagged := false
 		for _, w := range pre[from:] {
-			if !strings.HasPrefix(w, "-") {
+			switch {
+			case !strings.HasPrefix(w, "-"):
 				wrap = append(wrap, w)
+			case !slices.Contains(launcherFlags, w):
+				flagged = true // --filter=web, --cwd=x, --env-file=x, -r: where or what runs
 			}
 		}
 		if len(wrap) > 0 {
 			wrap[0] = path.Base(wrap[0])
 		}
-		if !slices.Contains(testLaunchers, strings.Join(wrap, " ")) {
+		if flagged || !slices.Contains(testLaunchers, strings.Join(wrap, " ")) {
 			c.skip = "it runs the tests through " + strings.Join(pre[from:], " ") + ", whose container, user, display or shell the smates step would not have: run smates inside it by hand"
 			return c
 		}
