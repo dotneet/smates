@@ -42,7 +42,7 @@ func TestResolve(t *testing.T) {
 	a := New(h, Options{})
 	for spec, want := range map[string][]string{
 		"./a":     {"web/src/a.ts"},
-		"@ws/cfg": {"packages/cfg/src/index.ts"},
+		"@ws/cfg": {"packages/cfg/package.json", "packages/cfg/src/index.ts"},
 		"x":       nil,
 		"./gone":  nil,
 	} {

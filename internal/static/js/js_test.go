@@ -318,7 +318,7 @@ func TestDepsPackages(t *testing.T) {
 				"packages/dep/index.js":     ``,
 			},
 			file: "src/main.ts",
-			want: []string{"packages/dep/index.js", "src/db/index.ts", "src/env.browser.ts", "src/env.node.ts", "src/utils/str.ts"},
+			want: []string{"packages/dep/index.js", "packages/dep/package.json", "src/db/index.ts", "src/env.browser.ts", "src/env.node.ts", "src/utils/str.ts"},
 		},
 		{
 			name: "exports: string, subpaths, nested conditions, patterns, folders, null",
@@ -343,7 +343,7 @@ func TestDepsPackages(t *testing.T) {
 			},
 			file: "apps/web/main.ts",
 			want: []string{
-				"packages/str/lib/str.ts", "packages/ui/package.json", "packages/ui/src/button.tsx",
+				"packages/str/lib/str.ts", "packages/str/package.json", "packages/ui/package.json", "packages/ui/src/button.tsx",
 				"packages/ui/src/icons/star.tsx", "packages/ui/src/index.ts", "packages/ui/src/styles/theme.css",
 			},
 		},
@@ -356,7 +356,7 @@ func TestDepsPackages(t *testing.T) {
 				"main.mjs":                `import "a"`,
 			},
 			file: "main.mjs",
-			want: []string{"packages/a/cjs.cjs", "packages/a/esm.mjs"},
+			want: []string{"packages/a/cjs.cjs", "packages/a/esm.mjs", "packages/a/package.json"},
 		},
 		{
 			name: "unbuilt exports fall back to the whole package source",
@@ -403,7 +403,7 @@ func TestDepsPackages(t *testing.T) {
 				"main.ts":                 `import "a"; import "b"`,
 			},
 			file: "main.ts",
-			want: []string{"packages/a/src/a.ts", "packages/b/cjs/index.js", "packages/b/esm/index.js"},
+			want: []string{"packages/a/package.json", "packages/a/src/a.ts", "packages/b/cjs/index.js", "packages/b/esm/index.js", "packages/b/package.json"},
 		},
 		{
 			name: "index and src/index without entry fields; subpaths without exports",
@@ -418,7 +418,7 @@ func TestDepsPackages(t *testing.T) {
 				"main.ts":                  `import "a"; import "b"; import "c/utils/x"; import "c/y"`,
 			},
 			file: "main.ts",
-			want: []string{"packages/a/index.ts", "packages/b/src/index.tsx", "packages/c/src/y.ts", "packages/c/utils/x.js"},
+			want: []string{"packages/a/index.ts", "packages/a/package.json", "packages/b/package.json", "packages/b/src/index.tsx", "packages/c/package.json", "packages/c/src/y.ts", "packages/c/utils/x.js"},
 		},
 		{
 			name: "npm dependencies and unknown packages produce nothing",
@@ -441,7 +441,20 @@ func TestDepsPackages(t *testing.T) {
 				"main.ts":                    `import "@acme/core"`,
 			},
 			file: "main.ts",
-			want: []string{"packages/core/src/index.ts"},
+			want: []string{"packages/core/package.json", "packages/core/src/index.ts"},
+		},
+		{
+			name: "file: dependency kept in the repository",
+			files: map[string]string{
+				"web/package.json":                `{"name": "web", "dependencies": {"@acme/kit": "file:vendor/kit"}}`,
+				"web/vendor/kit/package.json":     `{"name": "@acme/kit", "exports": {".": "./dist/index.js"}}`,
+				"web/vendor/kit/dist/index.js":    ``,
+				"web/vendor/kit/dist/internal.js": ``,
+				"web/vendor/kit/SOURCE.json":      `{}`,
+				"web/src/app.ts":                  `import "@acme/kit"`,
+			},
+			file: "web/src/app.ts",
+			want: []string{"web/vendor/kit/dist/index.js", "web/vendor/kit/package.json"},
 		},
 		{
 			name: "duplicate package names resolve in every package",
@@ -453,7 +466,7 @@ func TestDepsPackages(t *testing.T) {
 				"main.js":        `require("dup")`,
 			},
 			file: "main.js",
-			want: []string{"a/index.js", "b/index.js"},
+			want: []string{"a/index.js", "a/package.json", "b/index.js", "b/package.json"},
 		},
 		{
 			name: "alias heuristics without configuration",
