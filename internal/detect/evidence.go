@@ -111,7 +111,9 @@ func nodeTestRoot(f string, files []string) string {
 }
 
 // nodeTestGlob is the glob, relative to its suite's root, collecting test file rel and
-// its siblings of the same kind.
+// its siblings of the same kind. A file that is a test only by sitting in a test/
+// directory above its suite's root (the root is a package inside it) matches no
+// pattern there: it stays a path of its own.
 func nodeTestGlob(rel string) string {
 	dir, name := path.Split(rel)
 	if segs := strings.Split(strings.TrimSuffix(dir, "/"), "/"); slices.Contains(segs, "test") {
@@ -119,6 +121,9 @@ func nodeTestGlob(rel string) string {
 		return path.Join(append(segs[:i+1], "**", "*"+path.Ext(name))...)
 	}
 	m := nodeTestName.FindStringSubmatch(name)
+	if m == nil {
+		return rel
+	}
 	ext := "." + m[4]
 	var g string
 	switch {

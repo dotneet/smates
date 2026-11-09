@@ -19,9 +19,10 @@ func TestCIOnlyValue(t *testing.T) {
 		"${{ inputs.level }}":                                                         false,
 		"${{ env.BASE }}/x":                                                           false,
 		"${{ matrix.db == 'pg' && secrets.PG_URL || secrets.MY_URL }}":                false,
-		"${{ true }}":                                                                 false,
-		"postgres://localhost/x":                                                      false,
-		"1":                                                                           false,
+
+		"${{ true }}":            false,
+		"postgres://localhost/x": false,
+		"1":                      false,
 	} {
 		if got := ciOnlyValue(v); got != want {
 			t.Errorf("ciOnlyValue(%q) = %v, want %v", v, got, want)

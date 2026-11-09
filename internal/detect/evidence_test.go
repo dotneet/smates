@@ -26,6 +26,14 @@ func detectSpecs(t *testing.T, files map[string]string) []suiteSpec {
 // Test files of Node's own runner outside every JS package with a test runner get a node
 // suite: at their package, else at their directory (above a test/ directory).
 func TestDetectNodeTestFiles(t *testing.T) {
+	// Every glob names a file of the test-directory cases that no pattern matches at
+	// the package root: nodeTestGlob must not need one (it used to index a nil match).
+	for _, rel := range []string{"src/a.js", "a.js", "x/y/z.cjs"} {
+		if g := nodeTestGlob(rel); g != rel {
+			t.Errorf("nodeTestGlob(%q) = %q, want the path itself", rel, g)
+		}
+	}
+
 	for name, c := range map[string]struct {
 		files map[string]string
 		want  []suiteSpec
@@ -38,6 +46,18 @@ func TestDetectNodeTestFiles(t *testing.T) {
 		}, []suiteSpec{{"tools", "node", "", []string{"*-test.js", "*_test.cjs", "test-*.mjs", "test.js"}}}},
 		"test directory": {map[string]string{
 			"lib/test/a.js": nodeTestSrc, "lib/test/deep/b.js": nodeTestSrc, "lib/src/x.js": "",
+		}, []suiteSpec{{"lib", "node", "", []string{"test/**/*.js"}}}},
+		"test directory above the package": {map[string]string{
+			"test/app/package.json": `{"name":"app"}`, "test/app/src/a.js": nodeTestSrc, "test/app/src/b.js": nodeTestSrc, "test/app/src/helper.js": "",
+		}, []suiteSpec{{"test/app", "node", "", []string{"src/a.js", "src/b.js"}}}},
+		"test directory above the package, test names": {map[string]string{
+			"test/app/package.json": `{"name":"app"}`, "test/app/src/a.test.js": nodeTestSrc, "test/app/a-test.mjs": nodeTestSrc,
+		}, []suiteSpec{{"test/app", "node", "", []string{"*-test.mjs", "src/*.test.js"}}}},
+		"test directory inside the package": {map[string]string{
+			"pkg/package.json": `{"name":"p"}`, "pkg/test/a.js": nodeTestSrc, "pkg/test/unit/b.mjs": nodeTestSrc,
+		}, []suiteSpec{{"pkg", "node", "", []string{"test/**/*.js", "test/**/*.mjs"}}}},
+		"test.js in a test directory": {map[string]string{
+			"lib/test/test.js": nodeTestSrc,
 		}, []suiteSpec{{"lib", "node", "", []string{"test/**/*.js"}}}},
 		"package without a test script": {map[string]string{
 			"pkg/package.json": `{"name":"p"}`, "pkg/src/a.test.mjs": nodeTestSrc,
