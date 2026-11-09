@@ -198,11 +198,13 @@ smates doctor [flags]
 | `suite-launcher`、`suite-dependencies-installed` | スイートのコマンドを起動できること、`node_modules` がインストールされていること |
 | `toolchain-node` | vitest、jest、node のスイートがあるとき: `node` が `PATH` にあり、バージョン 18 以上であること（トレースに必要） |
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
-| `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL、コードが読むのに設定されていない環境変数 |
+| `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL（その他のサーバーは、スイートが実行するファイルのうち、ポート 1024 以上で、ファイル自身がサーバーを起動も横取りもしていないもの）、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
+| `suite-go-granularity` | 1 つのパッケージがテスト関数の大半を持つのに、パッケージ単位で選択している Go スイート（`granularity: func` を提案） |
 | `suite-rule-reaches` | `reaches` を持つルールごとに適用されるテストユニットの数。1 つにも適用されないルールは警告 |
 | `state-recorded` | 記録されたステートがあるか、どのコミットのものか |
 | `state-skipped` | 前回の実行で自分をスキップしたテストユニット（未証明なので、成功するまで毎回実行される） |
+| `state-source-sweep` | `granularity: func` の Go スイートの多くのユニットが、あるディレクトリのほぼすべてのソースファイルにファイル単位で依存している（たいていは実行時のソース読み込み）。そこへのどの変更でも全部が選択される（[トラブルシューティング](troubleshooting.md#a-small-change-selects-most-tests)を参照） |
 | `agent`、`ci` | エージェントが使えるか、検出した CI と、デフォルトで全件実行になるか |
 | `workflow-test-step` | smates を使わずにテストを実行している GitHub ワークフローのステップ |
 | `workflow-no-seed` | smates を pull request でしか実行せず、同じ `cache-key` でデフォルトブランチ上に実行するワークフローもない GitHub ワークフロー（pull request の出発点になるステートを誰も記録しない） |

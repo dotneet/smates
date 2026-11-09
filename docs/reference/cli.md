@@ -265,11 +265,13 @@ and value, or `doc`).
 | `suite-launcher`, `suite-dependencies-installed` | the suite command can start; `node_modules` is installed |
 | `toolchain-node` | with a vitest, jest or node suite: `node` is on `PATH` and is version 18 or later (tracing needs it) |
 | `toolchain-go`, `toolchain-bun`, `toolchain-python`, `suite-engines-node` | toolchains, and the Node version against `engines.node` |
-| `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses; variables it reads that are not set |
+| `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses (for other servers: in files a suite runs, on ports from 1024, when the file does not start or intercept the server itself); variables it reads that are not set |
 | `suite-server-dependency` | an end-to-end-looking suite without `depends_on`, `serves` or `rules` |
+| `suite-go-granularity` | a Go suite selecting whole packages although one package holds most of its test functions (suggests `granularity: func`) |
 | `suite-rule-reaches` | how many test units each rule with `reaches` applies to; a warning for one that applies to none |
 | `state-recorded` | a recorded state exists, and from which commit |
 | `state-skipped` | test units that skipped themselves in their last run (not proven: they run every time until they pass) |
+| `state-source-sweep` | many units of a Go suite with `granularity: func` depending on (nearly) every source file of a directory as whole files, usually sources read at runtime: any change there selects them all (see [Troubleshooting](troubleshooting.md#a-small-change-selects-most-tests)) |
 | `agent`, `ci` | the agent is available; the CI detected and whether it runs everything by default |
 | `workflow-test-step` | a GitHub workflow step that runs the tests without smates |
 | `workflow-no-seed` | a GitHub workflow that runs smates only on pull requests, with no workflow running it on the default branch under the same `cache-key`: nothing records the state pull requests start from |

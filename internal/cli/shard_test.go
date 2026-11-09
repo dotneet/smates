@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 )
 
@@ -58,6 +60,18 @@ func TestShardCount(t *testing.T) {
 			max:    6, target: 10 * time.Minute, want: 6,
 		},
 		{
+			// A Go suite recording 4 functions at once: 30 min of process time take
+			// about 7.5 min.
+			name:   "functions recorded at once overlap",
+			suites: []*selector.Suite{goFuncSuite(suite("a", unit{true, 20 * minute}, unit{true, 10 * minute}), 4)},
+			max:    8, target: 10 * time.Minute, want: 1,
+		},
+		{
+			name:   "unrecorded units of such a suite weigh the median, divided too",
+			suites: []*selector.Suite{goFuncSuite(suite("a", unit{true, 0}, unit{true, 0}, unit{true, 0}, unit{false, 10 * minute}), 2)},
+			max:    8, target: 10 * time.Minute, want: 2,
+		},
+		{
 			// A suite without durations that selected nothing does not force the maximum.
 			name:   "unrecorded suite with nothing selected",
 			suites: []*selector.Suite{suite("a", unit{true, 1 * minute}), suite("b", unit{false, 0})},
@@ -71,6 +85,37 @@ func TestShardCount(t *testing.T) {
 				t.Errorf("shardCount = %d, want %d", got, c.want)
 			}
 		})
+	}
+}
+
+// goFuncSuite gives s the settings of a Go suite with granularity func and record_jobs.
+func goFuncSuite(s *selector.Suite, jobs int) *selector.Suite {
+	s.Suite = &runner.Suite{Suite: config.Suite{Name: s.Name, Runner: "go", Granularity: config.GranularityFunc, RecordJobs: jobs}}
+	return s
+}
+
+// Only a Go suite with granularity func records several units at once whose durations
+// are each a process of its own.
+func TestRecordParallelism(t *testing.T) {
+	for name, c := range map[string]struct {
+		suite config.Suite
+		want  int
+	}{
+		"go func with jobs":          {config.Suite{Runner: "go", Granularity: config.GranularityFunc, RecordJobs: 6}, 6},
+		"go func, one job":           {config.Suite{Runner: "go", Granularity: config.GranularityFunc, RecordJobs: 1}, 1},
+		"go func, default":           {config.Suite{Runner: "go", Granularity: config.GranularityFunc}, 1},
+		"go packages":                {config.Suite{Runner: "go", RecordJobs: 6}, 1},
+		"other runners keep the sum": {config.Suite{Runner: "bun", RecordJobs: 6}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sr := &selector.Suite{Suite: &runner.Suite{Suite: c.suite}}
+			if got := recordParallelism(sr); got != c.want {
+				t.Errorf("got %d, want %d", got, c.want)
+			}
+		})
+	}
+	if got := recordParallelism(&selector.Suite{}); got != 1 {
+		t.Errorf("no suite settings: got %d, want 1", got)
 	}
 }
 

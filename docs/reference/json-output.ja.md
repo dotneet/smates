@@ -343,10 +343,11 @@ smates がプログラムやコーディングエージェント向けに出力�
 | `makefile-command` | Makefile のターゲットが、smates 自身のコマンドが渡さないフラグや変数でスイートのランナーを実行しています。 |
 | `server-dependency` | 別プロセスのサーバーのエンドツーエンドテストに見えるのに、`depends_on` も `serves` もないスイートです。 |
 | `service` | テストがサービスを必要としているようです（compose ファイル、または localhost で接続するコードから）。 |
-| `local-server` | コードが `localhost` の URL を呼んでいます。それを使うテストにはそのサーバーの起動が必要です。 |
+| `local-server` | スイートが実行するファイルが、ポート 1024 以上の `localhost` の URL を呼んでいて、そのサーバーを自分で起動も横取りもしていません。それを使うテストにはそのサーバーの起動が必要です。 |
 | `env` | `.env.example`（`.env.sample`、`.env.template`、`.env.dist`）に挙げられ、どのスイートの `env` も設定していない環境変数を、コードが読んでいます。 |
 | `workflow-test-step` | ワークフローのステップが smates を使わずにテストを実行しています。 |
 | `orphans-policy` | `orphans: agent` ですが、エージェントが使えません。 |
+| `go-granularity` | 1 つのパッケージが Go スイートのテスト関数の大半を持つため、パッケージ単位の選択ではほとんど省けません。`granularity: func` を提案します。 |
 
 ## smates why、deps、list { #smates-why-deps-list }
 

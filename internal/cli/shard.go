@@ -49,13 +49,15 @@ func shardCount(res *selector.Result, maxShards int, target time.Duration) int {
 		}
 		slices.Sort(recorded)
 		median := recorded[len(recorded)/2]
+		// The shards record: units that run at once while recording overlap.
+		jobs := int64(recordParallelism(sr))
 		for _, t := range sr.Tests {
 			switch {
 			case !t.Selected:
 			case t.Duration > 0:
-				total += t.Duration
+				total += t.Duration / jobs
 			default:
-				total += median
+				total += median / jobs
 			}
 		}
 	}

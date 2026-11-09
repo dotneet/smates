@@ -14,6 +14,7 @@ import (
 	"github.com/dotneet/smates/internal/agent"
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/detect"
+	"github.com/dotneet/smates/internal/pathutil"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/state"
@@ -144,6 +145,10 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkWarn, "suite-test-discovery", "suite %s: %s", s.Name, s.DiscoveryWarning).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".tests", Value: []string{"<glob relative to " + s.Root + ">"}}, Doc: docURL + "guides/configuration/#which-files-are-tests"})
 		}
+		if g, ok := goFuncHint(p.repo.Root, s.Configured, p.files); ok {
+			r.add(checkWarn, "suite-go-granularity", "suite %s: %s; %s", s.Name, g.reason(), goFuncAction).about(s.Name).
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".granularity", Value: config.GranularityFunc}, Doc: docURL + "guides/go-test-functions/"})
+		}
 		if why := serverSuiteHint(p.repo.Root, s, p.files); why != "" {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "guides/servers/"})
@@ -203,6 +208,7 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			n += len(s.Tests)
 		}
 		doctorSkipped(p, r)
+		doctorSourceSweeps(p, r)
 		if p.state.Created.IsZero() {
 			// Shared state without a snapshot of this worktree yet.
 			r.add(checkOK, "state-recorded", "state %s: %d tests recorded, no snapshot in this worktree yet (the next run records one)", p.statePath, n)
@@ -398,7 +404,9 @@ func doctorProject(p *project, nodeVersion func() string, r *doctorReport) {
 	}
 }
 
-// suiteOf names the suite whose root holds file (the deepest), or the first suite.
+// suiteOf names the suite whose root holds file (the deepest). For a file no suite
+// holds it names the only suite, or "<suite>" when there are several: picking one would
+// suggest a change to a suite the file has nothing to do with.
 func suiteOf(suites []config.Suite, file string) string {
 	best, depth := "", -1
 	for _, s := range suites {
@@ -412,8 +420,16 @@ func suiteOf(suites []config.Suite, file string) string {
 			}
 		}
 	}
-	if best == "" && len(suites) > 0 {
-		best = suites[0].Name
+	switch {
+	case best != "":
+		return best
+	case len(suites) == 1:
+		return suites[0].Name
 	}
-	return best
+	return "<suite>"
+}
+
+// inSuite reports whether a suite's root holds file.
+func inSuite(suites []config.Suite, file string) bool {
+	return slices.ContainsFunc(suites, func(s config.Suite) bool { return pathutil.Under(file, s.Root) })
 }

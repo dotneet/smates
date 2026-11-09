@@ -80,6 +80,30 @@ Common causes of a test that never settles:
 - **A flaky test.** `smates flaky` lists tests whose outcome flipped with unchanged
   inputs. See [Shadow mode, flaky tests and stats](../guides/trust.md).
 
+## A small change selects most tests
+
+`smates why <changed file>` lists nearly every test of the suite. For a Go suite with
+`granularity: func`, `smates doctor` names the usual cause (`state-source-sweep`):
+
+```text
+warn  suite api: 511 of 728 test units depend on (nearly) all 104 source files of internal/api/ as whole files, so a change to any of them selects all 511. ...
+```
+
+Those tests read the sources at runtime: a helper every test runs globs, parses or hashes
+the files of a directory (to collect route names, check a naming rule, compute a cache
+key). smates cannot tell which part of a file such a read used, so each of those files
+becomes a dependency of every test that ran the helper. In Go per-function units, which
+count executed code per declaration, a whole source file as a dependency means just
+that (or a coverage profile that could not tell which bodies ran). In suites that track
+files whole, the same pattern also comes from importing most modules of a package, so
+the check leaves them out; `smates deps <test>` shows such reads there too.
+
+Move the read out of the tests' processes: compute what the tests need once (a
+generated or checked-in file, refreshed by `go generate` or a script, and checked by
+one test that compares it with the sources), or keep the source scan in one dedicated
+test instead of a helper all of them call. Then record again (`smates run --all`) and
+check `smates deps <test>`.
+
 ## A test that should have run was skipped
 
 1. Check the dependency map: `smates why <changed file>` lists the tests that depend on

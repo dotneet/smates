@@ -68,6 +68,48 @@ type testStep struct {
 // would run them a second time) but never patched.
 var testCmdRe = regexp.MustCompile(`(?:^|[\s;&|(])((?:go test|vitest|jest|pytest|bun test|node --test|turbo (?:run )?test(?::[\w:-]+)?|(?:npm|pnpm|yarn) (?:run )?test(?::[\w:-]+)?|make test[\w-]*))(?:\s|$|;|&|\|)`)
 
+// runTestCmd is the test command (testCmdRe's match) a line of a run: block runs, or
+// "" when it only names one in a string: an assignment (x='go test ./...'), an argument
+// of echo, test or grep. A string a shell runs (sh -c "...", bash -c, eval) counts.
+func runTestCmd(l string) string {
+	quoted := unrunQuoted(l)
+	for _, m := range testCmdRe.FindAllStringSubmatchIndex(l, -1) {
+		if !slices.ContainsFunc(quoted, func(q [2]int) bool { return m[2] >= q[0] && m[2] < q[1] }) {
+			return l[m[2]:m[3]]
+		}
+	}
+	return ""
+}
+
+// shellRunsRe matches what, written just before a quoted string, makes the shell run
+// that string as a command.
+var shellRunsRe = regexp.MustCompile(`(?:\b(?:ba|z|da|k)?sh\s+(?:-\w+\s+)*-\w*c|\beval)\s*$`)
+
+// unrunQuoted returns the [start, end) byte spans of l inside quotes that no shell
+// runs (see runTestCmd). A backslash escapes the next character outside single quotes.
+func unrunQuoted(l string) [][2]int {
+	var out [][2]int
+	quote, start := byte(0), 0
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		switch {
+		case c == '\\' && quote != '\'':
+			i++
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote, start = c, i
+		case c == quote:
+			if !shellRunsRe.MatchString(l[:start]) {
+				out = append(out, [2]int{start, i + 1})
+			}
+			quote = 0
+		}
+	}
+	if quote != 0 && !shellRunsRe.MatchString(l[:start]) {
+		out = append(out, [2]int{start, len(l)}) // continues on the next line
+	}
+	return out
+}
+
 // plainTestCmd reports whether a matched test command runs the unit tests (plain
 // "test", "test:unit", "make test", "make test-unit") rather than another test target
 // such as test:e2e or test-integration, which smates may not cover.
@@ -167,8 +209,8 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				if t == "" || strings.HasPrefix(t, "#") {
 					continue
 				}
-				if m := testCmdRe.FindStringSubmatch(l); m != nil && cmd == "" {
-					cmd, match = t, m[1]
+				if m := runTestCmd(l); m != "" && cmd == "" {
+					cmd, match = t, m
 					continue
 				}
 				others++

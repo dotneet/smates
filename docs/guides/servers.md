@@ -156,7 +156,9 @@ admin API only to the admin tests.
 
 `smates doctor` warns about suites that look like end-to-end tests and declare none of
 `depends_on`, `serves` or `rules`. A suite looks like one when its name or root mentions
-e2e, its command runs Playwright or Cypress, or a test file calls `http://localhost`:
+e2e, its command runs Playwright or Cypress, or a test file calls `http://localhost` (one
+that starts the server it calls itself, an `httptest` server or `http.server` on port 0,
+or intercepts the requests with nock, msw or `responses`, does not count):
 
 ```text
 suite e2e looks like end-to-end tests (runs playwright) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: ["backend/**"]
