@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/selector"
 	"github.com/dotneet/smates/internal/summary"
 )
 
@@ -86,8 +88,12 @@ func (c *cycle) estimate(batches []*batch) estimate {
 		if _, ok := e.bySuite[b.sr.Name]; !ok {
 			e.suites = append(e.suites, b.sr.Name)
 		}
+		jobs := time.Duration(1)
+		if c.record {
+			jobs = time.Duration(recordParallelism(b.sr))
+		}
 		for _, u := range b.units {
-			d := time.Duration(dur[u]) * time.Millisecond
+			d := time.Duration(dur[u]) * time.Millisecond / jobs
 			if d == 0 {
 				e.unrecorded++
 			}
@@ -96,6 +102,17 @@ func (c *cycle) estimate(batches []*batch) estimate {
 		}
 	}
 	return e
+}
+
+// recordParallelism is how many units of a suite overlap while recording, as far as
+// their recorded durations add up: a Go suite with granularity func times each function
+// as a process of its own and runs record_jobs of them at once. Other suites keep the
+// sum of their durations, an upper bound.
+func recordParallelism(sr *selector.Suite) int {
+	if s := sr.Suite; s != nil && s.Runner == "go" && s.Granularity == config.GranularityFunc && s.RecordJobs > 1 {
+		return s.RecordJobs
+	}
+	return 1
 }
 
 // hintLongRun prints how to split a selection whose recorded durations add up to more

@@ -199,9 +199,26 @@ var (
 	sourceExts = map[string]bool{".go": true, ".ts": true, ".tsx": true, ".mts": true, ".cts": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".py": true}
 )
 
+// ownServerRe matches code that starts the server it calls in its own process (an
+// httptest server, a listener on port 0, http.server, net.createServer) or intercepts
+// its requests (nock, msw, responses, ...): the local URLs of such a file need no server
+// started before the tests.
+var ownServerRe = regexp.MustCompile(`httptest\.New(?:Unstarted|TLS)?Server|\bnet\.Listen(?:TCP|Unix)?\(|\bListenAndServe(?:TLS)?\(|\.Serve\(|\b(?:Threading)?HTTPServer\(|\b(?:Threading)?TCPServer\(|serve_forever|\.bind\(\(|\bcreateServer\(|\.listen\(|\bsetupServer\(|\bnock\(|\bresponses\.(?:add|get|post|put|delete|patch)\(|requests_mock|\brespx\b|\bhttpretty\b|\baioresponses\b|\bhttpserver\b`)
+
+// localServerPort reports whether a port of a plain local URL (no known service) can
+// name a server the tests need: not an invalid port, nor one below 1024, which tests use
+// as an address where nothing listens (the discard port 9, ...) rather than for a dev
+// server.
+func localServerPort(port int) bool { return port >= 1024 && port <= 65535 }
+
+// ownServer reports whether source starts or intercepts the server it calls (ownServerRe).
+func ownServer(source []byte) bool { return ownServerRe.Match(source) }
+
 // scanSources looks through the repository's source and test files for URLs pointing
-// at a local server and for environment variables the code reads.
-func scanSources(root string, files []string) sourceScan {
+// at a local server and for environment variables the code reads. tested reports
+// whether a suite runs a file (nil: every file): a plain local URL counts only there,
+// in a file that does not start or intercept that server itself.
+func scanSources(root string, files []string, tested func(string) bool) sourceScan {
 	sc := sourceScan{EnvReads: map[string]string{}}
 	seen := map[string]bool{}
 	n := 0
@@ -235,6 +252,9 @@ func scanSources(root string, files []string) sourceScan {
 			}
 			if port == 0 {
 				continue // http://localhost without a port: usually a placeholder
+			}
+			if kind == "" && (!localServerPort(port) || tested != nil && !tested(f) || ownServer(data)) {
+				continue
 			}
 			key := fmt.Sprintf("%s:%d", kind, port)
 			if seen[key] {

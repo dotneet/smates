@@ -349,10 +349,11 @@ The values of `kind`:
 | `makefile-command` | A Makefile target runs a suite's runner with flags or variables smates' own command does not pass. |
 | `server-dependency` | A suite looks like end-to-end tests of a server in another process, with no `depends_on` or `serves`. |
 | `service` | The tests appear to need a service (from a compose file, or code that connects to it on localhost). |
-| `local-server` | The code calls a `localhost` URL: tests using it need that server running. |
+| `local-server` | A file a suite runs calls a `localhost` URL on a port from 1024, without starting or intercepting that server itself: tests using it need that server running. |
 | `env` | The code reads an environment variable that an `.env.example` (`.env.sample`, `.env.template`, `.env.dist`) lists and no suite's `env` sets. |
 | `workflow-test-step` | A workflow step runs the tests without smates. |
 | `orphans-policy` | `orphans: agent`, but no agent is available. |
+| `go-granularity` | One package holds most of a Go suite's test functions, so selecting whole packages saves little: `granularity: func` is suggested. |
 
 ## smates why, deps and list { #smates-why-deps-list }
 

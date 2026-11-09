@@ -319,7 +319,12 @@ type envHint struct {
 // unit tests (the workflow's, the job's and the step's own). smates.yml gets them only
 // as comments: CI values (ports, database names) need not hold locally, and the step's
 // env reaches the smates action in CI anyway.
-func workflowEnvHints(steps []testStep, suites []config.Suite) map[string]envHint {
+//
+// A variable that only carries the workflow's own orchestration (its value an expression
+// of matrix, needs, steps, ... alone: a shard number, a commit to compare with) is left
+// out unless the repository's code reads it (readByCode; nil: none does): the step's
+// script uses it, the tests do not.
+func workflowEnvHints(steps []testStep, suites []config.Suite, readByCode func(string) bool) map[string]envHint {
 	out := map[string]envHint{}
 	for _, st := range steps {
 		if st.Other || len(st.Env) == 0 {
@@ -335,6 +340,9 @@ func workflowEnvHints(steps []testStep, suites []config.Suite) map[string]envHin
 				h.From += ", " + from
 			}
 			for _, kv := range st.Env {
+				if ciOnlyValue(kv[1]) && (readByCode == nil || !readByCode(kv[0])) {
+					continue
+				}
 				if !slices.ContainsFunc(h.Env, func(e [2]string) bool { return e[0] == kv[0] }) {
 					h.Env = append(h.Env, kv)
 				}
@@ -439,4 +447,33 @@ func carryGoFlags(suites []config.Suite, mk, votes []makeHint, steps []testStep,
 		}
 	}
 	return out
+}
+
+// ciContextRe finds the contexts a GitHub Actions expression refers to.
+var ciContextRe = regexp.MustCompile(`\b(matrix|needs|steps|strategy|github|runner|job|jobs|secrets|vars|env|inputs)\s*[.\[]`)
+
+// ciExprRe finds the expressions of a workflow value.
+var ciExprRe = regexp.MustCompile(`\$\{\{(.*?)\}\}`)
+
+// orchestration are the contexts that describe the run itself, not what the tests need.
+var orchestration = map[string]bool{"matrix": true, "needs": true, "steps": true, "strategy": true, "github": true, "runner": true, "job": true, "jobs": true}
+
+// ciOnlyValue reports whether a workflow env value is made of expressions over the run's
+// orchestration contexts alone (matrix, needs, steps, github, ...): no secret, variable,
+// input or env, and some context at all.
+func ciOnlyValue(v string) bool {
+	exprs := ciExprRe.FindAllStringSubmatch(v, -1)
+	if len(exprs) == 0 {
+		return false
+	}
+	seen := false
+	for _, e := range exprs {
+		for _, m := range ciContextRe.FindAllStringSubmatch(e[1], -1) {
+			if !orchestration[m[1]] {
+				return false
+			}
+			seen = true
+		}
+	}
+	return seen
 }

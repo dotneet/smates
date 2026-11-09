@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,7 +90,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stderr, "smates: %s target %q runs %q; smates runs the %s suite's runner itself, so those flags/variables are not applied. See the commented command:/env: hint for the suite in smates.yml.\n", h.File, h.Target, h.Line, h.Suite)
 		}
 	}
-	doc := renderConfig(suites, configHints(mk, workflowEnvHints(wfSteps, suites), carried))
+	codeEnv := scanSources(repo.Root, files, nil).EnvReads
+	hints := configHints(mk, workflowEnvHints(wfSteps, suites, func(name string) bool { _, ok := codeEnv[name]; return ok }), carried)
+	goFuncConfigHints(repo.Root, suites, files, hints)
+	doc := renderConfig(suites, hints)
 	// --force overwrites the config file smates reads, whichever of its names it has
 	// (a new smates.yml next to a .smates.yml would shadow it).
 	name := configFileName(repo.Root)
@@ -948,9 +952,24 @@ func serverSuiteHint(repoRoot string, s *runner.Suite, files []string) string {
 		if err != nil {
 			continue
 		}
-		for _, needle := range []string{"http://localhost", "http://127.0.0.1", "http://0.0.0.0"} {
-			if bytes.Contains(data, []byte(needle)) {
-				return f + " calls " + needle
+		if ownServer(data) {
+			continue // it starts or intercepts the server it calls
+		}
+		// A URL without a port (port 80) or on a port a server can use, as for the
+		// local-server check (localServerPort): not an address where nothing listens.
+		for _, m := range localURLRe.FindAllSubmatchIndex(data, -1) {
+			if string(data[m[2]:m[3]]) != "http" {
+				continue
+			}
+			digits := ""
+			if m[6] >= 0 {
+				digits = string(data[m[6]:m[7]])
+			} else if rest := data[m[1]:]; len(rest) > 1 && rest[0] == ':' && rest[1] >= '0' && rest[1] <= '9' {
+				digits = string(rest[1:2]) // a one-digit port the pattern leaves out
+			}
+			port, _ := strconv.Atoi(digits)
+			if digits == "" || localServerPort(port) {
+				return f + " calls http://" + string(data[m[4]:m[5]])
 			}
 		}
 	}

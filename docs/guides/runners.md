@@ -136,6 +136,12 @@ always passes the files explicitly, because node's own discovery would also run
 helpers smates does not consider tests. If the command uses `--test-isolation=none`
 (one process for all files), set `isolate: true`.
 
+`smates init` gives Node's runner a suite where a package announces it (`node --test`
+in the `test` script), and also where no package does: test files that import
+`node:test` outside every JS package with a test runner (scripts run by CI or a task
+runner) become a `node` suite at their package, or at their directory, with `tests:`
+globs that match them.
+
 ### bun
 
 While recording, smates runs `bun test --coverage` once per file and reads bun's
@@ -152,7 +158,10 @@ usual (per-file status then needs a JUnit report).
   tool from the registry, the run stops with a message to install it first.
 - npm/pnpm/yarn/bun workspaces and tsconfig `paths` are resolved by the static
   analyzer, so imports between packages of a monorepo are followed (see
-  [What the import graph understands](#what-the-import-graph-understands)).
+  [What the import graph understands](#what-the-import-graph-understands)). A package of
+  the repository imported by name (a workspace package, a `file:` dependency) makes its
+  `package.json` a dependency too: its `main`, `exports` and `type` decide what the
+  import loads, also when the package is installed as a copy.
 - Lockfiles, manifests and tsconfig files are inputs of every test; see
   [Default inputs](../reference/configuration.md#default-inputs) for the exact list. A
   tsconfig that is not among them (a nested package's, or one they extend) still steers
@@ -178,7 +187,8 @@ specifier may mean several files, the test depends on all of them.
     - workspace packages by name, through `exports` (every condition), `main` and
       `module`. Every directory with a `package.json` counts, so no workspace
       configuration is read. When the entry point does not exist in the working tree (an
-      unbuilt `dist/`), the import depends on all of the package's source files;
+      unbuilt `dist/`), the import depends on all of the package's source files. The
+      package's `package.json` is a dependency of the import either way;
     - `@/x` and `~/x` as `src/x` (else `x`) of the nearest package, and `$lib/x` as
       `src/lib/x`, when nothing else resolves them (aliases usually set in a bundler
       config);
@@ -228,6 +238,12 @@ A Python suite uses `pytest` when anything points to it, and `unittest` otherwis
   `requirements/`);
 - a GitHub workflow running pytest;
 - a test file written for pytest (`import pytest`, module-level `def test_…` functions).
+
+A directory that a CI or task file at the repository root (a GitHub workflow,
+`.gitlab-ci.yml`, a Makefile, `tox.ini`, `package.json`, ...) runs with
+`python -m unittest discover -s <dir>` gets a `unittest` suite even without a Python
+project file, with the command's pattern (and its top-level directory, when it names
+one).
 
 ### pytest
 

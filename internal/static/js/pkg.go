@@ -110,6 +110,11 @@ func (a *Analyzer) resolveWorkspace(spec string) wsResult {
 		res.found = true
 		add := func(f string) { res.files = append(res.files, f) }
 		for _, d := range dirs {
+			// The package's package.json decides what the specifier resolves to (main,
+			// exports, type): a change to it can change what the importer loads, also
+			// when the package is installed as a copy (a file: dependency) whose
+			// package.json the tests read outside the repository.
+			add(path.Join(d, "package.json"))
 			if !a.resolveInPackage(d, a.pkg(d), sub, add) {
 				res.found = false
 				res.fallback = append(res.fallback, a.packageFiles(d)...)

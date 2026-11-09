@@ -188,6 +188,9 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		out = append(out, config.Suite{Root: d, Runner: r, Command: command, Env: env, Tests: tests})
 	}
 
+	// Node's own runner where no package announces it (see nodeTestSuites).
+	out = append(out, nodeTestSuites(repo, files, out)...)
+
 	// Python: one suite per project with pytest configuration or tests. Projects that
 	// show no sign of pytest (no dependency, configuration or conftest.py) use the
 	// standard library's unittest, except Django projects: their TestCase classes need
@@ -211,6 +214,9 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		}
 		out = append(out, config.Suite{Root: d, Runner: r})
 	}
+
+	// unittest directories a CI or task file discovers (see unittestSuites).
+	out = append(out, unittestSuites(repo, files, out)...)
 
 	// Keep suites that have tests (as the runner's configuration or the default
 	// patterns describe them); give them unique names.

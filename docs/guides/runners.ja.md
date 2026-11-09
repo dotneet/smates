@@ -54,6 +54,8 @@ smates は `testMatch` などのテストのパターンを jest の設定から
 
 `node --test` は各ファイルを専用のプロセスで実行するので、終了コードはファイルごとです。node 自身の探索では、smates がテストとみなさないヘルパーまで実行されてしまうため、smates は常にファイルを明示的に渡します。コマンドが `--test-isolation=none`（全ファイルを 1 プロセス）を使っている場合は `isolate: true` を設定してください。
 
+`smates init` は、パッケージが Node のランナーを使うと示している場合（`test` スクリプトの `node --test`）に加えて、どのパッケージも示していない場合にもスイートを作ります。テストランナーを持つどの JS パッケージにも属さない場所で `node:test` を import しているテストファイル（CI やタスクランナーが実行するスクリプトなど）は、そのパッケージ、またはそのディレクトリを root とする `node` スイートになり、それらに一致する `tests:` の glob が付きます。
+
 ### bun { #bun }
 
 記録中、smates はファイルごとに `bun test --coverage` を 1 回ずつ実行し、bun のカバレッジとモジュールキャッシュを読み取ります。`bunfig.toml` のコピーの先頭に入れた preload が、`node:fs`、`Bun.file`、`Bun.Glob` をフックします。記録しない実行では通常どおり 1 回の `bun test` を使います（その場合、ファイルごとの結果には JUnit レポートが必要です）。
@@ -62,7 +64,7 @@ smates は `testMatch` などのテストのパターンを jest の設定から
 
 - npm、pnpm、yarn、bun のいずれでも動きます。smates は `node_modules/.bin` のローカルなバイナリを直接実行し、なければロックファイルに応じて `pnpm exec`、`yarn`、`bunx`、`npx --no-install` を使います。
 - smates は `npx` や `bunx` にランナーをダウンロードさせません。コマンドがレジストリからツールを取得しようとする場合、実行は止まり、先にインストールするよう案内します。
-- npm/pnpm/yarn/bun のワークスペースと tsconfig の `paths` は静的解析が解決するので、モノレポのパッケージ間の import もたどれます（[import グラフが理解するもの](#what-the-import-graph-understands) を参照）。
+- npm/pnpm/yarn/bun のワークスペースと tsconfig の `paths` は静的解析が解決するので、モノレポのパッケージ間の import もたどれます（[import グラフが理解するもの](#what-the-import-graph-understands) を参照）。名前で import したリポジトリ内のパッケージ（ワークスペースのパッケージ、`file:` 依存）は、その `package.json` も依存になります。`main`、`exports`、`type` が import の読み込み先を決めるためで、パッケージがコピーとしてインストールされている場合も同じです。
 - ロックファイル、マニフェスト、tsconfig は、すべてのテストの inputs になります。正確な一覧は [デフォルトの inputs](../reference/configuration.md#default-inputs) を参照してください。そこに含まれない tsconfig（入れ子のパッケージのものや、それらが extends するもの）も、その `paths` は import グラフの解決に使われます。
 - vitest と bun のスイートでは、型のためだけの import（`import type`）は依存になりません。[制限事項](../reference/limitations.md#what-tracing-reaches) を参照してください。
 
@@ -75,7 +77,7 @@ smates は `testMatch` などのテストのパターンを jest の設定から
     - `import`、`export … from`、`import()`、`require()`、`require.resolve()`、`import.meta.resolve()`
     - 最も近い設定ディレクトリにある tsconfig と jsconfig の `paths` と `baseUrl`（`extends` もたどります）。対象は `tsconfig.json`、`jsconfig.json`、同じディレクトリの `tsconfig.*.json`（`tsconfig.app.json` など）と、それらが `references` に並べるプロジェクトです
     - package.json の `imports`（`#internal/x`）
-    - 名前で参照するワークスペースのパッケージ。`exports`（すべての条件）、`main`、`module` をたどります。`package.json` のあるディレクトリはすべて対象になるので、ワークスペースの設定は読みません。エントリポイントが作業ツリーにない場合（ビルドしていない `dist/`）、その import はパッケージのすべてのソースファイルに依存します
+    - 名前で参照するワークスペースのパッケージ。`exports`（すべての条件）、`main`、`module` をたどります。`package.json` のあるディレクトリはすべて対象になるので、ワークスペースの設定は読みません。エントリポイントが作業ツリーにない場合（ビルドしていない `dist/`）、その import はパッケージのすべてのソースファイルに依存します。どちらの場合も、パッケージの `package.json` はその import の依存になります
     - ほかで解決できない `@/x` と `~/x` は最も近いパッケージの `src/x`（なければ `x`）、`$lib/x` は `src/lib/x` として扱います（ふつうバンドラーの設定で定義するエイリアスです）
     - `import.meta.glob(...)` のパターン、`require.context(dir)`、テンプレートリテラルの import（`` import(`./locales/${lang}.json`) `` は一致するすべてのファイルに依存します）、`new URL("./file", import.meta.url)`、`/// <reference path="...">`
     - `jest.mock`、`vi.mock` とその仲間（`doMock`、`requireActual` など）。モジュール自体と、隣の `__mocks__` ディレクトリにある手動モックです
@@ -101,6 +103,8 @@ Python のスイートは、pytest を示すものが 1 つでもあれば `pyte
 - プロジェクトかその上のディレクトリにあるマニフェスト、ロックファイル、タスクファイル（`pyproject.toml`、`setup.cfg`、`setup.py`、`tox.ini`、`noxfile.py`、`Pipfile`、`poetry.lock`/`pdm.lock`/`uv.lock`、`*requirements*.txt`/`.in`、`requirements/` 以下のファイル）に pytest の名前がある
 - pytest を実行する GitHub のワークフロー
 - pytest 向けに書かれたテストファイル（`import pytest`、モジュールレベルの `def test_…` 関数）
+
+リポジトリのルートにある CI やタスクのファイル（GitHub のワークフロー、`.gitlab-ci.yml`、Makefile、`tox.ini`、`package.json` など）が `python -m unittest discover -s <dir>` で実行しているディレクトリは、Python のプロジェクトファイルがなくても `unittest` スイートになります。コマンドのパターン（トップレベルディレクトリを指定していればそれも）を引き継ぎます。
 
 ### pytest { #pytest }
 

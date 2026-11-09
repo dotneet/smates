@@ -138,7 +138,7 @@ smates run
 
 ## smates doctor が宣言漏れを指摘する { #smates-doctor-points-at-missing-declarations }
 
-`smates doctor` は、エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれも宣言していないスイートについて警告します。名前か root に e2e を含む、コマンドが Playwright か Cypress を実行する、テストファイルが `http://localhost` を呼び出す、のいずれかに当てはまるとエンドツーエンドテストとみなします。
+`smates doctor` は、エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれも宣言していないスイートについて警告します。名前か root に e2e を含む、コマンドが Playwright か Cypress を実行する、テストファイルが `http://localhost` を呼び出す、のいずれかに当てはまるとエンドツーエンドテストとみなします（呼び出すサーバーを自分で起動するファイル、たとえばポート 0 の `httptest` サーバーや `http.server`、または nock、msw、`responses` でリクエストを横取りするファイルは数えません）。
 
 ```text
 suite e2e looks like end-to-end tests (runs playwright) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: ["backend/**"]

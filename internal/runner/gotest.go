@@ -422,7 +422,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		env = append(env, childTraceEnv(rc, rc.TraceDir)...)
+		env = append(env, childTraceEnv(rc, rc.TraceDir, "")...)
 	}
 	start := time.Now()
 	// Packages that fail to build never start a test binary; go test reports them as
@@ -565,11 +565,18 @@ func repoDir(root, dir string) (string, bool) {
 }
 
 // childTraceEnv is the environment tracing the Node, Bun and Python processes a Go test
-// starts, writing their traces under dir.
-func childTraceEnv(rc *RunContext, dir string) []string {
+// starts, writing their traces under dir. parent is the SMATES_TRACE_PARENT those
+// children see: the trace environments reset it (a run of its own), so it is set here,
+// after them, where a later entry cannot clear it. An empty parent leaves the reset, for
+// a test binary started through the -exec wrapper, which sets its own.
+func childTraceEnv(rc *RunContext, dir, parent string) []string {
 	base := suiteEnv(rc.Suite)
 	node := trace.NodeEnv(dir, rc.Repo.Root, rc.Shims(), base)
-	return slices.Concat(node, trace.PythonEnv(dir, rc.Repo.Root, rc.Shims(), base)[2:3]) // PYTHONPATH only
+	env := slices.Concat(node, trace.PythonEnv(dir, rc.Repo.Root, rc.Shims(), base)[2:3]) // PYTHONPATH only
+	if parent != "" {
+		env = append(env, "SMATES_TRACE_PARENT="+parent)
+	}
+	return env
 }
 
 // lastMessage keeps the last trace.MaxMessage bytes of a test's output.

@@ -48,7 +48,7 @@ type reviewItem struct {
 	// ID is stable for the same finding: "<kind>-<subject>" in kebab-case.
 	ID string `json:"id"`
 	// Kind: service | env | local-server | makefile-command | server-dependency |
-	// workflow-test-step | orphans-policy | no-suites.
+	// workflow-test-step | orphans-policy | no-suites | go-granularity.
 	Kind     string       `json:"kind"`
 	Reason   string       `json:"reason"`
 	Evidence []string     `json:"evidence"`
@@ -105,6 +105,7 @@ func initReview(repo *gitx.Repo, existing *config.Config, suites []config.Suite,
 			Action: reviewAction{Description: "add the suites to smates.yml by hand (name, runner, root, command)", Snippet: "suites:\n  - name: tests\n    runner: custom\n    root: .\n    command: <test command>\n", SnippetFile: "smates.yml"},
 		})
 	}
+	out = append(out, goFuncReview(repo.Root, suites, files)...)
 	for _, h := range mk {
 		snippet := "command: " + yamlStr(h.Command) + "\n"
 		if len(h.Env) > 0 {

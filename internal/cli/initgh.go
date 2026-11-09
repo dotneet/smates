@@ -434,7 +434,7 @@ type inspection struct {
 func inspect(root string, suites []config.Suite, files []string) inspection {
 	var in inspection
 	in.Services = composeServices(root)
-	sc := scanSources(root, files)
+	sc := scanSources(root, files, func(f string) bool { return inSuite(suites, f) })
 	for _, r := range sc.Local {
 		if r.Kind == "" {
 			in.Local = append(in.Local, r)

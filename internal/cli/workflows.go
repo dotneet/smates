@@ -65,8 +65,102 @@ type testStep struct {
 // testCmdRe finds test commands; suffixed script names ("test:e2e", "test-e2e") are
 // told apart by plainTestCmd.
 // turbo and node --test steps are found (they run the tests, so the smates workflow
-// would run them a second time) but never patched.
-var testCmdRe = regexp.MustCompile(`(?:^|[\s;&|(])((?:go test|vitest|jest|pytest|bun test|node --test|turbo (?:run )?test(?::[\w:-]+)?|(?:npm|pnpm|yarn) (?:run )?test(?::[\w:-]+)?|make test[\w-]*))(?:\s|$|;|&|\|)`)
+// would run them a second time) but never patched. A command may start and end a
+// command substitution ($(go test ...), `pytest`; \x60 is the backtick).
+var testCmdRe = regexp.MustCompile(`(?:^|[\s;&|(\x60])((?:go test|vitest|jest|pytest|bun test|node --test|turbo (?:run )?test(?::[\w:-]+)?|(?:npm|pnpm|yarn) (?:run )?test(?::[\w:-]+)?|make test[\w-]*))(?:\s|$|;|&|\||\)|\x60)`)
+
+// runTestCmd is the test command (testCmdRe's match) a line of a run: block runs, or
+// "" when it only names one in a string: an assignment (x='go test ./...'), an argument
+// of echo, test or grep. A string a shell runs (sh -c "...", bash -c, eval) counts.
+func runTestCmd(l string) string {
+	quoted := unrunQuoted(l)
+	for _, m := range testCmdRe.FindAllStringSubmatchIndex(l, -1) {
+		if !slices.ContainsFunc(quoted, func(q [2]int) bool { return m[2] >= q[0] && m[2] < q[1] }) {
+			return l[m[2]:m[3]]
+		}
+	}
+	return ""
+}
+
+// shellRunsRe matches what, written just before a quoted string, makes the shell run
+// that string as a command.
+var shellRunsRe = regexp.MustCompile(`(?:\b(?:ba|z|da|k)?sh\s+(?:-\w+\s+)*-\w*c|\beval)\s*$`)
+
+// unrunQuoted returns the [start, end) byte spans of l inside quotes that no shell
+// runs (see runTestCmd). A backslash escapes the next character outside single quotes.
+// Inside double quotes a command substitution, $(...) or `...`, runs: it is left out of
+// the spans, so what it names counts.
+func unrunQuoted(l string) [][2]int {
+	var out [][2]int
+	add := func(from, to int, runs bool) {
+		if !runs && from < to {
+			out = append(out, [2]int{from, min(to, len(l))})
+		}
+	}
+	for i := 0; i < len(l); i++ {
+		switch l[i] {
+		case '\\':
+			i++
+		case '\'':
+			end := len(l)
+			if k := strings.IndexByte(l[i+1:], '\''); k >= 0 {
+				end = i + 1 + k + 1
+			}
+			add(i, end, shellRunsRe.MatchString(l[:i]))
+			i = end - 1
+		case '"':
+			runs := shellRunsRe.MatchString(l[:i])
+			from, j := i, i+1
+			for ; j < len(l) && l[j] != '"'; j++ {
+				switch {
+				case l[j] == '\\':
+					j++
+				case l[j] == '$' && j+1 < len(l) && l[j+1] == '(':
+					add(from, j, runs)
+					j = closingParen(l, j+1)
+					from = j + 1
+				case l[j] == '`':
+					add(from, j, runs)
+					if k := strings.IndexByte(l[j+1:], '`'); k >= 0 {
+						j += 1 + k
+					} else {
+						j = len(l)
+					}
+					from = j + 1
+				}
+			}
+			add(from, j+1, runs)
+			i = j
+		}
+	}
+	return out
+}
+
+// closingParen is the index of the parenthesis closing the one at l[open] (len(l) when
+// the line ends first), skipping quoted strings and escaped characters inside.
+func closingParen(l string, open int) int {
+	depth := 0
+	for k := open; k < len(l); k++ {
+		switch l[k] {
+		case '\\':
+			k++
+		case '\'', '"':
+			q := l[k]
+			for k++; k < len(l) && l[k] != q; k++ {
+				if l[k] == '\\' && q == '"' {
+					k++
+				}
+			}
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return k
+			}
+		}
+	}
+	return len(l)
+}
 
 // plainTestCmd reports whether a matched test command runs the unit tests (plain
 // "test", "test:unit", "make test", "make test-unit") rather than another test target
@@ -167,8 +261,8 @@ func parseWorkflowSteps(rel string, data []byte) []testStep {
 				if t == "" || strings.HasPrefix(t, "#") {
 					continue
 				}
-				if m := testCmdRe.FindStringSubmatch(l); m != nil && cmd == "" {
-					cmd, match = t, m[1]
+				if m := runTestCmd(l); m != "" && cmd == "" {
+					cmd, match = t, m
 					continue
 				}
 				others++

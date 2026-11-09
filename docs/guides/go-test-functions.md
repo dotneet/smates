@@ -26,6 +26,10 @@ smates: selected 2 of 3 test unit(s) across 1 suite(s) (33% skipped)
 [below](#compile-checks). The default, `granularity: package`, keeps one unit per
 package.
 
+`smates init` writes `granularity: func` as a comment for a Go suite in which one package
+holds most of the test functions, and `smates doctor` suggests it for such a suite
+(`suite-go-granularity`).
+
 ## What counts as a test function
 
 Every top-level `TestXxx(*testing.T)`, `FuzzXxx(*testing.F)` (with its seed corpus) and
@@ -82,6 +86,12 @@ depends on:
   environment variables it read, embedded and other non-Go files, `go.mod`/`go.sum`, and
   what its child processes used. Go packages it builds or runs as a subprocess
   (`go run ../cmd/tool`) count in full.
+
+A file the function reads at runtime counts as a whole file, a Go source file too: a
+helper that globs or parses the package's sources in every test's process makes every
+test that runs it depend on all of them, and any edit there selects them all.
+`smates doctor` reports this (`state-source-sweep`); see
+[Troubleshooting](../reference/troubleshooting.md#a-small-change-selects-most-tests).
 
 The unit of attribution is the top-level declaration: a function that executed one
 line of `PlaceOrder` depends on the body of `PlaceOrder`, not on the other functions of
@@ -216,6 +226,10 @@ functions.
 - Packages run as many at a time as `-p` allows (in the command or `GOFLAGS`; default
   GOMAXPROCS). A suite that runs `go test -p 1` because its packages share a database
   keeps them apart while recording too.
+
+A function's recorded duration is the time of its process. With `record_jobs: N`, N of
+them run at once, so the estimate of `--budget` and the shard sizing of `--max-shards`
+divide the suite's durations by N.
 
 Functions share no process while recording. A test that relies on state another test
 of its package left behind in memory behaves differently than under `go test`.
