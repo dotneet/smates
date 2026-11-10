@@ -261,12 +261,14 @@ func javaSources(root string) []string {
 // support code, dependencies of the units that use them.
 //
 // A supertype is looked up among the test files, then among the repository's other Java
-// sources (sources lists them; it is called once, when needed): one in a main source set
-// (src/main/) runs no test, as the test framework is not on its classpath; one in another
-// source set (src/testFixtures/) is followed like a test file. One found nowhere keeps the
-// class a unit (a library's test base class or contract), unless it is the JDK's
-// (qualified or imported from java.* or javax.*, or a java.lang class neither imported nor
-// declared in the file's package) or JUnit's own (org.junit.*: callbacks, providers).
+// sources (sources lists them; it is called once, when needed), and followed the same way
+// (a test-support project's main source set may hold contract tests). One found nowhere
+// keeps the class a unit (a library's test base class or contract), unless it is the
+// JDK's (qualified or imported from java.* or javax.*, or a java.lang class neither
+// imported nor declared in the file's package) or JUnit's own (org.junit.*: callbacks,
+// providers), or the supertype of a type in a main source set (src/main/) that carries no
+// test annotation: production code extends libraries, not their tests (a fake
+// implementing a repository interface that extends a library's is no unit).
 func gradleUnits(files []string, read func(string) []byte, sources func() []string) []string {
 	infos := make(map[string]*java.Info, len(files))
 	types := map[string]string{} // qualified top-level type -> file
@@ -349,18 +351,16 @@ func gradleUnits(files []string, read func(string) []byte, sources func() []stri
 	}
 	memo := map[string]bool{}
 	var runs func(f string, d java.Decl) bool
-	// superRuns reports whether a supertype, as file in writes it, may run tests.
-	superRuns := func(in *java.Info, name string) bool {
+	// superRuns reports whether a supertype, as file in writes it, may run tests. main
+	// is set when in is production code.
+	superRuns := func(in *java.Info, name string, main bool) bool {
 		for _, q := range in.Resolve(name) {
 			if f, d, ok := find(q); ok {
-				if strings.HasPrefix(f, "src/main/") || strings.Contains(f, "/src/main/") {
-					return false
-				}
 				return runs(f, d)
 			}
 		}
 		lib := func(prefix string) bool { return strings.HasPrefix(name, prefix) || in.Imported(name, prefix) }
-		return !(lib("java.") || lib("javax.") || lib("org.junit.") || javaLang[name] && !in.Imported(name, ""))
+		return !(main || lib("java.") || lib("javax.") || lib("org.junit.") || javaLang[name] && !in.Imported(name, ""))
 	}
 	runs = func(f string, d java.Decl) bool {
 		in := infos[f]
@@ -369,8 +369,9 @@ func gradleUnits(files []string, read func(string) []byte, sources func() []stri
 			return v
 		}
 		memo[key] = true // a cycle (not valid Java) counts as a test: smates cannot tell
-		v := annotated(in, anns) || testName(d.Name) || d.Extends != "" && superRuns(in, d.Extends) ||
-			slices.ContainsFunc(d.Interfaces, func(n string) bool { return superRuns(in, n) })
+		main := strings.HasPrefix(f, "src/main/") || strings.Contains(f, "/src/main/")
+		v := annotated(in, anns) || testName(d.Name) || d.Extends != "" && superRuns(in, d.Extends, main) ||
+			slices.ContainsFunc(d.Interfaces, func(n string) bool { return superRuns(in, n, main) })
 		memo[key] = v
 		return v
 	}

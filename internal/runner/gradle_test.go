@@ -46,6 +46,11 @@ func TestGradleUnits(t *testing.T) {
 		"lib/src/main/java/com/example/lib/Clock.java":           "package com.example.lib;\npublic interface Clock { long now(); }",
 		"src/testFixtures/java/com/example/fx/ListContract.java": "package com.example.fx;\nimport org.junit.jupiter.api.Test;\npublic interface ListContract { @Test default void adds() {} }",
 		"src/testFixtures/java/com/example/fx/Holder.java":       "package com.example.fx;\npublic interface Holder { }",
+		// A test-support project: contract tests in its main source set.
+		"testing/src/main/java/com/example/testing/MainContract.java": "package com.example.testing;\nimport org.junit.jupiter.api.Test;\npublic interface MainContract { @Test default void adds() {} }",
+		"testing/src/main/java/com/example/testing/RepoSpec.java":     "package com.example.testing;\nimport org.junit.jupiter.api.Test;\npublic abstract class RepoSpec { @Test void saves() {} }",
+		"testing/src/main/java/com/example/testing/Layered.java":      "package com.example.testing;\npublic interface Layered extends MainContract { }",
+		"testing/src/main/java/com/example/testing/LibBacked.java":    "package com.example.testing;\npublic abstract class LibBacked extends org.lib.Base { }",
 	}
 	for _, tc := range []struct {
 		name string
@@ -91,6 +96,10 @@ func TestGradleUnits(t *testing.T) {
 		{"implements a plain test-file interface", "PlainImpl.java", "package com.example;\nimport com.example.support.Plain;\nclass PlainImpl implements Plain { public int size() { return 0; } }", false},
 		{"implements a main interface (a fake)", "FakeRepo.java", "package com.example;\nimport com.example.repo.UserRepository;\nclass FakeRepo implements UserRepository {}", false},
 		{"implements a main interface of another project", "FixedClock.java", "package com.example;\nimport com.example.lib.Clock;\nclass FixedClock implements Clock { public long now() { return 0; } }", false},
+		{"implements a contract in a main source set", "MainImpl.java", "package com.example;\nimport com.example.testing.MainContract;\nclass MainImpl implements MainContract {}", true},
+		{"extends a contract class in a main source set", "Spec.java", "package com.example;\nimport com.example.testing.RepoSpec;\nclass Spec extends RepoSpec {}", true},
+		{"main interface extending a main contract", "LayeredImpl.java", "package com.example;\nimport com.example.testing.Layered;\nclass LayeredImpl implements Layered {}", true},
+		{"main class extending a library class", "Backed.java", "package com.example;\nimport com.example.testing.LibBacked;\nclass Backed extends LibBacked {}", false},
 		{"extends a main class", "MemRepo.java", "package com.example;\nimport com.example.repo.AbstractRepo;\nclass MemRepo extends AbstractRepo {}", false},
 		{"implements a plain test-fixtures interface", "Held.java", "package com.example;\nimport com.example.fx.Holder;\nclass Held implements Holder {}", false},
 		{"implements JDK interfaces", "Task.java", "package com.example;\nimport java.util.function.Supplier;\nclass Task implements Runnable, Supplier<String>, java.io.Closeable { public void run() {} public String get() { return \"\"; } public void close() {} }", false},
