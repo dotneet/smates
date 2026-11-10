@@ -1,7 +1,7 @@
 # smates
 
 **Run only the tests your change can affect** — for TypeScript/JavaScript (vitest, jest,
-`node --test`, bun), Go and Python (pytest, unittest, uv), in CI and locally.
+`node --test`, bun), Go, Python (pytest, unittest, uv) and Java (Gradle), in CI and locally.
 
 **Documentation: <https://dotneet.github.io/smates/>** ([日本語](README.ja.md))
 
@@ -59,6 +59,7 @@ and [How smates decides](https://dotneet.github.io/smates/getting-started/how-it
 | TypeScript / JavaScript | vitest, jest, `node --test`, bun | test file |
 | Python | pytest, unittest (uv, virtualenvs) | test file / module |
 | Go | `go test` | package, or test function |
+| Java | Gradle (JUnit Platform) | test class file |
 | anything else | `custom` command | test file |
 
 ## Documentation

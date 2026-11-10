@@ -1,7 +1,7 @@
 # smates
 
-smates runs only the tests your change can affect, for TypeScript/JavaScript, Go and
-Python, in CI and on your machine.
+smates runs only the tests your change can affect, for TypeScript/JavaScript, Go,
+Python and Java (Gradle), in CI and on your machine.
 
 ```text
 $ smates run
@@ -84,6 +84,7 @@ tests, and otherwise runs the affected suites in full. See
 | `pytest` | test file |
 | `unittest` | test module |
 | `go` | package, or test function with `granularity: func` |
+| `gradle` (Java, JUnit Platform) | test class file |
 | `custom` (any command) | test file |
 
 A *test unit* is what smates selects or skips as a whole. Tracing details per runner are

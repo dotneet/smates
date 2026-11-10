@@ -69,7 +69,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 
 | キー | 意味 | 既定値 |
 |---|---|---|
-| `runner` | `vitest`、`jest`、`node`、`bun`、`pytest`、`unittest`、`go`、`custom` のいずれか | 必須 |
+| `runner` | `vitest`、`jest`、`node`、`bun`、`pytest`、`unittest`、`go`、`gradle`、`custom` のいずれか | 必須 |
 | `root` | コマンドを実行するディレクトリ（リポジトリルートからの相対パス） | `.` |
 | `name` | 出力、`--suite`、`--only suite:unit`、`depends_on` で使う名前 | root（root が `.` ならランナー名） |
 
@@ -105,6 +105,7 @@ api	runner=go	root=services/api	units=9	command=go test	tests=runner defaults
 | `go` | `testdata/`、`vendor/`、名前が `_` か `.` で始まるディレクトリを除く `**/*_test.go`（`go test ./...` と同じくスキップ） | スイートの中に入れ子になったモジュールは、`go.work` のワークスペースに含まれるときだけそのスイートに属する |
 | `node` | node の既定パターン（`*.test.*`、`*-test.*`、`*_test.*`、`test-*.*`、`test.*`、`test/` 以下のファイル） | `test/` 以下のヘルパーとフィクスチャは除外 |
 | `bun` | bun の既定パターン（`*.test.*`、`*.spec.*`、`*_test.*`、`*_spec.*`） | |
+| `gradle` | `build/` を除く `src/test/java/**/*.java` | そのうちテストクラスのファイルがユニット（[Java（Gradle）](runners.md#gradle) を参照） |
 
 JS/TS の設定ファイルを解釈できるのは、オブジェクトリテラルを export していて（`module.exports = {...}`、`export default {...}`、`defineConfig({...})`、またはトップレベルの `const` を名前で export）、オプションが文字列・配列・正規表現のリテラルの場合です。
 
@@ -190,6 +191,7 @@ smates は選択したテストファイルをコマンドの末尾に追加し�
 | `vitest` | プロジェクトが vitest の `isolate: false` を設定しているとき |
 | `node` | コマンドが `--test-isolation=none` を使っているとき |
 | `unittest` | 全モジュールを 1 プロセスで実行する代わりに、モジュールごとに別プロセスで実行したいとき |
+| `gradle` | 逆の向きです。smates は既定でテストクラスごとに 1 つの JVM で記録します。`isolate: false` で Gradle 自身のフォークのしかたを保ちます |
 
 `bun` は記録中、常にファイルごとに 1 プロセスで実行します。`record_jobs` は、これらのプロセスを同時にいくつ動かすかの上限です（既定値は bun と、`--runInBand` のようにファイルを直列に実行するコマンドでは 1、それ以外は CPU 数）。Go のスイートでは `record_jobs` の意味が異なります。[Go のテスト関数単位の選択](go-test-functions.md#what-recording-costs) を参照してください。
 

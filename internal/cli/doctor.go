@@ -207,6 +207,9 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkOK, "toolchain-python", "python %s", py)
 		}
 	}
+	if runners["gradle"] {
+		doctorGradle(p, r)
+	}
 	doctorProject(p, func() string { return tool("node", "--version") }, r)
 	if p.state.Empty() {
 		r.add(checkWarn, "state-recorded", "no recorded state at %s: the first `smates run --all` (or a run on the default branch in CI) records it", p.statePath).

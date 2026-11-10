@@ -241,6 +241,12 @@ func TestGradleRecordOldJava(t *testing.T) {
 	if !strings.Contains(why, "Java 11") || !obs["a"].NoTrace {
 		t.Errorf("why = %q, obs %+v", why, obs["a"])
 	}
+	// An executable the task names, whose version the init script could not tell.
+	custom := t.TempDir()
+	testutil.Write(t, custom, "facts-_app_test.json", `{"task":":app:test","java":"/opt/jvm/bin/java","javaVersion":0,"jfr":false,"projects":[]}`)
+	if why := (gradle{}).record(context.Background(), rc, custom, obs, nil, nil); !strings.Contains(why, "cannot tell") || !obs["a"].NoTrace {
+		t.Errorf("unknown version: %q", why)
+	}
 	if why := (gradle{}).record(context.Background(), rc, t.TempDir(), obs, nil, nil); !strings.Contains(why, "no Test task") {
 		t.Errorf("no facts: %q", why)
 	}

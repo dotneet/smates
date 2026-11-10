@@ -66,7 +66,7 @@ type Suite struct {
 	Name string `yaml:"name"`
 	// Root is the directory (repo-relative) the command runs in.
 	Root string `yaml:"root"`
-	// Runner: vitest | jest | node | bun | pytest | go | custom
+	// Runner: vitest | jest | node | bun | pytest | unittest | go | gradle | custom
 	Runner string `yaml:"runner"`
 	// Tests are globs (relative to Root) that identify test files.
 	Tests   []string `yaml:"tests"`

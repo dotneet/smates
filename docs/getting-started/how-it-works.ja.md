@@ -29,7 +29,7 @@ package.json, vitest.config.ts, pnpm-lock.yaml   スイートの入力
 | 何も変更していないが、前回失敗した | 選択: `[failed: last run: fail]` |
 
 *テストユニット* は、smates がまとめて選択・スキップする単位です。テストファイル、
-`unittest` ならテストモジュール、Go ならパッケージ（[`granularity: func`](../guides/go-test-functions.md)
+`unittest` ならテストモジュール、Gradle ならテストクラスのファイル、Go ならパッケージ（[`granularity: func`](../guides/go-test-functions.md)
 ならテスト関数）です。
 
 ## テストが依存するもの { #what-a-test-depends-on }
@@ -175,6 +175,7 @@ smates はいつものテストコマンドを実行し、その実行の間だ�
 | Bun | ファイルごとの `bun test --coverage`、モジュールキャッシュ、`node:fs`・`Bun.file`・`Bun.Glob` の preload フック |
 | Python（pytest、unittest） | `sys.monitoring`（3.12 以降）または `sys.setprofile` と audit フック。テスト・fixture・モジュールごと |
 | Go | 静的な import の閉包（Go では正確）と、`go test -exec` 経由でテストログが記録するファイルと環境変数 |
+| Java（Gradle） | テストクラスごとの JVM での JDK Flight Recorder（ロードしたクラス、読み取ったファイル、起動したプロセス）と、Java の静的グラフ |
 | 子プロセス | Node、Bun、Python の子プロセスは自分自身をトレースします。シェルスクリプト、`grep`、`cat` などはコマンドラインから解析し、Go のテストの子プロセスは Go のテストログから追跡します（[詳細](../guides/runners.md#child-processes)） |
 
 カバレッジツールやパッケージマネージャーを含むランナーごとの詳細は

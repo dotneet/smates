@@ -28,7 +28,7 @@ Now you change files:
 | nothing, but it failed last time | selected: `[failed: last run: fail]` |
 
 A *test unit* is what smates selects or skips as a whole: a test file, a test module for
-`unittest`, a package for Go (or a test function with
+`unittest`, a test class file for Gradle, a package for Go (or a test function with
 [`granularity: func`](../guides/go-test-functions.md)).
 
 ## What a test depends on
@@ -172,6 +172,7 @@ run.
 | Bun | `bun test --coverage` per file, the module cache, and preload hooks for `node:fs`, `Bun.file`, `Bun.Glob` |
 | Python (pytest, unittest) | `sys.monitoring` (3.12+) or `sys.setprofile`, plus audit hooks; per test, fixture and module |
 | Go | The static import closure (exact for Go), plus the files and variables the test log records through `go test -exec` |
+| Java (Gradle) | The JDK Flight Recorder in a JVM per test class (classes loaded, files read, processes started), plus the static Java graph |
 | Child processes | Node, Bun and Python children trace themselves; shell scripts, `grep`, `cat` and similar are analyzed from their command line; children of Go tests through Go's test log ([details](../guides/runners.md#child-processes)) |
 
 Per-runner details, including coverage tools and package managers, are in

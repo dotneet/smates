@@ -213,6 +213,29 @@ set it in the environment or in the suite's `env:` instead.
 **c8** writes no `coverage/tmp` while smates records, so a later `c8 report` has
 nothing to read. Workaround: let c8 report in the same command.
 
+**Gradle: Java tests only.** Test sources in Kotlin, Groovy or Scala are no units: a
+selective run's class filter leaves them out, so they run only when the suite runs in
+full (`smates doctor` warns). A change to a Kotlin source is an orphan: smates maps the
+classes a test loads to Java sources only. Maven builds
+have no runner (`smates init` says so and suggests an `ignore:` glob).
+
+**Gradle: what the flight recorder does not see.** Directory listings and existence
+checks that read no file (a test that only lists a directory, or checks that a path is
+missing), and environment variables (JFR has no event for `System.getenv`). A file read
+adds its directory's listing, which covers the common case of a test that lists a
+directory and reads its files. A child process's arguments are recorded joined by
+spaces, so an argument containing a space is split.
+Workaround: a `rules:` entry for the directory or file, or `env:` in the suite.
+
+**Gradle: recording needs Java 17 in the test JVM** and costs a JVM start per test class
+(about a second each). Below Java 17 the tests run unrecorded and every class runs every
+time. Gradle before 8.14 does not report assumption failures to listeners: a class with
+a skipped test is never proven.
+
+**Gradle: only test execution is saved.** Gradle still starts, configures the build and
+compiles what changed on every run. See
+[What it saves](../guides/runners.md#what-gradle-saves).
+
 See [Languages and runners](../guides/runners.md).
 
 ## Files and file systems

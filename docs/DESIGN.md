@@ -889,6 +889,33 @@ build (a project's tests may depend on any other project), version catalogs, the
 and its properties, `buildSrc/**`, and the trees of the builds `includeBuild` names as a
 string literal; an `includeBuild` of anything else makes every file of the build an input.
 
+Detection (`internal/detect/gradle.go`) writes a `gradle` suite per project with a `.java`
+file under `src/test/java`. A build is a directory holding `settings.gradle(.kts)`, or a
+build script with no settings file at or above it (outside `testdata/` and `vendor/`). Its
+projects are the root project and the paths the settings' `include` calls name as string
+literals (with their parents: `:a:b` includes `:a`), in their default directories or
+where a `project(':x').projectDir = file('dir')` with literals moves them; such a moved
+project gets the command naming its task, as the default command assumes the path from the
+directory. An `include` of anything but literals, or a `projectDir` set any other way,
+makes every directory of the build with a build script a project at the path its directory
+names, with a note to check the commands (fail toward a suite: a directory that is no
+project of the build fails its suite's command rather than leaving tests unrun). Detection
+also notes a project whose tests are Kotlin, Groovy or Scala only (no suite) or in part
+(those classes are no units), and the topmost `pom.xml` of a tree with tests (no Maven
+runner); both suggest an `ignore:` glob for the tree, as every change there is otherwise an
+orphan that runs every suite.
+
+`smates doctor` checks, per launcher, that the command's wrapper exists (or `gradle` is on
+`PATH`) and the Gradle version (the wrapper's `distributionUrl`, else `gradle --version`;
+before 8.14 assumption failures are not reported), per build the Java version the tests
+run on (the highest `JavaLanguageVersion.of(n)` in its build scripts, else `JAVA_HOME`'s or
+`PATH`'s `java -version`; recording needs 17, and a missing JDK fails the build before any
+test, which reads as every class failing), and per suite with a config file the test
+sources in other JVM languages. `smates init --github` sets up `actions/setup-java` (from
+`.java-version`, else the toolchain when it is 17 or later, else 21), unless mise pins
+Java, and `gradle/actions/setup-gradle` (with `gradle-version: current` when the
+repository has no wrapper, so that `gradle` is on `PATH`).
+
 Static analysis (fast Go scanners, no toolchain): JS/TS imports, requires, dynamic imports
 with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, import.meta.url)`,
 mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
@@ -1351,7 +1378,7 @@ not available).
 
 - Unit tests for every package (`go test -race ./...`).
 - End-to-end fixtures per ecosystem (`e2e/fixtures/*`: vitest, pnpm monorepo, jest, node:test,
-  bun, pytest/uv, Go, polyglot) full of dependencies static analysis misses.
+  bun, pytest/uv, Go, Gradle, polyglot) full of dependencies static analysis misses.
   `TestScenarios` checks expected selections and shadow-mode escapes per scenario, and that
   every test a scenario breaks gets a failure hint naming the edited file;
   `TestMutations` breaks every source, data and script file in turn and requires that every

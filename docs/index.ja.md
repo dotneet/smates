@@ -1,7 +1,7 @@
 # smates { #smates }
 
 smates は、変更が影響しうるテストだけを実行するツールです。TypeScript/JavaScript、Go、
-Python に対応し、CI でも手元のマシンでも使えます。
+Python、Java（Gradle）に対応し、CI でも手元のマシンでも使えます。
 
 ```text
 $ smates run
@@ -83,6 +83,7 @@ smates は各テストが実際に使ったものを記録し、次の実行で�
 | `pytest` | テストファイル |
 | `unittest` | テストモジュール |
 | `go` | パッケージ（`granularity: func` ならテスト関数） |
+| `gradle`（Java、JUnit Platform） | テストクラスのファイル |
 | `custom`（任意のコマンド） | テストファイル |
 
 *テストユニット* は、smates がまとめて選択・スキップする単位です。ランナーごとのトレースの

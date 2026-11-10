@@ -20,7 +20,8 @@
 // test of the fixture running at the same time (at most SMATES_E2E_REPOS, which defaults
 // to -parallel up to 4).
 //
-// Run with: go test -tags e2e ./e2e/ (needs node 20+, npm, pnpm, bun, go, uv on PATH;
+// Run with: go test -tags e2e ./e2e/ (needs node 20+, npm, pnpm, bun, go, uv, a JDK 17+
+// and gradle on PATH;
 // fixtures whose tools are missing are skipped). Set SMATES_E2E_FIXTURE to a fixture
 // name, or a comma-separated list of them, to run only those; "-name" excludes one.
 package e2e
@@ -36,6 +37,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -809,6 +811,21 @@ func mutation(f string) (func([]byte) []byte, bool) {
 			return nil, false
 		}
 		return func(b []byte) []byte { return append(b, []byte("\nvar _ = smatesMutationUndefined\n")...) }, true
+	case ".java":
+		if strings.Contains(f, "/src/test/") && javaTestName(base) {
+			return nil, false
+		}
+		// A static initializer that throws, in the file's last top-level class: loading
+		// the class fails, compiling still works (a compile error would fail every test
+		// of the build). The fixtures mutate no interface or enum, where it would not
+		// compile.
+		return func(b []byte) []byte {
+			i := bytes.LastIndexByte(b, '}')
+			if i < 0 {
+				return b
+			}
+			return slices.Concat(b[:i], []byte("    static { if (true) throw new RuntimeException(\"SMATES_MUTATION\"); }\n"), b[i:])
+		}, true
 	case ".sh":
 		return func(b []byte) []byte { return append(b, []byte("\nexit 3\n")...) }, true
 	case ".md":
@@ -816,14 +833,26 @@ func mutation(f string) (func([]byte) []byte, bool) {
 			return nil, false
 		}
 		return func(b []byte) []byte { return []byte("SMATES_MUTATION\n") }, true
-	case ".json", ".yaml", ".yml", ".txt", ".csv", ".sql", ".toml", ".html", ".tmpl", ".env":
+	case ".json", ".yaml", ".yml", ".txt", ".csv", ".sql", ".toml", ".html", ".tmpl", ".env", ".properties":
 		switch base {
-		case "package.json", "package-lock.json", "tsconfig.json", "pyproject.toml", "uv.lock", "go.mod", "go.sum", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock":
+		case "gradle.properties", "gradle-wrapper.properties",
+			"package.json", "package-lock.json", "tsconfig.json", "pyproject.toml", "uv.lock", "go.mod", "go.sum", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock":
 			return nil, false
 		}
 		return func(b []byte) []byte { return []byte("SMATES_MUTATION{{{\n") }, true
 	}
 	return nil, false
+}
+
+// javaTestName reports whether a Java file is named like a test class.
+func javaTestName(base string) bool {
+	name := strings.TrimSuffix(base, ".java")
+	for _, s := range []string{"Test", "Tests", "TestCase", "IT"} {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTestName(base string) bool {

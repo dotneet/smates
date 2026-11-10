@@ -198,6 +198,7 @@ smates doctor [flags]
 | `suite-launcher`、`suite-dependencies-installed` | スイートのコマンドを起動できること、`node_modules` がインストールされていること |
 | `toolchain-node` | vitest、jest、node のスイートがあるとき: `node` が `PATH` にあり、バージョン 18 以上であること（トレースに必要） |
 | `toolchain-go`、`toolchain-bun`、`toolchain-python`、`suite-engines-node` | ツールチェーンと、`engines.node` に対する Node のバージョン |
+| `toolchain-gradle`、`toolchain-java`、`suite-gradle-other-tests` | Gradle のスイート: wrapper（または `PATH` 上の `gradle`）とそのバージョン（8.14 以降は assumption による中断を報告します）、テストが動く Java のバージョン（ビルドスクリプトの toolchain、なければ `JAVA_HOME` か `java`。記録には 17 以上が必要）、ユニットにならない Kotlin、Groovy、Scala のテストソース |
 | `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL（その他のサーバーは、スイートが実行するファイルのうち、ポート 1024 以上で、ファイル自身がサーバーを起動も横取りもしていないもの）、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
 | `suite-go-granularity` | 1 つのパッケージがテスト関数の大半を持つのに、パッケージ単位で選択している Go スイート（`granularity: func` を提案） |
