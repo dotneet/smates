@@ -85,21 +85,30 @@ func TestRelThroughSymlink(t *testing.T) {
 	if err := os.Symlink(root, link); err != nil {
 		t.Fatal(err)
 	}
-	for in, want := range map[string]string{
-		filepath.Join(link, "pkg", "a.go"):           "pkg/a.go",
-		filepath.Join(link, "pkg", "missing.json"):   "pkg/missing.json", // probe of a file that does not exist yet
-		filepath.Join(link, "newdir", "deep", "x.y"): "newdir/deep/x.y",
-	} {
-		if got, ok := Rel(root, in); !ok || got != want {
-			t.Errorf("Rel(%q) = %q %v, want %q", in, got, ok, want)
-		}
-	}
 	// A symlink inside the repository pointing outside of it is outside.
 	out := t.TempDir()
 	testutil.Write(t, out, "secret", "x")
-	os.Symlink(out, filepath.Join(root, "ext"))
-	if got, ok := Rel(root, filepath.Join(root, "ext", "secret")); ok {
-		t.Errorf("symlink to outside resolved to %q", got)
+	if err := os.Symlink(out, filepath.Join(root, "ext")); err != nil {
+		t.Fatal(err)
+	}
+	for _, base := range []string{root, link} {
+		for _, tc := range []struct {
+			name, in, want string
+			ok             bool
+		}{
+			{"linked file", filepath.Join(link, "pkg", "a.go"), "pkg/a.go", true},
+			{"resolved file", filepath.Join(root, "pkg", "a.go"), "pkg/a.go", true},
+			{"missing file", filepath.Join(link, "pkg", "missing.json"), "pkg/missing.json", true},
+			{"missing ancestors", filepath.Join(link, "newdir", "deep", "x.y"), "newdir/deep/x.y", true},
+			{"outside link", filepath.Join(link, "ext", "secret"), "", false},
+			{"root itself", link, "", false},
+		} {
+			t.Run(filepath.Base(base)+"/"+tc.name, func(t *testing.T) {
+				if got, ok := Rel(base, tc.in); got != tc.want || ok != tc.ok {
+					t.Errorf("Rel(%q, %q) = %q %v, want %q %v", base, tc.in, got, ok, tc.want, tc.ok)
+				}
+			})
+		}
 	}
 }
 

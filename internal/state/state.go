@@ -317,7 +317,18 @@ func Read(r io.Reader, gz bool) (*State, error) {
 		r = zr
 	}
 	var d diskState
-	if err := json.NewDecoder(r).Decode(&d); err != nil {
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(&d); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
+	}
+	// Read through EOF: Decode can finish before the underlying reader reports a
+	// damaged gzip trailer. A state contains exactly one JSON value, followed only
+	// by whitespace; a second value or any other trailing data is corrupt too.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
 		return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
 	}
 	return fromDisk(&d)

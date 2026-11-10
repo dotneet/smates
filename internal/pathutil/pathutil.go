@@ -40,6 +40,7 @@ func Rel(root, p string) (string, bool) {
 	if !filepath.IsAbs(p) || strings.ContainsRune(p, 0) || strings.Contains(filepath.ToSlash(p), "/node:") {
 		return "", false
 	}
+	root = resolve(filepath.Clean(root))
 	p = resolve(filepath.Clean(p))
 	rel, err := filepath.Rel(root, p)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

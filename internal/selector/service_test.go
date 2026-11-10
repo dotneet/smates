@@ -8,9 +8,156 @@ import (
 	"testing"
 
 	"github.com/dotneet/smates/internal/config"
+	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/state"
 )
+
+func TestPathsID(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		left, right []string
+	}{
+		{"one glob versus two", []string{"a,b"}, []string{"a", "b"}},
+		{"empty list versus empty glob", nil, []string{""}},
+		{"comma in first versus last glob", []string{"a,b", "c"}, []string{"a", "b,c"}},
+		{"empty segments", []string{",a", "b"}, []string{"", "a,b"}},
+		{"trailing comma", []string{"a,b", ""}, []string{"a", "b,"}},
+		{"wildcards", []string{"worker,first/**"}, []string{"worker", "first/**"}},
+		{"quotes and newlines", []string{"a,\"b", "c\nd"}, []string{"a", "\"b,c\nd"}},
+		{"encoding marker in a glob", []string{"a,b"}, []string{"paths-v2:3:a,b"}},
+		{"invalid UTF-8 remains distinct", []string{"a,\xff"}, []string{"a,\xfe"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if pathsID(c.left) == pathsID(c.right) {
+				t.Errorf("different lists share an ID: %q and %q", c.left, c.right)
+			}
+		})
+	}
+	for _, globs := range [][]string{{"a"}, {"quotes\"and\nnewlines"}} {
+		if got, want := pathsID(globs), "paths:"+strings.Join(globs, ","); got != want {
+			t.Errorf("single comma-free key changed: %q, want %q", got, want)
+		}
+	}
+}
+
+func TestSelectDependsOnCommaGlobs(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		left, right []string
+		changed     string
+	}{
+		{"one versus two", []string{"a,b"}, []string{"a", "b"}, "a,b"},
+		{"first versus last", []string{"a,b", "c"}, []string{"a", "b,c"}, "a,b"},
+		{"last versus first", []string{"a", "b,c"}, []string{"a,b", "c"}, "b,c"},
+		{"wildcards", []string{"worker,first/**"}, []string{"worker", "first/**"}, "worker,first/job.py"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := serviceFixture(t, []config.Dependency{
+				{Paths: c.left},
+				{Paths: c.right, Tests: []string{"admin/**"}},
+			}, nil)
+			f.write(c.changed, "one")
+			st := f.record(nil, nil)
+			if got := e2eVia(f.sel(st, nil)); len(got) != 0 {
+				t.Fatalf("unchanged inputs select tests: %v", got)
+			}
+			f.write(c.changed, "two")
+			res := f.sel(st, nil)
+			if got := e2eVia(res); len(got) != 2 {
+				t.Errorf("changed declared input must select both e2e tests: %v", got)
+			}
+			if len(res.Orphans) != 0 {
+				t.Errorf("declared input became an orphan: %v", res.Orphans)
+			}
+		})
+	}
+}
+
+func TestSelectDependsOnLegacyCommaKeys(t *testing.T) {
+	for _, paths := range [][]string{{"worker/**"}, {"worker/**", "other/**"}, {"worker,first/**"}, {"worker,first/**", "other/**"}} {
+		t.Run(strings.Join(paths, " + "), func(t *testing.T) {
+			f := serviceFixture(t, []config.Dependency{{Paths: paths}}, nil)
+			f.write("worker,first/job.py", "one")
+			st := f.record(nil, nil)
+			key := depkey.Set(pathsID(paths))
+			oldKey := depkey.Set("paths:" + strings.Join(paths, ","))
+			for _, e := range st.Suites["e2e"].Tests {
+				v := e.Deps[key]
+				delete(e.Deps, key)
+				e.Deps[oldKey] = v
+			}
+			res := f.sel(st, nil)
+			want := 2
+			if key == oldKey {
+				want = 0 // existing unambiguous recordings stay usable
+			}
+			if got := e2eVia(res); len(got) != want {
+				t.Fatalf("legacy key selection: %v, want %d tests", got, want)
+			}
+			obs := map[string]*runner.Observation{}
+			for unit := range st.Suites["e2e"].Tests {
+				obs[unit] = &runner.Observation{Status: state.Pass}
+			}
+			sr := res.SuiteByName("e2e")
+			Record(st, sr, obs, NewHasher(f.snap()).WithConfig(f.cfg).ForSuite(sr.Suite), RecordOptions{})
+			for unit, e := range st.Suites["e2e"].Tests {
+				if _, ok := e.Deps[key]; !ok {
+					t.Errorf("%s: new key missing from recording", unit)
+				}
+				if _, ok := e.Deps[oldKey]; oldKey != key && ok {
+					t.Errorf("%s: obsolete key retained", unit)
+				}
+			}
+			if got := e2eVia(f.sel(st, nil)); len(got) != 0 {
+				t.Errorf("fresh recording still selects unchanged tests: %v", got)
+			}
+		})
+	}
+}
+
+func TestSelectDependsOnOverwrittenLegacyKeys(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		left, right []string
+		removed     string
+	}{
+		{"comma-free list overwritten by literal", []string{"a", "b"}, []string{"a,b"}, "a"},
+		{"comma-free globs overwritten by literal", []string{"worker/**", "other/**"}, []string{"worker/**,other/**"}, "worker/job.py"},
+		{"literal overwritten by comma-free list", []string{"a,b"}, []string{"a", "b"}, "a,b"},
+		{"comma in either list", []string{"a,b", "c"}, []string{"a", "b,c"}, "a,b"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := serviceFixture(t, []config.Dependency{
+				{Paths: c.left},
+				{Paths: c.right, Tests: []string{"admin/**"}},
+			}, nil)
+			f.write(c.removed, "one")
+			st := f.record(nil, nil)
+			sr := f.sel(st, nil).SuiteByName("e2e")
+			h := NewHasher(f.snap()).WithConfig(f.cfg).ForSuite(sr.Suite).WithSets(sr.Services)
+			// Before the fix, the last declaration's hash overwrote the first,
+			// including in tests the last declaration did not apply to.
+			oldKey := depkey.Set("paths:" + strings.Join(c.left, ","))
+			wrong := h.Hash(sr.Services[1].Key)
+			for _, e := range st.Suites["e2e"].Tests {
+				for key := range e.Deps {
+					if depkey.IsSet(key) {
+						delete(e.Deps, key)
+					}
+				}
+				e.Deps[oldKey] = wrong
+			}
+			// Removing the first set's sole file makes its new correct hash equal
+			// the old wrong empty-set hash. That equality must never skip a test.
+			f.remove(c.removed)
+			res := f.sel(st, nil)
+			if got := e2eVia(res); len(got) != 2 {
+				t.Errorf("overwritten legacy hash skipped a changed dependency: %v", got)
+			}
+		})
+	}
+}
 
 // serviceFixture: Playwright-style tests under e2e/ exercise a Go server under
 // backend/ (another process), plus a worker and docker-compose.yml.
