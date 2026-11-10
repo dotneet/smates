@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -75,7 +77,8 @@ func gradleBuildRoot(repoRoot, root string) string {
 
 // gradleCommand is the default command of a suite rooted at root: the nearest wrapper
 // between root and the repository root (else gradle on PATH) with the project's test
-// task, by its path from the build root (":app:test"; "test" for the root project).
+// task, by its path from the build root (":app:test"; ":test" for the root project: a
+// bare "test" would run the test task of every project of the build).
 func gradleCommand(repoRoot, root, build string) string {
 	exe := "gradle"
 	name := "gradlew"
@@ -106,7 +109,7 @@ func gradleCommand(repoRoot, root, build string) string {
 func gradleTaskPath(root, build, task string) string {
 	rel := pathutil.RelTo(root, build)
 	if rel == "." || !pathutil.Under(root, build) {
-		return task
+		return ":" + task
 	}
 	return ":" + strings.ReplaceAll(rel, "/", ":") + ":" + task
 }
@@ -138,8 +141,9 @@ var (
 	includeBuildLiteral = regexp.MustCompile(`\bincludeBuild\s*\(?\s*(?:file\s*\(\s*)?(['"])([^'"$]+)['"]`)
 )
 
-// includedBuilds returns the trees (dir/**, relative to the build root) of the builds
-// the settings include with includeBuild. One whose directory is not a string literal
+// includedBuilds returns the trees (dir/**, relative to the build root, "../shared/**"
+// for a build beside it) of the builds in the repository the settings include with
+// includeBuild. One whose directory is not a string literal
 // makes the whole build an input ("**"): smates cannot tell which files it holds.
 func includedBuilds(repoRoot, build string) []string {
 	var out []string
@@ -154,13 +158,21 @@ func includedBuilds(repoRoot, build string) []string {
 			return []string{"**"}
 		}
 		for _, m := range lits {
-			dir := pathutil.Join(m[2])
-			if dir == "." || strings.HasPrefix(dir, "../") || path.IsAbs(dir) {
-				// The build itself, or a directory outside it: every file the input
-				// glob can name (outside the repository there are none to track).
-				if dir == "." {
-					return []string{"**"}
+			dir := filepath.ToSlash(m[2])
+			if filepath.IsAbs(m[2]) || path.IsAbs(dir) {
+				rel, err := filepath.Rel(filepath.Join(repoRoot, filepath.FromSlash(build)), filepath.Clean(m[2]))
+				if err != nil {
+					continue
 				}
+				dir = filepath.ToSlash(rel)
+			}
+			dir = pathutil.Join(dir)
+			if dir == "." {
+				return []string{"**"}
+			}
+			// A build outside this one ("../shared", a sibling in the repository) is an
+			// input like any other; only one outside the repository has no file to track.
+			if r := pathutil.Join(build, dir); r == ".." || strings.HasPrefix(r, "../") {
 				continue
 			}
 			out = append(out, dir+"/**")
@@ -189,13 +201,16 @@ var testAnnotations = []string{
 // unit even when no annotation smates knows marks it (an engine's own annotation).
 var testClassSuffixes = []string{"Test", "Tests", "TestCase", "IT", "ITCase"}
 
-// javaLang are java.lang classes a test-support class may extend: such a class runs no
-// test. Any other superclass smates cannot find among the suite's test files may be a
+// javaLang are java.lang classes a test-support class may extend, and interfaces it may
+// implement: such a type runs no test. Any other superclass smates cannot find among the suite's test files may be a
 // test base class of a library, and keeps the class a unit.
 var javaLang = map[string]bool{
 	"Object": true, "Exception": true, "RuntimeException": true, "Error": true, "Throwable": true,
 	"Thread": true, "Number": true, "IllegalArgumentException": true, "IllegalStateException": true,
 	"AssertionError": true, "ClassLoader": true, "UnsupportedOperationException": true,
+	// Interfaces.
+	"Runnable": true, "Comparable": true, "AutoCloseable": true, "Iterable": true, "Cloneable": true,
+	"CharSequence": true, "Appendable": true, "Readable": true,
 }
 
 func (gradle) Units(s *Suite, testFiles []string) []string {
@@ -206,22 +221,59 @@ func (gradle) Units(s *Suite, testFiles []string) []string {
 		b, _ := os.ReadFile(filepath.Join(s.RepoRoot, filepath.FromSlash(f)))
 		return b
 	}
-	return unitsAreFiles(gradleUnits(testFiles, read))
+	sources := func() []string { return javaSources(s.RepoRoot) }
+	return unitsAreFiles(gradleUnits(testFiles, read, sources))
+}
+
+// javaSources lists the repository's .java files (repo-relative), without build
+// outputs, dependencies and hidden directories.
+func javaSources(root string) []string {
+	if root == "" {
+		return nil
+	}
+	var out []string
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if n := d.Name(); p != root && (strings.HasPrefix(n, ".") || n == "build" || n == "node_modules" || n == "target") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(p, ".java") {
+			if rel, err := filepath.Rel(root, p); err == nil {
+				out = append(out, filepath.ToSlash(rel))
+			}
+		}
+		return nil
+	})
+	return out
 }
 
 // gradleUnits returns the test files that declare a concrete top-level class that may
 // run tests: one carrying a test annotation (testAnnotations, and annotations declared
 // in the test files that carry one: composed annotations) or named like a test
-// (testClassSuffixes), or extending a class that may run tests. A superclass found
-// among the files is followed; one that is not (a library's) keeps the class a unit,
-// unless it is a java.lang class or imported from java.* or javax.*. A file that
-// cannot be read is a unit: smates cannot tell. Other files are test support code,
-// dependencies of the units that use them.
-func gradleUnits(files []string, read func(string) []byte) []string {
+// (testClassSuffixes), or with a supertype (its superclass, or an interface it
+// implements: JUnit Jupiter runs an interface's @Test default methods) that may run
+// tests. A file that cannot be read is a unit: smates cannot tell. Other files are test
+// support code, dependencies of the units that use them.
+//
+// A supertype is looked up among the test files, then among the repository's other Java
+// sources (sources lists them; it is called once, when needed): one in a main source set
+// (src/main/) runs no test, as the test framework is not on its classpath; one in another
+// source set (src/testFixtures/) is followed like a test file. One found nowhere keeps the
+// class a unit (a library's test base class or contract), unless it is the JDK's
+// (qualified or imported from java.* or javax.*, or a java.lang class neither imported nor
+// declared in the file's package) or JUnit's own (org.junit.*: callbacks, providers).
+func gradleUnits(files []string, read func(string) []byte, sources func() []string) []string {
 	infos := make(map[string]*java.Info, len(files))
 	types := map[string]string{} // qualified top-level type -> file
+	isTest := make(map[string]bool, len(files))
 	var units []string
 	for _, f := range files {
+		isTest[f] = true
 		src := read(f)
 		if src == nil {
 			units = append(units, f)
@@ -250,8 +302,66 @@ func gradleUnits(files []string, read func(string) []byte) []string {
 			}
 		}
 	}
+	// others maps the qualified name a source file's path suggests (the path below its
+	// java/ directory) to the files outside the test files with that name.
+	var others map[string][]string
+	find := func(q string) (string, java.Decl, bool) {
+		if f, ok := types[q]; ok {
+			for _, d := range infos[f].Decls {
+				if qualifyJava(infos[f].Package, d.Name) == q {
+					return f, d, true
+				}
+			}
+		}
+		if others == nil {
+			others = map[string][]string{}
+			if sources != nil {
+				for _, f := range sources() {
+					if isTest[f] {
+						continue
+					}
+					i := strings.LastIndex("/"+f, "/java/")
+					if i < 0 {
+						continue
+					}
+					name := strings.ReplaceAll(strings.TrimSuffix(f[i+5:], ".java"), "/", ".")
+					others[name] = append(others[name], f)
+				}
+			}
+		}
+		for _, f := range others[q] {
+			in := infos[f]
+			if in == nil {
+				src := read(f)
+				if src == nil {
+					continue
+				}
+				in = java.Describe(src)
+				infos[f] = in
+			}
+			for _, d := range in.Decls {
+				if qualifyJava(in.Package, d.Name) == q {
+					return f, d, true
+				}
+			}
+		}
+		return "", java.Decl{}, false
+	}
 	memo := map[string]bool{}
 	var runs func(f string, d java.Decl) bool
+	// superRuns reports whether a supertype, as file in writes it, may run tests.
+	superRuns := func(in *java.Info, name string) bool {
+		for _, q := range in.Resolve(name) {
+			if f, d, ok := find(q); ok {
+				if strings.HasPrefix(f, "src/main/") || strings.Contains(f, "/src/main/") {
+					return false
+				}
+				return runs(f, d)
+			}
+		}
+		lib := func(prefix string) bool { return strings.HasPrefix(name, prefix) || in.Imported(name, prefix) }
+		return !(lib("java.") || lib("javax.") || lib("org.junit.") || javaLang[name] && !in.Imported(name, ""))
+	}
 	runs = func(f string, d java.Decl) bool {
 		in := infos[f]
 		key := f + "#" + d.Name
@@ -259,7 +369,8 @@ func gradleUnits(files []string, read func(string) []byte) []string {
 			return v
 		}
 		memo[key] = true // a cycle (not valid Java) counts as a test: smates cannot tell
-		v := annotated(in, anns) || testName(d.Name) || d.Extends != "" && superRuns(in, d.Extends, types, infos, runs)
+		v := annotated(in, anns) || testName(d.Name) || d.Extends != "" && superRuns(in, d.Extends) ||
+			slices.ContainsFunc(d.Interfaces, func(n string) bool { return superRuns(in, n) })
 		memo[key] = v
 		return v
 	}
@@ -276,28 +387,6 @@ func gradleUnits(files []string, read func(string) []byte) []string {
 		}
 	}
 	return units
-}
-
-// superRuns reports whether superclass name, as file in writes it, may run tests: the
-// class it resolves to among the test files does, or it is none of them and not a JDK
-// class (qualified or imported from java.* or javax.*, or a java.lang class neither
-// imported nor declared in the file's package).
-func superRuns(in *java.Info, name string, types map[string]string, infos map[string]*java.Info, runs func(string, java.Decl) bool) bool {
-	for _, q := range in.Resolve(name) {
-		f, ok := types[q]
-		if !ok {
-			continue
-		}
-		for _, d := range infos[f].Decls {
-			if qualifyJava(infos[f].Package, d.Name) == q {
-				return runs(f, d)
-			}
-		}
-	}
-	jdk := strings.HasPrefix(name, "java.") || strings.HasPrefix(name, "javax.") ||
-		in.Imported(name, "java.") || in.Imported(name, "javax.") ||
-		javaLang[name] && !in.Imported(name, "")
-	return !jdk
 }
 
 func annotated(in *java.Info, anns map[string]bool) bool {
