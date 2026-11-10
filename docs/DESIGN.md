@@ -805,7 +805,10 @@ unless it is the JDK's (`java.*`, `javax.*`, a `java.lang` type neither imported
 declared in the package) or JUnit's own (`org.junit.*`: extensions, argument providers),
 or the supertype of production code (`src/main/`) that carries no test annotation:
 production code extends libraries, not their tests, so a fake implementing a repository
-interface that extends a library's is no unit. A file that cannot be read is a unit. The other files are test
+interface that extends a library's is no unit, unless the supertype looks like a test
+base (a test-like name, or a package of `junit.`, `org.testng.`,
+`org.springframework.test.`, `org.spockframework.`: JUnit 3's `TestCase` carries no
+annotation). A file that cannot be read is a unit. The other files are test
 support code, dependencies of the units that use them. `@Nested` classes belong to the
 file of their outer class, and every top-level class a unit declares (a package-private
 secondary class too) is its own.
@@ -868,7 +871,8 @@ does (a library; JDK, Gradle and JUnit classes are not looked up). A read below 
 set's resources output maps to the file of the same path in its resource directories (all
 of their trees when none has it: a generated resource), a read of a project's jar to that
 project's main resource trees (`dir/**`: JFR sees the jar, not the entry). Resources are
-matched before class output directories, as a build may put them there; below a class
+matched before class output directories, as a build may put them there (a `.class` file
+there is no resource); below a class
 output directory a `.class` read maps as its class does, and any other file (an annotation
 processor's `META-INF/services`) to its project's tree. Other reads in the repository stay
 as they are, relative ones resolved against the task's working directory. JFR has no
@@ -879,9 +883,9 @@ A started process goes through the command-line analysis of "Subprocesses smates
 trace" (`trace.CommandLineDeps`): JFR joins the arguments with spaces, so the words are
 split again and a shell's `-c` script is the rest of the line; a process started without
 a directory runs in the task's working directory. A Node, Bun or Python process that
-traced itself belongs to the JVM that started it (its pid, or through traced ancestors;
-when JVMs that ran one after the other started processes with the same pid, to all of
-them), otherwise to every unit of the run. Recordings are named by pid and start time
+traced itself belongs to the JVMs that started it: the union of those whose recorded
+processes have its pid, its parent's pid, and those of its traced ancestors (pids are
+reused across the JVMs that run one after the other, so each match can only add), otherwise to every unit of the run. Recordings are named by pid and start time
 (`%p-%t`), so a reused pid does not overwrite an earlier JVM's file. A unit that ran in a JVM whose recording is missing
 or unreadable stays untraced (`Observation.NoTrace`): its pass is recorded as `unknown`
 and it runs again, with a warning. Environment variables are not recorded (JFR has no

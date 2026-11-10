@@ -66,7 +66,9 @@ func gradleRecordRepo(t *testing.T) (string, []gradleFacts, *gradleMapper) {
 		"lib/build/classes/java/main/com/example/lib/gen/FooProto.class": "\xca\xfe",
 		"app/build/classes/java/main/com/example/Store.class":            "\xca\xfe",
 		// A build whose resources go to its class output directory.
-		"merged/src/main/resources/conf.txt": "c",
+		"merged/src/main/resources/conf.txt":                   "c",
+		"merged/src/main/java/com/example/m/X.java":            "package com.example.m;\npublic class X {}",
+		"merged/build/classes/java/main/com/example/m/X.class": "\xca\xfe",
 	}
 	testutil.WriteTree(t, root, files)
 	var java []string
@@ -143,6 +145,7 @@ func TestGradleMapperRead(t *testing.T) {
 		{"class file without a source: its project", filepath.Join(root, "lib/build/classes/java/main/com/example/lib/gen/FooProto.class"), []string{"lib/**"}},
 		{"another file in a class output directory: its project", filepath.Join(root, "app/build/classes/java/main/META-INF/services/com.example.Plugin"), []string{"app/**"}},
 		{"a resource in the class output directory", filepath.Join(root, "merged/build/classes/java/main/conf.txt"), []string{"merged/src/main/resources/conf.txt", "merged/src/main/resources/"}},
+		{"a class file in a class output directory resources share", filepath.Join(root, "merged/build/classes/java/main/com/example/m/X.class"), []string{"merged/src/main/java/com/example/m/X.java"}},
 		{"outside the repository", "/usr/lib/jvm/lib/modules", nil},
 		{"the repository root itself", root, nil},
 		{"empty", "", nil},
@@ -246,6 +249,29 @@ func TestGradleRecorded(t *testing.T) {
 	})
 	// The JVMs run one after the other: a pid two of them gave to children stands for
 	// either, so a traced child with it counts for both.
+	// Every way to find a child's JVM adds to it: a pid another JVM reused must not hide
+	// the parent pid or the ancestor that links it to its own.
+	for _, tc := range []struct {
+		name  string
+		child *trace.Proc
+		procs []*trace.Proc
+	}{
+		{"a pid hit hides the parent pid", &trace.Proc{Pid: 101, Ppid: 100}, nil},
+		{"a pid hit hides a traced ancestor", &trace.Proc{Pid: 101, Ppid: 555, Anc: "100-0"}, []*trace.Proc{{Pid: 100, Ppid: 1, Code: map[string]bool{}, Reads: map[string]bool{}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := newObs()
+			recs := []*jvmRecording{rec(1, "1"), rec(2, "2")}
+			recs[0].Procs = []jvmProc{{Pid: 100, Dir: filepath.Join(root, "app"), Command: "sh -c 'node x.js'"}}
+			recs[1].Procs = []jvmProc{{Pid: 101, Dir: filepath.Join(root, "app"), Command: "true"}}
+			events := []gradleEvent{ev("com.example.StoreTest", "Gradle Test Executor 1"), ev("com.example.OtherTest", "Gradle Test Executor 2")}
+			tc.child.Code, tc.child.Reads = map[string]bool{}, map[string]bool{"app/fixture.json": true}
+			gradleRecorded(obs, events, classes, recs, facts, m, append(tc.procs, tc.child))
+			if !obs[store].Files["app/fixture.json"] {
+				t.Errorf("store (JVM 1, the child's real owner): %v", keys(obs[store].Files))
+			}
+		})
+	}
 	t.Run("a pid reused by children of two JVMs", func(t *testing.T) {
 		obs := newObs()
 		recs := []*jvmRecording{rec(1, "1"), rec(2, "2")}
