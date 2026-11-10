@@ -1,8 +1,7 @@
 # Proposal: JVM tests (Gradle + JUnit Platform)
 
-Status: **accepted**, in progress: phase 1 (the Java static analyzer,
-`internal/static/java`) and phase 2 (the `gradle` runner without recording) are
-implemented; see "Phases". The decisions taken on the
+Status: **accepted**, in progress: phases 1 to 3 (the Java static analyzer, the
+`gradle` runner, recording) are implemented; see "Phases". The decisions taken on the
 questions the proposal left open are at the end. As each phase lands, the parts that
 describe behavior move into
 `DESIGN.md` (section 2) and the user guides; this file is not part of the documentation
@@ -346,7 +345,15 @@ above:
    `filter.includeTestsMatching`, which it would add to them; every `build.gradle(.kts)`
    of the build is a suite input, not only the project's and its parents'. User
    documentation, `init` and `doctor` stay for phase 4.
-3. Recording: `forkEvery`, JFR, the collector, attribution and path mapping.
+3. Recording: `forkEvery`, JFR, the collector, attribution and path mapping. **Done**
+   (`internal/runner/gradle_record.go`, `shims/gradle/smates.jfc`, `Collect.java`;
+   DESIGN.md section 2, "Recording Gradle tests"). Differences from the sections above:
+   recording needs Java 17, not 11 (`%p` in the recording's file name and
+   `jdk.ProcessStart`); the facts cover the jar and resource and class output
+   directories of every project of the build, through a provider stored in the
+   configuration cache; a process started without a directory is analyzed in the task's
+   working directory (JFR records none); a self-tracing Node, Bun or Python child is
+   matched to its JVM by the pids of `ProcessStart`, else given to every unit.
 4. `init`, `doctor`, user documentation, the e2e fixture.
 5. Later: Maven (`-Dtest=`, `forkCount=1`/`reuseForks=false`, `argLine` for JFR, the
    Surefire XML reports), Kotlin sources (top-level functions and properties, `FooKt`
@@ -363,6 +370,7 @@ above:
    for `@EnabledIfEnvironmentVariable(named = "NAME")` may come later.
 4. **Units a tag-filtered task never runs** are `unknown`, with a warning. Evaluating
    class-level `@Tag` statically may come later.
-5. **Minimum versions**: JDK 11 to record (a `doctor` warning below 17, where child
-   processes are not seen). Gradle's minimum is pinned down with phase 2, from the
-   versions that report assumption failures to the listener.
+5. **Minimum versions**: JDK 17 to record (phase 3: below it the units run unrecorded,
+   their passes `unknown`). Gradle's minimum is pinned down with phase 4 (`doctor`): a
+   Gradle without `TestResult.getAssumptionFailure` runs, but every skip counts as an
+   assumption.

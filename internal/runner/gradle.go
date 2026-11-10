@@ -32,9 +32,8 @@ func init() { Register(gradle{}) }
 // up-to-date checks and the build cache (an up-to-date task runs nothing and reports
 // nothing), narrows the task to the selected classes (Test.setTestNameIncludePatterns,
 // the --tests option, which Gradle intersects with the task's own filters), and writes
-// one JSON line per test and per class from a TestListener. Without recording (there
-// is none yet), a pass is reported but recorded as unknown: nothing traced what the
-// class used (Observation.NoTrace).
+// one JSON line per test and per class from a TestListener. Recording (the JDK Flight
+// Recorder, one JVM per test class) is in gradle_record.go.
 type gradle struct{}
 
 func (gradle) Name() string { return "gradle" }
@@ -367,6 +366,13 @@ func (g gradle) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		}
 		env = append(env, "SMATES_GRADLE_CLASSES="+list)
 	}
+	record := filepath.Join(dir, "gradle-record")
+	if rc.Record {
+		if err := os.MkdirAll(record, 0o755); err != nil {
+			return nil, err
+		}
+		env = append(env, gradleRecordEnv(rc, record)...)
+	}
 	argvs, err := g.Commands(rc)
 	if err != nil {
 		return nil, err
@@ -382,7 +388,69 @@ func (g gradle) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		return res, err
 	}
 	res.Observations, res.Warnings = gradleObservations(rc.Units, classes, events, code, rc.Record)
+	if rc.Record {
+		why := g.record(ctx, rc, record, res.Observations, events, classes)
+		if n := untracedPasses(res.Observations); n > 0 {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%d test class file(s) passed but were not recorded (%s); their passes are recorded as not proven and they run again next time", n, why))
+		}
+	}
 	return res, nil
+}
+
+// record adds the recorded dependencies to the observations (see gradle_record.go). It
+// returns why units stay untraced, for the warning about them.
+func (gradle) record(ctx context.Context, rc *RunContext, dir string, obs map[string]*Observation, events []gradleEvent, classes map[string]string) string {
+	facts, err := readGradleFacts(dir)
+	if err != nil {
+		return "the init script's facts could not be read: " + err.Error()
+	}
+	java, version := "", 0
+	for _, fa := range facts {
+		if fa.Error != "" {
+			return "the init script could not describe the build's projects: " + fa.Error
+		}
+		if fa.JFR && java == "" {
+			java = fa.Java
+		}
+		if !fa.JFR {
+			version = fa.JavaVersion
+		}
+	}
+	if java == "" {
+		if len(facts) == 0 {
+			return "no Test task started"
+		}
+		return fmt.Sprintf("the test JVM runs Java %d; recording needs Java 17 or later", version)
+	}
+	recs, err := collectJFR(ctx, java, rc.ShimDir, dir)
+	if err != nil {
+		return err.Error()
+	}
+	read := func(f string) []byte {
+		b, _ := os.ReadFile(filepath.Join(rc.Repo.Root, filepath.FromSlash(f)))
+		return b
+	}
+	m := newGradleMapper(rc.Repo.Root, gitJavaFiles(rc), read, facts)
+	procs, err := trace.Collect(rc.TraceDir, rc.Repo.Root)
+	if err != nil {
+		return "the traces of child processes could not be read: " + err.Error()
+	}
+	gradleRecorded(obs, events, classes, recs, facts, m, procs)
+	if version != 0 {
+		return fmt.Sprintf("some test JVMs run Java %d; recording needs Java 17 or later", version)
+	}
+	return "their test JVM's flight recording is missing or unreadable"
+}
+
+// untracedPasses counts the passes recorded as not proven.
+func untracedPasses(obs map[string]*Observation) int {
+	n := 0
+	for _, o := range obs {
+		if o.NoTrace && o.Status == state.Pass {
+			n++
+		}
+	}
+	return n
 }
 
 // gradleClasses maps the qualified names of the top-level classes the units declare to
@@ -433,6 +501,8 @@ type gradleEvent struct {
 	// getAssumptionFailure).
 	Assumption *bool  `json:"assumption"`
 	Msg        string `json:"msg"`
+	// Executor names the test JVM ("Gradle Test Executor N").
+	Executor string `json:"executor"`
 }
 
 func readGradleEvents(dir string) ([]gradleEvent, error) {
@@ -468,7 +538,8 @@ func readGradleEvents(dir string) ([]gradleEvent, error) {
 //     failed and no test reported anything, it failed before tests ran (a compile
 //     error), and every unit fails (Inferred).
 //
-// Without tracing, a pass is marked NoTrace when recording: it is recorded as unknown.
+// When recording, a pass is NoTrace until the recordings say what the unit used (see
+// gradleRecorded): it is recorded as unknown otherwise.
 func gradleObservations(units []string, classes map[string]string, events []gradleEvent, exitCode int, record bool) (map[string]*Observation, []string) {
 	obs := map[string]*Observation{}
 	unitOf := func(class string) string {
@@ -521,7 +592,6 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		return obs, nil
 	}
 	var silent []string
-	passed := 0
 	for _, u := range units {
 		a := accs[u]
 		if a == nil {
@@ -541,8 +611,7 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		case a.unproven:
 			o.Status = state.Unknown
 		default:
-			o.NoTrace = record
-			passed++
+			o.NoTrace = record // until the recording says what it used
 		}
 		obs[u] = o
 	}
@@ -553,9 +622,6 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 			w += ": " + strings.Join(silent, ", ")
 		}
 		warnings = append(warnings, w)
-	}
-	if record && passed > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d test class file(s) passed; the gradle runner does not trace tests yet, so their passes are recorded as not proven and they run again next time", passed))
 	}
 	return obs, warnings
 }

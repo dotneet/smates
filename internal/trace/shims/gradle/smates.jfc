@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- JDK Flight Recorder settings for recording a test JVM (see internal/runner/gradle_record.go):
+     the classes it loaded, the files it read and the processes it started, without stack
+     traces, and the JVM's command line, which names its Gradle test executor. -->
+<configuration version="2.0" label="smates" description="Classes, file reads and processes of a test JVM">
+  <event name="jdk.ClassLoad">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">false</setting>
+    <setting name="threshold">0 ms</setting>
+  </event>
+  <event name="jdk.FileRead">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">false</setting>
+    <setting name="threshold">0 ms</setting>
+  </event>
+  <event name="jdk.ProcessStart">
+    <setting name="enabled">true</setting>
+    <setting name="stackTrace">false</setting>
+  </event>
+  <event name="jdk.InitialSystemProperty">
+    <setting name="enabled">true</setting>
+    <setting name="period">beginChunk</setting>
+  </event>
+</configuration>

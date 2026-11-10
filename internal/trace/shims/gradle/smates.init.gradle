@@ -1,4 +1,5 @@
-// smates init script (see internal/runner/gradle.go). It only touches Test tasks:
+// smates init script (see internal/runner/gradle.go and gradle_record.go). It only
+// touches Test tasks:
 //
 // - up-to-date checks and the build cache are off: smates ran its own selection, and
 //   a task Gradle skips reports no result;
@@ -7,18 +8,59 @@
 //   intersects with the task's own filters; a class that matches nothing does not
 //   fail the build. A --tests the user passed on the command line wins.
 // - SMATES_GRADLE_RESULTS is a directory receiving one JSON line per finished test and
-//   test class (results-<task>.jsonl).
+//   test class (results-<task>.jsonl), with the executor (test JVM) that ran it.
+// - SMATES_GRADLE_RECORD, when set, is a directory receiving a JDK Flight Recorder file
+//   per test JVM (settings: SMATES_GRADLE_JFC) and the task's facts (facts-<task>.json):
+//   its working directory, Java executable and version, and the source and output
+//   directories and jars of every project of the build. Recording needs Java 17 or
+//   later (the facts say whether it happened); it runs one JVM per test class unless
+//   SMATES_GRADLE_ISOLATE is "false". The variables SMATES_GRADLE_ENV names (comma
+//   separated) are copied into the task's environment, so Node, Bun and Python
+//   children of tests trace themselves.
 //
-// Both are read when the task starts, not while the build is configured: they change
-// on every run and would otherwise invalidate the configuration cache.
+// The variables are read when the task starts, not while the build is configured: they
+// change on every run and would otherwise invalidate the configuration cache. The facts
+// about the projects are computed by a provider, stored in the configuration cache.
 import groovy.json.JsonOutput
+
+// projectFacts lists, for every project of the build, its directory, the resource
+// directories and the resource and class output directories of its source sets, and
+// its jar.
+static List projectFacts(Project root) {
+  root.allprojects.collect { Project q ->
+    Map m = [path: q.path, dir: q.projectDir.path, sourceSets: []]
+    def sets = q.extensions.findByName('sourceSets')
+    if (sets != null) {
+      m.sourceSets = sets.collect { s ->
+        [name: s.name, resources: s.resources.srcDirs*.path, resourcesOut: s.output.resourcesDir?.path,
+         classes: s.output.classesDirs.files*.path]
+      }
+    }
+    def jar = q.tasks.findByName('jar')
+    if (jar != null && jar.hasProperty('archiveFile')) {
+      m.jar = jar.archiveFile.get().asFile.path
+    }
+    m
+  }
+}
 
 gradle.allprojects { Project p ->
   p.tasks.withType(Test).configureEach { Test t ->
     t.outputs.upToDateWhen { false }
     t.outputs.cacheIf { false }
+    Project root = p.rootProject
+    // A build smates cannot read this way (another kind of source set) must still run:
+    // the error goes into the facts, and its units are not recorded.
+    Provider<Map> projects = p.providers.provider {
+      try {
+        [projects: projectFacts(root)]
+      } catch (Exception e) {
+        [error: String.valueOf(e)]
+      }
+    }
     t.doFirst { Task task ->
       Test test = (Test) task
+      String safe = test.path.replaceAll('[^A-Za-z0-9_.-]', '_')
       String classes = System.getenv('SMATES_GRADLE_CLASSES')
       if (classes) {
         test.filter.failOnNoMatchingTests = false
@@ -32,19 +74,48 @@ gradle.allprojects { Project p ->
           test.setTestNameIncludePatterns(names)
         }
       }
+      String record = System.getenv('SMATES_GRADLE_RECORD')
+      if (record) {
+        def launcher = test.javaLauncher.get()
+        int version = launcher.metadata.languageVersion.asInt()
+        boolean jfr = version >= 17
+        if (jfr) {
+          if (System.getenv('SMATES_GRADLE_ISOLATE') != 'false') {
+            test.forkEvery = 1
+          }
+          test.jvmArgs('-XX:StartFlightRecording=filename=' + new File(record, 'jvm-%p.jfr').path +
+              ',dumponexit=true,settings=' + System.getenv('SMATES_GRADLE_JFC'), '-Xlog:jfr+startup=warning')
+        }
+        (System.getenv('SMATES_GRADLE_ENV') ?: '').split(',').findAll { it }.each { String name ->
+          String value = System.getenv(name)
+          if (value != null) {
+            test.environment(name, value)
+          }
+        }
+        new File(record, 'facts-' + safe + '.json').setText(JsonOutput.toJson([
+            task: test.path, workingDir: test.workingDir.path, java: launcher.executablePath.asFile.path,
+            javaVersion: version, jfr: jfr] + projects.get()), 'UTF-8')
+      }
       String out = System.getenv('SMATES_GRADLE_RESULTS')
       if (!out) {
         return
       }
-      File f = new File(out, 'results-' + test.path.replaceAll('[^A-Za-z0-9_.-]', '_') + '.jsonl')
+      File f = new File(out, 'results-' + safe + '.jsonl')
       f.parentFile.mkdirs()
       Writer w = f.newWriter('UTF-8', true)
       // Gradle tells an assumption failure from a disabled test only since
       // TestResult.getAssumptionFailure; before it, a skip is reported as unknown.
       boolean assumptions = TestResult.methods.any { it.name == 'getAssumptionFailure' }
       def write = { TestDescriptor d, TestResult r, String kind ->
+        String executor = null
+        for (TestDescriptor a = d.parent; a != null; a = a.parent) {
+          if (a.name?.startsWith('Gradle Test Executor')) {
+            executor = a.name
+            break
+          }
+        }
         Map m = [k: kind, task: test.path, class: d.className, name: d.name, result: r.resultType.name(),
-                 ms: r.endTime - r.startTime]
+                 ms: r.endTime - r.startTime, executor: executor]
         if (r.resultType == TestResult.ResultType.SKIPPED) {
           m.assumption = assumptions ? (r.assumptionFailure != null) : null
         }

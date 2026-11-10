@@ -264,7 +264,7 @@ func TestGradleObservations(t *testing.T) {
 	if !strings.Contains(obs["c"].Failure, "bad: boom") || !strings.Contains(obs["e"].Failure, "com.example.Second: boom") {
 		t.Errorf("failures: %q / %q", obs["c"].Failure, obs["e"].Failure)
 	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "not proven") {
+	if len(warns) != 0 {
 		t.Errorf("warnings = %q", warns)
 	}
 

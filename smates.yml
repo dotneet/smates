@@ -137,10 +137,9 @@ suites:
       - { tests: ["."], deps: *pytest } # env (Python through a custom runner), python-unittest
       - { tests: ["."], deps: ["internal/runner/unittest.go"] } # python-unittest
       - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,node-test,pnpm-monorepo,python-unittest}/**"] }
-      # No e2e fixture runs Gradle yet (it comes with the gradle runner's recording); the
-      # static graph analyzes any Java source it finds, and a Gradle fixture would run
-      # here first.
-      - { tests: ["."], deps: ["internal/static/java/**", "internal/runner/gradle.go", "internal/trace/shims/gradle/**"] }
+      # No e2e fixture runs Gradle yet (phase 4 of docs/proposals/jvm.md); the static
+      # graph analyzes any Java source it finds, and a Gradle fixture would run here first.
+      - { tests: ["."], deps: ["internal/static/java/**", "internal/runner/gradle*.go", "internal/trace/shims/gradle/**"] }
 
 # Release packaging, CI and documentation-site files that no test reads; action.yml
 # is covered by the action job in .github/workflows/ci.yml.
