@@ -268,7 +268,8 @@ func javaSources(root string) []string {
 // imported nor declared in the file's package) or JUnit's own (org.junit.*: callbacks,
 // providers), or the supertype of a type in a main source set (src/main/) that carries no
 // test annotation: production code extends libraries, not their tests (a fake
-// implementing a repository interface that extends a library's is no unit).
+// implementing a repository interface that extends a library's is no unit), unless the
+// supertype looks like a test base (a test-like name, a test framework's package).
 func gradleUnits(files []string, read func(string) []byte, sources func() []string) []string {
 	infos := make(map[string]*java.Info, len(files))
 	types := map[string]string{} // qualified top-level type -> file
@@ -360,7 +361,15 @@ func gradleUnits(files []string, read func(string) []byte, sources func() []stri
 			}
 		}
 		lib := func(prefix string) bool { return strings.HasPrefix(name, prefix) || in.Imported(name, prefix) }
-		return !(main || lib("java.") || lib("javax.") || lib("org.junit.") || javaLang[name] && !in.Imported(name, ""))
+		if main {
+			// Production code extends libraries, not their tests, unless the supertype
+			// looks like a test framework's base (JUnit 3's TestCase, a Spring or
+			// TestNG test base): a test-support project's main code may.
+			simple := name[strings.LastIndexByte(name, '.')+1:]
+			return testName(simple) || strings.Contains(simple, "Test") ||
+				slices.ContainsFunc(testPackages, lib)
+		}
+		return !(lib("java.") || lib("javax.") || lib("org.junit.") || javaLang[name] && !in.Imported(name, ""))
 	}
 	runs = func(f string, d java.Decl) bool {
 		in := infos[f]
@@ -389,6 +398,10 @@ func gradleUnits(files []string, read func(string) []byte, sources func() []stri
 	}
 	return units
 }
+
+// testPackages are packages of test frameworks' base classes: a supertype from one of
+// them may run tests even when production code extends it.
+var testPackages = []string{"junit.", "org.testng.", "org.springframework.test.", "org.spockframework."}
 
 func annotated(in *java.Info, anns map[string]bool) bool {
 	for a := range in.Annotations {

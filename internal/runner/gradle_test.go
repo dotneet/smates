@@ -51,6 +51,9 @@ func TestGradleUnits(t *testing.T) {
 		"testing/src/main/java/com/example/testing/RepoSpec.java":     "package com.example.testing;\nimport org.junit.jupiter.api.Test;\npublic abstract class RepoSpec { @Test void saves() {} }",
 		"testing/src/main/java/com/example/testing/Layered.java":      "package com.example.testing;\npublic interface Layered extends MainContract { }",
 		"testing/src/main/java/com/example/testing/LibBacked.java":    "package com.example.testing;\npublic abstract class LibBacked extends org.lib.Base { }",
+		"testing/src/main/java/com/example/testing/DbCase.java":       "package com.example.testing;\npublic abstract class DbCase extends junit.framework.TestCase { }",
+		"testing/src/main/java/com/example/testing/SpringBase.java":   "package com.example.testing;\nimport org.springframework.test.context.junit4.AbstractJUnit4SpringContextTests;\npublic abstract class SpringBase extends AbstractJUnit4SpringContextTests { }",
+		"testing/src/main/java/com/example/testing/NgBase.java":       "package com.example.testing;\nimport org.testng.Base;\npublic abstract class NgBase extends Base { }",
 	}
 	for _, tc := range []struct {
 		name string
@@ -99,6 +102,9 @@ func TestGradleUnits(t *testing.T) {
 		{"implements a contract in a main source set", "MainImpl.java", "package com.example;\nimport com.example.testing.MainContract;\nclass MainImpl implements MainContract {}", true},
 		{"extends a contract class in a main source set", "Spec.java", "package com.example;\nimport com.example.testing.RepoSpec;\nclass Spec extends RepoSpec {}", true},
 		{"main interface extending a main contract", "LayeredImpl.java", "package com.example;\nimport com.example.testing.Layered;\nclass LayeredImpl implements Layered {}", true},
+		{"main class extending JUnit 3's TestCase", "OrderBehaviour.java", "package com.example;\nimport com.example.testing.DbCase;\npublic class OrderBehaviour extends DbCase { public void testSaves() {} }", true},
+		{"main class extending a Spring test base", "SpringBehaviour.java", "package com.example;\nimport com.example.testing.SpringBase;\nclass SpringBehaviour extends SpringBase {}", true},
+		{"main class extending a TestNG class", "NgBehaviour.java", "package com.example;\nimport com.example.testing.NgBase;\nclass NgBehaviour extends NgBase {}", true},
 		{"main class extending a library class", "Backed.java", "package com.example;\nimport com.example.testing.LibBacked;\nclass Backed extends LibBacked {}", false},
 		{"extends a main class", "MemRepo.java", "package com.example;\nimport com.example.repo.AbstractRepo;\nclass MemRepo extends AbstractRepo {}", false},
 		{"implements a plain test-fixtures interface", "Held.java", "package com.example;\nimport com.example.fx.Holder;\nclass Held implements Holder {}", false},

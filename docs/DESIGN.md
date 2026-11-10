@@ -805,7 +805,10 @@ unless it is the JDK's (`java.*`, `javax.*`, a `java.lang` type neither imported
 declared in the package) or JUnit's own (`org.junit.*`: extensions, argument providers),
 or the supertype of production code (`src/main/`) that carries no test annotation:
 production code extends libraries, not their tests, so a fake implementing a repository
-interface that extends a library's is no unit. A file that cannot be read is a unit. The other files are test
+interface that extends a library's is no unit, unless the supertype looks like a test
+base (a test-like name, or a package of `junit.`, `org.testng.`,
+`org.springframework.test.`, `org.spockframework.`: JUnit 3's `TestCase` carries no
+annotation). A file that cannot be read is a unit. The other files are test
 support code, dependencies of the units that use them. `@Nested` classes belong to the
 file of their outer class, and every top-level class a unit declares (a package-private
 secondary class too) is its own.
