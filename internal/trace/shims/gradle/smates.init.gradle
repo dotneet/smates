@@ -1,0 +1,74 @@
+// smates init script (see internal/runner/gradle.go). It only touches Test tasks:
+//
+// - up-to-date checks and the build cache are off: smates ran its own selection, and
+//   a task Gradle skips reports no result;
+// - SMATES_GRADLE_CLASSES names a file listing the classes to run (one per line). They
+//   go through Test.setTestNameIncludePatterns, the --tests option, which Gradle
+//   intersects with the task's own filters; a class that matches nothing does not
+//   fail the build. A --tests the user passed on the command line wins.
+// - SMATES_GRADLE_RESULTS is a directory receiving one JSON line per finished test and
+//   test class (results-<task>.jsonl).
+//
+// Both are read when the task starts, not while the build is configured: they change
+// on every run and would otherwise invalidate the configuration cache.
+import groovy.json.JsonOutput
+
+gradle.allprojects { Project p ->
+  p.tasks.withType(Test).configureEach { Test t ->
+    t.outputs.upToDateWhen { false }
+    t.outputs.cacheIf { false }
+    t.doFirst { Task task ->
+      Test test = (Test) task
+      String classes = System.getenv('SMATES_GRADLE_CLASSES')
+      if (classes) {
+        test.filter.failOnNoMatchingTests = false
+        boolean userTests = false
+        try {
+          userTests = !test.filter.commandLineIncludePatterns.isEmpty()
+        } catch (MissingPropertyException ignored) {
+        }
+        if (!userTests) {
+          List<String> names = new File(classes).readLines('UTF-8').findAll { it.trim() }
+          test.setTestNameIncludePatterns(names)
+        }
+      }
+      String out = System.getenv('SMATES_GRADLE_RESULTS')
+      if (!out) {
+        return
+      }
+      File f = new File(out, 'results-' + test.path.replaceAll('[^A-Za-z0-9_.-]', '_') + '.jsonl')
+      f.parentFile.mkdirs()
+      Writer w = f.newWriter('UTF-8', true)
+      // Gradle tells an assumption failure from a disabled test only since
+      // TestResult.getAssumptionFailure; before it, a skip is reported as unknown.
+      boolean assumptions = TestResult.methods.any { it.name == 'getAssumptionFailure' }
+      def write = { TestDescriptor d, TestResult r, String kind ->
+        Map m = [k: kind, task: test.path, class: d.className, name: d.name, result: r.resultType.name(),
+                 ms: r.endTime - r.startTime]
+        if (r.resultType == TestResult.ResultType.SKIPPED) {
+          m.assumption = assumptions ? (r.assumptionFailure != null) : null
+        }
+        if (r.exception != null) {
+          m.msg = String.valueOf(r.exception).take(4000)
+        }
+        synchronized (w) {
+          w.write(JsonOutput.toJson(m) + '\n')
+          w.flush()
+        }
+      }
+      test.addTestListener(new TestListener() {
+        void beforeSuite(TestDescriptor d) {}
+        void afterSuite(TestDescriptor d, TestResult r) {
+          if (d.className != null) {
+            write(d, r, 'class')
+          }
+          if (d.parent == null) {
+            synchronized (w) { w.close() }
+          }
+        }
+        void beforeTest(TestDescriptor d) {}
+        void afterTest(TestDescriptor d, TestResult r) { write(d, r, 'test') }
+      })
+    }
+  }
+}

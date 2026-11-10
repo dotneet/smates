@@ -166,6 +166,10 @@ type Observation struct {
 	// test that runs in a browser, untraced): its dependencies are the known ones, and
 	// recording keeps it unknown when those may not be all (see selector.Record).
 	StaticOnly bool
+	// NoTrace is set for an outcome a runner reported without tracing anything for the
+	// unit (gradle, which records no dependencies yet): the run reports it, but a pass
+	// is recorded as unknown, so the unit runs again next time.
+	NoTrace bool
 	// untraced: the runner reported the unit but its process left no trace (observeAll).
 	untraced bool
 }

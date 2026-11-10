@@ -1,7 +1,8 @@
 # Proposal: JVM tests (Gradle + JUnit Platform)
 
 Status: **accepted**, in progress: phase 1 (the Java static analyzer,
-`internal/static/java`) is implemented; see "Phases". The decisions taken on the
+`internal/static/java`) and phase 2 (the `gradle` runner without recording) are
+implemented; see "Phases". The decisions taken on the
 questions the proposal left open are at the end. As each phase lands, the parts that
 describe behavior move into
 `DESIGN.md` (section 2) and the user guides; this file is not part of the documentation
@@ -334,7 +335,17 @@ above:
    so selection is unchanged until phase 2 adds `gradle` to the runners whose static
    closure counts (`staticLangs` in `internal/selector`).
 2. The `gradle` runner without recording: suites, units, the init script's filters and
-   listener, statuses (section 3.6), suite inputs.
+   listener, statuses (section 3.6), suite inputs. **Done** (`internal/runner/gradle.go`,
+   `shims/gradle/smates.init.gradle`; DESIGN.md section 2, "Gradle"). Until phase 3, a pass
+   is recorded as `unknown` (nothing traced what the class used), so a recorded unit runs
+   every time; units without an entry are decided by their static closure against the
+   base revision. Differences from the sections above: the init script reads its
+   variables when a `Test` task starts, not while the build is configured, and applies to
+   every `Test` task of the build (no `SMATES_GRADLE_TASKS`); classes go through the
+   `--tests` patterns, which Gradle intersects with the task's own filters, rather than
+   `filter.includeTestsMatching`, which it would add to them; every `build.gradle(.kts)`
+   of the build is a suite input, not only the project's and its parents'. User
+   documentation, `init` and `doctor` stay for phase 4.
 3. Recording: `forkEvery`, JFR, the collector, attribution and path mapping.
 4. `init`, `doctor`, user documentation, the e2e fixture.
 5. Later: Maven (`-Dtest=`, `forkCount=1`/`reuseForks=false`, `argLine` for JFR, the

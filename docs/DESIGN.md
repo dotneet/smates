@@ -1,10 +1,12 @@
 # smates design
 
 smates ("smart test selection") selects the tests a change can actually affect, for
-TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go and
-Python (pytest, unittest; uv, virtualenvs), and runs them. It is a single static Go binary (~5 MB)
+TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go,
+Python (pytest, unittest; uv, virtualenvs) and Java (Gradle on the JUnit Platform, not
+traced yet: see "Gradle" in section 2), and runs them. It is a single static Go binary (~5 MB)
 with no runtime dependencies; language shims (a Node preload, a Python `sitecustomize` and
-pytest plugin, reporters for vitest and jest) are embedded and extracted at run time.
+pytest plugin, reporters for vitest and jest, a Gradle init script) are embedded and
+extracted at run time.
 
 ## 1. Core idea: per-test content fingerprints over observed inputs
 
@@ -413,6 +415,7 @@ can alter test results.
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output |
 | go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process and of re-executions of the binary; other children as for a package | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
+| gradle | test class source file | not traced yet: the static Java closure | not traced yet | per class from a `TestListener` the init script registers; a pass is recorded as `unknown` (see "Gradle") |
 
 Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
 the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
@@ -751,6 +754,54 @@ needs no check, since its unit runs the whole package.
 transitively). Granularity is the module: a test that imports a module depends on the data
 that module reads.
 
+**Gradle.** A `gradle` suite is a Gradle project (`root`) whose tests run on the JUnit
+Platform. Its default command is the nearest `gradlew` between the suite root and the
+repository root (else `gradle`) with the project's `test` task, by its path from the
+nearest directory holding `settings.gradle(.kts)` (`:app:test`; `test` for the root
+project; a build that maps projects to other directories names the task in `command`).
+Test files are `src/test/java/**/*.java`, without `build/`. A unit is a test file that
+declares a concrete top-level class that may run tests (`gradleUnits`): one carrying a
+test annotation (JUnit Jupiter's test methods and `@Nested`, JUnit 4's `@Test` and
+`@RunWith`, `@Suite`, jqwik's, ArchUnit's, and annotations of the test files that carry
+one: composed annotations), named like a test (`*Test`, `*Tests`, `*TestCase`, `*IT`,
+`*ITCase`), or extending a class that may run tests. A superclass found among the test
+files is followed; any other one keeps the class a unit (a library's test base class)
+unless it is a JDK class (`java.*`, `javax.*`, a `java.lang` class neither imported nor
+declared in the package); a file that cannot be read is a unit. The other files are test
+support code, dependencies of the units that use them. `@Nested` classes belong to the
+file of their outer class, and every top-level class a unit declares (a package-private
+secondary class too) is its own.
+
+smates passes `--init-script <shims>/gradle/smates.init.gradle`. For every `Test` task of
+the build it turns off up-to-date checks and the build cache (a task Gradle skips runs and
+reports nothing), and, when the task starts, reads two variables: `SMATES_GRADLE_CLASSES`,
+a file listing the selected classes, which go through `Test.setTestNameIncludePatterns`
+(the `--tests` option: Gradle intersects it with the task's own filters, so a task that
+filters JUnit tags or class names keeps doing so; a `--tests` passed after `--` wins), with
+`failOnNoMatchingTests` off (a deleted class or one the task excludes does not fail the
+build); and `SMATES_GRADLE_RESULTS`, a directory receiving one JSON line per finished test
+and class from a `TestListener`. Reading them at execution time keeps the configuration
+cache valid across runs (Gradle keys it on the init script's content, not its path). A full
+run passes no class list: Gradle's own detection runs everything the task runs.
+
+Outcomes per unit, from the listener's events: a failed test or class fails it; otherwise a
+test an assumption aborted (`TestResult.getAssumptionFailure`; a Gradle without it cannot
+tell a skip from `@Disabled`, so every skip counts) makes it `unknown`, since it proved
+nothing about the environment it needs; otherwise it passes (disabled and conditionally
+disabled tests do not keep it from passing). A unit without events in a successful build
+(the task's filters or tags exclude it, or it runs no test) is `unknown`, with a warning. A
+build that failed before any test reported (a compile error) fails every unit of the batch
+(`Inferred`). Nothing is traced yet: a recorded pass is stored as `unknown`
+(`Observation.NoTrace`), so the unit runs again next time, with a warning. Selection still
+uses the units' static closures where nothing is recorded (against the base revision), and
+`gradle` is among the runners whose static closure decides untested code.
+
+The suite's inputs are the files of the build that can change every test's outcome: the
+settings, every `build.gradle(.kts)`, `gradle.properties` and `gradle.lockfile` of the
+build (a project's tests may depend on any other project), version catalogs, the wrapper
+and its properties, `buildSrc/**`, and the trees of the builds `includeBuild` names as a
+string literal; an `includeBuild` of anything else makes every file of the build an input.
+
 Static analysis (fast Go scanners, no toolchain): JS/TS imports, requires, dynamic imports
 with literal or template prefixes, `path.join(__dirname, …)`, `new URL(…, import.meta.url)`,
 mocks and their manual mocks in `__mocks__/`; tsconfig paths and workspace packages (falling
@@ -770,6 +821,11 @@ file counts, not only the nearest: the go command takes the one nearest its work
 directory, which may be above a nested one. A `go.work` named by `GOWORK` (suite env or
 smates' own; `auto` means the search, as unset) is invisible to static analysis, so the go runner makes its pins (the same
 set) suite inputs. These are content keys: any edit selects every test of the workspace.
+Java (`internal/static/java`): an index of the top-level types of every `.java` file of the
+tree, then per file its single-type and static imports, on-demand imports and same-package
+types matched by identifier, and qualified names in code (identifiers matched by name
+over-approximate; compile-time constants, which `javac` inlines, and annotations are seen
+only here).
 
 **Type-only imports.** The JS/TS scanner is token-level and turns every `from "<literal>"`
 into an edge; in `.ts`/`.tsx`/`.mts`/`.cts` files it marks the declarations TypeScript
