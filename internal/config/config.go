@@ -88,6 +88,7 @@ type Suite struct {
 	Env    map[string]string `yaml:"env"`
 	// Isolate re-runs each test file in its own process while recording, for runners
 	// that share worker processes between files (jest, vitest with isolate: false).
+	// gradle runs one JVM per test class while recording unless it is false.
 	Isolate *bool `yaml:"isolate"`
 	// RecordJobs bounds how many per-file processes run at once while recording with
 	// one process per file (bun always; jest/vitest/node with isolate). Default: 1 for bun

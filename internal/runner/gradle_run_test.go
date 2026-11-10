@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -65,7 +66,8 @@ func TestGradleRun(t *testing.T) {
 	units := s.Adapter.Units(s, s.TestFiles(all))
 	const dir = "app/src/test/java/com/example/app/"
 	cart, greeter, check, env := dir+"CartTest.java", dir+"GreeterTest.java", dir+"GreeterCheck.java", dir+"EnvironmentTest.java"
-	if want := []string{cart, env, check, greeter}; !reflect.DeepEqual(units, want) {
+	catalog, migrations, plugins, shell := dir+"CatalogTest.java", dir+"MigrationsTest.java", dir+"PluginsTest.java", dir+"ShellTest.java"
+	if want := []string{cart, catalog, env, check, greeter, migrations, plugins, shell}; !reflect.DeepEqual(units, want) {
 		t.Fatalf("units = %v, want %v", units, want)
 	}
 	run := func(t *testing.T, units []string, all bool) (*RunResult, string) {
@@ -92,12 +94,49 @@ func TestGradleRun(t *testing.T) {
 
 	t.Run("all", func(t *testing.T) {
 		res, out := run(t, units, true)
-		want := map[string]string{cart: state.Pass, greeter: state.Pass, check: state.Pass, env: state.Unknown}
+		want := map[string]string{cart: state.Pass, greeter: state.Pass, check: state.Pass, env: state.Unknown,
+			catalog: state.Pass, migrations: state.Pass, plugins: state.Pass, shell: state.Pass}
 		if got := statuses(res); res.ExitCode != 0 || !reflect.DeepEqual(got, want) {
 			t.Fatalf("exit %d, statuses %v, want %v\n%s", res.ExitCode, got, want, out)
 		}
-		if !res.Observations[cart].NoTrace || res.Observations[env].NoTrace {
-			t.Error("a pass is NoTrace, an assumption is not")
+		const main = "app/src/main/java/com/example/app/"
+		// What each class was recorded to use, and what it must not depend on: one JVM
+		// per class keeps them apart.
+		for _, c := range []struct {
+			unit      string
+			want, not []string
+		}{
+			{cart, []string{main + "Cart.java", "lib/src/main/java/com/example/lib/Money.java", "lib/src/main/resources/**"}, []string{main + "Greeter.java"}},
+			// The inlined constant's class is never loaded: the static closure has it.
+			{greeter, []string{main + "Greeter.java"}, []string{dir + "support/Names.java", main + "Cart.java"}},
+			{check, []string{main + "Greeter.java", dir + "support/BaseCheck.java"}, nil},
+			{catalog, []string{main + "Catalog.java", "app/src/main/resources/catalog.txt", "app/src/main/resources/"}, nil},
+			{plugins, []string{main + "plugins/Upper.java"}, nil},
+			{migrations, []string{"app/data/migrations/001.sql", "app/data/migrations/002.sql", "app/data/migrations/"}, []string{"app/src/main/resources/catalog.txt"}},
+			{shell, []string{"app/data/motd.txt"}, nil},
+		} {
+			o := res.Observations[c.unit]
+			if o.NoTrace {
+				t.Errorf("%s: not traced", c.unit)
+			}
+			for _, f := range c.want {
+				if !o.Files[f] {
+					t.Errorf("%s: %s not recorded; recorded %v", c.unit, f, keys(o.Files))
+				}
+			}
+			for _, f := range c.not {
+				if o.Files[f] {
+					t.Errorf("%s: %s recorded", c.unit, f)
+				}
+			}
+			for f := range o.Files {
+				if strings.Contains(f, "/build/") {
+					t.Errorf("%s: build output %s recorded", c.unit, f)
+				}
+			}
+		}
+		if len(res.Warnings) > 0 {
+			t.Errorf("warnings: %q", res.Warnings)
 		}
 	})
 
@@ -132,4 +171,13 @@ func TestGradleRun(t *testing.T) {
 			t.Fatalf("exit %d, %+v\n%s", res.ExitCode, o, out)
 		}
 	})
+}
+
+func keys(m map[string]bool) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

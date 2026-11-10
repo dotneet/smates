@@ -2,11 +2,11 @@
 
 smates ("smart test selection") selects the tests a change can actually affect, for
 TypeScript/JavaScript (vitest, jest, `node --test`, bun; npm, pnpm, yarn, bun), Go,
-Python (pytest, unittest; uv, virtualenvs) and Java (Gradle on the JUnit Platform, not
-traced yet: see "Gradle" in section 2), and runs them. It is a single static Go binary (~5 MB)
+Python (pytest, unittest; uv, virtualenvs) and Java (Gradle on the JUnit Platform), and
+runs them. It is a single static Go binary (~5 MB)
 with no runtime dependencies; language shims (a Node preload, a Python `sitecustomize` and
-pytest plugin, reporters for vitest and jest, a Gradle init script) are embedded and
-extracted at run time.
+pytest plugin, reporters for vitest and jest, a Gradle init script and a Java reader of
+flight recordings) are embedded and extracted at run time.
 
 ## 1. Core idea: per-test content fingerprints over observed inputs
 
@@ -416,7 +416,7 @@ can alter test results.
 | unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output |
 | go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process and of re-executions of the binary; other children as for a package | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
-| gradle | test class source file | not traced yet: the static Java closure | not traced yet | per class from a `TestListener` the init script registers; a pass is recorded as `unknown` (see "Gradle") |
+| gradle | test class source file | classes the test JVM loaded (JDK Flight Recorder `jdk.ClassLoad`), mapped to the sources declaring them, + the static Java closure | `jdk.FileRead` (resources mapped to their sources, a project's jar to its resource trees), the listing of each read file's directory, `jdk.ProcessStart` command lines; Node, Bun and Python children trace themselves | one JVM per test class while recording (`forkEvery = 1`; `isolate: false` keeps Gradle's forking); JVMs matched to classes by their Gradle test executor; outcomes per class from a `TestListener` (see "Gradle") |
 
 Test files are what the runner itself would collect: without `tests:` in `smates.yml`,
 the adapter reads its runner's configuration statically (jest `testMatch`/`testRegex`/
@@ -832,10 +832,73 @@ nothing about the environment it needs; otherwise it passes (disabled and condit
 disabled tests do not keep it from passing). A unit without events in a successful build
 (the task's filters or tags exclude it, or it runs no test) is `unknown`, with a warning. A
 build that failed before any test reported (a compile error) fails every unit of the batch
-(`Inferred`). Nothing is traced yet: a recorded pass is stored as `unknown`
-(`Observation.NoTrace`), so the unit runs again next time, with a warning. Selection still
-uses the units' static closures where nothing is recorded (against the base revision), and
-`gradle` is among the runners whose static closure decides untested code.
+(`Inferred`).
+
+**Recording Gradle tests** (`gradle_record.go`). A class loads once per JVM, so attributing
+code to a test class through class loading needs a JVM per class: while recording, the
+init script sets `forkEvery = 1` (Gradle still runs `maxParallelForks` of them at once)
+and starts the JDK Flight Recorder in each test JVM
+(`-XX:StartFlightRecording=filename=<dir>/jvm-%p-%t.jfr,dumponexit=true,settings=<shims>/gradle/smates.jfc`).
+The settings keep only `jdk.ClassLoad`, `jdk.FileRead` and `jdk.ProcessStart` (threshold
+0, no stack traces) and `jdk.InitialSystemProperty`, whose `sun.java.command` names the
+JVM's Gradle test executor. Recording needs Java 17 or later on the task's
+`javaLauncher` (`%p` and `%t` in the file name, `ProcessStart`); an older JVM runs unrecorded. A
+JVM per class costs a JVM and JUnit Platform start per class (a few hundred
+milliseconds, spread over the parallel forks); classes no longer share a JVM while
+recording, so state one class leaves behind for the next is gone, and fixtures started
+once per JVM start once per class. `isolate: false` keeps Gradle's forking: every class
+of a JVM then depends on everything that JVM loaded and read (a superset, still sound).
+The init script also writes the task's facts: its working directory, its Java executable
+and version, and for every project of the build the resource directories, resource and
+class output directories of its source sets and its jar (a provider, so the facts are
+part of the configuration cache entry; the paths of the run are read when the task
+starts). It copies the tracing environment of Node, Bun and Python into the task's
+`environment`, so their children trace themselves however the build sets it. JDK Flight
+Recorder files are binary: after the build, one JVM runs `shims/gradle/Collect.java` in
+source-file mode on the task's own Java (it can read what that JVM wrote), which prints
+one line per distinct class, read and process of each recording.
+
+Attribution joins the listener's executor of each class with the recording's. A unit
+depends on what every JVM that ran one of its classes did, including before its first
+test (Gradle's worker and JUnit's discovery read Gradle's jars and the JDK, outside the
+repository); a JVM that ran no class of a unit (an abstract class Gradle forked for) is
+dropped. Mapping to repository keys: a loaded class (lambda and hidden classes, nested
+classes: their top-level class) maps to every source declaring it in the index of the
+repository's Java files (several projects may declare it); a class no source declares
+maps to the tree of the project (`dir/**`) whose class output directory holds its class
+file (generated code, Kotlin: what it was made from is unknown), and to nothing when none
+does (a library; JDK, Gradle and JUnit classes are not looked up). A read below a source
+set's resources output maps to the file of the same path in its resource directories (all
+of their trees when none has it: a generated resource), a read of a project's jar to that
+project's main resource trees (`dir/**`: JFR sees the jar, not the entry). Resources are
+matched before class output directories, as a build may put them there (a `.class` file
+there is no resource); below a class
+output directory a `.class` read maps as its class does, and any other file (an annotation
+processor's `META-INF/services`) to its project's tree. Other reads in the repository stay
+as they are, relative ones resolved against the task's working directory. JFR has no
+event for directory listings or existence checks, so a read file also adds the listing
+of its directory (a new migration script next to the ones a test read selects it); a
+test that only lists a directory or probes a path that does not exist is a known gap.
+A started process goes through the command-line analysis of "Subprocesses smates cannot
+trace" (`trace.CommandLineDeps`): JFR joins the arguments with spaces, so the words are
+split again and a shell's `-c` script is the rest of the line; a process started without
+a directory runs in the task's working directory. A Node, Bun or Python process that
+traced itself belongs to the JVMs that started it: the union of those whose recorded
+processes have its pid, its parent's pid, and those of its traced ancestors (pids are
+reused across the JVMs that run one after the other, so each match can only add), otherwise to every unit of the run. Recordings are named by pid and start time
+(`%p-%t`), so a reused pid does not overwrite an earlier JVM's file. A unit that ran in a JVM whose recording is missing
+or unreadable stays untraced (`Observation.NoTrace`): its pass is recorded as `unknown`
+and it runs again, with a warning. Environment variables are not recorded (JFR has no
+event for `System.getenv`): the suite's `env:` is part of its settings, and a variable
+the tests read from the shell selects nothing when it changes.
+
+What only the static graph sees (compile-time constants, which `javac` inlines into the
+classes using them; annotations and types used only in signatures) stays covered by the
+static closure, which is part of every unit's dependencies; what only recording sees
+(classes reached through reflection, dependency injection or `ServiceLoader`, resources
+and data files, child processes) comes from the recording. `gradle` is among the
+runners whose static closure decides untested code: a Java file no test loaded or reaches
+statically selects nothing.
 
 The suite's inputs are the files of the build that can change every test's outcome: the
 settings, every `build.gradle(.kts)`, `gradle.properties` and `gradle.lockfile` of the
