@@ -268,6 +268,7 @@ and value, or `doc`).
 | `service-reachable`, `local-server-reachable`, `env-var-set` | services and `localhost` URLs the code uses (for other servers: in files a suite runs, on ports from 1024, when the file does not start or intercept the server itself); variables it reads that are not set |
 | `suite-server-dependency` | an end-to-end-looking suite without `depends_on`, `serves` or `rules` |
 | `suite-go-granularity` | a Go suite selecting whole packages although one package holds most of its test functions (suggests `granularity: func`) |
+| `suite-timing-tests` | JavaScript or TypeScript test files of a vitest, jest, node or bun suite that read a clock and assert on the order of values, with real timers, and that `untraced` does not list: coverage while recording can make them fail (suggests `untraced`) |
 | `suite-rule-reaches` | how many test units each rule with `reaches` applies to; a warning for one that applies to none |
 | `state-recorded` | a recorded state exists, and from which commit |
 | `state-skipped` | test units that skipped themselves in their last run (not proven: they run every time until they pass) |

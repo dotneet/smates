@@ -91,7 +91,8 @@ edit the file and validate it before writing (see [Commands](cli.md#smates-confi
     Editing a suite's entry reruns that suite's tests: every test depends on its suite's
     settings as written (and on the top-level `env_track`), its `inputs`, `rules`,
     `depends_on` and `serves` included. The exceptions are `volatile` and `max_age`,
-    which only decide when tests run, and `requires`, which decides where they can run.
+    which only decide when tests run, `untraced`, which decides how a run is observed,
+    and `requires`, which decides where they can run.
     A glob added to the top-level `inputs` makes the files it matches new dependencies
     of every test, so every test runs once. Editing the other top-level keys (`ignore`,
     `orphans`, `agent`, ...) or another suite reruns nothing. A test that reads
@@ -103,7 +104,7 @@ Globs use `/` as the separator, and `**` matches any depth. Write them relative 
 directory the key names (the repository root or the suite `root`), without a leading
 `./`.
 
-The globs of `rules`, `depends_on`, `serves`, `volatile` and the `tests` of `requires`
+The globs of `rules`, `depends_on`, `serves`, `volatile`, `untraced` and the `tests` of `requires`
 are checked when smates loads the file: an invalid one is a configuration error
 (exit 3), and a leading `./` is removed. The globs of the top-level `ignore` and
 `inputs`, and of a suite's `tests`, `exclude` and `inputs`, are used as written: one that
@@ -158,6 +159,7 @@ One entry of `suites:`.
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
+| `untraced` | list of globs (relative to `root`) | `[]` | Test units that must run without code coverage while recording, because tracing changes what they measure (timing and ratio assertions). They run in a batch of their own; a pass is recorded with the files they read and their static import closure, or stays unknown (and runs again) when smates cannot tell all the code they run. vitest, jest, node and bun only; in other suites they run without tracing and run every time. Matched like `volatile`. See [Tests that measure time](../guides/runners.md#tests-that-measure-time). |
 | `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
 | `requires` | list of [requirements](#requires) | `[]` | What the environment must provide for the tests to run (a database, a browser). Tests whose requirements are not met do not run and stay selected. |
 

@@ -562,6 +562,11 @@ type suiteResult struct {
 func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	p, sr := c.p, b.sr
 	rc := c.runContext(sr, b.units, b.full)
+	if b.untraced {
+		// Without code coverage where the runner supports it, else without recording.
+		rc.Untraced = runner.TracesUntraced(sr.Suite.Runner)
+		rc.Record = rc.Untraced
+	}
 	rc.TraceDir = filepath.Join(c.traceRoot, fmt.Sprintf("batch-%d", i))
 	if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
 		return 0, err
@@ -572,9 +577,9 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		buf = &outputBuffer{}
 		rc.Stdout, rc.Stderr = buf, buf
 	case b.parts > 1:
-		p.logf("%s: running %d test unit(s) with %s (batch %d of %d: %s)", sr.Name, len(b.units), sr.Suite.Runner, b.part, b.parts, prioLabel(b.prio))
+		p.logf("%s: running %d test unit(s) with %s%s (batch %d of %d: %s)", sr.Name, len(b.units), sr.Suite.Runner, untracedNote(b, rc), b.part, b.parts, prioLabel(b.prio))
 	default:
-		p.logf("%s: running %d test unit(s) with %s", sr.Name, len(b.units), sr.Suite.Runner)
+		p.logf("%s: running %d test unit(s) with %s%s", sr.Name, len(b.units), sr.Suite.Runner, untracedNote(b, rc))
 	}
 	if err := runner.Preflight(p.repo.Root, sr.Suite); err != nil {
 		return 0, envError{fmt.Errorf("%s: %w", sr.Name, err)}
@@ -610,7 +615,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	// A launcher (sh, npm, yarn, pnpm) exits 126 or 127 when the command it runs is not
 	// executable or not installed: when tests that report results reported none, they
 	// never ran. The batch is still handled as a failure below.
-	noResult := notStarted(sr.Suite.Runner, c.record, r)
+	noResult := notStarted(sr.Suite.Runner, rc.Record, r)
 	if !noResult {
 		// Any other failing batch failed tests, even when no unit is known to have
 		// failed (TestMain exiting 1, a teardown error, a coverage threshold).
@@ -623,7 +628,14 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		p.logf("%s: %s", sr.Name, w)
 	}
 	unreported := unreportedUnits(r, b.units)
-	settleOutcomes(r, b.units, c.record, len(c.f.extra) > 0)
+	settleOutcomes(r, b.units, rc.Record, len(c.f.extra) > 0)
+	if b.untraced && c.record {
+		// Recorded from their known dependencies (selector.Record): no coverage, or no
+		// trace at all, saw the code they ran.
+		for _, o := range r.Observations {
+			o.StaticOnly = true
+		}
+	}
 	selector.DropIgnoredEnv(p.cfg, sr.Suite, r)
 	if c.ran[sr.Name] == nil {
 		c.ran[sr.Name] = map[string]string{}
@@ -648,7 +660,10 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	}
 	c.failures.add(sr, r.Observations) // before recording: compares with the previous entries
 	if c.record {
-		if w := noTraceWarning(b.units, r, sr.Suite.Runner, c.sel.diffUnrecorded); w != "" {
+		// A runner that cannot trace untraced units without coverage runs them without
+		// recording: no trace is expected (their passes stay unknown, Suite.Untrusted
+		// says why).
+		if w := noTraceWarning(b.units, r, sr.Suite.Runner, c.sel.diffUnrecorded); w != "" && rc.Record {
 			p.logf("%s: %s", sr.Name, w)
 		} else if missing := len(b.units) - len(r.Observations); missing > 0 && r.ExitCode == 0 {
 			p.debugf("%s: %d unit(s) produced no trace (kept as not recorded)", sr.Name, missing)
@@ -701,23 +716,50 @@ func (c *cycle) recordSuites() {
 	}
 }
 
-// untrustedWarning says which browser tests' passes trust_browser_passes does not
-// record as passed (their known dependencies may not be all, see Suite.Untrusted), and
-// why, for a few of them: they stay unknown and run again next time ("" when none).
+// untracedNote is what the run log adds for a batch of untraced units: how they run.
+func untracedNote(b *batch, rc *runner.RunContext) string {
+	switch {
+	case !b.untraced:
+		return ""
+	case rc.Untraced:
+		return " without code coverage (untraced)"
+	}
+	return " without tracing (untraced)"
+}
+
+// untrustedWarning says which tests recorded from their known dependencies alone
+// (browser tests with trust_browser_passes, the units untraced lists) passed but are
+// not recorded as passed, because those may not be all they use (see
+// Suite.Untrusted), and why, for a few of them: they stay unknown and run again next
+// time ("" when none).
 func untrustedWarning(sr *selector.Suite, obs map[string]*runner.Observation) string {
-	var units []string
+	var browser, untraced []string
 	for u, o := range obs {
 		if o.StaticOnly && o.Status == state.Pass && sr.Untrusted[u] != "" {
-			units = append(units, u)
+			if selector.UntracedUnit(sr.Suite, u, sr.Files[u]) {
+				untraced = append(untraced, u)
+			} else {
+				browser = append(browser, u)
+			}
 		}
 	}
-	if len(units) == 0 {
-		return ""
+	var parts []string
+	if len(browser) > 0 {
+		parts = append(parts, untrustedList(sr, browser, "browser test(s) passed but are not trusted (trust_browser_passes)"))
 	}
+	if len(untraced) > 0 {
+		parts = append(parts, untrustedList(sr, untraced, "untraced test(s) passed but smates cannot tell all they depend on without coverage"))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// untrustedList is one sentence of untrustedWarning: the number of units, what, and a
+// few of them with the reason.
+func untrustedList(sr *selector.Suite, units []string, what string) string {
 	slices.Sort(units)
 	const shown = 3
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d browser test(s) passed but are not trusted (trust_browser_passes), so they will run again next time:", len(units))
+	fmt.Fprintf(&b, "%d %s, so they will run again next time:", len(units), what)
 	for _, u := range units[:min(shown, len(units))] {
 		fmt.Fprintf(&b, " %s (%s);", u, sr.Untrusted[u])
 	}

@@ -47,7 +47,8 @@ records the file and depends on its content as usual. The other
 settings cannot change a test's outcome (ignore globs only change the `dir/**` hashes
 they affect, input globs and rules add keys of their own, `env_ignore` applies when
 comparing), so editing them selects nothing. A suite's `volatile`, `max_age` and
-`requires` are left out of the hash too (they choose when tests run, not how), and so is an empty
+`requires` are left out of the hash too (they choose when tests run, not how), as is
+`untraced` (it chooses how a run is observed), and so is an empty
 rule `reaches`, so an upgrade does not change the hash. Diff mode (no recorded state) still
 compares the file by content. An entry recorded by an older smates holds the file's blob
 hash instead of the key; it counts as unchanged while the file is, until the test runs
@@ -449,6 +450,36 @@ runner's global code) as its dependencies; `Record` keeps it `unknown` when
 read), no static analysis, or a known dependency with an import `Graph.Unresolved`
 reports (no repository file, no installed package, no builtin: a Vite alias, a virtual
 module).
+
+**Untraced units.** Code coverage changes how V8 optimizes code, so a test asserting on
+timings or their ratios can fail only while recording. A suite's `untraced` globs
+(`selector.UntracedUnit`, matched like `volatile`; never a Go compile check) put those
+units, while recording, in batches of their own (`cycle.untracedGroups`, also under
+`--fail-fast` and `--max-time`; the suite is then never one full batch). For the
+runners `runner.TracesUntraced` names (vitest, jest, node, bun) the batch runs with
+`RunContext.Untraced`: `traceEnv` drops smates' `NODE_V8_COVERAGE` (the user's own value
+then applies) and bun runs without `--coverage`, so the shim still records reads,
+listings, environment variables and processes but no executed code. With no executed
+code to say which test file a worker ran, vitest, jest and node run one runner process
+per unit (`runIsolatedNode`, as for `isolate`) attributed by command line
+(`untracedOptions`: `UnitsFromArgv` with `WorkersOwnArgv`, which hands the unit a
+runner names to the pool workers below it, so the runner's crawl and transforms count as
+infrastructure as in a traced run; a runner with no known pool worker keeps its unit and
+reads, and a helper whose code is unknown counts as global; jest, which runs one file in
+band, drops listings as for `--runInBand`). A reported pass that left no trace at all
+stays `unknown`, as in any traced run: the trace was lost. Other runners run the batch
+without recording. Either way every observation of the batch is `StaticOnly`, so `Record` adds `Known` (the static closure,
+inputs, rules, and for these units what the runner's configuration loads) and records
+`unknown` when `Suite.Untrusted` names a reason or `Known` is empty (never computed).
+`untracedUntrusted` gives one when the runner cannot trace untraced units, static
+analysis is off, the runner configuration is unsure, a test file is not JS/TS, or a
+known JS/TS source has an unresolved import or may run code no trace sees without
+coverage (`untracedBlind`: a builtin that starts processes or threads, loads modules by
+name or reads files natively; Bun or Deno process and file APIs; `import()` or
+`require()` of a computed name; an unreadable source). Matches in comments count: the
+check distrusts more, never less. `smates doctor` flags JS/TS test files of such suites
+that read a clock and make an ordering assertion with real timers (`timingTests`,
+`suite-timing-tests`).
 
 A Go package unit is the directory of a test file, unless build constraints exclude every
 Go file of that directory in the suite's configuration (`go list -find` with the suite's

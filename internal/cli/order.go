@@ -92,7 +92,11 @@ type batch struct {
 	sr    *selector.Suite
 	units []string
 	full  bool // the units are the whole suite (the runner may discover them itself)
-	prio  int  // the best priority among the units
+	// untraced: the units are listed by the suite's untraced and the cycle records, so
+	// the batch runs without code coverage (runner.RunContext.Untraced) or, for a runner
+	// that cannot, without recording.
+	untraced bool
+	prio     int // the best priority among the units
 	// part and parts number the batches of a suite (1-based).
 	part, parts int
 	// est is how long the batch takes by recorded durations (--max-time); unknown when
@@ -160,7 +164,7 @@ func splitByTime(b *batch, est func(string) (time.Duration, bool), target time.D
 		}
 		n := len(out)
 		if n == 0 || out[n-1].unknown != !ok || ok && out[n-1].est+d+cost > target {
-			out = append(out, &batch{si: b.si, sr: b.sr, prio: rank(byID[u]), unknown: !ok})
+			out = append(out, &batch{si: b.si, sr: b.sr, prio: rank(byID[u]), unknown: !ok, untraced: b.untraced})
 			pkgs = map[string]bool{}
 			if pkgOf != nil && ok {
 				cost = goPackageCost
@@ -172,6 +176,37 @@ func splitByTime(b *batch, est func(string) (time.Duration, bool), target time.D
 		if pkgOf != nil {
 			pkgs[pkgOf(u)] = true
 		}
+	}
+	return out
+}
+
+// unitGroup is units of a suite that run the same way: traced or not (batch.untraced).
+type unitGroup struct {
+	units    []string
+	untraced bool
+}
+
+// untracedGroups splits the units of sr, in order, into those the cycle traces and
+// those the suite's untraced lists (selector.UntracedUnit), which run in batches of
+// their own while recording. Without recording nothing is traced: one group.
+func (c *cycle) untracedGroups(sr *selector.Suite, units []string) []unitGroup {
+	if !c.record || sr.Suite == nil || len(sr.Suite.Untraced) == 0 {
+		return []unitGroup{{units: units}}
+	}
+	var traced, untraced []string
+	for _, u := range units {
+		if selector.UntracedUnit(sr.Suite, u, sr.Files[u]) {
+			untraced = append(untraced, u)
+		} else {
+			traced = append(traced, u)
+		}
+	}
+	var out []unitGroup
+	if len(traced) > 0 {
+		out = append(out, unitGroup{units: traced})
+	}
+	if len(untraced) > 0 {
+		out = append(out, unitGroup{units: untraced, untraced: true})
 	}
 	return out
 }
@@ -209,13 +244,17 @@ func (c *cycle) plan() []*batch {
 				cmp.Compare(a, b),
 			)
 		})
-		parts := []*batch{{si: si, sr: sr, units: units, prio: rank(byID[units[0]])}}
-		if c.f.failFast {
-			parts = nil
-			for _, u := range units {
+		var parts []*batch
+		for _, g := range c.untracedGroups(sr, units) {
+			if !c.f.failFast {
+				parts = append(parts, &batch{si: si, sr: sr, units: g.units, prio: rank(byID[g.units[0]]), untraced: g.untraced})
+				continue
+			}
+			n0 := len(parts)
+			for _, u := range g.units {
 				p := rank(byID[u])
-				if n := len(parts); n == 0 || parts[n-1].prio != p {
-					parts = append(parts, &batch{si: si, sr: sr, prio: p})
+				if n := len(parts); n == n0 || parts[n-1].prio != p {
+					parts = append(parts, &batch{si: si, sr: sr, prio: p, untraced: g.untraced})
 				}
 				b := parts[len(parts)-1]
 				b.units = append(b.units, u)

@@ -891,7 +891,10 @@ func Record(st *state.State, sr *Suite, obs map[string]*runner.Observation, h *H
 			}
 		}
 		status := o.Status
-		if status == "" || o.StaticOnly && sr.Untrusted[unit] != "" || o.NoTrace && status == state.Pass {
+		// A unit recorded from its known dependencies (StaticOnly) passes only when they
+		// can be trusted, and are known at all: an empty list is one never computed. A
+		// pass reported without any trace (NoTrace) proves nothing about what it used.
+		if status == "" || o.StaticOnly && (sr.Untrusted[unit] != "" || len(sr.Known[unit]) == 0) || o.NoTrace && status == state.Pass {
 			status = state.Unknown
 		}
 		e := &state.Entry{Deps: deps, Status: status, DurationMs: o.DurationMs, Commit: opt.Commit, At: opt.Now}

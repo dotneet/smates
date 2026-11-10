@@ -88,7 +88,11 @@ var outputDirs = map[string]bool{
 }
 
 // Handles implements host.Analyzer.
-func (a *Analyzer) Handles(p string) bool { return handledExts[path.Ext(p)] }
+func (a *Analyzer) Handles(p string) bool { return IsSource(p) }
+
+// IsSource reports whether p is a JavaScript or TypeScript source (or a component file
+// that holds one) the analyzer reads.
+func IsSource(p string) bool { return handledExts[path.Ext(p)] }
 
 // Deps implements host.Analyzer.
 func (a *Analyzer) Deps(p string, src []byte) []string {

@@ -73,6 +73,11 @@ Common causes of a test that never settles:
   the setting on, `N browser test(s) passed but are not trusted` names the stories it
   still does not record, and why (an import smates cannot resolve, `viteFinal` in
   `main.*`, ...).
+- **Untraced tests.** `N untraced test(s) passed but smates cannot tell all they depend
+  on without coverage` names the tests in `untraced` whose passes are not recorded, and
+  why (an import that starts processes, a module named at run time, a runner that cannot
+  trace without coverage). See
+  [Tests that measure time](../guides/runners.md#tests-that-measure-time).
 - **Runner arguments.** A run with arguments after `--` never records a test as passed.
   Move permanent flags into the suite's `command`.
 - **A unittest module written for pytest.** Its status stays unknown, so it runs every
@@ -103,6 +108,15 @@ generated or checked-in file, refreshed by `go generate` or a script, and checke
 one test that compares it with the sources), or keep the source scan in one dedicated
 test instead of a helper all of them call. Then record again (`smates run --all`) and
 check `smates deps <test>`.
+
+## A test fails only under smates
+
+Run it again with `smates run --no-record` (no tracing). If it passes there and fails in
+every recorded run, tracing is what changes its outcome. The usual case is a test that
+measures time: an assertion on a duration, or on a ratio of two measurements, fails
+because V8 coverage slows code down unevenly. List it in the suite's `untraced` to
+record it without coverage (`smates doctor` suggests it as `suite-timing-tests`); see
+[Tests that measure time](../guides/runners.md#tests-that-measure-time).
 
 ## A test that should have run was skipped
 

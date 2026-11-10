@@ -91,6 +91,33 @@ smates は `testMatch` などのテストのパターンを jest の設定から
 
 `smates run --no-record` は、選択したテストをトレースせずに、ランナー本来の速さで実行します。選択は同じですが、状態は元のまま残ります。実行したテストは記録されない（新しい依存も結果も残らない）ので、次に記録する実行で再び選択されます。一度も記録されていないテストは new のままです。手元で素早く繰り返すときに使い、状態の更新は記録する実行（CI、または通常の `smates run`）に任せてください。トレースなしでもファイルごとの結果を報告できるランナー（vitest、jest、pytest、`go test`、および `junit:` レポートのあるスイート）では、どのファイルが失敗したかは引き続き報告されます。
 
+### 時間を測るテスト { #tests-that-measure-time }
+
+V8 のカバレッジは、すべてのコードを同じ割合で遅くするわけではありません。V8 がコードをコンパイルし最適化する方法そのものが変わります。そのため、処理時間を assert するテスト（`expect(elapsed).toBeLessThan(50)`）や、2 つの計測の比を assert するテスト（入力を 4 倍にしても時間は 6 倍未満）は、ランナー単体では成功するのに `smates run` では毎回失敗し、`smates run --no-record` では成功することがあります。
+
+こうしたテストは、スイートの `untraced` に挙げます（`root` からのグロブ）。
+
+```yaml
+suites:
+  - name: web
+    runner: vitest
+    untraced: ["test/perf.test.ts", "**/*.bench.test.ts"]
+```
+
+記録中、smates はこれらを、ほかのテストとは別に、テストファイルごとに 1 つのランナープロセスで、コードカバレッジなしに実行します（`NODE_V8_COVERAGE` も `bun test --coverage` も使いません）。`fs` のフックは引き続き、読んだファイル、一覧したディレクトリ、読んだ環境変数、起動したプロセスを捉えます。実行したコードは、静的な import クロージャと、ランナーの設定が読み込むもの（セットアップファイル、プラグイン、エイリアスの参照先）から求めます。pass はこれらの依存とともに記録され、どれかが変わるまでテストはスキップされます。
+
+smates がそうしたテストの実行するコードをすべて把握できないときは、pass を不明として記録し、次回も実行します。ログにはその理由が出ます（`untraced test(s) passed but smates cannot tell all they depend on without coverage`）。
+
+- 静的解析がオフ（`static: false`）か、ランナーの設定を読めない。
+- テストファイルが JavaScript でも TypeScript でもない。
+- import クロージャ内のファイルが、smates が解決できないものを import している。または `child_process`、`worker_threads`、`cluster`、`module`、`wasi`、`sqlite`、`bun` を（`node:` の有無にかかわらず）import している。`Bun.file`、`Bun.spawn`、`Bun.$`、Deno のファイルやプロセスの API を使っている。実行時に計算した名前で `import()` や `require()` を呼んでいる。これらは、フックにも import グラフにも見えないコードを実行したり、ファイルを読んだりします。
+
+`node_modules` のパッケージは依存になりません（ロックファイルが代わりになります）。実行時にリポジトリのファイルを読むパッケージは `fs` を通すので、フックが捉えます。
+
+この方法で untraced のテストを記録できるのは、vitest、jest、`node --test`、bun のスイートだけです。pytest、unittest、Go、custom のスイートでは、`untraced` に挙げたテストは記録中もトレースなしで実行され、毎回実行されます。
+
+`smates doctor` は、時計を読み（`performance.now()`、`process.hrtime`、`Date.now() - ...`）、値の大小を assert する JavaScript と TypeScript のテストファイルについて警告します（`suite-timing-tests`）。偽のタイマーを使うファイルと、すでに `untraced` に挙げたファイルは除きます。`untraced` はスイートの設定のハッシュに含めないので、グロブを追加しても削除しても何も再実行されません。smates からまったく外したいテストは、スイートの `exclude` に加えて別に実行してください。
+
 ## Python { #python }
 
 smates はシムを `PYTHONPATH` に追加します。シムは `sys.monitoring`（Python 3.12 以降）または `sys.setprofile`（3.8〜3.11）でどの関数が実行されたかをトレースし、`open`、ディレクトリの一覧、`stat` は audit フックで捉えます。
