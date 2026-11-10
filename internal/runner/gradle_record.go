@@ -367,6 +367,9 @@ func (m *gradleMapper) read(p, wd string) []string {
 			continue
 		}
 		sub := pathutil.RelTo(r, out)
+		if strings.HasSuffix(r, ".class") && slices.ContainsFunc(m.classes, func(c classDir) bool { return pathutil.Under(r, c.dir) }) {
+			break // a class file in a class output directory the resources share
+		}
 		var keys []string
 		for _, s := range srcs {
 			if f := pathutil.Join(s, sub); m.exists(f) {
@@ -480,20 +483,25 @@ func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes m
 	for _, p := range procs {
 		byKey[p.Key()] = p
 	}
-	// owner returns the executors a child may belong to: every one whose JVM started a
-	// process with its pid (or its parent's), when a pid was reused.
+	// owner returns the executors a child may belong to: the union of those whose JVM
+	// started a process with its pid, with its parent's pid, and those of its traced
+	// ancestors. pids are reused, so any of them may be the one: each can only add.
 	var owner func(p *trace.Proc, depth int) []string
 	owner = func(p *trace.Proc, depth int) []string {
-		if e, ok := childOf[p.Pid]; ok {
-			return e
+		var out []string
+		add := func(es []string) {
+			for _, e := range es {
+				if !slices.Contains(out, e) {
+					out = append(out, e)
+				}
+			}
 		}
-		if e, ok := childOf[p.Ppid]; ok {
-			return e
-		}
+		add(childOf[p.Pid])
+		add(childOf[p.Ppid])
 		if a := byKey[p.Anc]; a != nil && a != p && depth < 64 {
-			return owner(a, depth+1)
+			add(owner(a, depth+1))
 		}
-		return nil
+		return out
 	}
 	global := map[string]bool{}
 	for _, p := range procs {
