@@ -45,7 +45,7 @@ suites:
   each project directory it includes (and the root project), a `src/test/java`
   directory. One suite per project. The default command runs the nearest `gradlew`
   between the suite root and the repository root (else `gradle`) with the project's
-  task path (`:app:test`, or `test` for the root project). A suite can name another
+  task path (`:app:test`, or `:test` for the root project). A suite can name another
   `Test` task in `command` (for example a task that filters JUnit tags).
 - **Test files**: `src/test/java/**/*.java` relative to the suite root by default
   (`tests:` overrides it as for any suite).

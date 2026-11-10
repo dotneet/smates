@@ -31,10 +31,10 @@ enum Color { RED }
 		t.Errorf("package = %q", in.Package)
 	}
 	want := []Decl{
-		{Name: "CartTest", Kind: "class", Abstract: true, Extends: "BaseTest"},
+		{Name: "CartTest", Kind: "class", Abstract: true, Extends: "BaseTest", Interfaces: []string{"Runnable"}},
 		{Name: "Helper", Kind: "class", Extends: "com.example.util.Base"},
 		{Name: "Plain", Kind: "class"},
-		{Name: "Port", Kind: "interface"},
+		{Name: "Port", Kind: "interface", Interfaces: []string{"Runnable"}},
 		{Name: "Slow", Kind: "@interface"},
 		{Name: "Point", Kind: "record"},
 		{Name: "Color", Kind: "enum"},
@@ -72,6 +72,29 @@ func TestDescribeAbstractModifier(t *testing.T) {
 		last := in.Decls[len(in.Decls)-1]
 		if last.Name != "A" || last.Abstract != tc.want {
 			t.Errorf("%q: %+v, want abstract=%v", tc.src, last, tc.want)
+		}
+	}
+}
+
+func TestDescribeInterfaces(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want []string
+	}{
+		{"class A implements B {}", []string{"B"}},
+		{"class A extends Base<X> implements B<Map<K, V>>, c.d.E, F {}", []string{"B", "c.d.E", "F"}},
+		{"class A<T extends Comparable<T>> implements Contract<T> {}", []string{"Contract"}},
+		{"interface A extends B, C<D> {}", []string{"B", "C"}},
+		{"sealed interface A extends B permits X, Y {}", []string{"B"}},
+		{"record A(int x, java.util.List<String> y) implements B {}", []string{"B"}},
+		{"enum A implements B { X }", []string{"B"}},
+		{"class A extends B {}", nil},
+		{"class A implements @Ann B {}", []string{"B"}},
+	} {
+		in := Describe([]byte(tc.src))
+		last := in.Decls[len(in.Decls)-1]
+		if !reflect.DeepEqual(last.Interfaces, tc.want) {
+			t.Errorf("%q: interfaces %v, want %v", tc.src, last.Interfaces, tc.want)
 		}
 	}
 }

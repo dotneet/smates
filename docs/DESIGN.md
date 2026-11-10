@@ -788,17 +788,24 @@ that module reads.
 **Gradle.** A `gradle` suite is a Gradle project (`root`) whose tests run on the JUnit
 Platform. Its default command is the nearest `gradlew` between the suite root and the
 repository root (else `gradle`) with the project's `test` task, by its path from the
-nearest directory holding `settings.gradle(.kts)` (`:app:test`; `test` for the root
+nearest directory holding `settings.gradle(.kts)` (`:app:test`; `:test` for the root
 project; a build that maps projects to other directories names the task in `command`).
 Test files are `src/test/java/**/*.java`, without `build/`. A unit is a test file that
 declares a concrete top-level class that may run tests (`gradleUnits`): one carrying a
 test annotation (JUnit Jupiter's test methods and `@Nested`, JUnit 4's `@Test` and
 `@RunWith`, `@Suite`, jqwik's, ArchUnit's, and annotations of the test files that carry
 one: composed annotations), named like a test (`*Test`, `*Tests`, `*TestCase`, `*IT`,
-`*ITCase`), or extending a class that may run tests. A superclass found among the test
-files is followed; any other one keeps the class a unit (a library's test base class)
-unless it is a JDK class (`java.*`, `javax.*`, a `java.lang` class neither imported nor
-declared in the package); a file that cannot be read is a unit. The other files are test
+`*ITCase`), or with a supertype that may run tests: its superclass, or an interface it
+implements (JUnit Jupiter runs an interface's `@Test` default methods in the classes
+implementing it). A supertype is looked up among the test files, then among the
+repository's other Java sources by the path below their `java/` directory: one in a main
+source set (`src/main/`) runs no test (the test framework is not on its classpath: a fake
+implementing a production interface is no unit), one in another source set
+(`src/testFixtures/`) is followed like a test file. A supertype found nowhere keeps the
+class a unit (a library's test base class or contract) unless it is the JDK's
+(`java.*`, `javax.*`, a `java.lang` type neither imported nor declared in the package) or
+JUnit's own (`org.junit.*`: extensions, argument providers); a file that cannot be read
+is a unit. The other files are test
 support code, dependencies of the units that use them. `@Nested` classes belong to the
 file of their outer class, and every top-level class a unit declares (a package-private
 secondary class too) is its own.
