@@ -7,6 +7,7 @@ import (
 	"github.com/dotneet/smates/internal/testutil"
 )
 
+// The project paths the include calls name, with their parents.
 func TestGradleIncludes(t *testing.T) {
 	for _, tc := range []struct {
 		src  string
@@ -20,7 +21,7 @@ func TestGradleIncludes(t *testing.T) {
 		{"include(\n  \":a\",\n  \":b\",\n)", []string{":a", ":b"}, true},
 		{"if (x) { include 'a' }", []string{":a"}, true},
 		{"include 'a'; include 'b'", []string{":a", ":b"}, true},
-		{"includeBuild 'x'\nincludeFlat 'y'", []string{}, true},
+		{"includeBuild 'x'\nincludeFlat 'y'", []string{":y"}, true}, // includeFlat: a project too
 		{"include(*modules)", []string{}, false},
 		{"include \"svc-$name\"", []string{}, false},
 		{"include 'a' + suffix", []string{}, false},
@@ -29,7 +30,13 @@ func TestGradleIncludes(t *testing.T) {
 		{"include('a',)", []string{":a"}, true},
 		{"include()", []string{}, false},
 	} {
-		got, ok := gradleIncludes(tc.src, includeWord)
+		dir := t.TempDir()
+		testutil.Write(t, dir, "settings.gradle", tc.src)
+		st := ReadGradleSettings(dir, ".")
+		got, ok := []string{}, st.OK
+		for _, p := range st.Projects[1:] {
+			got = append(got, p.Path)
+		}
 		if !reflect.DeepEqual(got, tc.want) || ok != tc.ok {
 			t.Errorf("%q: got %v %v, want %v %v", tc.src, got, ok, tc.want, tc.ok)
 		}
@@ -44,7 +51,10 @@ func TestReadGradleSettings(t *testing.T) {
 	}{
 		{"includes", "include 'app', ':libs:core'", []GradleProject{{":", "."}, {":app", "app"}, {":libs", "libs"}, {":libs:core", "libs/core"}}, true},
 		{"moved inside the build", "include ':core'\nproject(':core').projectDir = file('modules/core-impl')", []GradleProject{{":", "."}, {":core", "modules/core-impl"}}, true},
-		{"child of a moved project", "include ':core', ':core:api'\nproject(':core').projectDir = new File(settingsDir, 'modules/core')", []GradleProject{{":", "."}, {":core", "modules/core"}, {":core:api", "modules/core/api"}}, true},
+		// Gradle places a project in its parent's directory when it is included: a move
+		// after the include leaves the children where they were.
+		{"child included before its parent moves", "include ':core', ':core:api'\nproject(':core').projectDir = new File(settingsDir, 'modules/core')", []GradleProject{{":", "."}, {":core", "modules/core"}, {":core:api", "core/api"}}, true},
+		{"child included after its parent moves", "include ':core'\nproject(':core').projectDir = file('modules/core')\ninclude ':core:api'", []GradleProject{{":", "."}, {":core", "modules/core"}, {":core:api", "modules/core/api"}}, true},
 		{"moved outside the build", "include ':shared'\nproject(':shared').projectDir = file('../shared')", []GradleProject{{":", "."}, {":shared", "../shared"}}, true},
 		{"includeFlat", "includeFlat 'sibling'", []GradleProject{{":", "."}, {":sibling", "../sibling"}}, true},
 		{"projectDir set otherwise", "include 'a'\nrootProject.children.each { it.projectDir = file(\"x/${it.name}\") }", []GradleProject{{":", "."}, {":a", "a"}}, false},

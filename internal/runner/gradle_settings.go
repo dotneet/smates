@@ -44,69 +44,75 @@ func ReadGradleSettings(repoRoot, build string) GradleSettings {
 			src += StripGroovyComments(string(data)) + "\n"
 		}
 	}
-	paths, ok := gradleIncludes(src, includeWord)
-	flat, flatOK := gradleIncludes(src, includeFlatWord)
-	ok = ok && flatOK
-	moved := map[string]string{}
-	for _, m := range projectDirAssig.FindAllStringSubmatch(src, -1) {
-		moved[":"+strings.TrimPrefix(m[1], ":")] = path.Clean(filepath.ToSlash(m[2]))
+	// Replay the statements in order, as Gradle does: include creates each project
+	// (and its missing parents) in its parent's directory as it is at that point, and a
+	// projectDir assignment moves only that project, not the children included before.
+	type stmt struct {
+		pos   int
+		flat  bool
+		paths []string // include, includeFlat
+		dir   string   // projectDir: paths[0] moves to dir
+	}
+	var stmts []stmt
+	ok := true
+	for _, w := range []*regexp.Regexp{includeWord, includeFlatWord} {
+		for _, loc := range w.FindAllStringIndex(src, -1) {
+			lits, good := includeArgs(src[loc[1]:])
+			if !good {
+				ok = false
+				continue
+			}
+			stmts = append(stmts, stmt{pos: loc[0], flat: w == includeFlatWord, paths: lits})
+		}
+	}
+	for _, m := range projectDirAssig.FindAllStringSubmatchIndex(src, -1) {
+		stmts = append(stmts, stmt{pos: m[0], paths: []string{src[m[2]:m[3]]}, dir: path.Clean(filepath.ToSlash(src[m[4]:m[5]]))})
 	}
 	if len(projectDirWord.FindAllStringIndex(src, -1)) > len(projectDirAssig.FindAllStringIndex(src, -1)) {
 		ok = false
 	}
-	for _, p := range flat {
-		if _, set := moved[p]; !set && strings.Count(p, ":") == 1 {
-			moved[p] = "../" + p[1:] // includeFlat: a sibling of the build root
-		}
-	}
-	var dirOf func(p string) string
-	dirOf = func(p string) string {
-		if d, ok := moved[p]; ok {
-			return d
-		}
-		i := strings.LastIndexByte(p, ':')
-		if i <= 0 {
-			return p[1:]
-		}
-		return pathutil.Join(dirOf(p[:i]), p[i+1:])
-	}
-	st := GradleSettings{Projects: []GradleProject{{Path: ":", Dir: "."}}, OK: ok}
-	all := append(paths, flat...)
-	sort.Strings(all)
-	for i, p := range all {
-		if i > 0 && all[i-1] == p {
-			continue
-		}
-		st.Projects = append(st.Projects, GradleProject{Path: p, Dir: dirOf(p)})
-	}
-	return st
-}
-
-// gradleIncludes returns the project paths the include (or includeFlat) calls of settings (comments
-// stripped) name, with their parents (":a:b" includes ":a"), sorted. ok is false when
-// an include names a project by anything but string literals.
-func gradleIncludes(src string, word *regexp.Regexp) ([]string, bool) {
-	set := map[string]bool{}
-	ok := true
-	for _, loc := range word.FindAllStringIndex(src, -1) {
-		lits, good := includeArgs(src[loc[1]:])
-		if !good {
-			ok = false
-			continue
-		}
-		for _, l := range lits {
+	sort.Slice(stmts, func(a, b int) bool { return stmts[a].pos < stmts[b].pos })
+	dirs := map[string]string{":": "."}
+	for _, st := range stmts {
+		for _, l := range st.paths {
 			p := ":" + strings.TrimPrefix(l, ":")
-			for ; p != ""; p = p[:strings.LastIndexByte(p, ':')] {
-				set[p] = true
+			switch {
+			case st.dir != "":
+				dirs[p] = st.dir
+			case st.flat:
+				if _, done := dirs[p]; !done && strings.Count(p, ":") == 1 {
+					dirs[p] = "../" + p[1:] // a sibling of the build root
+				}
+			default:
+				for i := 1; i <= len(p); i++ {
+					if i < len(p) && p[i] != ':' {
+						continue
+					}
+					sub := p[:i]
+					if _, done := dirs[sub]; done {
+						continue
+					}
+					parent := ":"
+					if k := strings.LastIndexByte(sub, ':'); k > 0 {
+						parent = sub[:k]
+					}
+					dirs[sub] = pathutil.Join(dirs[parent], sub[strings.LastIndexByte(sub, ':')+1:])
+				}
 			}
 		}
 	}
-	paths := make([]string, 0, len(set))
-	for p := range set {
-		paths = append(paths, p)
+	st := GradleSettings{Projects: []GradleProject{{Path: ":", Dir: "."}}, OK: ok}
+	var paths []string
+	for p := range dirs {
+		if p != ":" {
+			paths = append(paths, p)
+		}
 	}
 	sort.Strings(paths)
-	return paths, ok
+	for _, p := range paths {
+		st.Projects = append(st.Projects, GradleProject{Path: p, Dir: dirs[p]})
+	}
+	return st
 }
 
 // includeArgs reads the arguments of an include call: string literals separated by

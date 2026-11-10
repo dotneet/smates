@@ -912,7 +912,9 @@ build script with no settings file at or above it (outside `testdata/` and `vend
 projects are the root project and the paths the settings' `include` calls name as string
 literals (with their parents: `:a:b` includes `:a`), in their default directories or
 where a `project(':x').projectDir = file('dir')` with literals moves them
-(`runner.ReadGradleSettings`). Detection writes no command: the runner's default command
+(`runner.ReadGradleSettings`, which replays the statements in order as Gradle does: a
+project is placed in its parent's directory when it is included, so a child included
+before its parent moves stays where it was). Detection writes no command: the runner's default command
 finds a moved project's path from the same settings when it runs (`gradleTaskPath`), with
 the wrapper of the platform it runs on (`gradlew` or `gradlew.bat`), so a config written on
 one platform runs on the others. A project moved outside the build (`projectDir` to
