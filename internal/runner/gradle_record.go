@@ -150,7 +150,7 @@ func collectJFR(ctx context.Context, java, shimDir, dir string) ([]*jvmRecording
 
 var (
 	executorName = regexp.MustCompile(`'(Gradle Test Executor \d+)'`)
-	jfrPid       = regexp.MustCompile(`^jvm-(\d+)\.jfr$`)
+	jfrPid       = regexp.MustCompile(`^jvm-(\d+)(?:-[\d_]+)?\.jfr$`)
 )
 
 // parseCollected reads the collector's output (see Collect.java).
@@ -233,11 +233,18 @@ type gradleMapper struct {
 	// classes are the repo-relative class output directories; resources the source
 	// sets' resource directories by their repo-relative output directory; jars the
 	// projects' main resource trees by their repo-relative jar.
-	classes   []string
+	classes   []classDir
 	resources map[string][]string
 	jars      map[string][]string
 	exists    func(string) bool
+	// generated caches whether a loaded class without a tracked source has a class file
+	// in a class output directory: the tree of its project, else "".
+	generated map[string]string
 }
+
+// classDir is a repo-relative class output directory and the dependency key of the
+// tree of the project it belongs to.
+type classDir struct{ dir, project string }
 
 func newGradleMapper(root string, javaFiles []string, read func(string) []byte, facts []gradleFacts) *gradleMapper {
 	m := &gradleMapper{root: root, rel: trace.RelFunc(root), types: map[string][]string{}, resources: map[string][]string{}, jars: map[string][]string{},
@@ -273,7 +280,11 @@ func newGradleMapper(root string, javaFiles []string, read func(string) []byte, 
 				}
 				for _, c := range ss.Classes {
 					if cr, ok := m.rel(c); ok {
-						m.classes = append(m.classes, cr)
+						cd := classDir{dir: cr}
+						if pd, ok := m.rel(p.Dir); ok && p.Dir != "" {
+							cd.project = depkey.Tree(pd)
+						}
+						m.classes = append(m.classes, cd)
 					}
 				}
 				if ss.Name == "main" {
@@ -290,12 +301,49 @@ func newGradleMapper(root string, javaFiles []string, read func(string) []byte, 
 	return m
 }
 
-// class returns the sources declaring the top-level class of a loaded class.
+// class returns the sources declaring the top-level class of a loaded class. A class no
+// tracked source declares whose class file is in a class output directory of the build
+// (generated code, another JVM language) counts as the tree of its project: what it was
+// made from is unknown.
 func (m *gradleMapper) class(name string) []string {
 	if i := strings.IndexAny(name, "$/"); i >= 0 {
 		name = name[:i]
 	}
-	return m.types[name]
+	if fs := m.types[name]; len(fs) > 0 {
+		return fs
+	}
+	if platformClass(name) {
+		return nil
+	}
+	if m.generated == nil {
+		m.generated = map[string]string{}
+	}
+	tree, ok := m.generated[name]
+	if !ok {
+		file := strings.ReplaceAll(name, ".", "/") + ".class"
+		for _, c := range m.classes {
+			if c.project != "" && m.exists(pathutil.Join(c.dir, file)) {
+				tree = c.project
+				break
+			}
+		}
+		m.generated[name] = tree
+	}
+	if tree == "" {
+		return nil
+	}
+	return []string{tree}
+}
+
+// platformClass reports whether a class belongs to the JDK, Gradle or JUnit, which no
+// class output directory of the build holds.
+func platformClass(name string) bool {
+	for _, p := range []string{"java.", "javax.", "jdk.", "sun.", "com.sun.", "org.gradle.", "org.junit.", "worker.org.gradle."} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // read returns the keys of a file a JVM read (relative paths against wd).
@@ -313,11 +361,7 @@ func (m *gradleMapper) read(p, wd string) []string {
 	if keys, ok := m.jars[r]; ok {
 		return keys
 	}
-	for _, c := range m.classes {
-		if pathutil.Under(r, c) {
-			return nil
-		}
-	}
+	// Resources first: a build may put them in a class output directory.
 	for out, srcs := range m.resources {
 		if !pathutil.Under(r, out) || r == out {
 			continue
@@ -337,6 +381,21 @@ func (m *gradleMapper) read(p, wd string) []string {
 			}
 		}
 		return keys
+	}
+	for _, c := range m.classes {
+		if !pathutil.Under(r, c.dir) || r == c.dir {
+			continue
+		}
+		if strings.HasSuffix(r, ".class") {
+			// The class load stands for it (its source, else its project).
+			return m.class(strings.ReplaceAll(strings.TrimSuffix(pathutil.RelTo(r, c.dir), ".class"), "/", "."))
+		}
+		// Another file a tool wrote there (an annotation processor's
+		// META-INF/services): made from something in its project.
+		if c.project != "" {
+			return []string{c.project}
+		}
+		return nil
 	}
 	return []string{r, depkey.Listing(path.Dir(r))}
 }
@@ -377,7 +436,9 @@ func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes m
 	}
 	// Files per executor.
 	files := map[string]map[string]bool{}
-	childOf := map[int]string{} // child pid -> executor
+	// child pid -> executors: pids are reused, and the JVMs run one after the other, so
+	// a pid may stand for children of several of them.
+	childOf := map[int][]string{}
 	for _, r := range recs {
 		if r.Executor == "" || byExec[r.Executor] == nil {
 			continue // a JVM that ran no class of a unit
@@ -399,7 +460,9 @@ func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes m
 			}
 		}
 		for _, p := range r.Procs {
-			childOf[p.Pid] = r.Executor
+			if !slices.Contains(childOf[p.Pid], r.Executor) {
+				childOf[p.Pid] = append(childOf[p.Pid], r.Executor)
+			}
 			cwd := p.Dir
 			if cwd == "" {
 				cwd = dir // a child started without a directory runs in the JVM's
@@ -417,8 +480,10 @@ func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes m
 	for _, p := range procs {
 		byKey[p.Key()] = p
 	}
-	var owner func(p *trace.Proc, depth int) string
-	owner = func(p *trace.Proc, depth int) string {
+	// owner returns the executors a child may belong to: every one whose JVM started a
+	// process with its pid (or its parent's), when a pid was reused.
+	var owner func(p *trace.Proc, depth int) []string
+	owner = func(p *trace.Proc, depth int) []string {
 		if e, ok := childOf[p.Pid]; ok {
 			return e
 		}
@@ -428,16 +493,19 @@ func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes m
 		if a := byKey[p.Anc]; a != nil && a != p && depth < 64 {
 			return owner(a, depth+1)
 		}
-		return ""
+		return nil
 	}
 	global := map[string]bool{}
 	for _, p := range procs {
-		e := owner(p, 0)
+		execs := owner(p, 0)
 		for f := range p.Files() {
-			if e == "" {
+			if len(execs) == 0 {
 				global[f] = true
-			} else if files[e] != nil {
-				files[e][f] = true
+			}
+			for _, e := range execs {
+				if files[e] != nil {
+					files[e][f] = true
+				}
 			}
 		}
 	}

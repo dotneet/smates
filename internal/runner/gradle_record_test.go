@@ -23,7 +23,7 @@ func TestParseCollected(t *testing.T) {
 		"class\tcom.example.A",
 		"read\t/r/a\\tb.txt",
 		"proc\t99\t/r/app\tsh -c printf 'x\\ny' \\\\ z",
-		"jvm\tjvm-42.jfr",
+		"jvm\tjvm-42-2026_11_10_15_20_01.jfr",
 		"error\tjava.io.IOException: truncated",
 		"jvm\tother.jfr",
 	}, "\n")
@@ -62,6 +62,11 @@ func gradleRecordRepo(t *testing.T) (string, []gradleFacts, *gradleMapper) {
 		"app/src/main/resources-extra/extra.txt":         "x",
 		"app/data/in.txt":                                "in",
 		"lib/src/main/resources/lib.properties":          "a=b",
+		// Class files: one generated (no tracked source), one of a tracked source.
+		"lib/build/classes/java/main/com/example/lib/gen/FooProto.class": "\xca\xfe",
+		"app/build/classes/java/main/com/example/Store.class":            "\xca\xfe",
+		// A build whose resources go to its class output directory.
+		"merged/src/main/resources/conf.txt": "c",
 	}
 	testutil.WriteTree(t, root, files)
 	var java []string
@@ -81,6 +86,9 @@ func gradleRecordRepo(t *testing.T) (string, []gradleFacts, *gradleMapper) {
 			}},
 			{Path: ":lib", Dir: j("lib"), Jar: j("lib/build/libs/lib.jar"), SourceSets: []gradleSourceSet{
 				{Name: "main", Resources: []string{j("lib/src/main/resources")}, ResourcesOut: j("lib/build/resources/main"), Classes: []string{j("lib/build/classes/java/main")}},
+			}},
+			{Path: ":merged", Dir: j("merged"), SourceSets: []gradleSourceSet{
+				{Name: "main", Resources: []string{j("merged/src/main/resources")}, ResourcesOut: j("merged/build/classes/java/main"), Classes: []string{j("merged/build/classes/java/main")}},
 			}},
 		},
 	}}
@@ -103,6 +111,11 @@ func TestGradleMapperClass(t *testing.T) {
 		{"com.example.lib.Money", []string{"lib/src/main/java/com/example/lib/Money.java", "other/src/main/java/com/example/lib/Money.java"}},
 		{"java.lang.String", nil},
 		{"org.junit.jupiter.api.Test", nil},
+		// No tracked source, a class file in a class output directory (generated code,
+		// Kotlin): the tree of its project.
+		{"com.example.lib.gen.FooProto", []string{"lib/**"}},
+		{"com.example.lib.gen.FooProto$Builder", []string{"lib/**"}},
+		{"org.lib.Library", nil}, // a dependency's class: no class file in the build
 	} {
 		got := m.class(tc.class)
 		sort.Strings(got)
@@ -126,7 +139,10 @@ func TestGradleMapperRead(t *testing.T) {
 		// Generated: no source directory has it, every resource of the set counts.
 		{"a generated resource", filepath.Join(root, "app/build/resources/main/version.txt"), []string{"app/src/main/resources/**", "app/src/main/resources-extra/**"}},
 		{"a project's jar: its main resources", filepath.Join(root, "lib/build/libs/lib.jar"), []string{"lib/src/main/resources/**"}},
-		{"class output", filepath.Join(root, "app/build/classes/java/main/com/example/Store.class"), nil},
+		{"class file: its source", filepath.Join(root, "app/build/classes/java/main/com/example/Store.class"), []string{"app/src/main/java/com/example/Store.java"}},
+		{"class file without a source: its project", filepath.Join(root, "lib/build/classes/java/main/com/example/lib/gen/FooProto.class"), []string{"lib/**"}},
+		{"another file in a class output directory: its project", filepath.Join(root, "app/build/classes/java/main/META-INF/services/com.example.Plugin"), []string{"app/**"}},
+		{"a resource in the class output directory", filepath.Join(root, "merged/build/classes/java/main/conf.txt"), []string{"merged/src/main/resources/conf.txt", "merged/src/main/resources/"}},
 		{"outside the repository", "/usr/lib/jvm/lib/modules", nil},
 		{"the repository root itself", root, nil},
 		{"empty", "", nil},
@@ -226,6 +242,22 @@ func TestGradleRecorded(t *testing.T) {
 		}
 		if f := obs[other].Files; !f["app/tool.js"] || !f["app/tool-data.json"] || !f["app/global.json"] || f["app/data/in.txt"] {
 			t.Errorf("other: %v", keys(f))
+		}
+	})
+	// The JVMs run one after the other: a pid two of them gave to children stands for
+	// either, so a traced child with it counts for both.
+	t.Run("a pid reused by children of two JVMs", func(t *testing.T) {
+		obs := newObs()
+		recs := []*jvmRecording{rec(1, "1"), rec(2, "2")}
+		recs[0].Procs = []jvmProc{{Pid: 80, Dir: filepath.Join(root, "app"), Command: "node a.js"}}
+		recs[1].Procs = []jvmProc{{Pid: 80, Dir: filepath.Join(root, "app"), Command: "node b.js"}}
+		events := []gradleEvent{ev("com.example.StoreTest", "Gradle Test Executor 1"), ev("com.example.OtherTest", "Gradle Test Executor 2")}
+		child := &trace.Proc{Pid: 80, Ppid: 1, Code: map[string]bool{}, Reads: map[string]bool{"app/fixture.json": true}}
+		gradleRecorded(obs, events, classes, recs, facts, m, []*trace.Proc{child})
+		for _, u := range []string{store, other} {
+			if !obs[u].Files["app/fixture.json"] {
+				t.Errorf("%s: %v", u, keys(obs[u].Files))
+			}
 		}
 	})
 }

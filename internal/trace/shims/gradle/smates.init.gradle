@@ -83,7 +83,7 @@ gradle.allprojects { Project p ->
           if (System.getenv('SMATES_GRADLE_ISOLATE') != 'false') {
             test.forkEvery = 1
           }
-          test.jvmArgs('-XX:StartFlightRecording=filename=' + new File(record, 'jvm-%p.jfr').path +
+          test.jvmArgs('-XX:StartFlightRecording=filename=' + new File(record, 'jvm-%p-%t.jfr').path +
               ',dumponexit=true,settings=' + System.getenv('SMATES_GRADLE_JFC'), '-Xlog:jfr+startup=warning')
         }
         (System.getenv('SMATES_GRADLE_ENV') ?: '').split(',').findAll { it }.each { String name ->

@@ -835,11 +835,11 @@ build that failed before any test reported (a compile error) fails every unit of
 code to a test class through class loading needs a JVM per class: while recording, the
 init script sets `forkEvery = 1` (Gradle still runs `maxParallelForks` of them at once)
 and starts the JDK Flight Recorder in each test JVM
-(`-XX:StartFlightRecording=filename=<dir>/jvm-%p.jfr,dumponexit=true,settings=<shims>/gradle/smates.jfc`).
+(`-XX:StartFlightRecording=filename=<dir>/jvm-%p-%t.jfr,dumponexit=true,settings=<shims>/gradle/smates.jfc`).
 The settings keep only `jdk.ClassLoad`, `jdk.FileRead` and `jdk.ProcessStart` (threshold
 0, no stack traces) and `jdk.InitialSystemProperty`, whose `sun.java.command` names the
 JVM's Gradle test executor. Recording needs Java 17 or later on the task's
-`javaLauncher` (`%p` in the file name, `ProcessStart`); an older JVM runs unrecorded. A
+`javaLauncher` (`%p` and `%t` in the file name, `ProcessStart`); an older JVM runs unrecorded. A
 JVM per class costs a JVM and JUnit Platform start per class (a few hundred
 milliseconds, spread over the parallel forks); classes no longer share a JVM while
 recording, so state one class leaves behind for the next is gone, and fixtures started
@@ -861,12 +861,16 @@ test (Gradle's worker and JUnit's discovery read Gradle's jars and the JDK, outs
 repository); a JVM that ran no class of a unit (an abstract class Gradle forked for) is
 dropped. Mapping to repository keys: a loaded class (lambda and hidden classes, nested
 classes: their top-level class) maps to every source declaring it in the index of the
-repository's Java files (several projects may declare it); a class no source declares (a
-library, generated code) adds nothing. A read below a source set's resources output maps
-to the file of the same path in its resource directories (all of their trees when none
-has it: a generated resource), a read of a project's jar to that project's main resource
-trees (`dir/**`: JFR sees the jar, not the entry), and reads below class output
-directories are dropped (class loads stand for them); other reads in the repository stay
+repository's Java files (several projects may declare it); a class no source declares
+maps to the tree of the project (`dir/**`) whose class output directory holds its class
+file (generated code, Kotlin: what it was made from is unknown), and to nothing when none
+does (a library; JDK, Gradle and JUnit classes are not looked up). A read below a source
+set's resources output maps to the file of the same path in its resource directories (all
+of their trees when none has it: a generated resource), a read of a project's jar to that
+project's main resource trees (`dir/**`: JFR sees the jar, not the entry). Resources are
+matched before class output directories, as a build may put them there; below a class
+output directory a `.class` read maps as its class does, and any other file (an annotation
+processor's `META-INF/services`) to its project's tree. Other reads in the repository stay
 as they are, relative ones resolved against the task's working directory. JFR has no
 event for directory listings or existence checks, so a read file also adds the listing
 of its directory (a new migration script next to the ones a test read selects it); a
@@ -875,8 +879,10 @@ A started process goes through the command-line analysis of "Subprocesses smates
 trace" (`trace.CommandLineDeps`): JFR joins the arguments with spaces, so the words are
 split again and a shell's `-c` script is the rest of the line; a process started without
 a directory runs in the task's working directory. A Node, Bun or Python process that
-traced itself belongs to the JVM that started it (its pid, or through traced ancestors),
-otherwise to every unit of the run. A unit that ran in a JVM whose recording is missing
+traced itself belongs to the JVM that started it (its pid, or through traced ancestors;
+when JVMs that ran one after the other started processes with the same pid, to all of
+them), otherwise to every unit of the run. Recordings are named by pid and start time
+(`%p-%t`), so a reused pid does not overwrite an earlier JVM's file. A unit that ran in a JVM whose recording is missing
 or unreadable stays untraced (`Observation.NoTrace`): its pass is recorded as `unknown`
 and it runs again, with a warning. Environment variables are not recorded (JFR has no
 event for `System.getenv`): the suite's `env:` is part of its settings, and a variable
