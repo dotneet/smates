@@ -64,7 +64,7 @@ func runNodeAttempt(ctx context.Context, rc *RunContext, extra, testArgs []strin
 		if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 			return nil, err
 		}
-		env = trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+		env = traceEnv(rc)
 	}
 	start := time.Now()
 	code, err := runBatches(ctx, rc, extra, testArgs, env)
@@ -119,12 +119,13 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			extra = append(extra, "--reporter="+path)
 		}
 	}
-	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
-		// The project runs files in shared workers (isolate: false): run each file on
-		// its own while recording.
+	if rc.Record && (config.Bool(rc.Suite.Isolate, false) || rc.Untraced) {
+		// The project runs files in shared workers (isolate: false), or no coverage
+		// tells which file a worker ran (untraced): run each file on its own while
+		// recording.
 		return runIsolatedNode(ctx, rc, func(u string) []string {
 			return append(append([]string{}, extra...), relToSuite(rc.Suite, u))
-		}, traceOptions{})
+		}, untracedOptions(rc, traceOptions{}))
 	}
 	return runNodeWithFallback(ctx, rc, extra, rc.RelArgs(""), traceOptions{})
 }
@@ -283,12 +284,13 @@ func (jest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		}
 	}
 	// In band, the process that runs tests also crawls the project: its directory
-	// listings are not dependencies of the tests.
-	opt := traceOptions{dropDirs: inBand}
-	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
+	// listings are not dependencies of the tests. Jest runs a single test file in band,
+	// as it does each untraced unit (one jest per file, see untracedOptions).
+	opt := traceOptions{dropDirs: inBand || rc.Untraced}
+	if rc.Record && (config.Bool(rc.Suite.Isolate, false) || rc.Untraced) {
 		return runIsolatedNode(ctx, rc, func(u string) []string {
 			return append(append([]string{}, extra...), "--runTestsByPath", relToSuite(rc.Suite, u))
-		}, opt)
+		}, untracedOptions(rc, opt))
 	}
 	if !rc.All {
 		extra = append(extra, "--runTestsByPath")
@@ -333,7 +335,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 		return nil, err
 	}
-	env := trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	env := traceEnv(rc)
 	start := time.Now()
 	// A command that runs files one after another (tests sharing a database or ports)
 	// is recorded one file at a time too; record_jobs overrides this.
@@ -388,12 +390,13 @@ func (nodeTest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// always passed explicitly: node's own discovery would also run helpers that smates
 	// does not consider tests (test/helpers/*.js) as if they were test files.
 	esc := nodeArgEscaper(ctx, rc)
-	if rc.Record && config.Bool(rc.Suite.Isolate, false) {
-		// --test-isolation=none runs every file in one process: run each file on its own
-		// while recording.
+	if rc.Record && (config.Bool(rc.Suite.Isolate, false) || rc.Untraced) {
+		// --test-isolation=none runs every file in one process, and without coverage
+		// (untraced) only the command line tells which file a process ran: run each file
+		// on its own while recording.
 		return runIsolatedNode(ctx, rc, func(u string) []string {
 			return []string{esc(relToSuite(rc.Suite, u))}
-		}, traceOptions{trustProcStatus: true})
+		}, untracedOptions(rc, traceOptions{trustProcStatus: true}))
 	}
 	explicit := *rc
 	explicit.All = false

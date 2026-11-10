@@ -187,13 +187,18 @@ func (s *selection) unitDeps(ss *suiteSel) {
 		known := k.sorted()
 		sort.Strings(traced)
 		sr.Known[u] = known
-		if config.Bool(su.TrustBrowserPasses, false) && su.BrowserUnit(sr.Files[u]) {
-			if why := s.untrusted(ss, u, known, static); why != "" {
-				if sr.Untrusted == nil {
-					sr.Untrusted = map[string]string{}
-				}
-				sr.Untrusted[u] = why
+		why := ""
+		switch {
+		case UntracedUnit(su, u, sr.Files[u]):
+			why = s.untracedUntrusted(ss, u, known, static)
+		case config.Bool(su.TrustBrowserPasses, false) && su.BrowserUnit(sr.Files[u]):
+			why = s.untrusted(ss, u, known, static)
+		}
+		if why != "" {
+			if sr.Untrusted == nil {
+				sr.Untrusted = map[string]string{}
 			}
+			sr.Untrusted[u] = why
 		}
 		sr.Deps[u] = mergeSorted(known, traced)
 		ss.units = append(ss.units, &unitSel{id: u, entry: entry, known: k})
@@ -376,9 +381,10 @@ func (s *selection) knownDeps(ss *suiteSel, u string, entry *state.Entry, inputs
 			k.rest[f] = ViaInput
 		}
 	}
-	if su.BrowserUnit(files) {
+	if su.BrowserUnit(files) || UntracedUnit(su, u, files) {
 		// What the runner loads through its configuration (setup files, Vite plugins
-		// serving mock APIs, alias targets) runs with the test in the browser.
+		// serving mock APIs, alias targets) runs with the test in the browser, or with
+		// an untraced test, where no trace sees it.
 		for f := range ss.loaded {
 			k.rest[f] = ViaInput
 		}

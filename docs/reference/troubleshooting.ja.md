@@ -43,6 +43,7 @@ smates deps src/cart.test.ts
 - **`dir/**` への依存。** smates が中を見られないコマンド（`make`、バイナリ）を使うと、テストはそのディレクトリ配下のすべてのファイルに依存します。本当の入力を `rules` で宣言してツールを直接呼ぶか、余分な実行を受け入れてください。
 - **ログの警告。** `N test file(s) passed but left no trace (their process was likely killed before writing it); they will run again next time` は、smates が使ったものを保存する前にテストプロセスが終了したことを示します（テスト内の `process.exit()`、強制終了されたワーカーなど）。`N test unit(s) ran and passed but left no trace`（または `N test file(s) passed but none left a trace`）は、そのバッチのテストプロセスがひとつもトレースされなかったことを示します。スイートの command が、smates のトレース用の環境変数（`NODE_OPTIONS`、`NODE_V8_COVERAGE`、`SMATES_*`）を落とすラッパー（turbo や nx などのタスクランナー、`env -i`、コンテナ）経由でテストを実行しているか、キャッシュした結果を再生している可能性が高いです。スイートの `command` をテストランナー自体にして `root:` をそのパッケージにするか、その環境変数を引き継いでください。`custom` のスイートでは、代わりに、記録はコマンドが起動する Node と Python のプロセス、または `junit:` のレポートからだけ行うと表示します。シェルスクリプトや JVM のビルドはどちらも残しません。こうしたユニットは未記録のまま残ります。CI で `--base` がなければ次回も新しいテストとして実行されますが、ローカル（または `--base` 付き）ではベースリビジョンに対する静的解析で判定され、実行時に読むものは見えません。
 - **ブラウザのテスト。** `N test file(s) ran in a browser, which smates cannot trace; they will run again next time` は、ブラウザモードのテストか Storybook のストーリーを示します。ブラウザの中は何もトレースされないので、実行のたびに結果が不明になります。スイートに `trust_browser_passes: true` を設定すると、pass を静的な依存とともに記録します。`smates run --shadow` で確かめてください（[ブラウザモードと Storybook](../guides/runners.md#browser-mode-and-storybook) を参照）。この設定がオンのとき、`N browser test(s) passed but are not trusted` は、それでも記録しないストーリーとその理由（smates が解決できない import、`main.*` の `viteFinal` など）を示します。
+- **untraced のテスト。** `N untraced test(s) passed but smates cannot tell all they depend on without coverage` は、`untraced` に挙げたテストのうち pass を記録しないものとその理由（プロセスを起動する import、実行時に名前を決めるモジュール、カバレッジなしではトレースできないランナー）を示します。[時間を測るテスト](../guides/runners.md#tests-that-measure-time) を参照してください。
 - **ランナーへの引数。** `--` 以降に引数を付けた実行では、テストを成功として記録しません。常に使うフラグはスイートの `command` に移してください。
 - **pytest 向けに書かれた unittest のモジュール。** 状態が不明のままなので毎回実行されます。ログで `runner: pytest` が提案されます。
 - **flaky なテスト。** `smates flaky` は、入力が変わらないのに結果が反転したテストを一覧します。[シャドーモード・flaky・統計](../guides/trust.md) を参照してください。
@@ -58,6 +59,10 @@ warn  suite api: 511 of 728 test units depend on (nearly) all 104 source files o
 これらのテストは実行時にソースを読んでいます。すべてのテストが通るヘルパーが、ディレクトリのファイルを glob で集めたり、パースしたり、ハッシュを取ったりしています（ルート名の収集、命名規則の検査、キャッシュキーの計算など）。smates はその読み込みがファイルのどの部分を使ったかを判断できないため、読まれたファイルはそれぞれ、そのヘルパーを実行したすべてのテストの依存になります。実行したコードを宣言単位で数える Go の関数単位のユニットでは、ソースファイル全体が依存になっていれば、それは実行時の読み込みを意味します（または、関数のカバレッジプロファイルから、どの本体が実行されたかを判断できなかったことを意味します）。ファイル単位で追跡するスイートでは、パッケージのほとんどのモジュールを import しても同じ形になるため、このチェックの対象外です。そうしたスイートでも、`smates deps <test>` で同じような読み込みを確認できます。
 
 読み込みをテストのプロセスの外へ移してください。テストに必要な情報は一度だけ計算します（生成したファイルやコミットしたファイルにして `go generate` やスクリプトで更新し、ソースとの一致は 1 つのテストで検査します）。あるいは、ソースの走査をすべてのテストが呼ぶヘルパーではなく、専用の 1 つのテストに置きます。そのうえで記録し直し（`smates run --all`）、`smates deps <test>` で確認します。
+
+## smates でだけテストが失敗する { #a-test-fails-only-under-smates }
+
+`smates run --no-record`（トレースなし）でもう一度実行してください。そこでは成功し、記録する実行では毎回失敗するなら、結果を変えているのはトレースです。よくあるのは時間を測るテストです。処理時間や 2 つの計測の比を assert すると、V8 のカバレッジがコードを不均一に遅くするため失敗します。スイートの `untraced` に挙げると、カバレッジなしで記録します（`smates doctor` が `suite-timing-tests` として提案します）。[時間を測るテスト](../guides/runners.md#tests-that-measure-time) を参照してください。
 
 ## 実行されるべきテストがスキップされた { #a-test-that-should-have-run-was-skipped }
 

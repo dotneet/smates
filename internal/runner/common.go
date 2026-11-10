@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -93,12 +94,37 @@ type traceOptions struct {
 	dropDirs bool
 	// unitsFromArgv identifies units by the test file on each process's command line.
 	unitsFromArgv bool
+	// workersOwnArgv: with unitsFromArgv, the pool workers of a runner naming a test
+	// file own its unit, and the runner is infrastructure (trace.Options.WorkersOwnArgv).
+	workersOwnArgv bool
+}
+
+// untracedOptions are the trace options of a run of one test file per runner process
+// (runIsolatedNode): without coverage (RunContext.Untraced), no executed code tells
+// which unit a process ran, so units come from the test file on the runner's command
+// line, and what the pool workers below that runner use is that unit's.
+func untracedOptions(rc *RunContext, opt traceOptions) traceOptions {
+	if rc.Untraced {
+		opt.unitsFromArgv, opt.workersOwnArgv = true, true
+	}
+	return opt
 }
 
 // observe collects a trace directory into per-unit observations.
 func observe(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Observation, []string, error) {
 	obs, warns, _, err := observeAll(rc, exitCode, opt)
 	return obs, warns, err
+}
+
+// traceEnv is the environment of a recorded Node or Bun run: trace.Env, less the V8
+// coverage of an untraced run (RunContext.Untraced), whose processes then write their
+// coverage where the user's NODE_V8_COVERAGE says, if anywhere.
+func traceEnv(rc *RunContext) []string {
+	env := trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	if rc.Untraced {
+		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "NODE_V8_COVERAGE=") })
+	}
+	return env
 }
 
 // observeAll is observe that also returns what source files read when they ran.
@@ -123,7 +149,7 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 			p.Exit = nil
 		}
 	}
-	attr := trace.Attribute(procs, rc.UnitOf, trace.Options{UnitsFromArgv: opt.unitsFromArgv, Rel: trace.RelFunc(rc.Repo.Root)})
+	attr := trace.Attribute(procs, rc.UnitOf, trace.Options{UnitsFromArgv: opt.unitsFromArgv, WorkersOwnArgv: opt.workersOwnArgv, Rel: trace.RelFunc(rc.Repo.Root)})
 	var warnings []string
 	if attr.SharedProcs > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d test process(es) ran several test files; their dependencies were merged (still correct, less precise). Set \"isolate: true\" on the suite in smates.yml (one process per test file while recording) for exact attribution.", attr.SharedProcs))

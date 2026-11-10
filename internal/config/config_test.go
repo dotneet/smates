@@ -122,6 +122,7 @@ func TestParseErrors(t *testing.T) {
 		{"rule bad tests glob", "suites:\n  - runner: go\n    rules: [{tests: [\"a\\\\b\"], deps: [m/**]}]\n", "path separator"},
 		{"unknown rule field", "suites:\n  - runner: go\n    rules: [{test: [\"**\"], deps: [m/**]}]\n", "field test not found"},
 		{"bad volatile glob", "suites:\n  - runner: go\n    volatile: [\"a[\"]\n", "volatile"},
+		{"bad untraced glob", "suites:\n  - runner: vitest\n    untraced: [\"a[\"]\n", "untraced"},
 		{"negative max_age", "suites:\n  - runner: go\n    max_age: -1h\n", "max_age"},
 		{"bad max_age", "suites:\n  - runner: go\n    max_age: 7d\n", ""},
 	}
@@ -337,6 +338,7 @@ func TestParseRules(t *testing.T) {
 suites:
   - runner: go
     volatile: ["./pkg/clock#TestToday", "pkg/calendar"]
+    untraced: ["./pkg/perf"]
     max_age: 168h
     rules:
       - reaches: ["./internal/testdb/**", "$APP_DB_*"]
@@ -351,6 +353,9 @@ suites:
 	s := c.Suites[0]
 	if want := []string{"pkg/clock#TestToday", "pkg/calendar"}; !reflect.DeepEqual(s.Volatile, want) {
 		t.Errorf("volatile %v, want %v", s.Volatile, want)
+	}
+	if want := []string{"pkg/perf"}; !reflect.DeepEqual(s.Untraced, want) {
+		t.Errorf("untraced %v, want %v", s.Untraced, want)
 	}
 	if s.MaxAge != 168*time.Hour {
 		t.Errorf("max_age %v", s.MaxAge)

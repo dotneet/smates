@@ -221,6 +221,57 @@ local iterations, and let a recorded run (CI, or a plain `smates run`) bring the
 to date. Runners that report per-file status without tracing (vitest, jest, pytest,
 `go test`, and any suite with a `junit:` report) still report which files failed.
 
+### Tests that measure time { #tests-that-measure-time }
+
+V8 coverage does not slow all code down by the same factor: it changes how V8 compiles
+and optimizes it. A test that asserts on a duration (`expect(elapsed).toBeLessThan(50)`)
+or on a ratio of two measurements (a run on 4× the input takes less than 6× as long) can
+then pass under the runner and fail under `smates run`, every time, while it passes with
+`smates run --no-record`.
+
+List such tests in the suite's `untraced` (globs relative to `root`):
+
+```yaml
+suites:
+  - name: web
+    runner: vitest
+    untraced: ["test/perf.test.ts", "**/*.bench.test.ts"]
+```
+
+While recording, smates runs them without code coverage (no `NODE_V8_COVERAGE`, no
+`bun test --coverage`), one runner process per test file, after the other tests. The `fs` hooks still see the files they
+read, the directories they list, the environment variables they read and the processes
+they start; the code they run is taken from their static import closure, with what the
+runner's configuration loads (setup files, plugins, alias targets). A pass is recorded
+with those dependencies, so the test is skipped until one of them changes.
+
+When smates cannot tell all the code such a test runs, its pass is recorded as unknown
+and it runs again next time, and the log says why
+(`untraced test(s) passed but smates cannot tell all they depend on without coverage`):
+
+- static analysis is off (`static: false`), or the runner's configuration cannot be read;
+- a test file is not JavaScript or TypeScript;
+- a file in its import closure imports something smates cannot resolve, or imports
+  `child_process`, `worker_threads`, `cluster`, `module`, `wasi`, `sqlite` or `bun`
+  (with or without `node:`), uses `Bun.file`, `Bun.spawn`, `Bun.$` or a Deno file or
+  process API, or calls `import()` or `require()` with a name computed at run time.
+  These run code, or read files, that neither the hooks nor the import graph see.
+
+Packages under `node_modules` are not dependencies (the lockfile stands for them). A
+package that reads files of the repository at run time does so through `fs`, which the
+hooks see.
+
+Only vitest, jest, `node --test` and bun suites can record untraced tests this way. In a
+pytest, unittest, Go or custom suite the tests `untraced` lists run without any tracing
+while recording, and run again every time.
+
+`smates doctor` warns about JavaScript and TypeScript test files that read a clock
+(`performance.now()`, `process.hrtime`, `Date.now() - ...`) and assert on the order of
+values, unless they use fake timers or `untraced` already lists them
+(`suite-timing-tests`). `untraced` is left out of the suite's settings hash: adding or
+removing a glob reruns nothing. To keep such a test out of smates entirely, add it to
+the suite's `exclude` and run it on its own.
+
 ## Python
 
 smates puts its shims on `PYTHONPATH`. They trace which functions run through

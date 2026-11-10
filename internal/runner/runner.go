@@ -110,6 +110,14 @@ type RunContext struct {
 	Units  []string
 	All    bool
 	Record bool
+	// Untraced records the units without measuring the code they execute, which slows
+	// it down unevenly (config.Suite.Untraced): no V8 or Bun coverage, only what the
+	// shims see (files read, directories listed, environment variables, processes
+	// started). Every observation is StaticOnly: the code the units load is their
+	// static closure. With no executed code to tell which unit a process ran, Node
+	// runners start once per unit (as bun always does) and attribute by command line.
+	// Only adapters TracesUntraced names support it.
+	Untraced bool
 	// Fresh asks for outcomes the runner did not take from a cache of earlier runs
 	// (shadow mode evaluates the selection against them). Recording always runs fresh.
 	Fresh     bool
@@ -442,6 +450,17 @@ func suiteEnv(s *Suite) []string {
 	}
 	sort.Strings(env)
 	return env
+}
+
+// TracesUntraced reports whether the adapter named runner can record untraced units
+// (RunContext.Untraced): one whose code is measured by V8 or Bun coverage and whose
+// file reads the Node shim sees. Other runners run untraced units without recording.
+func TracesUntraced(runner string) bool {
+	switch runner {
+	case "vitest", "jest", "node", "bun":
+		return true
+	}
+	return false
 }
 
 // MergeEnv overlays KEY=VALUE lists; later lists win.
