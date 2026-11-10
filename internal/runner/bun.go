@@ -54,7 +54,7 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// BUN_OPTIONS (bun, also preloading it into bun test itself: loaded once) and
 	// NODE_OPTIONS (node), both set by NodeEnv.
 	shim := rc.Shims().Node
-	env := trace.Env(rc.TraceDir, rc.Repo.Root, rc.Shims(), suiteEnv(rc.Suite))
+	env := traceEnv(rc)
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
 		return nil, err
 	}
@@ -69,7 +69,10 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// tests that share ports, databases or directories collide.
 	codes, err := isolatedRun(ctx, rc, rc.Units, 1, func(u string, i int) ([]string, []string, error) {
 		cov := filepath.Join(rc.TraceDir, fmt.Sprintf("bun-%d", i))
-		extra := append(append([]string{}, pre...), "--coverage", "--coverage-reporter=lcov", "--coverage-dir="+cov)
+		extra := append([]string{}, pre...)
+		if !rc.Untraced {
+			extra = append(extra, "--coverage", "--coverage-reporter=lcov", "--coverage-dir="+cov)
+		}
 		argv, err := rc.CommandLine(extra, []string{"./" + relToSuite(rc.Suite, u)})
 		return argv, env, err
 	})
@@ -88,7 +91,11 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o = &Observation{Files: map[string]bool{}}
 			obs[u] = o
 		}
-		files, err := readLcov(filepath.Join(rc.TraceDir, fmt.Sprintf("bun-%d", i), "lcov.info"), rc.Dir(), rc.Repo.Root)
+		var files []string
+		var err error
+		if !rc.Untraced { // untraced: the modules the shim saw loaded, and the static closure
+			files, err = readLcov(filepath.Join(rc.TraceDir, fmt.Sprintf("bun-%d", i), "lcov.info"), rc.Dir(), rc.Repo.Root)
+		}
 		if err != nil && codes[u] == 0 && bunImportsSource(rc, u) {
 			// Bun writes no report when no source file was covered: a passing test
 			// that imports some would be recorded without them.

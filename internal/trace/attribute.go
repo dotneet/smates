@@ -2,6 +2,7 @@ package trace
 
 import (
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -39,6 +40,13 @@ type Options struct {
 	// command line instead of from executed code (runners without code coverage that
 	// are started once per test file).
 	UnitsFromArgv bool
+	// WorkersOwnArgv, with UnitsFromArgv: a runner started once per test file runs it
+	// in pool workers it starts (vitest, jest without coverage): the workers below a
+	// process naming units on its command line own those units, and that process is
+	// runner infrastructure, whose reads (its crawl of the project, the sources it
+	// transforms) are not the tests'. A runner with no worker the pool pattern knows
+	// keeps its units, reads and all: more is recorded, never less.
+	WorkersOwnArgv bool
 	// Rel converts an absolute path to a repo-relative one (required with UnitsFromArgv).
 	Rel func(string) (string, bool)
 }
@@ -116,6 +124,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		sort.Strings(own[p])
 	}
+	if opt.UnitsFromArgv && opt.WorkersOwnArgv {
+		handOver(procs, own, helper, parent)
+	}
 	owner := func(p *Proc) bool { return !helper[p] && (len(own[p]) > 0 || p.HasContexts()) }
 
 	// Processes that are ancestors of a unit-owning process are runner infrastructure,
@@ -177,10 +188,11 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			for f := range files {
 				extra[target][f] = true
 			}
-		case !infra[p] && len(p.Code) > 0:
+		case !infra[p] && (len(p.Code) > 0 || opt.WorkersOwnArgv):
 			// A helper that runs repository code (a server started by global setup) is
 			// something every test may talk to. Helpers that only read files (the
-			// runner's own crawlers and transformers) are not.
+			// runner's own crawlers and transformers) are not. Without coverage
+			// (WorkersOwnArgv) what a helper runs is unknown: it counts as such a helper.
 			for f := range files {
 				res.Global[f] = true
 			}
@@ -262,6 +274,43 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 	}
 	return res
+}
+
+// poolWorkerRe matches the entry scripts of the worker processes test runners start
+// (tinypool, vitest's forks, jest-worker); the shim knows them as pool workers too.
+var poolWorkerRe = regexp.MustCompile(`[\\/](?:tinypool[\\/]dist[\\/](?:esm[\\/])?entry[\\/]process|vitest[\\/]dist[\\/]workers[\\/](?:vmF|f)orks|jest-worker[\\/]build[\\/](?:workers[\\/])?processChild)\.[cm]?js$`)
+
+// poolWorker reports whether p is a test runner's worker: a worker thread, or a process
+// running a pool's worker entry script.
+func poolWorker(p *Proc) bool {
+	return p.Tid != 0 || len(p.Argv) > 1 && poolWorkerRe.MatchString(p.Argv[1])
+}
+
+// handOver gives the units a runner names on its command line (own, from
+// UnitsFromArgv) to the pool workers below it that own nothing themselves, and takes
+// them from the runner, which then counts as infrastructure (see
+// Options.WorkersOwnArgv). Helpers and processes with contexts are left alone.
+func handOver(procs []*Proc, own map[*Proc][]string, helper map[*Proc]bool, parent func(*Proc) *Proc) {
+	named := map[*Proc][]string{}
+	for p, units := range own {
+		named[p] = units
+	}
+	runners := map[*Proc]bool{}
+	for _, p := range procs {
+		if len(named[p]) > 0 || helper[p] || p.HasContexts() || !poolWorker(p) {
+			continue
+		}
+		for a, n := parent(p), 0; a != nil && n < 64; a, n = parent(a), n+1 {
+			if units := named[a]; len(units) > 0 {
+				own[p] = units
+				runners[a] = true
+				break
+			}
+		}
+	}
+	for r := range runners {
+		delete(own, r)
+	}
 }
 
 // namesUnit reports whether p's command line names a test file (arguments resolved

@@ -122,6 +122,14 @@ type Suite struct {
 	// units that run every time, whatever changed: tests that depend on something
 	// smates cannot track, such as the date.
 	Volatile []string `yaml:"volatile" json:"-"`
+	// Untraced: globs (relative to Root, matched like Volatile) of the test units that
+	// must run without tracing while smates records, because tracing changes what they
+	// measure (V8 coverage slows code down unevenly, so a test asserting timings or
+	// their ratios fails under it). They run in batches of their own, and a pass is
+	// recorded with the dependencies smates knows statically (selector.UntracedUnit).
+	// Left out of the settings hash: it changes how the tests are observed, not what
+	// they test, and adding a glob must not rerun the suite.
+	Untraced []string `yaml:"untraced" json:"-"`
 	// MaxAge: a unit whose last recorded run is older than this runs again, whatever
 	// changed (0: never). Neither it nor Volatile changes how the tests run, so they are
 	// left out of the settings hash (selector.ConfigHash).
@@ -806,6 +814,10 @@ func (c *Config) Normalize() error {
 		}
 		trimDotSlash(s.Volatile)
 		if err := checkGlobs(fmt.Sprintf("suite %q: volatile", s.Name), s.Volatile); err != nil {
+			return err
+		}
+		trimDotSlash(s.Untraced)
+		if err := checkGlobs(fmt.Sprintf("suite %q: untraced", s.Name), s.Untraced); err != nil {
 			return err
 		}
 		if err := checkRules(s); err != nil {

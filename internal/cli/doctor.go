@@ -153,6 +153,15 @@ func runDoctor(cf *commonFlags) *doctorReport {
 			r.add(checkWarn, "suite-server-dependency", "suite %s looks like end-to-end tests (%s) but declares no depends_on, serves or rules: tracing cannot follow requests into a server process, so changes to the server's code select none of its tests. Declare it, e.g. depends_on: [<server suite>] or serves: [\"backend/**\"]", s.Name, why).about(s.Name).
 				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".depends_on", Value: []string{"<server suite>"}}, Doc: docURL + "guides/servers/"})
 		}
+		if timed := timingTests(p.repo.Root, s, p.files); len(timed) > 0 {
+			const shown = 3
+			list := strings.Join(timed[:min(shown, len(timed))], ", ")
+			if len(timed) > shown {
+				list += fmt.Sprintf(" and %d more", len(timed)-shown)
+			}
+			r.add(checkWarn, "suite-timing-tests", "suite %s: %d test file(s) assert on measured time (%s): recording measures their code with V8 coverage, which slows it down unevenly, so a timing or ratio assertion can fail only under smates. List them in untraced to record them without coverage", s.Name, len(timed), list).about(s.Name).
+				fix(doctorFix{Config: &configFix{Key: "suites." + s.Name + ".untraced", Value: timed}, Doc: docURL + "guides/runners/#tests-that-measure-time"})
+		}
 		doctorRuleReach(p, s, len(units), r)
 		runners[s.Runner] = true
 	}

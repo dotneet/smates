@@ -175,6 +175,16 @@ Workaround: list it in `volatile`, or set `max_age`.
 selected when only the time changes. Workaround: list it in `volatile` (it runs every
 time), or set `max_age` so recorded runs expire.
 
+**Recording changes timings.** Recording measures the code of Node tests with V8
+coverage (bun tests with `--coverage`), which slows it down unevenly. A test that asserts
+on a duration or on a ratio of two measurements can fail only under `smates run`.
+Workaround: list it in the suite's `untraced`, which records it without coverage: the
+files it reads are still traced, but the code it runs is its static import closure, so a
+test whose closure may start processes or load modules by a computed name is never
+recorded as passed and runs every time (see
+[Tests that measure time](../guides/runners.md#tests-that-measure-time)). Python and Go
+tests listed in `untraced` run without tracing and run every time.
+
 **Jest** occasionally runs two files back to back in one worker even when recycling
 workers. Their dependencies are then merged: still correct, but less precise. Workers are
 not recycled at all on Jest 28 or older, when tests run in band (`--runInBand`, `-i`),

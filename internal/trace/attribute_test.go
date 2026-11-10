@@ -447,3 +447,67 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// TestAttributeWorkersOwnArgv: without coverage, a runner started for one test file
+// hands its unit to the pool workers it starts (forks, worker threads, jest-worker), and
+// its own reads (the crawl, the transforms) are no one's. Must keep: a runner with no
+// worker the pattern knows keeps its unit and reads, and a helper whose code is unknown
+// counts for every test.
+func TestAttributeWorkersOwnArgv(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "test/a.test.ts", "test/b.test.ts")
+	runner := func(pid int, file string) *Proc {
+		return &Proc{Pid: pid, Argv: []string{"node", "node_modules/.bin/vitest", "run", file}, Cwd: root,
+			Code: map[string]bool{}, Reads: map[string]bool{"src/crawled.ts": true, "test/": true}, Ctx: map[string]map[string]bool{}}
+	}
+	child := func(pid, ppid, tid int, script, read string) *Proc {
+		return &Proc{Pid: pid, Ppid: ppid, Tid: tid, Argv: []string{"node", script}, Cwd: root,
+			Code: map[string]bool{}, Reads: map[string]bool{read: true}, Ctx: map[string]map[string]bool{}}
+	}
+	tinypool := filepath.Join(root, "node_modules", "tinypool", "dist", "entry", "process.js")
+	jestWorker := filepath.Join(root, "node_modules", "jest-worker", "build", "workers", "processChild.js")
+	for _, c := range []struct {
+		name   string
+		procs  []*Proc
+		want   map[string][]string // unit -> files
+		global []string
+	}{
+		{"fork workers own the unit", []*Proc{runner(1, "test/a.test.ts"), child(2, 1, 0, tinypool, "data/a.json"), child(3, 1, 0, tinypool, "data/idle.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json", "data/idle.json"}}, nil},
+		{"a worker thread owns the unit", []*Proc{runner(1, "test/a.test.ts"), child(1, 0, 1, "", "data/a.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json"}}, nil},
+		{"jest-worker", []*Proc{runner(1, "test/a.test.ts"), child(2, 1, 0, jestWorker, "data/a.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json"}}, nil},
+		{"two runners", []*Proc{runner(1, "test/a.test.ts"), child(2, 1, 0, tinypool, "data/a.json"), runner(3, "test/b.test.ts"), child(4, 3, 0, tinypool, "data/b.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json"}, "test/b.test.ts": {"data/b.json"}}, nil},
+		{"a process the test starts in a worker", []*Proc{runner(1, "test/a.test.ts"), child(2, 1, 0, tinypool, "data/a.json"), child(5, 2, 0, "scripts/gen.js", "data/gen.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json", "data/gen.json"}}, nil},
+		{"must keep: no known pool worker (in band)", []*Proc{runner(1, "test/a.test.ts")},
+			map[string][]string{"test/a.test.ts": {"src/crawled.ts", "test/"}}, nil},
+		{"must keep: a helper the runner starts runs unknown code", []*Proc{runner(1, "test/a.test.ts"), child(2, 1, 0, tinypool, "data/a.json"), child(6, 1, 0, "scripts/server.js", "data/server.json")},
+			map[string][]string{"test/a.test.ts": {"data/a.json"}}, []string{"data/server.json"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := Attribute(c.procs, unitOfTests, Options{UnitsFromArgv: true, WorkersOwnArgv: true, Rel: RelFunc(root)})
+			if len(a.Units) != len(c.want) {
+				t.Errorf("units %v, want %v", keys(unitsOf(a)), c.want)
+			}
+			for u, want := range c.want {
+				if got := unitFiles(a, u); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s: %v, want %v", u, got, want)
+				}
+			}
+			if got := keys(a.Global); !reflect.DeepEqual(got, c.global) && !(len(got) == 0 && len(c.global) == 0) {
+				t.Errorf("global %v, want %v", got, c.global)
+			}
+		})
+	}
+}
+
+func unitsOf(a *Attribution) map[string]bool {
+	out := map[string]bool{}
+	for u := range a.Units {
+		out[u] = true
+	}
+	return out
+}

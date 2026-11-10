@@ -129,9 +129,10 @@ type Suite struct {
 	// Browser is set when the suite's runner configuration may run tests in a browser
 	// (runner.RunnerConfig): what they load there is never traced.
 	Browser bool `json:"-"`
-	// Untrusted holds, with trust_browser_passes, the tests that run in a browser whose
-	// known dependencies may not be all they load, and why: recording keeps their
-	// reported passes unknown (see Record).
+	// Untrusted holds the tests recorded from their known dependencies alone (with
+	// trust_browser_passes, those that run in a browser; those the suite's untraced
+	// lists) whose known dependencies may not be all they use, and why: recording keeps
+	// their reported passes unknown (see Record).
 	Untrusted map[string]string `json:"-"`
 }
 
@@ -162,6 +163,13 @@ func (d *ServiceDeps) Match(f string) bool { return d.match(f) }
 // are files.
 func (d *ServiceDeps) applies(su *runner.Suite, unit string, files []string) bool {
 	return len(d.Tests) == 0 || UnitMatches(su, unit, files, d.Tests)
+}
+
+// UntracedUnit reports whether the suite's untraced globs list unit, whose test files
+// are files: `smates run` runs it without tracing while recording (config.Suite.Untraced).
+// A Go compile check is never untraced: it runs no test.
+func UntracedUnit(su *runner.Suite, unit string, files []string) bool {
+	return su != nil && len(su.Untraced) > 0 && !runner.IsBuildCheck(unit) && UnitMatches(su, unit, files, su.Untraced)
 }
 
 // UnitMatches reports whether the tests globs of a rule or a depends_on declaration

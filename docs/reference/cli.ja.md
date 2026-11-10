@@ -201,6 +201,7 @@ smates doctor [flags]
 | `service-reachable`、`local-server-reachable`、`env-var-set` | コードが使うサービスと `localhost` の URL（その他のサーバーは、スイートが実行するファイルのうち、ポート 1024 以上で、ファイル自身がサーバーを起動も横取りもしていないもの）、コードが読むのに設定されていない環境変数 |
 | `suite-server-dependency` | エンドツーエンドテストに見えるのに `depends_on`、`serves`、`rules` のどれもないスイート |
 | `suite-go-granularity` | 1 つのパッケージがテスト関数の大半を持つのに、パッケージ単位で選択している Go スイート（`granularity: func` を提案） |
+| `suite-timing-tests` | vitest、jest、node、bun のスイートで、時計を読んで値の大小を assert し、偽のタイマーを使わず、`untraced` にも挙がっていない JavaScript と TypeScript のテストファイル。記録中のカバレッジで失敗することがあります（`untraced` を提案） |
 | `suite-rule-reaches` | `reaches` を持つルールごとに適用されるテストユニットの数。1 つにも適用されないルールは警告 |
 | `state-recorded` | 記録されたステートがあるか、どのコミットのものか |
 | `state-skipped` | 前回の実行で自分をスキップしたテストユニット（未証明なので、成功するまで毎回実行される） |
