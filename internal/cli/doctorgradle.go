@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -154,9 +155,10 @@ func gradleBuildOf(repoRoot, root string) string {
 }
 
 // toolchainVersions returns the Java versions the build scripts of the build at build
-// request with JavaLanguageVersion.of (a toolchain), and the file of the highest.
-func toolchainVersions(root, build string, files []string) (versions []int, file string) {
-	best := 0
+// request with JavaLanguageVersion.of (a toolchain), sorted, and the files requesting
+// each.
+func toolchainVersions(root, build string, files []string) ([]int, map[int][]string) {
+	by := map[int][]string{}
 	for _, f := range files {
 		if !pathutil.Under(f, build) || !strings.HasSuffix(f, ".gradle") && !strings.HasSuffix(f, ".gradle.kts") {
 			continue
@@ -167,16 +169,16 @@ func toolchainVersions(root, build string, files []string) (versions []int, file
 		}
 		for _, m := range toolchainRe.FindAllStringSubmatch(runner.StripGroovyComments(string(data)), -1) {
 			n, _ := strconv.Atoi(m[1])
-			if !slices.Contains(versions, n) {
-				versions = append(versions, n)
-			}
-			if n > best {
-				best, file = n, f
+			if !slices.Contains(by[n], f) {
+				by[n] = append(by[n], f)
 			}
 		}
 	}
-	slices.Sort(versions)
-	return versions, file
+	versions := slices.Sorted(maps.Keys(by))
+	for _, fs := range by {
+		slices.Sort(fs)
+	}
+	return versions, by
 }
 
 // doctorGradleJava checks the Java version the tests of a build run on: the toolchain
@@ -199,13 +201,14 @@ func doctorGradleJava(p *project, suite, build string, r *doctorReport) {
 			fix(doctorFix{Doc: "https://docs.gradle.org/current/userguide/toolchains.html"})
 		return
 	}
-	if versions, file := toolchainVersions(p.repo.Root, build, p.files); len(versions) > 0 {
-		top := versions[len(versions)-1]
-		if top < javaRecording {
-			below(fmt.Sprintf("the Java %d toolchain %s requests", top, file))
+	if versions, by := toolchainVersions(p.repo.Root, build, p.files); len(versions) > 0 {
+		// Every project's tests run on its own toolchain: one below 17 leaves that
+		// project's passes unproven, whatever the others request.
+		if low := versions[0]; low < javaRecording {
+			below(fmt.Sprintf("the Java %d toolchain %s requests%s", low, strings.Join(by[low], ", "), ifMore(len(versions) > 1, " (and some projects request others)")))
 			return
 		}
-		r.add(checkOK, id, "%s: the tests run on the Java %d toolchain %s requests", subject, top, file).about(subject)
+		r.add(checkOK, id, "%s: the tests run on the Java %s toolchain(s) the build scripts request", subject, joinInts(versions)).about(subject)
 		return
 	}
 	v := javaMajor(string(out))
@@ -237,4 +240,19 @@ func doctorGradleOtherTests(p *project, s *runner.Suite, r *doctorReport) {
 				fix(doctorFix{Doc: docURL + "guides/runners/#gradle"})
 		}
 	}
+}
+
+func ifMore(ok bool, s string) string {
+	if ok {
+		return s
+	}
+	return ""
+}
+
+func joinInts(ns []int) string {
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
 }

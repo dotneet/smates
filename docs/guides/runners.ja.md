@@ -228,7 +228,7 @@ suites:
 
 `gradle` ランナーは、Gradle のビルドで JUnit Platform 上の Java のテスト（JUnit 5、および JUnit Platform 経由の JUnit 4 などのエンジン）を実行します。Gradle 9 と JDK 21 で動作を確認しています。
 
-**スイート。** スイートは、`src/test/java` にテストを持つ Gradle プロジェクトです。`smates init` はプロジェクトごとに 1 つ書き出します。プロジェクトは `settings.gradle(.kts)` の `include` から読み取り、settings がプロジェクトを別の場所に置いている場合は `project(':x').projectDir = file('...')` からも読み取ります。既定のコマンドは、最も近い `gradlew`（なければ `PATH` 上の `gradle`）とそのプロジェクトのテストタスクで、プロジェクトのディレクトリから実行します（`../gradlew :app:test`、ルートプロジェクトなら `./gradlew :test`）。別の `Test` タスク（JUnit のタグで絞るタスクなど）を実行するには、`command` でそのタスクを指定します。
+**スイート。** スイートは、`src/test/java` にテストを持つ Gradle プロジェクトです。`smates init` はプロジェクトごとに 1 つ書き出します。プロジェクトは `settings.gradle(.kts)` の `include` から読み取り、settings がプロジェクトを別の場所に置いている場合は `project(':x').projectDir = file('...')` からも読み取ります（ビルドの外に置かれたプロジェクトや `includeFlat` で指定されたプロジェクトにはスイートを作らず、`init` がそう伝えます）。`smates.yml` にはコマンドを書きません。既定のコマンドは、最も近い `gradlew`（なければ `PATH` 上の `gradle`）とそのプロジェクトのテストタスクで、プロジェクトのディレクトリから実行します（`../gradlew :app:test`、ルートプロジェクトなら `./gradlew :test`）。別の `Test` タスク（JUnit のタグで絞るタスクなど）を実行するには、`command` でそのタスクを指定します。
 
 **テストユニット**はテストクラスのファイルです。トップレベルのクラスにテストのアノテーション（`@Test`、`@ParameterizedTest`、`@Nested`、`@RunWith` など）が付いているファイル、テストらしい名前（`*Test`、`*Tests`、`*TestCase`、`*IT`、`*ITCase`）のファイル、そうしたクラスを継承するか、そうしたインターフェースを実装するファイル（JUnit はインターフェースの `@Test` の default メソッドを実行します）がユニットです。`src/test/java` の下の抽象基底クラス、テスト用インターフェース、ヘルパーはユニットではなく、それを使うクラスの依存になります。親の型がリポジトリ内に見つからないクラス（ライブラリのテスト基底クラスを継承するもの）はユニットのまま残し、本番コードのインターフェースを実装するだけのクラス（フェイク）はユニットにしません。`@Nested` クラスは外側のクラスのファイルに属します。
 

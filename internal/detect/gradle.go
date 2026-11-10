@@ -2,12 +2,7 @@ package detect
 
 import (
 	"fmt"
-	"os"
-	"path"
-	"path/filepath"
-	"regexp"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/dotneet/smates/internal/config"
@@ -62,18 +57,17 @@ func gradleSuites(repo *gitx.Repo, dirs []string, dirFiles map[string][]string, 
 	var suites []config.Suite
 	var notes []string
 	for _, b := range builds {
-		projects, ok := gradleProjects(repo, b, dirs, dirFiles, builds)
+		projects, outside, ok := gradleProjects(repo, b, dirs, dirFiles, builds)
+		notes = append(notes, outside...)
 		if !ok {
 			notes = append(notes, fmt.Sprintf("%s: the settings of this Gradle build include projects smates cannot read (a computed name or directory): its suites assume each project's directory is its path (app/core is :app:core); check their commands", b))
 		}
 		for _, p := range projects {
 			label := "Gradle project " + p.path
 			if javaTests[p.dir] {
-				s := config.Suite{Root: p.dir, Runner: "gradle"}
-				if p.dir != defaultProjectDir(b, p.path) {
-					s.Command = runner.GradleCommand(repo.Root, p.dir, p.path)
-				}
-				suites = append(suites, s)
+				// No command: the runner finds a moved project's task from the settings
+				// when it runs, with the wrapper of the platform it runs on.
+				suites = append(suites, config.Suite{Root: p.dir, Runner: "gradle"})
 			}
 			for _, o := range otherJVMTests {
 				if !testRoots(files, o.dir, o.ext)[p.dir] {
@@ -150,46 +144,14 @@ func testRoots(files []string, root, ext string) map[string]bool {
 	return out
 }
 
-// defaultProjectDir is the directory of a project of the build at build when the
-// settings do not move it: its path below the build root (":app:core" is app/core).
-func defaultProjectDir(build, project string) string {
-	rel := strings.ReplaceAll(strings.Trim(project, ":"), ":", "/")
-	if rel == "" {
-		return build
-	}
-	return pathutil.Join(build, rel)
-}
-
-var (
-	includeWord     = regexp.MustCompile(`\binclude\b`)
-	projectDirWord  = regexp.MustCompile(`\bprojectDir\b`)
-	projectDirAssig = regexp.MustCompile(`\bproject\s*\(\s*['"](:?[\w.:-]+)['"]\s*\)\s*\.\s*projectDir\s*=\s*(?:file\s*\(|new\s+File\s*\(\s*(?:settingsDir|rootDir)\s*,)\s*['"]([^'"$]+)['"]\s*\)`)
-)
-
-// gradleProjects returns the projects of the build rooted at build: the root project,
-// the projects its settings include (and their parents) in their directories, moved
-// where the settings set projectDir. ok is false when the settings include or move a
-// project smates cannot read; the projects are then the directories of the build with a
-// build script, at the paths their directories name.
-func gradleProjects(repo *gitx.Repo, build string, dirs []string, dirFiles map[string][]string, builds []string) ([]gradleProject, bool) {
-	var src string
-	for _, s := range gradleSettingsFiles {
-		if slices.Contains(dirFiles[build], s) {
-			data, err := os.ReadFile(filepath.Join(repo.Root, filepath.FromSlash(build), s))
-			if err == nil {
-				src += runner.StripGroovyComments(string(data)) + "\n"
-			}
-		}
-	}
-	paths, ok := gradleIncludes(src)
-	moved := map[string]string{}
-	for _, m := range projectDirAssig.FindAllStringSubmatch(src, -1) {
-		moved[":"+strings.TrimPrefix(m[1], ":")] = m[2]
-	}
-	if len(projectDirWord.FindAllStringIndex(src, -1)) > len(projectDirAssig.FindAllStringIndex(src, -1)) {
-		ok = false
-	}
-	if !ok {
+// gradleProjects returns the projects of the build rooted at build (see
+// runner.ReadGradleSettings), with their repo-relative directories, and notes on the
+// projects the settings put outside the build, which get no suite. ok is false when
+// the settings include or move a project smates cannot read; the projects are then the
+// directories of the build with a build script, at the paths their directories name.
+func gradleProjects(repo *gitx.Repo, build string, dirs []string, dirFiles map[string][]string, builds []string) ([]gradleProject, []string, bool) {
+	st := runner.ReadGradleSettings(repo.Root, build)
+	if !st.OK {
 		var out []gradleProject
 		for _, d := range dirs {
 			if d == build || !pathutil.Under(d, build) || !slices.ContainsFunc(dirFiles[d], func(n string) bool { return slices.Contains(gradleBuildFiles, n) }) ||
@@ -198,31 +160,23 @@ func gradleProjects(repo *gitx.Repo, build string, dirs []string, dirFiles map[s
 			}
 			out = append(out, gradleProject{path: ":" + strings.ReplaceAll(pathutil.RelTo(d, build), "/", ":"), dir: d})
 		}
-		return append([]gradleProject{{path: ":", dir: build}}, out...), false
+		return append([]gradleProject{{path: ":", dir: build}}, out...), nil, false
 	}
-	var dirOf func(p string) (string, bool)
-	dirOf = func(p string) (string, bool) {
-		if d, ok := moved[p]; ok {
-			d = path.Clean(d)
-			if path.IsAbs(d) || d == ".." || strings.HasPrefix(d, "../") {
-				return "", false // outside the build: no suite smates could run from it
+	var out []gradleProject
+	var notes []string
+	for _, p := range st.Projects {
+		dir := pathutil.Join(build, p.Dir)
+		if p.Dir == ".." || strings.HasPrefix(p.Dir, "../") {
+			where := dir
+			if dir == ".." || strings.HasPrefix(dir, "../") {
+				where = p.Dir + " (outside the repository)"
 			}
-			return pathutil.Join(build, d), true
+			notes = append(notes, fmt.Sprintf("%s: Gradle project %s is in %s, outside the build (projectDir or includeFlat): smates runs a suite from inside its build, so the project gets no suite and changes to it are orphans, which run every suite in full", build, p.Path, where))
+			continue
 		}
-		i := strings.LastIndexByte(p, ':')
-		if i <= 0 {
-			return pathutil.Join(build, p[1:]), true
-		}
-		parent, ok := dirOf(p[:i])
-		return pathutil.Join(parent, p[i+1:]), ok
+		out = append(out, gradleProject{path: p.Path, dir: dir})
 	}
-	out := []gradleProject{{path: ":", dir: build}}
-	for _, p := range paths {
-		if d, ok := dirOf(p); ok {
-			out = append(out, gradleProject{path: p, dir: d})
-		}
-	}
-	return out, true
+	return out, notes, true
 }
 
 // buildOutput reports whether a directory relative to a build root is one Gradle owns
@@ -234,79 +188,4 @@ func buildOutput(rel string) bool {
 		}
 	}
 	return false
-}
-
-// gradleIncludes returns the project paths the include statements of settings (comments
-// stripped) name, with their parents (":a:b" includes ":a"), sorted. ok is false when
-// an include names a project by anything but string literals.
-func gradleIncludes(src string) ([]string, bool) {
-	set := map[string]bool{}
-	ok := true
-	for _, loc := range includeWord.FindAllStringIndex(src, -1) {
-		lits, good := includeArgs(src[loc[1]:])
-		if !good {
-			ok = false
-			continue
-		}
-		for _, l := range lits {
-			p := ":" + strings.TrimPrefix(l, ":")
-			for ; p != ""; p = p[:strings.LastIndexByte(p, ':')] {
-				set[p] = true
-			}
-		}
-	}
-	paths := make([]string, 0, len(set))
-	for p := range set {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	return paths, ok
-}
-
-// includeArgs reads the arguments of an include call: string literals separated by
-// commas, in parentheses or not (Groovy's `include 'a', 'b'` may continue on the next
-// line after a comma). ok is false for anything else (a variable, an interpolated
-// string, a spread list).
-func includeArgs(s string) ([]string, bool) {
-	i := 0
-	space := func(newlines bool) {
-		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || newlines && s[i] == '\n') {
-			i++
-		}
-	}
-	space(false)
-	paren := i < len(s) && s[i] == '('
-	if paren {
-		i++
-	}
-	var out []string
-	for {
-		space(true)
-		if paren && len(out) > 0 && i < len(s) && s[i] == ')' {
-			return out, true // a trailing comma (Kotlin)
-		}
-		if i >= len(s) || s[i] != '\'' && s[i] != '"' {
-			return nil, false
-		}
-		q := s[i]
-		end := strings.IndexByte(s[i+1:], q)
-		if end < 0 {
-			return nil, false
-		}
-		lit := s[i+1 : i+1+end]
-		if strings.ContainsAny(lit, "$\n") || lit == "" {
-			return nil, false
-		}
-		out = append(out, lit)
-		i += end + 2
-		space(paren)
-		if i < len(s) && s[i] == ',' {
-			i++
-			continue
-		}
-		if paren {
-			return out, i < len(s) && s[i] == ')'
-		}
-		return out, i >= len(s) || s[i] == '\n' || s[i] == ';' || s[i] == '}'
-	}
 }

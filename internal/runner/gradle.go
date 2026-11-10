@@ -79,15 +79,7 @@ func gradleBuildRoot(repoRoot, root string) string {
 // task, by its path from the build root (":app:test"; ":test" for the root project: a
 // bare "test" would run the test task of every project of the build).
 func gradleCommand(repoRoot, root, build string) string {
-	return gradleExe(repoRoot, root) + " " + gradleTaskPath(root, build, "test")
-}
-
-// GradleCommand is the command running the test task of the project with the given
-// path (":app", ":" for the root project) from its directory root: the nearest wrapper
-// (else gradle) and the task (":test" for the root project, as gradleTaskPath). Detection writes it when a build's settings put a project
-// in a directory other than its path.
-func GradleCommand(repoRoot, root, project string) string {
-	return gradleExe(repoRoot, root) + " " + strings.TrimSuffix(project, ":") + ":test"
+	return gradleExe(repoRoot, root) + " " + gradleTaskPath(repoRoot, root, build, "test")
 }
 
 // gradleExe is the nearest wrapper between root and the repository root, relative to
@@ -117,12 +109,19 @@ func gradleExe(repoRoot, root string) string {
 }
 
 // gradleTaskPath returns the path of a task of the project in directory root, in the
-// build rooted at build. It assumes the default layout (a project's directory is its
-// path); a build that maps projects elsewhere names the task in the suite's command.
-func gradleTaskPath(root, build, task string) string {
+// build rooted at build: the path of the project the settings put in that directory
+// (project(':x').projectDir), else the path the directory names (app/core is
+// :app:core). A build that maps projects in a way smates cannot read names the task in
+// the suite's command.
+func gradleTaskPath(repoRoot, root, build, task string) string {
 	rel := pathutil.RelTo(root, build)
 	if rel == "." || !pathutil.Under(root, build) {
 		return ":" + task
+	}
+	for _, p := range ReadGradleSettings(repoRoot, build).Projects {
+		if p.Dir == rel {
+			return p.Path + ":" + task
+		}
 	}
 	return ":" + strings.ReplaceAll(rel, "/", ":") + ":" + task
 }

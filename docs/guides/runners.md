@@ -483,8 +483,9 @@ engines through it) in a Gradle build. It is tested with Gradle 9 and JDK 21.
 
 **Suites.** A suite is a Gradle project with tests in `src/test/java`. `smates init`
 writes one per project: it reads the projects from `include` in `settings.gradle(.kts)`,
-and from `project(':x').projectDir = file('...')` where the settings move one. The
-default command is the nearest `gradlew` (else `gradle` on `PATH`) with the project's
+and from `project(':x').projectDir = file('...')` where the settings move one (a project
+moved outside the build, or named by `includeFlat`, gets no suite, and `init` says so).
+`smates.yml` gets no command: the default command is the nearest `gradlew` (else `gradle` on `PATH`) with the project's
 test task, run from the project directory: `../gradlew :app:test`, or `./gradlew :test`
 for the root project. To run another `Test` task (one that filters JUnit tags, say),
 name it in `command`.

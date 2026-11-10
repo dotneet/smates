@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -62,9 +63,9 @@ func TestToolchainVersions(t *testing.T) {
 		list = append(list, "b/"+f)
 		testutil.Write(t, dir, "b/"+f, files[f])
 	}
-	got, file := toolchainVersions(dir, "b", list)
-	if len(got) != 2 || got[0] != 11 || got[1] != 17 || file != "b/lib/build.gradle.kts" {
-		t.Errorf("toolchainVersions = %v, %q", got, file)
+	got, by := toolchainVersions(dir, "b", list)
+	if len(got) != 2 || got[0] != 11 || got[1] != 17 || !reflect.DeepEqual(by[11], []string{"b/app/build.gradle"}) || !reflect.DeepEqual(by[17], []string{"b/lib/build.gradle.kts"}) {
+		t.Errorf("toolchainVersions = %v, %v", got, by)
 	}
 }
 
@@ -85,6 +86,7 @@ func TestDoctorGradle(t *testing.T) {
 		"app/src/test/java/p/ATest.java":           "package p; class ATest { @Test void a() {} }",
 		"app/src/test/kotlin/p/KTest.kt":           "class KTest",
 		"lib/src/test/java/p/LTest.java":           "package p; class LTest { @Test void a() {} }",
+		"lib/build.gradle":                         "java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }", // mixed: 11 still warns
 	})
 	g.Write("smates.yml", "suites:\n  - {name: app, runner: gradle, root: app}\n  - {name: lib, runner: gradle, root: lib}\n")
 	var out, errb bytes.Buffer
@@ -92,7 +94,7 @@ func TestDoctorGradle(t *testing.T) {
 	for _, want := range []string{
 		"suite app: Gradle 8.10 (",
 		"does not tell smates about assumption failures",
-		"gradle build .: the tests run on the Java 11 toolchain app/build.gradle requests; recording needs Java 17",
+		"gradle build .: the tests run on the Java 11 toolchain app/build.gradle requests (and some projects request others); recording needs Java 17",
 		"suite app: 1 Kotlin test file(s) in app/src/test/kotlin are no test units",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -120,6 +122,7 @@ func TestDoctorGradle(t *testing.T) {
 	t.Setenv("PATH", bin)
 	g.Remove("gradlew")
 	g.Write("app/build.gradle", "plugins { id 'java' }")
+	g.Remove("lib/build.gradle")
 	testutil.WriteMode(t, jdk, "bin/java", "#!/bin/sh\necho 'openjdk version \"17.0.9\"' >&2\n", 0o755)
 	out.Reset()
 	Main([]string{"doctor", "-C", g.Dir}, &out, &errb)

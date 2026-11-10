@@ -231,9 +231,10 @@ func gradleJavaVersion(root, build string) (string, string) {
 		}
 		return nil
 	})
-	versions, file := toolchainVersions(root, build, files)
+	versions, by := toolchainVersions(root, build, files)
 	if len(versions) > 0 && versions[len(versions)-1] >= javaRecording {
-		return strconv.Itoa(versions[len(versions)-1]), "the toolchain " + file + " requests"
+		top := versions[len(versions)-1]
+		return strconv.Itoa(top), "the toolchain " + by[top][0] + " requests"
 	}
 	return "21", "recording the tests needs Java 17 or later"
 }

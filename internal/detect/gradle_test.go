@@ -2,17 +2,25 @@ package detect
 
 import (
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/runner"
 	"github.com/dotneet/smates/internal/testutil"
 )
 
 const javaTest = "package p;\nclass ATest { @Test void a() {} }\n"
 
 func TestDetectGradle(t *testing.T) {
+	wrapper := "gradlew"
+	if runtime.GOOS == "windows" {
+		wrapper = "gradlew.bat"
+	}
+	// Command is the suite's command as the runner resolves it; smates.yml gets none
+	// (a written command would name the wrapper of the platform init ran on).
 	type suite struct{ Name, Root, Command string }
 	cases := []struct {
 		name  string
@@ -32,7 +40,7 @@ func TestDetectGradle(t *testing.T) {
 				"app/src/main/java/p/App.java":        "package p; class App {}",
 				"internal/testdata/g/settings.gradle": "include 'x'", "internal/testdata/g/x/src/test/java/XTest.java": javaTest,
 			},
-			want: []suite{{"gradle:app", "app", ""}, {"gradle:lib", "lib", ""}},
+			want: []suite{{"gradle:app", "app", "gradle :app:test"}, {"gradle:lib", "lib", "gradle :lib:test"}},
 		},
 		{
 			name: "kotlin settings over several lines, nested project, root project tests",
@@ -42,16 +50,31 @@ func TestDetectGradle(t *testing.T) {
 				"services/api/src/test/java/p/ApiTest.java": javaTest,
 				"tools/src/test/java/p/ToolTest.java":       javaTest,
 			},
-			want: []suite{{"gradle:root", ".", ""}, {"gradle:services/api", "services/api", ""}, {"gradle:tools", "tools", ""}},
+			want: []suite{{"gradle:root", ".", "gradle :test"}, {"gradle:services/api", "services/api", "gradle :services:api:test"}, {"gradle:tools", "tools", "gradle :tools:test"}},
 		},
 		{
 			name: "build in a subdirectory, project moved by the settings",
 			files: map[string]string{
 				"backend/settings.gradle": "include ':core'\nproject(':core').projectDir = file('modules/core-impl')\n",
 				"backend/gradlew":         "#!/bin/sh\n",
+				"backend/gradlew.bat":     "@rem\n",
 				"backend/modules/core-impl/src/test/java/p/CoreTest.java": javaTest,
 			},
-			want: []suite{{"gradle", "backend/modules/core-impl", "../../gradlew :core:test"}},
+			want: []suite{{"gradle", "backend/modules/core-impl", "../../" + wrapper + " :core:test"}},
+		},
+		{
+			name: "projects outside the build: projectDir and includeFlat",
+			files: map[string]string{
+				"jvm/settings.gradle":                    "include ':shared'\nproject(':shared').projectDir = file('../shared')\nincludeFlat 'tools'\ninclude 'app'\n",
+				"jvm/app/src/test/java/p/AppTest.java":   javaTest,
+				"shared/src/test/java/p/SharedTest.java": javaTest,
+				"tools/src/test/java/p/ToolTest.java":    javaTest,
+			},
+			want: []suite{{"gradle", "jvm/app", "gradle :app:test"}},
+			notes: []string{
+				"jvm: Gradle project :shared is in shared, outside the build (projectDir or includeFlat): smates runs a suite from inside its build, so the project gets no suite",
+				"jvm: Gradle project :tools is in tools, outside the build",
+			},
 		},
 		{
 			name: "computed include: every directory with a build script, with a note",
@@ -62,7 +85,7 @@ func TestDetectGradle(t *testing.T) {
 				"buildSrc/build.gradle": "", "buildSrc/src/test/java/p/BTest.java": javaTest,
 				"tests-only/src/test/java/p/TTest.java": javaTest, // no build script
 			},
-			want:  []suite{{"gradle:a", "a", ""}, {"gradle:b/c", "b/c", ""}},
+			want:  []suite{{"gradle:a", "a", "gradle :a:test"}, {"gradle:b/c", "b/c", "gradle :b:c:test"}},
 			notes: []string{".: the settings of this Gradle build include projects smates cannot read"},
 		},
 		{
@@ -71,7 +94,7 @@ func TestDetectGradle(t *testing.T) {
 				"settings.gradle": "include 'a'\nrootProject.children.each { it.projectDir = new File(rootDir, \"modules/${it.name}\") }\n",
 				"a/build.gradle":  "", "a/src/test/java/p/ATest.java": javaTest,
 			},
-			want:  []suite{{"gradle", "a", ""}},
+			want:  []suite{{"gradle", "a", "gradle :a:test"}},
 			notes: []string{"cannot read"},
 		},
 		{
@@ -79,7 +102,7 @@ func TestDetectGradle(t *testing.T) {
 			files: map[string]string{
 				"build.gradle": "plugins { id 'java' }", "src/test/java/p/ATest.java": javaTest,
 			},
-			want: []suite{{"gradle", ".", ""}},
+			want: []suite{{"gradle", ".", "gradle :test"}},
 		},
 		{
 			name: "Kotlin tests only, Java and Groovy tests, Maven",
@@ -94,7 +117,7 @@ func TestDetectGradle(t *testing.T) {
 				"mixed/build.gradle":                     "", "mixed/pom.xml": "<project/>", // built by both: left to Gradle
 				"site/pom.xml": "<project/>", // no tests
 			},
-			want: []suite{{"gradle", "mixed", ""}},
+			want: []suite{{"gradle", "mixed", "gradle :mixed:test"}},
 			notes: []string{
 				`kt: Gradle project :kt has Kotlin tests only (src/test/kotlin): smates reads Java tests only, so it gets no suite; changes to it are orphans, which run every suite in full: if no other suite's tests use it, add "kt/**" to ignore:`,
 				"mixed: the Groovy tests of Gradle project :mixed (src/test/groovy) are no test units",
@@ -111,10 +134,18 @@ func TestDetectGradle(t *testing.T) {
 				list = append(list, f)
 			}
 			sort.Strings(list)
-			suites, notes := Detect(&gitx.Repo{Root: dir}, list)
+			repo := &gitx.Repo{Root: dir}
+			suites, notes := Detect(repo, list)
 			var got []suite
 			for _, s := range suites {
-				got = append(got, suite{s.Name, s.Root, s.Command})
+				if s.Command != "" {
+					t.Errorf("suite %s: command %q written", s.Name, s.Command)
+				}
+				rs, err := runner.NewSuite(repo, s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, suite{s.Name, s.Root, rs.Command})
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("suites:\n got %+v\nwant %+v", got, tc.want)
@@ -128,34 +159,5 @@ func TestDetectGradle(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestGradleIncludes(t *testing.T) {
-	for _, tc := range []struct {
-		src  string
-		want []string
-		ok   bool
-	}{
-		{"include 'a'", []string{":a"}, true},
-		{"include ':a:b', 'c'", []string{":a", ":a:b", ":c"}, true},
-		{"include(\"a\", \"b\")", []string{":a", ":b"}, true},
-		{"include 'a',\n        'b'\ninclude 'c'", []string{":a", ":b", ":c"}, true},
-		{"include(\n  \":a\",\n  \":b\",\n)", []string{":a", ":b"}, true},
-		{"if (x) { include 'a' }", []string{":a"}, true},
-		{"include 'a'; include 'b'", []string{":a", ":b"}, true},
-		{"includeBuild 'x'\nincludeFlat 'y'", []string{}, true},
-		{"include(*modules)", []string{}, false},
-		{"include \"svc-$name\"", []string{}, false},
-		{"include 'a' + suffix", []string{}, false},
-		{"include modules.toTypedArray()", []string{}, false},
-		{"include 'a', 'b'\ninclude listOf('c')", []string{":a", ":b"}, false},
-		{"include('a',)", []string{":a"}, true},
-		{"include()", []string{}, false},
-	} {
-		got, ok := gradleIncludes(tc.src)
-		if !reflect.DeepEqual(got, tc.want) || ok != tc.ok {
-			t.Errorf("%q: got %v %v, want %v %v", tc.src, got, ok, tc.want, tc.ok)
-		}
 	}
 }

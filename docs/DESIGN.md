@@ -907,9 +907,13 @@ file under `src/test/java`. A build is a directory holding `settings.gradle(.kts
 build script with no settings file at or above it (outside `testdata/` and `vendor/`). Its
 projects are the root project and the paths the settings' `include` calls name as string
 literals (with their parents: `:a:b` includes `:a`), in their default directories or
-where a `project(':x').projectDir = file('dir')` with literals moves them; such a moved
-project gets the command naming its task, as the default command assumes the path from the
-directory. An `include` of anything but literals, or a `projectDir` set any other way,
+where a `project(':x').projectDir = file('dir')` with literals moves them
+(`runner.ReadGradleSettings`). Detection writes no command: the runner's default command
+finds a moved project's path from the same settings when it runs (`gradleTaskPath`), with
+the wrapper of the platform it runs on (`gradlew` or `gradlew.bat`), so a config written on
+one platform runs on the others. A project moved outside the build (`projectDir` to
+`../shared`, or `includeFlat`) gets no suite, with a note: a suite runs from inside its
+build, and changes there are orphans. An `include` of anything but literals, or a `projectDir` set any other way,
 makes every directory of the build with a build script a project at the path its directory
 names, with a note to check the commands (fail toward a suite: a directory that is no
 project of the build fails its suite's command rather than leaving tests unrun). Detection
@@ -921,7 +925,8 @@ orphan that runs every suite.
 `smates doctor` checks, per launcher, that the command's wrapper exists (or `gradle` is on
 `PATH`) and the Gradle version (the wrapper's `distributionUrl`, else `gradle --version`;
 before 8.14 assumption failures are not reported), per build the Java version the tests
-run on (the highest `JavaLanguageVersion.of(n)` in its build scripts, else `JAVA_HOME`'s or
+run on (the lowest `JavaLanguageVersion.of(n)` in its build scripts, named with the files
+requesting it, as each project's tests run on their own toolchain; else `JAVA_HOME`'s or
 `PATH`'s `java -version`; recording needs 17, and a missing JDK fails the build before any
 test, which reads as every class failing), and per suite with a config file the test
 sources in other JVM languages. `smates init --github` sets up `actions/setup-java` (from
