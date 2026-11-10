@@ -84,14 +84,10 @@ func gradleCommand(repoRoot, root, build string) string {
 
 // GradleCommand is the command running the test task of the project with the given
 // path (":app", ":" for the root project) from its directory root: the nearest wrapper
-// (else gradle) and the task. Detection writes it when a build's settings put a project
+// (else gradle) and the task (":test" for the root project, as gradleTaskPath). Detection writes it when a build's settings put a project
 // in a directory other than its path.
 func GradleCommand(repoRoot, root, project string) string {
-	task := strings.TrimSuffix(project, ":") + ":test"
-	if project == ":" || project == "" {
-		task = "test"
-	}
-	return gradleExe(repoRoot, root) + " " + task
+	return gradleExe(repoRoot, root) + " " + strings.TrimSuffix(project, ":") + ":test"
 }
 
 // gradleExe is the nearest wrapper between root and the repository root, relative to

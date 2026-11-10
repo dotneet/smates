@@ -485,15 +485,18 @@ engines through it) in a Gradle build. It is tested with Gradle 9 and JDK 21.
 writes one per project: it reads the projects from `include` in `settings.gradle(.kts)`,
 and from `project(':x').projectDir = file('...')` where the settings move one. The
 default command is the nearest `gradlew` (else `gradle` on `PATH`) with the project's
-test task, run from the project directory: `../gradlew :app:test`, or `./gradlew test`
+test task, run from the project directory: `../gradlew :app:test`, or `./gradlew :test`
 for the root project. To run another `Test` task (one that filters JUnit tags, say),
 name it in `command`.
 
 **Test units** are test class files: a file whose top-level class carries a test
 annotation (`@Test`, `@ParameterizedTest`, `@Nested`, `@RunWith`, ...), is named like a
-test (`*Test`, `*Tests`, `*TestCase`, `*IT`, `*ITCase`), or extends a class that does.
-Abstract base classes and helpers under `src/test/java` are no units: they are
-dependencies of the classes that use them. `@Nested` classes belong to the file of their
+test (`*Test`, `*Tests`, `*TestCase`, `*IT`, `*ITCase`), or extends a class or
+implements an interface that does (JUnit runs an interface's `@Test` default methods).
+Abstract base classes, test interfaces and helpers under `src/test/java` are no units:
+they are dependencies of the classes that use them. A class whose supertype smates
+cannot find in the repository (a library's test base class) stays a unit; one that
+only implements production interfaces (a fake) does not. `@Nested` classes belong to the file of their
 outer class.
 
 **How smates runs them.** smates adds an init script (`--init-script`). For a test task
