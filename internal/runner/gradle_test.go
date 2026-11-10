@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"maps"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -18,22 +19,33 @@ func TestGradleUnits(t *testing.T) {
 	const dir = "src/test/java/com/example/"
 	base := map[string]string{
 		// Shared by the cases below.
-		dir + "support/Fixtures.java":   "package com.example.support;\npublic class Fixtures { public static int one() { return 1; } }",
-		dir + "support/BaseTest.java":   "package com.example.support;\nimport org.junit.jupiter.api.Test;\npublic abstract class BaseTest { @Test void inherited() {} }",
-		dir + "support/PlainBase.java":  "package com.example.support;\npublic abstract class PlainBase { protected int x; }",
-		dir + "support/FastTest.java":   "package com.example.support;\nimport org.junit.jupiter.api.Test;\n@Test\npublic @interface FastTest {}",
-		dir + "support/Same.java":       "package com.example;\npublic abstract class Same { @org.junit.jupiter.api.Test void t() {} }",
-		dir + "support/MidBase.java":    "package com.example.support;\npublic abstract class MidBase extends BaseTest {}",
-		dir + "support/CycleA.java":     "package com.example.support;\npublic class CycleA extends CycleB {}",
-		dir + "support/CycleB.java":     "package com.example.support;\npublic class CycleB extends CycleA {}",
-		dir + "support/Generic.java":    "package com.example.support;\npublic abstract class Generic<T> { @org.junit.jupiter.api.RepeatedTest(2) void r() {} }",
-		dir + "support/SomeLib.java":    "package com.example.support;\npublic class SomeLib {}",
-		dir + "support/Annotated.java":  "package com.example.support;\n@Deprecated public class Annotated {}",
-		dir + "support/Interface.java":  "package com.example.support;\nimport org.junit.jupiter.api.Test;\npublic interface Interface { @Test default void t() {} }",
-		dir + "support/EnumOnly.java":   "package com.example.support;\npublic enum EnumOnly { A }",
-		dir + "support/Error.java":      "package com.example.support;\npublic class Error extends RuntimeException {}",
-		dir + "support/TimerJob.java":   "package com.example.support;\nimport java.util.TimerTask;\npublic class TimerJob extends TimerTask { public void run() {} }",
-		dir + "support/SwingThing.java": "package com.example.support;\npublic class SwingThing extends javax.swing.JPanel {}",
+		dir + "support/Fixtures.java":    "package com.example.support;\npublic class Fixtures { public static int one() { return 1; } }",
+		dir + "support/BaseTest.java":    "package com.example.support;\nimport org.junit.jupiter.api.Test;\npublic abstract class BaseTest { @Test void inherited() {} }",
+		dir + "support/PlainBase.java":   "package com.example.support;\npublic abstract class PlainBase { protected int x; }",
+		dir + "support/FastTest.java":    "package com.example.support;\nimport org.junit.jupiter.api.Test;\n@Test\npublic @interface FastTest {}",
+		dir + "support/Same.java":        "package com.example;\npublic abstract class Same { @org.junit.jupiter.api.Test void t() {} }",
+		dir + "support/MidBase.java":     "package com.example.support;\npublic abstract class MidBase extends BaseTest {}",
+		dir + "support/CycleA.java":      "package com.example.support;\npublic class CycleA extends CycleB {}",
+		dir + "support/CycleB.java":      "package com.example.support;\npublic class CycleB extends CycleA {}",
+		dir + "support/Generic.java":     "package com.example.support;\npublic abstract class Generic<T> { @org.junit.jupiter.api.RepeatedTest(2) void r() {} }",
+		dir + "support/SomeLib.java":     "package com.example.support;\npublic class SomeLib {}",
+		dir + "support/Annotated.java":   "package com.example.support;\n@Deprecated public class Annotated {}",
+		dir + "support/Interface.java":   "package com.example.support;\nimport org.junit.jupiter.api.Test;\npublic interface Interface { @Test default void t() {} }",
+		dir + "support/EnumOnly.java":    "package com.example.support;\npublic enum EnumOnly { A }",
+		dir + "support/Error.java":       "package com.example.support;\npublic class Error extends RuntimeException {}",
+		dir + "support/TimerJob.java":    "package com.example.support;\nimport java.util.TimerTask;\npublic class TimerJob extends TimerTask { public void run() {} }",
+		dir + "support/SwingThing.java":  "package com.example.support;\npublic class SwingThing extends javax.swing.JPanel {}",
+		dir + "support/SubContract.java": "package com.example.support;\npublic interface SubContract extends Interface {}",
+		dir + "support/Plain.java":       "package com.example.support;\npublic interface Plain { int size(); }",
+	}
+	// Java sources outside the test files: main code, which cannot declare tests, and
+	// test fixtures, which can.
+	others := map[string]string{
+		"src/main/java/com/example/repo/UserRepository.java":     "package com.example.repo;\npublic interface UserRepository extends org.lib.CrudRepository { }",
+		"src/main/java/com/example/repo/AbstractRepo.java":       "package com.example.repo;\npublic abstract class AbstractRepo { }",
+		"lib/src/main/java/com/example/lib/Clock.java":           "package com.example.lib;\npublic interface Clock { long now(); }",
+		"src/testFixtures/java/com/example/fx/ListContract.java": "package com.example.fx;\nimport org.junit.jupiter.api.Test;\npublic interface ListContract { @Test default void adds() {} }",
+		"src/testFixtures/java/com/example/fx/Holder.java":       "package com.example.fx;\npublic interface Holder { }",
 	}
 	for _, tc := range []struct {
 		name string
@@ -70,6 +82,19 @@ func TestGradleUnits(t *testing.T) {
 		{"java.util base", "Job.java", "package com.example;\nimport java.util.TimerTask;\nclass Job extends TimerTask { public void run() {} }", false},
 		{"qualified javax base", "Panel.java", "package com.example;\nclass Panel extends javax.swing.JPanel {}", false},
 		{"interface", "Contract.java", "package com.example;\ninterface Contract { @Test default void t() {} }", false},
+		// Tests inherited from an interface's default methods.
+		{"implements a test interface", "ListBehaviour.java", "package com.example;\nimport com.example.support.Interface;\nclass ListBehaviour implements Interface {}", true},
+		{"implements a test interface through two levels", "Deep.java", "package com.example;\nimport com.example.support.*;\nclass Deep extends Object implements Runnable, SubContract { public void run() {} }", true},
+		{"implements a test-fixtures contract", "FxBehaviour.java", "package com.example;\nimport com.example.fx.ListContract;\nclass FxBehaviour implements ListContract {}", true},
+		{"implements an unknown library interface", "LibImpl.java", "package com.example;\nimport org.lib.ContractTests;\nclass LibImpl implements ContractTests {}", true},
+		{"abstract, implements a test interface", "AbsImpl.java", "package com.example;\nimport com.example.support.Interface;\nabstract class AbsImpl implements Interface {}", false},
+		{"implements a plain test-file interface", "PlainImpl.java", "package com.example;\nimport com.example.support.Plain;\nclass PlainImpl implements Plain { public int size() { return 0; } }", false},
+		{"implements a main interface (a fake)", "FakeRepo.java", "package com.example;\nimport com.example.repo.UserRepository;\nclass FakeRepo implements UserRepository {}", false},
+		{"implements a main interface of another project", "FixedClock.java", "package com.example;\nimport com.example.lib.Clock;\nclass FixedClock implements Clock { public long now() { return 0; } }", false},
+		{"extends a main class", "MemRepo.java", "package com.example;\nimport com.example.repo.AbstractRepo;\nclass MemRepo extends AbstractRepo {}", false},
+		{"implements a plain test-fixtures interface", "Held.java", "package com.example;\nimport com.example.fx.Holder;\nclass Held implements Holder {}", false},
+		{"implements JDK interfaces", "Task.java", "package com.example;\nimport java.util.function.Supplier;\nclass Task implements Runnable, Supplier<String>, java.io.Closeable { public void run() {} public String get() { return \"\"; } public void close() {} }", false},
+		{"implements a JUnit callback", "Ext.java", "package com.example;\nimport org.junit.jupiter.api.extension.BeforeEachCallback;\nclass Ext implements BeforeEachCallback {}", false},
 		{"enum", "Kind.java", "package com.example;\nenum Kind { A }", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +107,13 @@ func TestGradleUnits(t *testing.T) {
 				list = append(list, f)
 			}
 			slices.Sort(list)
-			units := gradleUnits(list, func(f string) []byte { return []byte(files[f]) })
+			read := func(f string) []byte {
+				if src, ok := files[f]; ok {
+					return []byte(src)
+				}
+				return []byte(others[f])
+			}
+			units := gradleUnits(list, read, func() []string { return slices.Sorted(maps.Keys(others)) })
 			if got := slices.Contains(units, dir+tc.file); got != tc.want {
 				t.Errorf("unit = %v, want %v (units %v)", got, tc.want, units)
 			}
@@ -94,14 +125,14 @@ func TestGradleUnits(t *testing.T) {
 		list = append(list, f)
 	}
 	slices.Sort(list)
-	if units := gradleUnits(list, func(f string) []byte { return []byte(base[f]) }); !reflect.DeepEqual(units, []string{dir + "support/CycleA.java", dir + "support/CycleB.java"}) {
+	if units := gradleUnits(list, func(f string) []byte { return []byte(base[f]) }, nil); !reflect.DeepEqual(units, []string{dir + "support/CycleA.java", dir + "support/CycleB.java"}) {
 		t.Errorf("support units = %v, want only the cycle", units)
 	}
 }
 
 // A file smates cannot read is a unit: it cannot tell what it declares.
 func TestGradleUnitsUnreadable(t *testing.T) {
-	units := gradleUnits([]string{"src/test/java/A.java"}, func(string) []byte { return nil })
+	units := gradleUnits([]string{"src/test/java/A.java"}, func(string) []byte { return nil }, nil)
 	if !reflect.DeepEqual(units, []string{"src/test/java/A.java"}) {
 		t.Errorf("units = %v", units)
 	}
@@ -118,13 +149,13 @@ func TestGradleDefaults(t *testing.T) {
 		root  string
 		want  string
 	}{
-		{"root project with wrapper", []string{"settings.gradle", wrapper}, ".", "./" + wrapper + " test"},
+		{"root project with wrapper", []string{"settings.gradle", wrapper}, ".", "./" + wrapper + " :test"},
 		{"subproject, wrapper at the build root", []string{"settings.gradle.kts", wrapper, "app/build.gradle.kts"}, "app", "../" + wrapper + " :app:test"},
 		{"nested subproject", []string{"settings.gradle", wrapper, "libs/core/build.gradle"}, "libs/core", "../../" + wrapper + " :libs:core:test"},
 		{"no wrapper", []string{"settings.gradle", "app/build.gradle"}, "app", "gradle :app:test"},
 		{"build in a subdirectory", []string{"backend/settings.gradle", "backend/" + wrapper, "backend/app/build.gradle"}, "backend/app", "../" + wrapper + " :app:test"},
-		{"build root in a subdirectory", []string{"backend/settings.gradle", "backend/" + wrapper}, "backend", "./" + wrapper + " test"},
-		{"no settings", []string{"build.gradle"}, ".", "gradle test"},
+		{"build root in a subdirectory", []string{"backend/settings.gradle", "backend/" + wrapper}, "backend", "./" + wrapper + " :test"},
+		{"no settings", []string{"build.gradle"}, ".", "gradle :test"},
 		{"nearest wrapper wins", []string{"settings.gradle", wrapper, "app/" + wrapper}, "app", "./" + wrapper + " :app:test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +227,7 @@ func TestGradleIncludedBuilds(t *testing.T) {
 		{"parenthesized, double quotes", `includeBuild("b/c")`, []string{"b/c/**"}},
 		{"file()", `includeBuild(file("d"))`, []string{"d/**"}},
 		{"none", `include 'app'`, nil},
-		{"outside the repository build", `includeBuild '../other'`, nil},
+		{"outside the repository", `includeBuild '../other'`, nil},
 		{"variable", `def dir = 'x'
 includeBuild dir`, []string{"**"}},
 		{"interpolated", `includeBuild "${rootDir}/x"`, []string{"**"}},
@@ -211,6 +242,27 @@ includeBuild(someDir)`, []string{"**"}},
 				t.Errorf("includedBuilds = %v, want %v", got, tc.want)
 			}
 		})
+	}
+	// A build in a subdirectory: a sibling build of the repository is kept, one that
+	// leaves the repository is not.
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "libs", "common")
+	testutil.Write(t, dir, "jvm/settings.gradle", "includeBuild '../shared'\nincludeBuild('../../elsewhere')\nincludeBuild '..'\nincludeBuild '"+filepath.ToSlash(abs)+"'\nincludeBuild '"+filepath.ToSlash(filepath.Dir(dir))+"/outside'\n")
+	if got, want := includedBuilds(dir, "jvm"), []string{"../**", "../libs/common/**", "../shared/**"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sibling builds: includedBuilds = %v, want %v", got, want)
+	}
+}
+
+// A sibling included build is an input of the suites of the build that includes it.
+func TestGradleInputsSiblingBuild(t *testing.T) {
+	dir := t.TempDir()
+	testutil.Write(t, dir, "jvm/settings.gradle", "includeBuild('../shared')\n")
+	s := &Suite{Suite: config.Suite{Name: "app", Runner: "gradle", Root: "jvm/app"}}
+	s.Inputs = gradle{}.Defaults(&gitx.Repo{Root: dir}, "jvm/app").Inputs
+	for path, want := range map[string]bool{"shared/src/main/java/com/example/S.java": true, "other/x.java": false, "jvm/app/src/main/java/A.java": false} {
+		if got := s.InputMatch(path); got != want {
+			t.Errorf("InputMatch(%q) = %v, want %v", path, got, want)
+		}
 	}
 }
 

@@ -14,6 +14,9 @@ type Decl struct {
 	// Extends is a class's superclass as written (a simple or qualified name, type
 	// arguments dropped); "" without an extends clause.
 	Extends string
+	// Interfaces are the interfaces a class, enum or record implements, or an interface
+	// extends, as written (type arguments dropped).
+	Interfaces []string
 }
 
 // Info is what Describe finds in one Java source file.
@@ -69,6 +72,9 @@ func Describe(src []byte) *Info {
 		if kind == "class" {
 			d.Extends = superclass(toks, i+2)
 		}
+		if kind != "@interface" {
+			d.Interfaces = interfaces(toks, i+2, kind)
+		}
 		info.Decls = append(info.Decls, d)
 	}
 	return info
@@ -110,6 +116,52 @@ func superclass(toks []token, i int) string {
 		}
 	}
 	return ""
+}
+
+// interfaces returns the names in the implements clause of a class, enum or record
+// header (the extends clause of an interface) starting at toks[i], up to its body.
+func interfaces(toks []token, i int, kind string) []string {
+	clause := "implements"
+	if kind == "interface" {
+		clause = "extends"
+	}
+	var out []string
+	in, angle, paren := false, 0, 0
+	for ; i < len(toks); i++ {
+		t := toks[i]
+		if t.kind == tokPunct {
+			switch t.op {
+			case '<':
+				angle++
+			case '>':
+				angle--
+			case '(':
+				paren++
+			case ')':
+				paren--
+			case '{', ';':
+				if angle <= 0 && paren <= 0 {
+					return out
+				}
+			}
+			continue
+		}
+		if t.kind != tokIdent || angle > 0 || paren > 0 {
+			continue
+		}
+		switch t.text {
+		case "extends", "implements", "permits":
+			in = t.text == clause
+			continue
+		}
+		if in && !after(toks, i, '.') && !after(toks, i, '@') {
+			if name, next, ok := dotted(toks, i); ok {
+				out = append(out, name)
+				i = next - 1
+			}
+		}
+	}
+	return out
 }
 
 // Resolve returns the qualified names a type name used in the file may refer to, most
