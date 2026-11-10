@@ -1148,25 +1148,27 @@ func TestUntested(t *testing.T) {
 	mk := func(runner_, root string, static bool) *Suite {
 		return &Suite{Suite: &runner.Suite{Suite: config.Suite{Runner: runner_, Root: root, Static: &static}}}
 	}
-	r := &Result{Mode: ModeState, Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false)}}
+	r := &Result{Mode: ModeState, Suites: []*Suite{mk("go", ".", true), mk("vitest", "web", true), mk("pytest", "py", false), mk("gradle", "jvm", true)}}
 	r.Suites[0].Suite.Exclude = []string{"e2e/**"}
 	got := r.Untested([]string{
-		"cmd/tool/main.go",   // Go code under the go suite
-		"web/src/Button.tsx", // TS under the vitest suite
-		"web/vite.config.ts", // tool configuration
-		"web/src/types.d.ts", // declarations
-		"web/.eslintrc.js",   // rc file
-		"scripts/build.ts",   // not under a JS suite root
-		"py/app.py",          // static analysis off for that suite
-		"web/setup-tests.ts", // setup file
-		"Dockerfile",         // not code
-		"web/src/data.json",  // not code
-		"pkg/testdata/in.go", // read as data by tests
-		"web/__mocks__/a.ts", // mocks
-		"e2e/fixture/x/x.go", // excluded from the go suite
-		"e2e/new/x.go",       // excluded from the go suite
+		"cmd/tool/main.go",             // Go code under the go suite
+		"web/src/Button.tsx",           // TS under the vitest suite
+		"web/vite.config.ts",           // tool configuration
+		"web/src/types.d.ts",           // declarations
+		"web/.eslintrc.js",             // rc file
+		"scripts/build.ts",             // not under a JS suite root
+		"py/app.py",                    // static analysis off for that suite
+		"web/setup-tests.ts",           // setup file
+		"Dockerfile",                   // not code
+		"web/src/data.json",            // not code
+		"pkg/testdata/in.go",           // read as data by tests
+		"web/__mocks__/a.ts",           // mocks
+		"e2e/fixture/x/x.go",           // excluded from the go suite
+		"e2e/new/x.go",                 // excluded from the go suite
+		"jvm/src/main/java/a/Svc.java", // Java under the gradle suite
+		"web/src/Legacy.java",          // Java under no gradle suite
 	})
-	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"cmd/tool/main.go", "web/src/Button.tsx", "jvm/src/main/java/a/Svc.java"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Untested = %v, want %v", got, want)
 	}
 	// A suite with a test that has no recorded entry knows only its import closure.
@@ -1175,11 +1177,17 @@ func TestUntested(t *testing.T) {
 	if got := r.Untested([]string{"cmd/tool/main.go", "web/src/Button.tsx"}); !reflect.DeepEqual(got, []string{"cmd/tool/main.go"}) {
 		t.Errorf("unrecorded vitest suite: %v", got)
 	}
+	// A gradle suite with an unrecorded unit: a class it reaches only through
+	// reflection or dependency injection may be the one changed.
+	r.Suites[3].Unrecorded = true
+	if got := r.Untested([]string{"jvm/src/main/java/a/Svc.java"}); len(got) != 0 {
+		t.Errorf("unrecorded gradle suite: %v", got)
+	}
 	r.Suites[0].Unrecorded = true
 	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {
 		t.Errorf("unrecorded root suite: %v", got)
 	}
-	r.Suites[0].Unrecorded, r.Suites[1].Unrecorded = false, false
+	r.Suites[0].Unrecorded, r.Suites[1].Unrecorded, r.Suites[3].Unrecorded = false, false, false
 	// Without a recorded state only the static closure is known.
 	r.Mode = ModeDiff
 	if got := r.Untested([]string{"cmd/tool/main.go"}); len(got) != 0 {

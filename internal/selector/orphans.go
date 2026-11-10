@@ -527,6 +527,7 @@ func isSourceLike(f string) bool {
 var staticLangs = map[string][]string{
 	"go":     {".go"},
 	"pytest": {".py"},
+	"gradle": {".java"},
 	"vitest": jsExts, "jest": jsExts, "node": jsExts, "bun": jsExts,
 }
 

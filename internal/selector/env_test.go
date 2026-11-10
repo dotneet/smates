@@ -184,3 +184,23 @@ func TestRecordFlakeEnv(t *testing.T) {
 		t.Errorf("newly read variable: events %+v", ev)
 	}
 }
+
+// TestRecordNoTrace: an outcome a runner reported without tracing the unit (gradle
+// before recording) records a pass as unknown, so the unit runs again; a failure and
+// an unknown stay as they are.
+func TestRecordNoTrace(t *testing.T) {
+	sr := &Suite{Name: "s", Known: map[string][]string{"A.java": {"A.java", "Lib.java"}}}
+	snap := gitx.Snapshot{"A.java": "a", "Lib.java": "l"}
+	for _, c := range []struct{ status, want string }{
+		{state.Pass, state.Unknown},
+		{state.Fail, state.Fail},
+		{state.Unknown, state.Unknown},
+	} {
+		st := state.New()
+		Record(st, sr, map[string]*runner.Observation{"A.java": {Status: c.status, NoTrace: true}}, NewHasher(snap), RecordOptions{Now: time.Unix(1, 0)})
+		e := st.Suite("s").Tests["A.java"]
+		if e.Status != c.want || e.Deps["Lib.java"] != "l" {
+			t.Errorf("%s: recorded %+v, want status %s with the known deps", c.status, e, c.want)
+		}
+	}
+}
