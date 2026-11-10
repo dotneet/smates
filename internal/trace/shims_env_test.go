@@ -78,6 +78,8 @@ print("done")
 
 func TestNodeShimEnv(t *testing.T) {
 	root := repoDir(t)
+	// Console formatting can read FORCE_COLOR on some Node versions; use raw
+	// output so the script observes only the environment reads under test.
 	got := runShim(t, root, "t.js", `
 void process.env.APP_REGION;
 void ('APP_UNSET' in process.env);
@@ -86,7 +88,7 @@ JSON.stringify(process.env);
 Object.keys(process.env);
 process.env.SET_LATER = 'inner';
 void process.env.SET_LATER;
-console.log('done');
+process.stdout.write('done\n');
 `, "node", "--require={node}")
 	if want := []string{"APP_REGION", "APP_UNSET"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("read %v, want %v", got, want)
@@ -124,7 +126,7 @@ if (wt.isMainThread) {
     // A replaced environment is traced too (process.env itself is no v8.serialize value).
     process.env = structuredClone(process.env);
     if (v8.deserialize(v8.serialize(process.env)).APP_COPIED !== 'x') throw new Error('v8');
-    console.log('done');
+    process.stdout.write('done\n');
   });
 } else {
   wt.parentPort.postMessage(wt.workerData.APP_COPIED);

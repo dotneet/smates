@@ -154,14 +154,84 @@ func TestReadErrors(t *testing.T) {
 	}
 }
 
-func TestTruncatedGzip(t *testing.T) {
+func TestGzipIntegrity(t *testing.T) {
 	var buf bytes.Buffer
 	if err := sample().Write(&buf, true); err != nil {
 		t.Fatal(err)
 	}
-	data := buf.Bytes()[:buf.Len()/2]
-	if _, err := Read(bytes.NewReader(data), true); err == nil {
-		t.Fatal("truncated gzip state must not load")
+	data := buf.Bytes()
+	corrupt := func(offset int) []byte {
+		out := bytes.Clone(data)
+		out[len(out)-offset] ^= 1
+		return out
+	}
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{
+		{"truncated body", data[:len(data)/2]},
+		{"truncated size", data[:len(data)-1]},
+		{"missing size", data[:len(data)-4]},
+		{"missing trailer", data[:len(data)-8]},
+		{"bad checksum", corrupt(8)},
+		{"bad size", corrupt(4)},
+		{"trailing bytes", append(bytes.Clone(data), 'x')},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := Read(bytes.NewReader(c.data), true); !errors.Is(err, ErrUnreadable) {
+				t.Fatalf("err = %v, want ErrUnreadable", err)
+			}
+		})
+	}
+}
+
+func TestReadTrailingData(t *testing.T) {
+	for _, gz := range []bool{false, true} {
+		for _, c := range []struct {
+			name, suffix string
+			valid        bool
+		}{
+			{"nothing", "", true},
+			{"whitespace", " \n\t\r", true},
+			{"object", "{}", false},
+			{"array", "[]", false},
+			{"null", "null", false},
+			{"scalar", "1", false},
+			{"incomplete JSON", "{", false},
+			{"garbage", "garbage", false},
+		} {
+			name := c.name
+			if gz {
+				name = "gzip/" + name
+			}
+			t.Run(name, func(t *testing.T) {
+				var buf bytes.Buffer
+				// Separate gzip members still form one uncompressed stream, so the
+				// trailing-data check must include every member.
+				if err := New().Write(&buf, gz); err != nil {
+					t.Fatal(err)
+				}
+				if gz {
+					zw := gzip.NewWriter(&buf)
+					if _, err := zw.Write([]byte(c.suffix)); err != nil {
+						t.Fatal(err)
+					}
+					if err := zw.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					buf.WriteString(c.suffix)
+				}
+				_, err := Read(&buf, gz)
+				if c.valid {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if !errors.Is(err, ErrUnreadable) {
+					t.Fatalf("err = %v, want ErrUnreadable", err)
+				}
+			})
+		}
 	}
 }
 

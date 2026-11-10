@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dotneet/smates/internal/config"
@@ -85,7 +86,7 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 			cand, in, id = c.files, c.match, "suite:"+d.Suite
 		} else {
 			globs := d.Paths
-			cand, in, id = expandInputs(globs, e.files), func(f string) bool { return pathutil.Match(globs, f) }, "paths:"+strings.Join(globs, ",")
+			cand, in, id = expandInputs(globs, e.files), func(f string) bool { return pathutil.Match(globs, f) }, pathsID(globs)
 		}
 		sd := &ServiceDeps{Key: depkey.Set(id), Label: d.String(), Tests: d.Tests,
 			match: func(f string) bool { return in(f) && !su.IsTestFile(f) && !pathutil.IsVendored(f) }}
@@ -97,6 +98,24 @@ func (e *serviceExpander) forSuite(su *runner.Suite) []*ServiceDeps {
 		out = append(out, sd)
 	}
 	return out
+}
+
+// pathsID identifies a glob list without confusing commas in a glob with list
+// separators. Only a single comma-free glob has an unambiguous legacy key: even a
+// list of comma-free globs may have recorded the hash of another declaration. All
+// ambiguous old keys must change so those tests run again before trusting the hash.
+func pathsID(globs []string) string {
+	if len(globs) == 1 && !strings.Contains(globs[0], ",") {
+		return "paths:" + globs[0]
+	}
+	var id strings.Builder
+	id.WriteString("paths-v2:")
+	for _, g := range globs {
+		id.WriteString(strconv.Itoa(len(g)))
+		id.WriteByte(':')
+		id.WriteString(g)
+	}
+	return id.String()
 }
 
 // changedSets returns, for each declaration with changed files in changed, those
