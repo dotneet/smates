@@ -798,14 +798,14 @@ one: composed annotations), named like a test (`*Test`, `*Tests`, `*TestCase`, `
 `*ITCase`), or with a supertype that may run tests: its superclass, or an interface it
 implements (JUnit Jupiter runs an interface's `@Test` default methods in the classes
 implementing it). A supertype is looked up among the test files, then among the
-repository's other Java sources by the path below their `java/` directory: one in a main
-source set (`src/main/`) runs no test (the test framework is not on its classpath: a fake
-implementing a production interface is no unit), one in another source set
-(`src/testFixtures/`) is followed like a test file. A supertype found nowhere keeps the
-class a unit (a library's test base class or contract) unless it is the JDK's
-(`java.*`, `javax.*`, a `java.lang` type neither imported nor declared in the package) or
-JUnit's own (`org.junit.*`: extensions, argument providers); a file that cannot be read
-is a unit. The other files are test
+repository's other Java sources by the path below their `java/` directory, and followed
+the same way (a test-support project may keep contract tests in its main source set). A
+supertype found nowhere keeps the class a unit (a library's test base class or contract)
+unless it is the JDK's (`java.*`, `javax.*`, a `java.lang` type neither imported nor
+declared in the package) or JUnit's own (`org.junit.*`: extensions, argument providers),
+or the supertype of production code (`src/main/`) that carries no test annotation:
+production code extends libraries, not their tests, so a fake implementing a repository
+interface that extends a library's is no unit. A file that cannot be read is a unit. The other files are test
 support code, dependencies of the units that use them. `@Nested` classes belong to the
 file of their outer class, and every top-level class a unit declares (a package-private
 secondary class too) is its own.
