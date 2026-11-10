@@ -139,7 +139,7 @@ One entry of `suites:`.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `name` | string | the runner, or `root` when it is not `.` | Name used by `--suite`, `--only`, `depends_on` and the output. Must be unique. |
-| `runner` | `vitest`, `jest`, `node`, `bun`, `pytest`, `unittest`, `go`, `custom` | **required** | How the suite runs and is traced. See [Languages and runners](../guides/runners.md). |
+| `runner` | `vitest`, `jest`, `node`, `bun`, `pytest`, `unittest`, `go`, `gradle`, `custom` | **required** | How the suite runs and is traced. See [Languages and runners](../guides/runners.md). |
 | `root` | path (repo-relative) | `.` | Directory the command runs in. Must be inside the repository. |
 | `command` | string | inferred from the runner | Base command line. Selected test files are appended, or substituted for `{tests}` when the command contains it. Required for `custom`. |
 | `tests` | list of globs (relative to `root`) | read from the runner's configuration, else the runner's defaults | Which files are test files. See [Which files are tests](../guides/configuration.md#which-files-are-tests). |
@@ -149,7 +149,7 @@ One entry of `suites:`.
 | `depends_on` | list of [dependencies](#depends_on) | `[]` | Code the tests exercise across a process boundary (a server started by docker compose, an HTTP API). See [Tests that talk to a server](../guides/servers.md). |
 | `serves` | list of globs (repo-relative) | `[]` | Shorthand for `depends_on: [{paths: [...]}]`. |
 | `env` | map of string to string | `{}` | Environment variables for the suite's tests. They override the shell, and changing a value reruns the suite. |
-| `isolate` | bool | `false` | While recording, run each test file in a process of its own. Honored by `vitest`, `jest`, `node` (under `--test-isolation=none`) and `unittest`. `bun` always records one process per file. |
+| `isolate` | bool | `false` | While recording, run each test file in a process of its own. Honored by `vitest`, `jest`, `node` (under `--test-isolation=none`) and `unittest`. `bun` always records one process per file. `gradle` records one JVM per test class unless it is set to `false`. |
 | `record_jobs` | int (≥ 0) | see meaning | How many per-file processes run at once while recording with one process per file: `1` for `bun` and for commands that run files serially (`--runInBand`, `--no-file-parallelism`, `--test-isolation=none`, `--test-concurrency=1`), else the CPU count. With `granularity: func`: how many test functions of one package are recorded at once (default `1`). `0` means the default. |
 | `granularity` | `package`, `func` | `package` | Go only. `func` makes each top-level test function a unit (`function` is accepted as an alias). See [Go test functions](../guides/go-test-functions.md). |
 | `static` | bool | `true` | Use the static import graph in addition to tracing. |
@@ -176,6 +176,7 @@ looked up in the suite root unless the table says otherwise.
 | `pytest` | `pyproject.toml`, `uv.lock`, `setup.cfg`, `setup.py`, `pytest.ini`, `tox.ini`, `requirements*.txt`, `.python-version`; at the repository root `pyproject.toml`, `uv.lock`, `.python-version`, `requirements*.txt`, `pytest.ini`, `.tool-versions` |
 | `unittest` | as `pytest`, without either `pytest.ini` |
 | `go` | `go.mod`, `go.sum`; at the repository root `go.work`, `go.work.sum`, `.tool-versions`; with `GOWORK` set (in the suite's `env` or the environment), that `go.work`, its `go.work.sum`, the `go.mod` and `go.sum` of its modules, and the `go.mod` of each local `replace` target |
+| `gradle` | of the Gradle build the suite belongs to (the nearest directory with `settings.gradle(.kts)`): the settings and `settings-gradle.lockfile`, every `build.gradle(.kts)`, `gradle.properties`, `gradle.lockfile` and `gradle/dependency-locks/**`, `gradle/*.versions.toml`, the wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.properties`), `buildSrc/**` and the included builds (`includeBuild`); at the repository root `.tool-versions`, `.java-version`, `.sdkmanrc` |
 | `custom` | none |
 
 ### rules

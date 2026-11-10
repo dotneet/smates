@@ -82,6 +82,15 @@ Common causes of a test that never settles:
   Move permanent flags into the suite's `command`.
 - **A unittest module written for pytest.** Its status stays unknown, so it runs every
   time; the log suggests `runner: pytest`.
+- **Gradle test classes not recorded.** `N test class file(s) passed but were not
+  recorded (...)` says why: the test JVM runs Java before 17, or its flight recording is
+  missing. `smates doctor` shows the Java version (`toolchain-java`).
+- **Gradle test classes that ran no test.** `N test class file(s) ran no test` names
+  classes the test task did not run: a JUnit tag the task excludes, a filter in the
+  build script, or a command that runs no `Test` task. Give them a suite whose
+  `command` names a task that runs them, or leave them out with `exclude:`.
+- **Gradle before 8.14** cannot tell an assumption failure from a disabled test, so a
+  class with a skipped test runs every time (`toolchain-gradle` in `smates doctor`).
 - **A flaky test.** `smates flaky` lists tests whose outcome flipped with unchanged
   inputs. See [Shadow mode, flaky tests and stats](../guides/trust.md).
 
@@ -177,6 +186,12 @@ names the suite and the command to install it. smates never lets `npx` or `bunx`
 download a runner: install the project's dependencies first (`npm ci`, `pnpm install`,
 `uv sync`, ...). See [Exit codes](exit-codes.md#4-environment-problem).
 
+## Every Gradle test class fails
+
+A Gradle build that fails before any test runs (a JDK that is missing, or too old for
+the build) reports every selected test class as failing: the build's own error is in
+the output above smates' summary. `smates doctor` checks the JDK (`toolchain-java`).
+
 ## Everything runs on every CI run
 
 The state was probably not restored, so every test is new.
@@ -229,6 +244,9 @@ a selective run. Typical causes:
 - **`isolate: true`** starts the runner once per file while recording. Leave it off
   unless the dependencies of files run in a shared worker need to be exact.
 - **A low `record_jobs`** for runners recorded one process per file (bun, `isolate`).
+- **Gradle** records one JVM per test class with the flight recorder on, about a second
+  per class. `isolate: false` keeps Gradle's own forking (classes sharing a JVM then
+  share their dependencies).
 
 Selective runs on pull requests are not affected: they only start the selected tests.
 

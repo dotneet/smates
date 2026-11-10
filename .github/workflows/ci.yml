@@ -44,7 +44,7 @@ jobs:
           args: --suite go --no-agent
 
   e2e:
-    # Runs the real toolchains (node, bun, uv/pytest, go) against fixture projects.
+    # Runs the real toolchains (node, bun, uv/pytest, go, gradle) against fixture projects.
     # One job per e2e suite in smates.yml, each a shard of the fixtures of about equal
     # run time, selected by smates: a job is skipped when a pull request changes nothing
     # its fixtures and the smates code they use depend on. Not recorded, so no state is
@@ -60,6 +60,7 @@ jobs:
           - e2e-jest-others
           - e2e-vitest-python
           - e2e-coverage-tools
+          - e2e-gradle
           - e2e-others
     runs-on: ubuntu-latest
     steps:
@@ -77,6 +78,15 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-java@v4
+        if: matrix.suite == 'e2e-gradle'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.suite == 'e2e-gradle'
+        with:
+          gradle-version: '9.4.1'
       - name: Run e2e tests if affected
         uses: ./
         with:

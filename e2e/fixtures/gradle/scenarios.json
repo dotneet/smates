@@ -1,0 +1,433 @@
+[
+  {
+    "name": "no-change",
+    "note": "Only the classes never proven to pass run: EnvironmentTest (aborted by an assumption) and SlowTest (its tag is excluded by the task).",
+    "edits": [],
+    "selected": [
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "library-code",
+    "note": "store depends on the pricing project: CartTest loads Money from its jar.",
+    "edits": [
+      {
+        "file": "pricing/src/main/java/com/example/pricing/Money.java",
+        "op": "replace",
+        "old": "return units * 100;",
+        "new": "return units * 101;"
+      }
+    ],
+    "selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "store/src/test/java/com/example/store/CartTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "second-class-of-a-file",
+    "note": "Coupon is a package-private second top-level class of Discounts.java: its class file is Coupon.class.",
+    "edits": [
+      {
+        "file": "pricing/src/main/java/com/example/pricing/Discounts.java",
+        "op": "replace",
+        "old": "cents / 2",
+        "new": "cents / 3"
+      }
+    ],
+    "selected": [
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "pricing/src/test/java/com/example/pricing/CouponTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "library-resource-through-jar",
+    "note": "MoneyTest reads rates.txt from the resources output directory, CartTest from the pricing jar.",
+    "edits": [
+      {
+        "file": "pricing/src/main/resources/rates.txt",
+        "op": "replace",
+        "old": "EUR",
+        "new": "USD"
+      }
+    ],
+    "selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "store/src/test/java/com/example/store/CartTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "class-loaded-by-reflection",
+    "note": "Plugins loads Upper with Class.forName: no import links them.",
+    "edits": [
+      {
+        "file": "store/src/main/java/com/example/store/plugins/Upper.java",
+        "op": "replace",
+        "old": "toUpperCase()",
+        "new": "toLowerCase()"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/PluginsTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "inlined-constant",
+    "note": "javac inlines Names.ANY into GreeterTest, which never loads Names: the static graph links them.",
+    "edits": [
+      {
+        "file": "store/src/test/java/com/example/store/support/Names.java",
+        "op": "replace",
+        "old": "\"ada\"",
+        "new": "\"bob\""
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/GreeterTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "inherited-tests",
+    "note": "BaseCheck is abstract: GreeterCheck runs its tests.",
+    "edits": [
+      {
+        "file": "store/src/test/java/com/example/store/support/BaseCheck.java",
+        "op": "replace",
+        "old": "assertTrue(ok());",
+        "new": "assertTrue(!ok());"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/GreeterCheck.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "classpath-resource",
+    "edits": [
+      {
+        "file": "store/src/main/resources/catalog.txt",
+        "op": "replace",
+        "old": "pear\n",
+        "new": "pear\nplum\n"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/CatalogTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "file-read-relative-to-the-project",
+    "note": "Settings opens config/store.properties with FileInputStream, relative to the test JVM working directory (the project).",
+    "edits": [
+      {
+        "file": "store/config/store.properties",
+        "op": "replace",
+        "old": "page.size=20",
+        "new": "page.size=50"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/SettingsTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "new-file-in-a-scanned-directory",
+    "note": "MigrationsTest lists data/migrations: a new file there selects it.",
+    "edits": [
+      {
+        "file": "store/data/migrations/003.sql",
+        "op": "write",
+        "content": "drop table loans;\n"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/MigrationsTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "file-read-by-a-child-process",
+    "note": "ShellTest runs sh -c \"cat data/motd.txt\".",
+    "edits": [
+      {
+        "file": "store/data/motd.txt",
+        "op": "replace",
+        "old": "welcome",
+        "new": "hello"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/ShellTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "main-code",
+    "edits": [
+      {
+        "file": "store/src/main/java/com/example/store/Greeter.java",
+        "op": "replace",
+        "old": "\"hello \"",
+        "new": "\"hi \""
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java"
+    ],
+    "orphans": []
+  },
+  {
+    "name": "build-script",
+    "note": "Every build script of the build is an input of every suite.",
+    "edits": [
+      {
+        "file": "store/build.gradle",
+        "op": "append",
+        "content": "\n// a comment\n"
+      }
+    ],
+    "selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java",
+      "store/src/test/java/com/example/store/EnvironmentTest.java",
+      "store/src/test/java/com/example/store/SlowTest.java"
+    ],
+    "not_selected": [],
+    "fails": [],
+    "orphans": []
+  },
+  {
+    "name": "new-test-class",
+    "edits": [
+      {
+        "file": "store/src/test/java/com/example/store/NewTest.java",
+        "op": "write",
+        "content": "package com.example.store;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\nimport org.junit.jupiter.api.Test;\n\nclass NewTest {\n    @Test\n    void fails() {\n        assertEquals(1, 2);\n    }\n}\n"
+      }
+    ],
+    "selected": [
+      "store/src/test/java/com/example/store/NewTest.java"
+    ],
+    "not_selected": [
+      "pricing/src/test/java/com/example/pricing/MoneyTest.java",
+      "pricing/src/test/java/com/example/pricing/CouponTest.java",
+      "store/src/test/java/com/example/store/CartTest.java",
+      "store/src/test/java/com/example/store/CatalogTest.java",
+      "store/src/test/java/com/example/store/GreeterCheck.java",
+      "store/src/test/java/com/example/store/GreeterTest.java",
+      "store/src/test/java/com/example/store/MigrationsTest.java",
+      "store/src/test/java/com/example/store/PluginsTest.java",
+      "store/src/test/java/com/example/store/SettingsTest.java",
+      "store/src/test/java/com/example/store/ShellTest.java"
+    ],
+    "fails": [
+      "store/src/test/java/com/example/store/NewTest.java"
+    ],
+    "orphans": []
+  }
+]

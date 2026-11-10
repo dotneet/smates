@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -30,6 +31,8 @@ const (
 	actSetupBun    = "oven-sh/setup-bun@v2"
 	actSetupPnpm   = "pnpm/action-setup@v4"
 	actMise        = "jdx/mise-action@v2"
+	actSetupJava   = "actions/setup-java@v4"
+	actSetupGradle = "gradle/actions/setup-gradle@v4"
 	actSmates      = "dotneet/smates@v1"
 )
 
@@ -197,6 +200,45 @@ func pythonVersionFile(root, suiteRoot string) string {
 	return ""
 }
 
+// javaVersionFile returns the nearest .java-version from suiteRoot up, which
+// actions/setup-java reads; "" when there is none.
+func javaVersionFile(root, suiteRoot string) string {
+	for _, d := range upDirs(suiteRoot) {
+		if f := joinRel(d, ".java-version"); fileExists(root, f) {
+			return f
+		}
+	}
+	return ""
+}
+
+// gradleJavaVersion is the Java version a generated workflow installs for the Gradle
+// build at build: the highest toolchain its build scripts request, at least 17 (what
+// recording needs; a toolchain below it is provisioned by Gradle itself), with a note
+// on where it comes from.
+func gradleJavaVersion(root, build string) (string, string) {
+	var files []string
+	_ = filepath.WalkDir(filepath.Join(root, filepath.FromSlash(build)), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && (d.Name() == "build" || d.Name() == ".gradle" || d.Name() == ".git" || d.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && (strings.HasSuffix(p, ".gradle") || strings.HasSuffix(p, ".gradle.kts")) {
+			if rel, err := filepath.Rel(root, p); err == nil {
+				files = append(files, filepath.ToSlash(rel))
+			}
+		}
+		return nil
+	})
+	versions, by := toolchainVersions(root, build, files)
+	if len(versions) > 0 && versions[len(versions)-1] >= javaRecording {
+		top := versions[len(versions)-1]
+		return strconv.Itoa(top), "the toolchain " + by[top][0] + " requests"
+	}
+	return "21", "recording the tests needs Java 17 or later"
+}
+
 // ---- workflow ----
 
 // renderWorkflow writes a GitHub Actions workflow that sets up the toolchains the
@@ -235,6 +277,20 @@ func renderWorkflow(repo *gitx.Repo, suites []config.Suite, in inspection) strin
 				usesMise = true
 			}
 			tool("uv", "uv", "      - uses: "+actSetupUV)
+		case "gradle":
+			if f := javaVersionFile(repo.Root, root); f != "" {
+				tool("java", "java:"+f, "      - uses: "+actSetupJava, "        with:", "          distribution: temurin", "          java-version-file: "+yamlStr(f))
+			} else {
+				v, from := gradleJavaVersion(repo.Root, gradleBuildOf(repo.Root, root))
+				tool("java", "java:"+v, "      - uses: "+actSetupJava, "        with:", "          distribution: temurin", "          java-version: "+strconv.Quote(v)+"   # "+from)
+			}
+			// Caches Gradle's dependencies and distributions. A build without a wrapper
+			// runs gradle from PATH, which setup-gradle installs when given a version.
+			if slices.ContainsFunc(upDirs(root), func(d string) bool { return has(joinRel(d, "gradlew")) }) {
+				once("gradle", "      - uses: "+actSetupGradle)
+			} else {
+				once("gradle", "      - uses: "+actSetupGradle, "        with:", "          gradle-version: current   # no gradlew in the repository: pin the version the build needs")
+			}
 		case "bun":
 			tool("bun", "bun", "      - uses: "+actSetupBun)
 			if !seen["install:"+root] {

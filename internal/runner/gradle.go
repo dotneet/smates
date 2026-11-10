@@ -79,6 +79,12 @@ func gradleBuildRoot(repoRoot, root string) string {
 // task, by its path from the build root (":app:test"; ":test" for the root project: a
 // bare "test" would run the test task of every project of the build).
 func gradleCommand(repoRoot, root, build string) string {
+	return gradleExe(repoRoot, root) + " " + gradleTaskPath(repoRoot, root, build, "test")
+}
+
+// gradleExe is the nearest wrapper between root and the repository root, relative to
+// root ("./gradlew", "../gradlew"), else gradle on PATH.
+func gradleExe(repoRoot, root string) string {
 	exe := "gradle"
 	name := "gradlew"
 	if runtime.GOOS == "windows" {
@@ -99,16 +105,23 @@ func gradleCommand(repoRoot, root, build string) string {
 			break
 		}
 	}
-	return exe + " " + gradleTaskPath(root, build, "test")
+	return exe
 }
 
 // gradleTaskPath returns the path of a task of the project in directory root, in the
-// build rooted at build. It assumes the default layout (a project's directory is its
-// path); a build that maps projects elsewhere names the task in the suite's command.
-func gradleTaskPath(root, build, task string) string {
+// build rooted at build: the path of the project the settings put in that directory
+// (project(':x').projectDir), else the path the directory names (app/core is
+// :app:core). A build that maps projects in a way smates cannot read names the task in
+// the suite's command.
+func gradleTaskPath(repoRoot, root, build, task string) string {
 	rel := pathutil.RelTo(root, build)
 	if rel == "." || !pathutil.Under(root, build) {
 		return ":" + task
+	}
+	for _, p := range ReadGradleSettings(repoRoot, build).Projects {
+		if p.Dir == rel {
+			return p.Path + ":" + task
+		}
 	}
 	return ":" + strings.ReplaceAll(rel, "/", ":") + ":" + task
 }
@@ -151,7 +164,7 @@ func includedBuilds(repoRoot, build string) []string {
 		if err != nil {
 			continue
 		}
-		src := stripGroovyComments(string(data))
+		src := StripGroovyComments(string(data))
 		lits := includeBuildLiteral.FindAllStringSubmatch(src, -1)
 		if len(includeBuildWord.FindAllStringIndex(src, -1)) > len(lits) {
 			return []string{"**"}
@@ -183,10 +196,10 @@ func includedBuilds(repoRoot, build string) []string {
 
 var groovyComment = regexp.MustCompile(`(?s)/\*.*?\*/|//[^\n]*`)
 
-// stripGroovyComments drops comments from a Groovy or Kotlin build script, so a
+// StripGroovyComments drops comments from a Groovy or Kotlin build script, so a
 // commented-out includeBuild is not counted. A "//" inside a string literal (a URL)
 // cuts the rest of its line, which can only hide a literal and so add "**".
-func stripGroovyComments(s string) string { return groovyComment.ReplaceAllString(s, "") }
+func StripGroovyComments(s string) string { return groovyComment.ReplaceAllString(s, "") }
 
 // testAnnotations are the annotations that make a class run tests: JUnit Jupiter's
 // test methods and @Nested, JUnit 4's @Test and @RunWith, JUnit Platform suites,
@@ -523,7 +536,7 @@ func (gradle) record(ctx context.Context, rc *RunContext, dir string, obs map[st
 		if len(facts) == 0 {
 			return "no Test task started"
 		}
-		return fmt.Sprintf("the test JVM runs Java %d; recording needs Java 17 or later", version)
+		return "the test JVM runs " + javaVersionText(version) + "; recording needs Java 17 or later"
 	}
 	recs, err := collectJFR(ctx, java, rc.ShimDir, dir)
 	if err != nil {
@@ -540,9 +553,18 @@ func (gradle) record(ctx context.Context, rc *RunContext, dir string, obs map[st
 	}
 	gradleRecorded(obs, events, classes, recs, facts, m, procs)
 	if version != 0 {
-		return fmt.Sprintf("some test JVMs run Java %d; recording needs Java 17 or later", version)
+		return "some test JVMs run " + javaVersionText(version) + "; recording needs Java 17 or later"
 	}
 	return "their test JVM's flight recording is missing or unreadable"
+}
+
+// javaVersionText names the Java version of a test JVM; 0 is a version the init script
+// could not tell (an executable the task names).
+func javaVersionText(v int) string {
+	if v == 0 {
+		return "a Java version smates cannot tell (the task's own executable)"
+	}
+	return fmt.Sprintf("Java %d", v)
 }
 
 // untracedPasses counts the passes recorded as not proven.

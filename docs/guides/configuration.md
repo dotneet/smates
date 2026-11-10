@@ -88,7 +88,7 @@ Each entry under `suites:` needs a `runner`; the rest is optional.
 
 | key | meaning | default |
 |---|---|---|
-| `runner` | `vitest`, `jest`, `node`, `bun`, `pytest`, `unittest`, `go` or `custom` | required |
+| `runner` | `vitest`, `jest`, `node`, `bun`, `pytest`, `unittest`, `go`, `gradle` or `custom` | required |
 | `root` | directory the command runs in, relative to the repository root | `.` |
 | `name` | used in output, `--suite`, `--only suite:unit` and `depends_on` | the root, or the runner name for a root of `.` |
 
@@ -134,6 +134,7 @@ never executed.
 | `go` | `**/*_test.go`, without `testdata/`, `vendor/` and directories whose name starts with `_` or `.` (as `go test ./...` skips them) | a module nested in the suite's belongs to it only through the `go.work` workspace |
 | `node` | node's default patterns: `*.test.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*`, files under `test/` | helpers and fixtures under `test/` are excluded |
 | `bun` | bun's default patterns: `*.test.*`, `*.spec.*`, `*_test.*`, `*_spec.*` | |
+| `gradle` | `src/test/java/**/*.java`, without `build/` | the test class files among them are the units (see [Java (Gradle)](runners.md#gradle)) |
 
 A JS/TS config is understood when it exports an object literal (`module.exports = {...}`,
 `export default {...}`, `defineConfig({...})`, or a top-level `const` it names) and the
@@ -279,6 +280,7 @@ that do not record are unchanged):
 | `vitest` | when the project sets vitest's `isolate: false` |
 | `node` | when the command uses `--test-isolation=none` |
 | `unittest` | to run each module in its own process instead of one process for all |
+| `gradle` | the other way round: smates records one JVM per test class by default; `isolate: false` keeps Gradle's own forking |
 
 `bun` always runs one process per file while recording. `record_jobs` bounds how many of
 these processes run at once (default: 1 for bun and for commands that run files serially

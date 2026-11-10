@@ -1,7 +1,7 @@
 # smates
 
 **変更が影響しうるテストだけを実行する** — TypeScript/JavaScript（vitest、jest、
-`node --test`、bun）、Go、Python（pytest、unittest、uv）に対応。CI でもローカルでも使えます。
+`node --test`、bun）、Go、Python（pytest、unittest、uv）、Java（Gradle）に対応。CI でもローカルでも使えます。
 
 **ドキュメント: <https://dotneet.github.io/smates/ja/>**（[English](README.md)）
 
@@ -59,6 +59,7 @@ smates run --explain # ...各テストが選ばれた理由も表示する
 | TypeScript / JavaScript | vitest、jest、`node --test`、bun | テストファイル |
 | Python | pytest、unittest（uv、virtualenv） | テストファイル / モジュール |
 | Go | `go test` | パッケージ、またはテスト関数 |
+| Java | Gradle（JUnit Platform） | テストクラスのファイル |
 | その他 | `custom` コマンド | テストファイル |
 
 ## ドキュメント

@@ -1,7 +1,8 @@
 # Proposal: JVM tests (Gradle + JUnit Platform)
 
-Status: **accepted**, in progress: phases 1 to 3 (the Java static analyzer, the
-`gradle` runner, recording) are implemented; see "Phases". The decisions taken on the
+Status: **accepted**: phases 1 to 4 (the Java static analyzer, the `gradle` runner,
+recording, `init`/`doctor`/documentation/e2e fixture) are implemented; phase 5 (Maven,
+Kotlin) is open. See "Phases". The decisions taken on the
 questions the proposal left open are at the end. As each phase lands, the parts that
 describe behavior move into
 `DESIGN.md` (section 2) and the user guides; this file is not part of the documentation
@@ -354,7 +355,16 @@ above:
    configuration cache; a process started without a directory is analyzed in the task's
    working directory (JFR records none); a self-tracing Node, Bun or Python child is
    matched to its JVM by the pids of `ProcessStart`, else given to every unit.
-4. `init`, `doctor`, user documentation, the e2e fixture.
+4. `init`, `doctor`, user documentation, the e2e fixture. **Done** (`internal/detect/gradle.go`,
+   `internal/cli/doctorgradle.go`, `e2e/fixtures/gradle`; DESIGN.md section 2, "Gradle";
+   docs/guides/runners.md, "Java (Gradle)"). Differences from section 7: `doctor` checks
+   Java 17 (phase 3) and Gradle 8.14, the first version reporting assumption failures to
+   listeners, and warns rather than fails below them (the tests still run); detection
+   also notes Groovy and Scala tests, and a project with Java tests and tests in another
+   JVM language gets a suite. The fixture covers every case of section 8; it uses
+   `gradle` on `PATH` (no wrapper jar in the repository), and its mutation sweep breaks a
+   Java file with a static initializer that throws, which compiles, rather than a compile
+   error, which would fail every class of the build.
 5. Later: Maven (`-Dtest=`, `forkCount=1`/`reuseForks=false`, `argLine` for JFR, the
    Surefire XML reports), Kotlin sources (top-level functions and properties, `FooKt`
    classes).

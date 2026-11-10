@@ -102,6 +102,10 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		}
 	}
 
+	// Gradle: one suite per project with Java tests.
+	gradle, gradleNotes := gradleSuites(repo, dirs, dirFiles, files)
+	out = append(out, gradle...)
+
 	// JS: one suite per package that uses a test runner, unless an ancestor suite with
 	// the same runner already covers it (workspace-level vitest/jest config).
 	jsRoots := map[string]string{}
@@ -221,7 +225,7 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 	// Keep suites that have tests (as the runner's configuration or the default
 	// patterns describe them); give them unique names.
 	var kept []config.Suite
-	var notes []string
+	notes := gradleNotes
 	for _, s := range out {
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {

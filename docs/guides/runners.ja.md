@@ -1,6 +1,6 @@
 # 言語とランナー { #languages-and-runners }
 
-smates は、いま使っているテストランナーをそのまま使います。JavaScript と TypeScript では vitest、jest、`node --test`、bun、Python では pytest と unittest、そして `go test` です。このページでは、各ランナーがどうトレースされるか、何を設定する必要があるかを説明します。
+smates は、いま使っているテストランナーをそのまま使います。JavaScript と TypeScript では vitest、jest、`node --test`、bun、Python では pytest と unittest、`go test`、そして Java では Gradle です。このページでは、各ランナーがどうトレースされるか、何を設定する必要があるかを説明します。
 
 ## 対応ランナー { #supported-runners }
 
@@ -13,6 +13,7 @@ smates は、いま使っているテストランナーをそのまま使いま�
 | `pytest` | テストファイル | `sys.monitoring`（3.12 以降）/ `sys.setprofile`、audit フック。テストごと、フィクスチャごと、収集したモジュールごと、およびモジュールレベルでの読み取り | プラグイン |
 | `unittest`（`python -m unittest`） | テストモジュール | Python と同じトレース。選択したモジュールをラッパー経由で 1 プロセスで実行し、モジュールごとにコンテキストを分ける | ラッパーの結果クラス |
 | `go` | パッケージ、または `granularity: func` でテスト関数 | 静的な import の閉包（Go では正確）+ `go test -exec` 経由の `-test.testlogfile`。テストの子プロセスの Node/Python | テストバイナリの終了コード、ビルドエラー |
+| `gradle`（JUnit Platform、Java） | テストクラスのファイル | テストクラスごとの JVM で JDK Flight Recorder を動かし、ロードしたクラス、読み取ったファイル、起動したプロセスを記録。加えて Java の静的グラフ | init script のテストリスナー |
 | `custom` | テストファイル | コマンドが起動する Node/Python のプロセス | 全体の終了コード、または [JUnit レポート](configuration.md#per-file-results-from-a-junit-report-junit) |
 
 *テストユニット*は smates が選択・スキップする単位です。トレースは smates が実行を*記録*しているときだけ行われます（`smates run` の既定。`--no-record` で無効にできます）。どのファイルがテストかは各ランナー自身の設定から読み取ります。[どのファイルがテストか](configuration.md#which-files-are-tests) を参照してください。
@@ -223,6 +224,38 @@ suites:
 
 コード生成の後でしかコンパイルできないパッケージは、他のビルドエラーと同じく失敗（exit 1）になり、環境エラーにはなりません。生成ファイルがないのか本当に壊れているのか、smates には区別できないためです。git が無視する生成ファイル（コードジェネレーターが作るファイル）があると、生成するまでローカルではこれらのユニットが失敗します。先にジェネレーターを実行するか、`exclude:` でそうしたパッケージを外してください。
 
+## Java（Gradle） { #gradle }
+
+`gradle` ランナーは、Gradle のビルドで JUnit Platform 上の Java のテスト（JUnit 5、および JUnit Platform 経由の JUnit 4 などのエンジン）を実行します。Gradle 9 と JDK 21 で動作を確認しています。
+
+**スイート。** スイートは、`src/test/java` にテストを持つ Gradle プロジェクトです。`smates init` はプロジェクトごとに 1 つ書き出します。プロジェクトは `settings.gradle(.kts)` の `include` から読み取り、settings がプロジェクトを別の場所に置いている場合は `project(':x').projectDir = file('...')` からも読み取ります（ビルドの外に置かれたプロジェクトや `includeFlat` で指定されたプロジェクトにはスイートを作らず、`init` がそう伝えます）。`smates.yml` にはコマンドを書きません。既定のコマンドは、最も近い `gradlew`（なければ `PATH` 上の `gradle`）とそのプロジェクトのテストタスクで、プロジェクトのディレクトリから実行します（`../gradlew :app:test`、ルートプロジェクトなら `./gradlew :test`）。別の `Test` タスク（JUnit のタグで絞るタスクなど）を実行するには、`command` でそのタスクを指定します。
+
+**テストユニット**はテストクラスのファイルです。トップレベルのクラスにテストのアノテーション（`@Test`、`@ParameterizedTest`、`@Nested`、`@RunWith` など）が付いているファイル、テストらしい名前（`*Test`、`*Tests`、`*TestCase`、`*IT`、`*ITCase`）のファイル、そうしたクラスを継承するか、そうしたインターフェースを実装するファイル（JUnit はインターフェースの `@Test` の default メソッドを実行します）がユニットです。`src/test/java` の下の抽象基底クラス、テスト用インターフェース、ヘルパーはユニットではなく、それを使うクラスの依存になります。親の型がリポジトリ内に見つからないクラス（ライブラリのテスト基底クラスを継承するもの）はユニットのまま残し、本番コードのインターフェースを実装するだけのクラス（フェイク）はユニットにしません。`@Nested` クラスは外側のクラスのファイルに属します。
+
+**実行のしかた。** smates は init script（`--init-script`）を追加します。テストタスクについて、up-to-date チェックとビルドキャッシュを無効にし（Gradle がスキップしたタスクは結果を報告しないため）、選択したクラスを `--tests` のパターンとして渡し（Gradle はタスク自身のフィルタとの共通部分を取ります。どれにも一致しないクラスがあってもビルドは失敗しません）、テストリスナーで各クラスの結果を報告させます。コマンドラインで自分で渡した `--tests` が優先されます。configuration cache とも併用できます。
+
+**結果。** 失敗したテストを含むクラスは失敗です。assumption（`assumeTrue`）で中断されたテストを含むクラスと、テストを 1 つも実行しなかったクラス（タスクが除外するタグが付いている場合など）は成功と確認できないので、次回も実行されます。`@Disabled` のテストがあってもクラスの成功は妨げません。テストを 1 つも実行する前にビルドが失敗した場合（コンパイルエラー）は、選択したすべてのクラスが失敗になります。
+
+### Gradle のテストの記録 { #recording-gradle-tests }
+
+記録中は、テストクラスごとに専用の JVM（`forkEvery = 1`）で実行し、JDK Flight Recorder を有効にします。ビルドのあとで smates が記録を読み取ります。
+
+- **ロードしたクラス**はそのソースファイルとして数えます。そのため、リフレクション（`Class.forName`）でしか到達しないクラスや、ファイル内の 2 つ目のトップレベルクラスも検出できます。
+- **読み取ったファイル**はそのファイル自身として数えます。クラスパス上のリソースは `src/main/resources` の元のファイルとして、別プロジェクトの jar から読んだリソースはそのプロジェクトのリソース一式として数えます。読み取ったファイルのディレクトリの一覧も依存に加えるので、テストが読むファイルと同じディレクトリに新しいファイル（新しいマイグレーションなど）が増えたときも選択されます。
+- **起動したプロセス**は、ほかの子プロセスと同じくコマンドラインから解析します。Node、Bun、Python の子プロセスは自分自身をトレースします。
+
+Java の静的グラフは、クラスがソース上で参照するもの（import、同じパッケージのクラス、継承するクラス）を加えます。javac がインライン化するため JVM がロードしないコンパイル時定数も、ここで拾います。settings、ビルドスクリプト、`gradle.properties`、バージョンカタログ、ロックファイル、wrapper、`buildSrc` と included build、`.tool-versions`、`.java-version`、`.sdkmanrc` は、ビルドのすべてのテストの inputs です。
+
+記録には、テスト用 JVM（テストタスクが使う toolchain）が Java 17 以降である必要があります。それより古い場合もテストは実行されますが、成功は確認できないものとして記録されるので、すべてのクラスが毎回実行されます。`isolate: false` を指定すると、記録中も Gradle 自身のフォークのしかたを保ちます。その場合、同じ JVM を使ったクラスどうしは依存を共有します。
+
+`smates doctor` は、wrapper、Gradle のバージョン（8.14 以降は assumption による中断を報告します。それより前ではスキップしたテストを含むクラスは成功と確認できません）、テストが動く Java のバージョンを確認し、Kotlin、Groovy、Scala のテストソースがあれば警告します。これらはユニットにならないので、選択的な実行では除外され、スイートを全件実行するときにだけ実行されます。
+
+### 何が短くなるか { #what-gradle-saves }
+
+smates が省くのはテストクラスの実行だけです。どの実行でも Gradle の起動、ビルドの設定、変更分のコンパイルは行われ、短くなるのはテストを実行している時間だけです。記録する実行（デフォルトブランチ）は通常の実行より時間がかかります。テストクラスごとに JVM の起動と Flight Recorder の記録が加わり、ノート PC で 1 クラスあたり約 1 秒です。
+
+効果を見積もるには、ジョブのうちテストタスクが占める時間（`--profile` やビルドスキャンで確認できます）と、そのうちテスト用 JVM の起動ではなくテストの実行にかかっている時間を見てください。10 分のジョブでテストタスクが 6 分テストを実行しているなら、クラスの 4 分の 1 を選択する変更で約 4.5 分短くなります。コンパイルや設定に時間の大半がかかるジョブでは、ほとんど短くなりません。e2e の fixture（小さなビルド）では、12 クラス中 3 クラスを選択した実行が 3.2 秒、全クラスで 4.0 秒でした。この規模では Gradle の固定コストが大半を占めます。
+
 ## カスタムコマンド { #custom-commands }
 
 `custom` ランナーは任意のコマンドを実行し、選択したテストファイルを末尾に追加するか `{tests}` の位置に入れます。`command` と `tests` が必要です。
@@ -250,6 +283,7 @@ smates はテストファイルのほかに、その実行の間だけ、いく�
 | bun | `--config=<bunfig.toml のコピー>`（smates の preload を先頭に入れ、カバレッジのしきい値を外したもの）、`--coverage --coverage-reporter=lcov --coverage-dir=…` | 記録中。ファイルごとに 1 回 |
 | pytest | `--continue-on-collection-errors` | コマンドに `-x`/`--exitfirst` がない場合。1 つのモジュールの import に失敗しても、ほかのファイルが止まらないようにするためです |
 | go（パッケージ単位。`granularity: func` は [Go のテスト関数単位の選択](go-test-functions.md) を参照） | `GOFLAGS` に `-exec=<smates のラッパー> -count=1`、およびテストのある各パッケージにテストファイルを 1 つ追加する `-overlay=<file>`（自分で指定した `-overlay` はそこにマージします） | `-exec` と `-overlay` は記録中（overlay は、テストバイナリを再実行した子プロセスにも専用のテストログを書かせるためです）。`-count=1` は記録中と `--shadow` のとき。キャッシュした結果を使わせないためです |
+| gradle | `--init-script <smates.init.gradle>` | 常に（[Java（Gradle）](#gradle) を参照）。記録中は、テスト用 JVM に `forkEvery = 1` と Flight Recorder の `-XX:StartFlightRecording` も設定します |
 
 `node --test`、unittest、custom のスイートには、テストファイルだけを渡します（記録する unittest の実行は `python -m smates_unittest` を通ります。[unittest](#unittest) を参照）。すべてを実行するのではない場合、pytest の終了コード 5（テストが収集されなかった）は失敗になりません。
 
@@ -265,6 +299,7 @@ vitest や jest の実行が、どのテストファイルも実行する前に�
 - smates が中を見られないコマンド（`make`、コンパイル済みのバイナリ）は、それが実行されたディレクトリ以下のすべて（`dir/**`）を依存にします。パスで指定されたプログラムならプログラム自体も、オプションの値（`--config=cfg/app.ini`、`-Dk=v`）やレスポンスファイル（`@args.txt`）で指定されたファイルも依存になります。
 - `-I`、`-E`、`-S` 付きで起動された Python の子プロセスや、smates の環境変数を落とした環境で起動された Node、Bun、Python の子プロセスは自分自身をトレースできないため、中を見られないコマンドと同じに扱います。
 - Go のテストの子プロセスについては [Go のテストの子プロセス](#child-processes-of-go-tests) を参照してください。
+- Gradle のテストの子プロセスは Flight Recorder を通じて検出します。Flight Recorder はコマンドラインの引数を空白でつないで記録するので、空白を含む引数はそこで分かれて解析されます。
 
 ### Go のテストの子プロセス { #child-processes-of-go-tests }
 

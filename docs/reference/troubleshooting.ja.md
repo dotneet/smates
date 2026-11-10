@@ -46,6 +46,9 @@ smates deps src/cart.test.ts
 - **untraced のテスト。** `N untraced test(s) passed but smates cannot tell all they depend on without coverage` は、`untraced` に挙げたテストのうち pass を記録しないものとその理由（プロセスを起動する import、実行時に名前を決めるモジュール、カバレッジなしではトレースできないランナー）を示します。[時間を測るテスト](../guides/runners.md#tests-that-measure-time) を参照してください。
 - **ランナーへの引数。** `--` 以降に引数を付けた実行では、テストを成功として記録しません。常に使うフラグはスイートの `command` に移してください。
 - **pytest 向けに書かれた unittest のモジュール。** 状態が不明のままなので毎回実行されます。ログで `runner: pytest` が提案されます。
+- **記録されない Gradle のテストクラス。** `N test class file(s) passed but were not recorded (...)` が理由を示します。テスト用 JVM が Java 17 より前か、その Flight Recorder の記録がないかです。`smates doctor` が Java のバージョンを表示します（`toolchain-java`）。
+- **テストを実行しなかった Gradle のテストクラス。** `N test class file(s) ran no test` は、テストタスクが実行しなかったクラスを挙げます。タスクが除外する JUnit のタグ、ビルドスクリプトのフィルタ、`Test` タスクを実行しないコマンドが原因です。それを実行するタスクを `command` に指定したスイートを作るか、`exclude:` で外してください。
+- **Gradle 8.14 より前**は assumption による中断と無効化したテストを区別できないので、スキップしたテストを含むクラスは毎回実行されます（`smates doctor` の `toolchain-gradle`）。
 - **flaky なテスト。** `smates flaky` は、入力が変わらないのに結果が反転したテストを一覧します。[シャドーモード・flaky・統計](../guides/trust.md) を参照してください。
 
 ## 小さな変更でほとんどのテストが選択される { #a-small-change-selects-most-tests }
@@ -104,6 +107,10 @@ smates: web: the runner exited with code 127 before any test reported a result: 
 
 スイートのコマンドがインストールされていない、`PATH` にない、または実行できません。`smates doctor` はスイートと、インストールのためのコマンドを示します。smates は `npx` や `bunx` にランナーをダウンロードさせないので、先にプロジェクトの依存をインストールしてください（`npm ci`、`pnpm install`、`uv sync` など）。[終了コード](exit-codes.md#4-environment-problem) を参照してください。
 
+## Gradle のすべてのテストクラスが失敗する { #every-gradle-test-class-fails }
+
+テストを 1 つも実行する前に失敗する Gradle のビルド（JDK がない、またはビルドには古すぎる）は、選択したすべてのテストクラスを失敗として報告します。ビルド自身のエラーは smates のサマリーより上の出力にあります。`smates doctor` が JDK を確認します（`toolchain-java`）。
+
 ## CI で毎回すべてが実行される { #everything-runs-on-every-ci-run }
 
 ステートが復元されておらず、すべてのテストが新規扱いになっている可能性が高いです。
@@ -133,6 +140,7 @@ smates: web: the runner exited with code 127 before any test reported a result: 
 - **Go の `granularity: func`** はテスト関数ごとに 1 プロセスで記録します。関数どうしが状態を共有しないなら、`record_jobs` を上げて 1 つのパッケージの関数を同時に記録できます。
 - **`isolate: true`** は記録中にファイルごとにランナーを起動します。共有ワーカーで動くファイルの依存を正確にする必要がなければ、オフのままにしてください。
 - **`record_jobs` が小さい**と、ファイルごとに 1 プロセスで記録するランナー（bun、`isolate`）が遅くなります。
+- **Gradle** は、テストクラスごとに Flight Recorder を有効にした JVM で記録します。1 クラスあたり約 1 秒です。`isolate: false` で Gradle 自身のフォークのしかたを保ちます（同じ JVM を使ったクラスどうしは依存を共有します）。
 
 プルリクエストでの選択的な実行には影響しません。選択されたテストだけを起動するからです。
 

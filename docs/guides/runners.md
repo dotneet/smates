@@ -1,8 +1,8 @@
 # Languages and runners
 
 smates works with the test runners you already use: vitest, jest, `node --test` and bun
-for JavaScript and TypeScript, pytest and unittest for Python, and `go test`. This page
-shows how each one is traced and what you may need to set for it.
+for JavaScript and TypeScript, pytest and unittest for Python, `go test`, and Gradle for
+Java. This page shows how each one is traced and what you may need to set for it.
 
 ## Supported runners
 
@@ -15,6 +15,7 @@ shows how each one is traced and what you may need to set for it.
 | `pytest` | test file | `sys.monitoring` (3.12+) / `sys.setprofile`, audit hooks; per test, per fixture, per collected module, plus module-level reads | plugin |
 | `unittest` (`python -m unittest`) | test module | same Python tracing; selected modules run in one process through a wrapper with contexts per module | wrapper result class |
 | `go` | package, or test function with `granularity: func` | static import closure (exact for Go) + `-test.testlogfile` via `go test -exec`; Node/Python children of tests | binary exit code, build failures |
+| `gradle` (JUnit Platform, Java) | test class file | JDK Flight Recorder in a JVM per test class: classes loaded, files read, processes started; plus the static Java graph | init script's test listener |
 | `custom` | test file | any Node/Python processes your command starts | overall exit code, or a [JUnit report](configuration.md#per-file-results-from-a-junit-report-junit) |
 
 A *test unit* is what smates selects or skips. Tracing only happens while smates
@@ -475,6 +476,88 @@ break. Generated files that git ignores (code produced by a generator step) make
 units fail locally until you generate them. Run the generator first, or leave such
 packages out with `exclude:`.
 
+## Java (Gradle) { #gradle }
+
+The `gradle` runner runs Java tests on the JUnit Platform (JUnit 5, and JUnit 4 or other
+engines through it) in a Gradle build. It is tested with Gradle 9 and JDK 21.
+
+**Suites.** A suite is a Gradle project with tests in `src/test/java`. `smates init`
+writes one per project: it reads the projects from `include` in `settings.gradle(.kts)`,
+and from `project(':x').projectDir = file('...')` where the settings move one (a project
+moved outside the build, or named by `includeFlat`, gets no suite, and `init` says so).
+`smates.yml` gets no command: the default command is the nearest `gradlew` (else `gradle` on `PATH`) with the project's
+test task, run from the project directory: `../gradlew :app:test`, or `./gradlew :test`
+for the root project. To run another `Test` task (one that filters JUnit tags, say),
+name it in `command`.
+
+**Test units** are test class files: a file whose top-level class carries a test
+annotation (`@Test`, `@ParameterizedTest`, `@Nested`, `@RunWith`, ...), is named like a
+test (`*Test`, `*Tests`, `*TestCase`, `*IT`, `*ITCase`), or extends a class or
+implements an interface that does (JUnit runs an interface's `@Test` default methods).
+Abstract base classes, test interfaces and helpers under `src/test/java` are no units:
+they are dependencies of the classes that use them. A class whose supertype smates
+cannot find in the repository (a library's test base class) stays a unit; one that
+only implements production interfaces (a fake) does not. `@Nested` classes belong to the file of their
+outer class.
+
+**How smates runs them.** smates adds an init script (`--init-script`). For a test task
+it turns off up-to-date checks and the build cache (a task Gradle skips reports no
+result), passes the selected classes as `--tests` patterns (Gradle intersects them with
+the task's own filters; a class that matches nothing does not fail the build), and
+reports each class's result through a test listener. A `--tests` you pass on the command
+line wins. It works with the configuration cache.
+
+**Statuses.** A class with a failing test fails. A class whose tests an assumption
+aborted (`assumeTrue`), or that ran no test at all (a tag the task excludes), is not
+proven and runs again next time; `@Disabled` tests do not keep a class from passing. A
+build that fails before any test ran (a compile error) fails every selected class.
+
+### Recording Gradle tests { #recording-gradle-tests }
+
+While recording, every test class runs in a JVM of its own (`forkEvery = 1`), with the
+JDK Flight Recorder on. After the build, smates reads the recordings:
+
+- **Classes loaded** count as their source files, so a class reached only by reflection
+  (`Class.forName`) and a second top-level class of a file are seen.
+- **Files read** count as themselves. A classpath resource counts as its source in
+  `src/main/resources`, and a resource read from another project's jar as that project's
+  resources. Every file read also adds its directory's listing, so a new file next to
+  one a test reads (a new migration) selects it.
+- **Processes started** are analyzed like other child processes, from their command
+  line. Node, Bun and Python children trace themselves.
+
+The static Java graph adds what a class references in its source (imports, classes of
+its package, the classes it extends), including the compile-time constants javac
+inlines, which the JVM never loads. Settings, build scripts, `gradle.properties`,
+version catalogs, lockfiles, the wrapper, `buildSrc` and included builds, and
+`.tool-versions`, `.java-version` and `.sdkmanrc`, are inputs of every test of the
+build.
+
+Recording needs Java 17 or later in the test JVM (the toolchain the test task uses).
+Below it the tests run, but their passes are recorded as not proven, so every class runs
+every time. `isolate: false` keeps Gradle's own forking while recording: the classes
+that share a JVM then share their dependencies.
+
+`smates doctor` checks the wrapper, the Gradle version (8.14 and later report assumption
+failures; before it a class with a skipped test is never proven), and the Java version
+the tests run on, and it warns about test sources in Kotlin, Groovy or Scala, which are
+no units: a selective run leaves them out, and they run only when the suite runs in full.
+
+### What it saves { #what-gradle-saves }
+
+smates skips test classes, nothing else. Every run still starts Gradle, configures the
+build and compiles what changed; only the time spent running tests shrinks. Recording
+runs (on the default branch) cost more than a plain run: a JVM start and a flight
+recording per test class, about a second each on a laptop.
+
+To estimate the gain, look at how much of the job the test tasks take (`--profile`, or
+a build scan), and how much of that is running tests rather than starting the test
+JVMs. In a job of 10 minutes whose test tasks spend 6 minutes running tests, a change
+that selects a quarter of the classes saves about 4.5 minutes; in a job dominated by
+compilation and configuration it saves little. On the e2e fixture, a small build,
+a run that selects 3 of 12 classes takes 3.2 s against 4.0 s for all of them: the fixed
+cost of Gradle dominates there.
+
 ## Custom commands
 
 The `custom` runner runs any command, with the selected test files appended or put in
@@ -504,6 +587,7 @@ Besides the test files, smates adds a few arguments to your command, for that ru
 | bun | `--config=<copy of bunfig.toml>` (smates' preload first, no coverage threshold), `--coverage --coverage-reporter=lcov --coverage-dir=…` | while recording, once per file |
 | pytest | `--continue-on-collection-errors` | unless the command has `-x`/`--exitfirst`: one module that fails to import does not stop the other files |
 | go (package granularity; see [Go test functions](go-test-functions.md) for `granularity: func`) | `-exec=<smates' wrapper> -count=1` in `GOFLAGS`, and `-overlay=<file>` that adds one test file to each package with tests (your own `-overlay` merged in) | `-exec` and `-overlay` while recording (the overlay lets re-executions of the test binary keep a test log of their own); `-count=1` while recording and with `--shadow`, so no cached result is reused |
+| gradle | `--init-script <smates.init.gradle>` | always (see [Java (Gradle)](#gradle)); while recording it also sets `forkEvery = 1` and the flight recorder's `-XX:StartFlightRecording` for the test JVMs |
 
 `node --test`, unittest and custom suites get only the test files (a unittest run that
 records goes through `python -m smates_unittest`, see [unittest](#unittest)). When not
@@ -535,6 +619,9 @@ Tests that start other processes are followed everywhere:
   environment drops smates' variables, cannot trace itself and is handled like a
   command smates cannot see into.
 - Children of Go tests: see [Child processes of Go tests](#child-processes-of-go-tests).
+- Children of Gradle tests are seen through the flight recorder, which records their
+  command line with its arguments joined by spaces: an argument containing a space is
+  split there.
 
 ### Child processes of Go tests { #child-processes-of-go-tests }
 

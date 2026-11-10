@@ -76,8 +76,33 @@ gradle.allprojects { Project p ->
       }
       String record = System.getenv('SMATES_GRADLE_RECORD')
       if (record) {
-        def launcher = test.javaLauncher.get()
-        int version = launcher.metadata.languageVersion.asInt()
+        // The Java executable and major version the tests run with: the task's launcher
+        // (a toolchain; Gradle 6.7+ has the property, 8+ always sets it), else its
+        // executable, else the JVM running Gradle. The version is 0 when it cannot be
+        // told (an executable of unknown version), which records nothing. (Inline: a
+        // method of this script is out of reach of a task action restored from the
+        // configuration cache.)
+        String java = null
+        int version = 0
+        try {
+          def launcher = test.javaLauncher.getOrNull()
+          if (launcher != null) {
+            java = launcher.executablePath.asFile.path
+            version = launcher.metadata.languageVersion.asInt()
+          }
+        } catch (Exception ignored) {
+        }
+        if (java == null && test.executable) {
+          java = test.executable
+          try {
+            version = test.javaVersion.majorVersion as int
+          } catch (Exception ignored) {
+          }
+        } else if (java == null) {
+          String exe = System.getProperty('os.name').toLowerCase().contains('windows') ? 'java.exe' : 'java'
+          java = new File(new File(System.getProperty('java.home'), 'bin'), exe).path
+          version = JavaVersion.current().majorVersion as int
+        }
         boolean jfr = version >= 17
         if (jfr) {
           if (System.getenv('SMATES_GRADLE_ISOLATE') != 'false') {
@@ -93,7 +118,7 @@ gradle.allprojects { Project p ->
           }
         }
         new File(record, 'facts-' + safe + '.json').setText(JsonOutput.toJson([
-            task: test.path, workingDir: test.workingDir.path, java: launcher.executablePath.asFile.path,
+            task: test.path, workingDir: test.workingDir.path, java: java,
             javaVersion: version, jfr: jfr] + projects.get()), 'UTF-8')
       }
       String out = System.getenv('SMATES_GRADLE_RESULTS')

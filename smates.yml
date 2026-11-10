@@ -121,6 +121,19 @@ suites:
       - { tests: ["."], deps: *gotest }
       - { tests: ["."], deps: ["e2e/fixtures/coverage-tools/**"] }
 
+  # Gradle and JUnit (a JDK and gradle on PATH). The Java static analyzer is used by the
+  # static graph of every suite, but only Gradle suites follow .java files.
+  - name: e2e-gradle
+    runner: go
+    root: e2e
+    command: go test -tags e2e -timeout 40m
+    exclude: ["fixtures/**"]
+    inputs: ["/go.mod", "/go.sum"]
+    env: { SMATES_E2E_FIXTURE: gradle }
+    rules:
+      - { tests: ["."], deps: *core }
+      - { tests: ["."], deps: ["internal/static/java/**", "internal/runner/gradle*.go", "internal/trace/shims/gradle/**", "e2e/fixtures/gradle/**"] }
+
   # Every fixture not named above: a new fixture runs here until it gets a suite.
   - name: e2e-others
     runner: go
@@ -128,7 +141,7 @@ suites:
     command: go test -tags e2e -timeout 40m
     exclude: ["fixtures/**"]
     inputs: ["/go.mod", "/go.sum"]
-    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv,-coverage-tools" }
+    env: { SMATES_E2E_FIXTURE: "-polyglot,-jest-npm,-vitest-npm,-python-uv,-coverage-tools,-gradle" }
     rules:
       - { tests: ["."], deps: *core }
       - { tests: ["."], deps: *js }
@@ -137,9 +150,6 @@ suites:
       - { tests: ["."], deps: *pytest } # env (Python through a custom runner), python-unittest
       - { tests: ["."], deps: ["internal/runner/unittest.go"] } # python-unittest
       - { tests: ["."], deps: ["internal/runner/bun.go", "e2e/fixtures/{bun,env,flaky,go-module,node-test,pnpm-monorepo,python-unittest}/**"] }
-      # No e2e fixture runs Gradle yet (phase 4 of docs/proposals/jvm.md); the static
-      # graph analyzes any Java source it finds, and a Gradle fixture would run here first.
-      - { tests: ["."], deps: ["internal/static/java/**", "internal/runner/gradle*.go", "internal/trace/shims/gradle/**"] }
 
 # Release packaging, CI and documentation-site files that no test reads; action.yml
 # is covered by the action job in .github/workflows/ci.yml.

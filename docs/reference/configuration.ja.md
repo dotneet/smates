@@ -111,7 +111,7 @@ agent:
 | キー | 型 | デフォルト | 意味 |
 |---|---|---|---|
 | `name` | string | ランナー名。`root` が `.` でなければ `root` | `--suite`、`--only`、`depends_on`、出力で使う名前。一意である必要があります。 |
-| `runner` | `vitest`、`jest`、`node`、`bun`、`pytest`、`unittest`、`go`、`custom` | **必須** | スイートの実行方法とトレース方法。[言語とランナー](../guides/runners.md) を参照してください。 |
+| `runner` | `vitest`、`jest`、`node`、`bun`、`pytest`、`unittest`、`go`、`gradle`、`custom` | **必須** | スイートの実行方法とトレース方法。[言語とランナー](../guides/runners.md) を参照してください。 |
 | `root` | パス（リポジトリルートから） | `.` | コマンドを実行するディレクトリ。リポジトリ内である必要があります。 |
 | `command` | string | ランナーから推定 | ベースとなるコマンドライン。選択したテストファイルを末尾に追加するか、コマンドに `{tests}` があればそこに置き換えます。`custom` では必須です。 |
 | `tests` | グロブのリスト（`root` から） | ランナーの設定から読む。読めなければランナーのデフォルト | どのファイルがテストファイルか。[どのファイルがテストか](../guides/configuration.md#which-files-are-tests) を参照してください。 |
@@ -121,7 +121,7 @@ agent:
 | `depends_on` | [依存](#depends_on) のリスト | `[]` | テストがプロセス境界を越えて使うコード（docker compose で起動するサーバー、HTTP API など）。[サーバーを叩くテスト](../guides/servers.md) を参照してください。 |
 | `serves` | グロブのリスト（リポジトリルートから） | `[]` | `depends_on: [{paths: [...]}]` の省略形。 |
 | `env` | 文字列から文字列へのマップ | `{}` | スイートのテストに渡す環境変数。シェルの値より優先され、値を変えるとスイートが再実行されます。 |
-| `isolate` | bool | `false` | 記録中、テストファイルごとに別プロセスで実行します。`vitest`、`jest`、`node`（`--test-isolation=none` のとき）、`unittest` が対応しています。`bun` は常にファイルごとに 1 プロセスで記録します。 |
+| `isolate` | bool | `false` | 記録中、テストファイルごとに別プロセスで実行します。`vitest`、`jest`、`node`（`--test-isolation=none` のとき）、`unittest` が対応しています。`bun` は常にファイルごとに 1 プロセスで記録します。`gradle` は `false` を指定しない限り、テストクラスごとに 1 つの JVM で記録します。 |
 | `record_jobs` | int（0 以上） | 意味の欄を参照 | ファイルごとに 1 プロセスで記録するとき、同時に動かすプロセス数。`bun` と、ファイルを順に実行するコマンド（`--runInBand`、`--no-file-parallelism`、`--test-isolation=none`、`--test-concurrency=1`）では `1`、それ以外は CPU 数です。`granularity: func` では、1 つのパッケージのテスト関数を同時にいくつ記録するか（デフォルト `1`）。`0` はデフォルトの意味です。 |
 | `granularity` | `package`、`func` | `package` | Go のみ。`func` にするとトップレベルのテスト関数がそれぞれ 1 ユニットになります（`function` も別名として使えます）。[Go のテスト関数単位の選択](../guides/go-test-functions.md) を参照してください。 |
 | `static` | bool | `true` | トレースに加えて静的な import グラフを使います。 |
@@ -147,6 +147,7 @@ agent:
 | `pytest` | `pyproject.toml`、`uv.lock`、`setup.cfg`、`setup.py`、`pytest.ini`、`tox.ini`、`requirements*.txt`、`.python-version`。リポジトリルートの `pyproject.toml`、`uv.lock`、`.python-version`、`requirements*.txt`、`pytest.ini`、`.tool-versions` |
 | `unittest` | `pytest` と同じで、どちらの `pytest.ini` も含まない |
 | `go` | `go.mod`、`go.sum`。リポジトリルートの `go.work`、`go.work.sum`、`.tool-versions`。`GOWORK` が（スイートの `env` か環境で）設定されていれば、その `go.work`、その `go.work.sum`、そのモジュールの `go.mod` と `go.sum`、ローカルの `replace` 先それぞれの `go.mod` |
+| `gradle` | スイートが属する Gradle ビルド（`settings.gradle(.kts)` のある最も近いディレクトリ）の、settings と `settings-gradle.lockfile`、すべての `build.gradle(.kts)`、`gradle.properties`、`gradle.lockfile` と `gradle/dependency-locks/**`、`gradle/*.versions.toml`、wrapper（`gradlew`、`gradlew.bat`、`gradle/wrapper/gradle-wrapper.properties`）、`buildSrc/**`、included build（`includeBuild`）。リポジトリルートの `.tool-versions`、`.java-version`、`.sdkmanrc` |
 | `custom` | なし |
 
 ### rules { #rules }
