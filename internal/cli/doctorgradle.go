@@ -187,8 +187,8 @@ func toolchainVersions(root, build string, files []string) ([]int, map[int][]str
 func doctorGradleJava(p *project, suite, build string, r *doctorReport) {
 	const id = "toolchain-java"
 	subject := "gradle build " + build
-	below := func(what string) {
-		r.add(checkWarn, id, "%s: the tests run on %s; recording needs Java %d or later, so every pass is recorded as not proven and every test class runs every time. Run the tests on a Java %d+ toolchain (the compiled bytecode level can stay)", subject, what, javaRecording, javaRecording).about(subject).
+	below := func(what, who string) {
+		r.add(checkWarn, id, "%s: the tests run on %s; recording needs Java %d or later, so %s: every pass is recorded as not proven and the test class runs every time. Run the tests on a Java %d+ toolchain (the compiled bytecode level can stay)", subject, what, javaRecording, who, javaRecording).about(subject).
 			fix(doctorFix{Doc: docURL + "guides/runners/#gradle"})
 	}
 	java, how := "java", "java on PATH"
@@ -205,7 +205,11 @@ func doctorGradleJava(p *project, suite, build string, r *doctorReport) {
 		// Every project's tests run on its own toolchain: one below 17 leaves that
 		// project's passes unproven, whatever the others request.
 		if low := versions[0]; low < javaRecording {
-			below(fmt.Sprintf("the Java %d toolchain %s requests%s", low, strings.Join(by[low], ", "), ifMore(len(versions) > 1, " (and some projects request others)")))
+			who := "no test class is recorded"
+			if len(versions) > 1 {
+				who = "the test classes of the projects on it are not recorded"
+			}
+			below(fmt.Sprintf("the Java %d toolchain %s requests%s", low, strings.Join(by[low], ", "), ifMore(len(versions) > 1, " (and some projects request others)")), who)
 			return
 		}
 		r.add(checkOK, id, "%s: the tests run on the Java %s toolchain(s) the build scripts request", subject, joinInts(versions)).about(subject)
@@ -216,7 +220,7 @@ func doctorGradleJava(p *project, suite, build string, r *doctorReport) {
 	case v == 0:
 		r.add(checkWarn, id, "%s: the Java version of %s is unknown; recording needs Java %d or later", subject, how, javaRecording).about(subject)
 	case v < javaRecording:
-		below(fmt.Sprintf("Java %d (%s)", v, how))
+		below(fmt.Sprintf("Java %d (%s)", v, how), "no test class is recorded")
 	default:
 		r.add(checkOK, id, "%s: the tests run on Java %d (%s; no toolchain requested)", subject, v, how).about(subject)
 	}

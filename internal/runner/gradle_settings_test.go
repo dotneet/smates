@@ -56,6 +56,8 @@ func TestReadGradleSettings(t *testing.T) {
 		{"child included before its parent moves", "include ':core', ':core:api'\nproject(':core').projectDir = new File(settingsDir, 'modules/core')", []GradleProject{{":", "."}, {":core", "modules/core"}, {":core:api", "core/api"}}, true},
 		{"child included after its parent moves", "include ':core'\nproject(':core').projectDir = file('modules/core')\ninclude ':core:api'", []GradleProject{{":", "."}, {":core", "modules/core"}, {":core:api", "modules/core/api"}}, true},
 		{"moved outside the build", "include ':shared'\nproject(':shared').projectDir = file('../shared')", []GradleProject{{":", "."}, {":shared", "../shared"}}, true},
+		{"projectDir of a project never included", "include 'a'\nproject(':b').projectDir = file('x')", []GradleProject{{":", "."}, {":a", "a"}}, true},
+		{"nested includeFlat", "includeFlat 'a:b'", []GradleProject{{":", "."}}, false},
 		{"includeFlat", "includeFlat 'sibling'", []GradleProject{{":", "."}, {":sibling", "../sibling"}}, true},
 		{"projectDir set otherwise", "include 'a'\nrootProject.children.each { it.projectDir = file(\"x/${it.name}\") }", []GradleProject{{":", "."}, {":a", "a"}}, false},
 		{"computed includeFlat", "includeFlat(*names)", []GradleProject{{":", "."}}, false},

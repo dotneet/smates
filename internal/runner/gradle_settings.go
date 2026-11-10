@@ -78,9 +78,15 @@ func ReadGradleSettings(repoRoot, build string) GradleSettings {
 			p := ":" + strings.TrimPrefix(l, ":")
 			switch {
 			case st.dir != "":
-				dirs[p] = st.dir
+				// Only an included project can be moved (Gradle fails the build
+				// otherwise).
+				if _, included := dirs[p]; included {
+					dirs[p] = st.dir
+				}
 			case st.flat:
-				if _, done := dirs[p]; !done && strings.Count(p, ":") == 1 {
+				if strings.Count(p, ":") != 1 {
+					ok = false // includeFlat takes a project name, not a path
+				} else if _, done := dirs[p]; !done {
 					dirs[p] = "../" + p[1:] // a sibling of the build root
 				}
 			default:
