@@ -247,8 +247,6 @@ func TestGradleRecorded(t *testing.T) {
 			t.Errorf("other: %v", keys(f))
 		}
 	})
-	// The JVMs run one after the other: a pid two of them gave to children stands for
-	// either, so a traced child with it counts for both.
 	// Every way to find a child's JVM adds to it: a pid another JVM reused must not hide
 	// the parent pid or the ancestor that links it to its own.
 	for _, tc := range []struct {
@@ -272,6 +270,8 @@ func TestGradleRecorded(t *testing.T) {
 			}
 		})
 	}
+	// The JVMs run one after the other: a pid two of them gave to children stands for
+	// either, so a traced child with it counts for both.
 	t.Run("a pid reused by children of two JVMs", func(t *testing.T) {
 		obs := newObs()
 		recs := []*jvmRecording{rec(1, "1"), rec(2, "2")}
