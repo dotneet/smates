@@ -133,6 +133,7 @@ jobs:
   pr-comment:
     # Dogfoods the action's pull request comment: smates' selection for its own Go
     # packages, kept as one sticky comment. Selection only, so no tests run twice.
+    # Reuse the Linux test job's state, including durations for the time-saved estimate.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -141,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # no state is cached: diff against the base branch
+          fetch-depth: 0 # fall back to diffing the base branch when the cache is cold
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -151,7 +152,7 @@ jobs:
           version: source
           command: select
           args: --suite go --no-agent
-          cache: 'false'
+          cache: 'true'
           comment: 'true'
       - name: Check the comment
         # Pull requests from forks get a read-only token: the action skips the comment.
