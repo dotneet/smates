@@ -491,6 +491,13 @@ func TestExecDepsBounded(t *testing.T) {
 		fmt.Fprintf(&chain, "f%d() { f%d; cat x; }\n", i, i+1)
 	}
 	chain.WriteString("f300() { cat sub/x; }\nf0\n")
+	// The body uses $X: each call is in a new state, analyzed again up to the bound on
+	// work.
+	var varied strings.Builder
+	varied.WriteString("f() {\n" + strings.Repeat("  cat x$X; cd sub; cd ..\n", 5000) + "}\n")
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&varied, "X=%d; f\n", i)
+	}
 	for _, c := range []struct {
 		name    string
 		sh      string
@@ -503,6 +510,9 @@ func TestExecDepsBounded(t *testing.T) {
 		{"nested braces", "cat " + strings.Repeat("{a,b}", 40), 1, []string{"./**"}},
 		{"find {} over many words", "find sub -exec cat " + strings.Repeat("{}{}{} ", 2000) + `\;`, 2, nil},
 		{"big function called often", hugeFn, 1, []string{"x"}},
+		{"big function called in many states", varied.String(), 301, nil},
+		// With a trap set, calls are not replayed (see call).
+		{"big function called often with a trap", "trap 'cat x' EXIT\n" + hugeFn, 2, []string{"./**", "x"}},
 		{"call chain", chain.String(), 2, []string{"sub/x", "x"}},
 	} {
 		done := make(chan []string, 1)

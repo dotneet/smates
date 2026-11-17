@@ -748,10 +748,12 @@ func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 			end += bodyStart
 		}
 		if name == "script" && bodyStart < end {
-			// lang="ts" may hold type assertions (<T>x), which read as JSX.
+			// JSX only where the block says so (lang="jsx" or "tsx"): a script without
+			// it is JavaScript, or TypeScript in Astro and with lang="ts", whose type
+			// assertions (<T>x) would read as JSX.
 			lang, _ := attrValue(attrs, "lang")
-			ts := strings.EqualFold(lang, "ts") || strings.EqualFold(lang, "typescript")
-			r, spans := scanCodeSpans(src[bodyStart:end], !ts)
+			jsx := strings.EqualFold(lang, "jsx") || strings.EqualFold(lang, "tsx")
+			r, spans := scanCodeSpans(src[bodyStart:end], jsx)
 			refs = append(refs, r...)
 			for _, s := range spans {
 				skipped = append(skipped, [2]int{bodyStart + s[0], bodyStart + s[1]})

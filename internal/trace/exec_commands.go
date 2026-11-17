@@ -1,11 +1,15 @@
 package trace
 
 import (
-	"os"
+	"errors"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
+
+// maxList bounds the size of the lists of file names read (--files0-from): past it,
+// the names are unknown.
+const maxList = 1 << 20
 
 // readers only read the paths named on their command line (recursively for -r tools).
 var readers = map[string]bool{
@@ -143,8 +147,11 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 				if !filepath.IsAbs(p) {
 					p = filepath.Join(dir, p)
 				}
-				if rt := scriptRuntime(p, false); rt != "" {
-					cmd = append([]string{rt}, cmd...)
+				// Only a regular file is read for its #! line (a pipe would block).
+				if isRegular(p) {
+					if rt := scriptRuntime(p, false); rt != "" {
+						cmd = append([]string{rt}, cmd...)
+					}
 				}
 			default:
 				if rt := a.consoleScript(cmd[0], dir); rt != "" {
@@ -171,7 +178,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(cwd, p)
 		}
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		if fi, err := a.stat(p); err == nil && !fi.IsDir() {
 			a.add(p)
 		} else if err != nil && !within(p, cwd) {
 			a.existence(p) // below cwd, the tree of the opaque command covers it
@@ -203,7 +210,11 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 		}
 		for _, m := range expand(l, cwd) {
 			a.add(m)
-			data, _ := os.ReadFile(m)
+			data, err := readRegular(m, maxList)
+			if errors.Is(err, errNotRegular) {
+				unresolved = true // a pipe, a device, a huge list: not read
+				continue
+			}
 			for n, name := range strings.Split(string(data), "\x00") {
 				if name != "" && n < 10000 {
 					// Names in the list are literal: no glob, no variable.
@@ -251,7 +262,10 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 		scripted = scripted || awkIO.MatchString(literal(args.script))
 		for _, f := range args.scriptFiles {
 			for _, m := range expand(f, cwd) {
-				if data, err := os.ReadFile(m); err == nil && awkIO.Match(data) {
+				data, err := readRegular(m, maxScript)
+				if errors.Is(err, errNotRegular) {
+					unresolved = true // a pipe, a device, a huge script: not read
+				} else if err == nil && awkIO.Match(data) {
 					scripted = true
 				}
 			}
@@ -261,7 +275,10 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 		scripts := []string{literal(args.script)}
 		for _, f := range args.scriptFiles {
 			for _, m := range expand(f, cwd) {
-				if data, err := os.ReadFile(m); err == nil {
+				data, err := readRegular(m, maxScript)
+				if errors.Is(err, errNotRegular) {
+					unresolved = true // a pipe, a device, a huge script: not read
+				} else if err == nil {
 					scripts = append(scripts, string(data))
 				}
 			}
@@ -306,7 +323,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 			a.glob(w, cwd)
 		}
 		for _, m := range expand(w, cwd) {
-			fi, err := os.Stat(m)
+			fi, err := a.stat(m)
 			switch {
 			case err != nil:
 				// A path that does not exist (yet): the command behaves differently once
@@ -338,7 +355,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 			continue
 		}
 		for _, m := range expand(w, cwd) {
-			fi, err := os.Stat(m)
+			fi, err := a.stat(m)
 			switch {
 			case err != nil:
 				if strings.Contains(w, "/") && !within(m, cwd) {
@@ -533,7 +550,7 @@ func operands(prog string, args []string) (c cmdArgs) {
 		case needScript:
 			needScript = false
 			c.script = w
-		case prog == "awk" && assign.MatchString(w):
+		case prog == "awk" && isAssign(w):
 			// var=value operands set awk variables
 		case other && len(w) > 1 && w[0] == '@':
 			c.values = append(c.values, w[1:])

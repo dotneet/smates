@@ -29,11 +29,21 @@ var coarsePatterns = []*regexp.Regexp{
 		`(?:(?:import|require(?:\s*\.\s*resolve)?)\s*\(\s*)?` + coarseLiteral),
 	// new URL("x", import.meta.url): a file next to the importing one.
 	regexp.MustCompile(`(?:^|[^\w$.])(?P<url>URL)\s*\(\s*` + coarseLiteral + `\s*,\s*import\s*\.\s*meta\s*\.\s*url\b`),
+	// import(`./x/${name}.js`), require(`./x/${name}`): a template literal with a
+	// static prefix loads any file under it (refTemplate, without the suffix: more).
+	regexp.MustCompile("(?:^|[^\\w$.])(?:import|require)\\s*\\(\\s*`(?P<tpl>[^`$\\\\]+)\\$\\{"),
+	// import.meta.glob("./x/*.ts"), import.meta.glob(["./a/*.ts", ...]) (its first
+	// pattern), with type arguments too.
+	regexp.MustCompile(`(?:^|[^\w$.])import\s*\.\s*meta\s*\.\s*(?P<glob>glob)(?:Eager)?\s*(?:<[^;\n]*?>)?\s*\(\s*\[?\s*` + coarseLiteral),
+	// require.context("./x"): the directory, with its subdirectories (more).
+	regexp.MustCompile(`(?:^|[^\w$.])require\s*\.\s*(?P<ctx>context)\s*\(\s*` + coarseLiteral),
 }
 
-// coarseDynamic matches an import() or require() whose argument does not start with a
-// string literal or a template literal's static text: a load of a computed name.
-var coarseDynamic = regexp.MustCompile("(?:^|[^\\w$.])(?:import|require)\\s*\\(\\s*(?:[^\\s'\"`)/]|`\\$\\{)")
+// coarseDynamic matches, in what the lexer skipped as JSX, a load whose target is not
+// one string: an import() or require() whose argument does not start with a string
+// literal, a template literal with a substitution, import.meta.glob and
+// require.context (whose array or options the coarse patterns may not read in full).
+var coarseDynamic = regexp.MustCompile("(?:^|[^\\w$.])(?:(?:import|require)\\s*\\(\\s*(?:[^\\s'\"`)/]|`[^`]*\\$\\{)|import\\s*\\.\\s*meta\\s*\\.\\s*glob|require\\s*\\.\\s*context)")
 
 // coarseRef is a reference coarseRefs found, with the offset of its specifier.
 type coarseRef struct {
@@ -58,7 +68,7 @@ func coarseRefs(src []byte) []coarseRef {
 		}
 		for _, m := range re.FindAllSubmatchIndex(src, -1) {
 			start, end := -1, -1
-			for _, name := range []string{"s1", "s2", "s3"} {
+			for _, name := range []string{"s1", "s2", "s3", "tpl"} {
 				if s, e, ok := group(m, name); ok {
 					start, end = s, e
 					break
@@ -77,6 +87,15 @@ func coarseRefs(src []byte) []coarseRef {
 			}
 			if _, _, ok := group(m, "url"); ok {
 				r.kind = refFile
+			}
+			if _, _, ok := group(m, "tpl"); ok {
+				r.kind = refTemplate
+			}
+			if _, _, ok := group(m, "glob"); ok {
+				r.kind = refGlob
+			}
+			if _, _, ok := group(m, "ctx"); ok {
+				r.kind, r.recursive = refContext, true
 			}
 			refs = append(refs, coarseRef{r, start})
 		}

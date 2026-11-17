@@ -249,9 +249,14 @@ func TestCoarseRefs(t *testing.T) {
 		`vitest.doMock(require.resolve('./mocked-resolve'))`,
 		`jest.requireActual<typeof import('./t')>('./actual')`,
 		`new Worker(new URL('./worker.ts', import.meta.url))`,
+		// A template with a static prefix: any file under it.
+		"import(`./locales/${lang}.json`)",
+		`const pages = import.meta.glob<{ default: unknown }>('./pages/*.tsx')`,
+		`import.meta.globEager(["./first/*.ts", "./second/*.ts"])`,
+		`require.context('./ctx', false)`,
 		// Not module loads.
 		`obj.import('./no1'); myrequire('./no2'); vi.fn('./no3'); new URL('/no4', location.origin)`,
-		"import(`./no5/${x}`)",
+		"obj.import(`./no5/${x}`); import(`${x}/no6`)",
 		`/* import x from './in-comment' */`,
 	}, "\n")
 	var got []string
@@ -271,6 +276,9 @@ func TestCoarseRefs(t *testing.T) {
 		"m:./mocked-import", "m:./mocked-resolve", "m:./t", "m:./in-comment",
 		"m:./mocked (mock)", "m:./mocked-import (mock)", "m:./mocked-resolve (mock)", "m:./actual",
 		"f:./worker.ts",
+		"t:./locales/|",
+		"g:./pages/*.tsx", "g:./first/*.ts",
+		"c:./ctx|r", // recursive: more than the false asked for
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("coarseRefs\n got: %q\nwant: %q", got, want)
@@ -329,5 +337,59 @@ func TestJSXSpansKeepUnresolved(t *testing.T) {
 				t.Errorf("Unresolved = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestTypeParametersAreNotJSX: a type parameter list before a parameter list (a
+// generic arrow function or call signature, in TypeScript or Flow) and a type
+// assertion in a script that is not JSX do not open a JSX element, so the code after
+// them is read: a load of a template, a glob or a context that the coarse scan would
+// otherwise only know as computed. Must keep each reference.
+func TestTypeParametersAreNotJSX(t *testing.T) {
+	const tpl = "\nconst m = import(`./locales/${lang}.json`);\n"
+	for _, tc := range []struct {
+		file, src string
+		want      string
+	}{
+		{"a.tsx", "type Fn = <T>(x: T) => T;" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "let f: <T>(x: T) => T;" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "interface I { <T>(x: T): T }" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "function f(cb: <T>(x: T) => void) {}" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "type M = Map<string, <T>(x: T) => T>;" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "type Fn = <T>\n  (x: T) => T;" + tpl, "t:./locales/|.json"},
+		{"a.tsx", "type Fn = <T>(x: T) => T;\nconst m = import.meta.glob('./pages/*.tsx');", "g:./pages/*.tsx"},
+		{"a.tsx", "type Fn = <T>(x: T) => T;\nconst c = require.context('./ctx', false);", "c:./ctx|n"},
+		{"a.js", "const f = <T>(x: T): T => x;" + tpl, "t:./locales/|.json"},
+		{"a.astro", "<script>\nconst el = <HTMLElement>document.body;" + tpl + "</script>", "t:./locales/|.json"},
+		{"a.vue", "<script>\nconst el = <HTMLElement>document.body;" + tpl + "</script>", "t:./locales/|.json"},
+		{"a.svelte", "<script lang=\"ts\">\nconst el = <HTMLElement>document.body;" + tpl + "</script>", "t:./locales/|.json"},
+		// JSX is still JSX, also with text that starts with a parenthesis right
+		// after the tag on a later element.
+		{"a.tsx", "const A = () => <p>Run src/* now</p>;" + tpl, "t:./locales/|.json"},
+		{"a.vue", "<script lang=\"tsx\">\nconst A = () => <p>Run src/* now</p>;" + tpl + "</script>", "t:./locales/|.json"},
+	} {
+		if refs := refStrings(refsOf(tc.file, []byte(tc.src))); !slices.Contains(refs, tc.want) {
+			t.Errorf("%s %q: %q, want %s", tc.file, tc.src, refs, tc.want)
+		}
+	}
+}
+
+// A template literal, a glob or a context call the lexer skipped as JSX text is found
+// by the coarse scan, and makes the importer's loads count as computed too.
+func TestCoarseLoadsInJSXText(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		want []string
+	}{
+		{"const A = () => <p>Run src/* now import(`./p/${x}`)</p>;", []string{"t:./p/|", "d:"}},
+		{"const A = () => <p>import.meta.glob('./g/*.ts')</p>;", []string{"g:./g/*.ts", "d:"}},
+		{"const A = () => <p>require.context('./c')</p>;", []string{"c:./c|r", "d:"}},
+	} {
+		refs := refStrings(refsOf("a.jsx", []byte(tc.src)))
+		for _, w := range tc.want {
+			if !slices.Contains(refs, w) {
+				t.Errorf("%q: %q, want %s", tc.src, refs, w)
+			}
+		}
 	}
 }

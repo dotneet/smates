@@ -21,9 +21,10 @@ import (
 //   - shell code is parsed and followed through cd, pushd/popd, source, variables
 //     (also those export, local and declare assign), brace expansion, input
 //     redirections, command substitutions (in the state where they occur), the bodies
-//     of the functions it calls (in the caller's directory) and a script's positional
-//     parameters ($1, "$@"); where branches (if, case, && and ||, loops) merge, every
-//     directory and value of each variable any of them may leave is kept;
+//     of the functions it calls (in the caller's directory), a script's positional
+//     parameters ($1, "$@"), unset and the code of traps (in every state after the
+//     trap); where branches (if, case, && and ||, loops) merge, every directory and
+//     value of each variable any of them may leave is kept;
 //   - any other program may read anything below the directory it runs in, so the test
 //     depends on that whole tree ("<dir>/**"), plus the files named on its command line
 //     (the script itself, option values such as --config=cfg/app.ini, response files
@@ -56,8 +57,8 @@ func execDepsIn(args []string, shell bool, cwd, root string, rel func(string) (s
 		}
 	}()
 	a := &execAnalysis{rel: rel, root: root, funcs: map[string]bool{}, defs: map[string]*funcDef{}, analyzed: map[string]bool{},
-		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, changes: map[string]bool{}, rt: rt,
-		sourced: map[string]*shList{}}
+		calling: map[string]bool{}, memo: map[string]callResult{}, relevant: map[string][]string{}, changes: map[string]bool{},
+		leaves: map[string]bool{}, unsetFuncs: map[string]bool{}, rt: rt, sourced: map[string]*shList{}}
 	if shell {
 		a.shellText(strings.Join(args, " "), cwd, "", 0, nil)
 	} else {
@@ -82,10 +83,15 @@ type execAnalysis struct {
 	memo     map[string]callResult // calls analyzed, by callKey
 	relevant map[string][]string   // the variables a function's body may use (callKey)
 	changes  map[string]bool       // whether a function's body may change the caller's state (mayChange)
-	lost     bool                  // the commands of a state no longer followed were recorded (shellState.unknown)
-	rt       map[string]bool       // the runtimes the child's environment traces (nil: all)
-	substs   []*shSubst            // the substitutions of the code parsed, by id (see placeholder)
-	frames   []*frame              // the loops, functions and subshells being run
-	zeros    []string              // $0 of the shells being analyzed ("" when unknown)
-	sourced  map[string]*shList    // sourced files parsed, by path and $0
+	leaves   map[string]bool       // whether a function's body may break or continue the caller's loops (mayLeave)
+	// unsetFuncs are the functions an unset may have removed ("": any of them).
+	unsetFuncs map[string]bool
+	traps      []*trap               // the traps the shell being analyzed set
+	lost       bool                  // the commands of a state no longer followed were recorded (shellState.unknown)
+	rt         map[string]bool       // the runtimes the child's environment traces (nil: all)
+	substs     []*shSubst            // the substitutions of the code parsed, by id (see placeholder)
+	frames     []*frame              // the loops, functions and subshells being run
+	zeros      []string              // $0 of the shells being analyzed ("" when unknown)
+	sourced    map[string]*shList    // sourced files parsed, by path and $0
+	stats      map[string]statResult // see stat
 }

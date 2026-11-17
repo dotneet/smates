@@ -168,14 +168,13 @@ func (a *execAnalysis) consoleScript(name, dir string) string {
 // shell wrappers package managers install are recognized too: pnpm's node_modules/.bin
 // shims and uv's trampoline for long interpreter paths.
 func scriptRuntime(p string, wrappers bool) string {
-	f, err := os.Open(p)
+	// Only a regular file is read (readHead): a FIFO or device named like a program
+	// (in .venv/bin, node_modules/.bin) would block or never end.
+	head, err := readHead(p, 1024)
 	if err != nil {
 		return ""
 	}
-	head := make([]byte, 1024)
-	n, _ := f.Read(head)
-	f.Close()
-	text := string(head[:n])
+	text := string(head)
 	line, _, _ := strings.Cut(text, "\n")
 	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
 	if !strings.HasPrefix(line, "#!") || len(fields) == 0 {

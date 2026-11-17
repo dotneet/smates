@@ -54,6 +54,11 @@ func TestGoCommandUserExec(t *testing.T) {
 		// -exec after -args is the test binary's own argument.
 		{"after -args", "go test ./... -args -exec /bin/x", nil, "", "", false, []string{"go", "test", "./...", "-args", "-exec", "/bin/x"}},
 		{"before and after -args", "go test --exec /x/run ./... -args -exec=/bin/x", nil, "", "/x/run", true, []string{"go", "test", "./...", "-args", "-exec=/bin/x"}},
+		// go test hands "--" and what follows to the test binary: not its -exec.
+		{"after --", "go test ./... -- -exec foo", nil, "", "", false, []string{"go", "test", "./...", "--", "-exec", "foo"}},
+		{"after -- passed through", "go test ./...", []string{"--", "-exec=foo"}, "", "", false, []string{"go", "test", "./...", "--", "-exec=foo"}},
+		{"before and after --", "go test -exec /x/run ./... -- --exec=/bin/x", nil, "", "/x/run", true, []string{"go", "test", "./...", "--", "--exec=/bin/x"}},
+		{"-- after -args", "go test ./... -args -- -exec /bin/x", nil, "", "", false, []string{"go", "test", "./...", "-args", "--", "-exec", "/bin/x"}},
 		// Another go command, by path.
 		{"go by path", "/opt/go1/bin/go test -exec=/x/run ./...", nil, "", "/x/run", true, []string{"/opt/go1/bin/go", "test", "./..."}},
 		// A wrapper's command line is not changed.

@@ -210,17 +210,40 @@ type shParser struct {
 	regex    bool       // after =~ inside [[ ]]
 	work     *parseWork // shared with the parsers of nested code (backticks, here-documents)
 	noArith  map[int]bool
+	// noDelim records, for a here-document delimiter (and whether tabs are stripped),
+	// the position from which a line with it was searched for in vain: it is not found
+	// from any later position either (many unterminated here-documents would otherwise
+	// each scan the rest of the input: quadratic time).
+	noDelim map[string]int
 }
 
 // parseWork bounds the work of parsing a piece of code: input crafted so that an
 // arithmetic expression is tried and parsed again as a command substitution at every
 // nesting level would take exponential time. Past the budget, the parse stops (bad).
-type parseWork struct{ n, budget int }
+// depth is the nesting of lists and expansions being parsed: past maxNest, the parse
+// stops too (each level is a recursive call; no real script nests that deep).
+type parseWork struct{ n, budget, depth int }
+
+const maxNest = 256
+
+// enter starts a nested list or expansion; false (the parse stopped) past maxNest. A
+// successful enter is followed by leave.
+func (p *shParser) enter() bool {
+	if p.work.depth >= maxNest {
+		p.bad, p.pos = true, len(p.src)
+		p.work.n = p.work.budget + 1 // the parsers of enclosing code stop too
+		return false
+	}
+	p.work.depth++
+	return true
+}
+
+func (p *shParser) leave() { p.work.depth-- }
 
 // parseShell parses shell code; bad says it could not be parsed entirely, backtick
 // that it uses backticks.
 func (a *execAnalysis) parseShell(src string) (l *shList, bad, backtick bool) {
-	p := &shParser{a: a, src: src, work: &parseWork{budget: 64*len(src) + 100000}}
+	p := &shParser{a: a, src: src, work: &parseWork{budget: 16*len(src) + 100000}}
 	l = p.script()
 	return l, p.bad, p.backtick
 }
@@ -312,6 +335,10 @@ func (p *shParser) script() *shList {
 // the end of the input.
 func (p *shParser) list() *shList {
 	l := &shList{}
+	if !p.enter() {
+		return l
+	}
+	defer p.leave()
 	for {
 		p.skipNewlines()
 		t := p.peek()
@@ -479,7 +506,7 @@ func (p *shParser) simple() shCmd {
 				p.test = true
 			}
 			s.words = append(s.words, t.text)
-			if len(s.words) == 1 && t.plain && funcName.MatchString(t.text) && p.peek().is(tOp, "(") {
+			if len(s.words) == 1 && t.plain && p.peek().is(tOp, "(") && funcName.MatchString(t.text) {
 				// name ( ) compound-command
 				p.next()
 				p.expectOp(")")
@@ -851,6 +878,10 @@ func (p *shParser) heredocBodies() {
 	j := p.pos
 	for _, h := range hds {
 		start, found := j, false
+		key := fmt.Sprint(h.tabs, "\x00", h.delim)
+		if from, ok := p.noDelim[key]; ok && j >= from {
+			j = len(p.src)
+		}
 		for j < len(p.src) && !found {
 			if !p.spend() {
 				return
@@ -876,6 +907,12 @@ func (p *shParser) heredocBodies() {
 		if !found {
 			// Not ended by its delimiter: the shell reads the rest as the body; the
 			// analysis keeps parsing it as commands.
+			if p.noDelim == nil {
+				p.noDelim = map[string]int{}
+			}
+			if from, ok := p.noDelim[key]; !ok || start < from {
+				p.noDelim[key] = start
+			}
 			p.bad = true
 			return
 		}
@@ -1053,6 +1090,10 @@ func isNameChar(c byte) bool { return isNameStart(c) || (c >= '0' && c <= '9') }
 
 // dollar lexes what starts with "$": a variable, ${...}, $(...), $((...)), $'...'.
 func (p *shParser) dollar(b *strings.Builder, quoted bool) {
+	if !p.enter() {
+		return
+	}
+	defer p.leave()
 	s := p.src[p.pos:]
 	switch {
 	case strings.HasPrefix(s, "$(("):
@@ -1067,19 +1108,8 @@ func (p *shParser) dollar(b *strings.Builder, quoted bool) {
 	case strings.HasPrefix(s, "${"):
 		p.param(b)
 	case strings.HasPrefix(s, "$'") && !quoted:
-		// ANSI-C quoting: literal, with backslash escapes.
 		p.pos += 2
-		for p.pos < len(p.src) && p.src[p.pos] != '\'' {
-			if p.src[p.pos] == '\\' && p.pos+1 < len(p.src) {
-				p.pos++
-			}
-			p.escaped(b, p.src[p.pos])
-			p.pos++
-		}
-		if p.pos >= len(p.src) {
-			p.bad = true
-		}
-		p.pos++
+		p.ansiC(b)
 	case strings.HasPrefix(s, "$\"") && !quoted:
 		p.pos++
 		p.dquote(b)
@@ -1096,6 +1126,103 @@ func (p *shParser) dollar(b *strings.Builder, quoted bool) {
 	default:
 		b.WriteString(literalDollar) // a lone $ is literal
 		p.pos++
+	}
+}
+
+// wordMarks are the bytes standing for something else in the words the parser
+// produces (the marks of quoted characters, of substitutions), and NUL.
+const wordMarks = "\x00" + literalDollar + literalStar + literalQuery + literalSet + literalOpen + literalClose +
+	literalSpace + literalTab + literalNL + "\x13" + string(rune(substOpen)) + string(rune(substClose))
+
+// ansiEscapes are the single-character escapes of ANSI-C quoting.
+var ansiEscapes = map[byte]byte{'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': '\n', 'r': '\r', 't': '\t', 'v': 11,
+	'\\': '\\', '\'': '\'', '"': '"', '?': '?'}
+
+// ansiC lexes the body of an ANSI-C quoted string $'...' (p.pos after its opening
+// quote): its characters are literal, its backslash escapes decoded as bash does (\n,
+// \t, \nnn octal, \xHH, \uHHHH, \UHHHHHHHH, \cX, ...). An escape the analysis cannot
+// decode exactly (an unknown one, a NUL ending the string, a character beyond ASCII
+// from \u, whose encoding depends on the locale, a byte of the words' marks) makes the
+// word unresolved.
+func (p *shParser) ansiC(b *strings.Builder) {
+	unresolved := false
+	put := func(v int) {
+		if v < 0 || v > 0xff || strings.IndexByte(wordMarks, byte(v)) >= 0 {
+			unresolved = true
+			return
+		}
+		p.escaped(b, byte(v))
+	}
+	// digits reads up to n digits of base at p.pos; -1 when there is none.
+	digits := func(n, base int) int {
+		v, k := 0, 0
+		for ; k < n && p.pos < len(p.src); k++ {
+			d, err := strconv.ParseUint(p.src[p.pos:p.pos+1], base, 8)
+			if err != nil {
+				break
+			}
+			v = v*base + int(d)
+			p.pos++
+		}
+		if k == 0 {
+			return -1
+		}
+		return v
+	}
+	for p.pos < len(p.src) && p.src[p.pos] != '\'' && p.spend() {
+		c := p.src[p.pos]
+		p.pos++
+		if c != '\\' {
+			p.escaped(b, c)
+			continue
+		}
+		if p.pos >= len(p.src) {
+			break
+		}
+		e := p.src[p.pos]
+		p.pos++
+		switch {
+		case ansiEscapes[e] != 0:
+			put(int(ansiEscapes[e]))
+		case e >= '0' && e <= '7':
+			p.pos--
+			put(digits(3, 8))
+		case e == 'x':
+			put(digits(2, 16))
+		case e == 'u' || e == 'U':
+			n := 4
+			if e == 'U' {
+				n = 8
+			}
+			if v := digits(n, 16); v < 0x80 {
+				put(v)
+			} else {
+				unresolved = true
+			}
+		case e == 'c' && p.pos < len(p.src) && p.src[p.pos] != '\'':
+			x := p.src[p.pos]
+			p.pos++
+			if x == '\\' && p.pos < len(p.src) && p.src[p.pos] == '\\' {
+				p.pos++ // \c\\ is control-backslash
+			}
+			if x >= 'a' && x <= 'z' {
+				x -= 'a' - 'A'
+			}
+			if x < '@' || x > '_' {
+				unresolved = true
+				continue
+			}
+			put(int(x & 0x1f))
+		default:
+			unresolved = true
+		}
+	}
+	if p.pos >= len(p.src) {
+		p.bad = true
+	}
+	p.pos++
+	if unresolved {
+		b.WriteString(unresolvedSubst)
 	}
 }
 
@@ -1244,7 +1371,7 @@ const maxWords = 1024
 func braceSeg(seg []string) (out []string, ok bool) {
 	limit := max(maxWords, len(seg))
 	for _, w := range seg {
-		if assign.MatchString(w) {
+		if strings.IndexByte(w, '{') < 0 || isAssign(w) {
 			out = append(out, w)
 		} else {
 			out = append(out, braceExpand(w)...)

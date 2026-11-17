@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -97,14 +98,38 @@ func (a *execAnalysis) absoluteTrees(seg []string, cwd string, vars map[string][
 // unknownVars reports whether the word w uses a variable that is not in vars, or an
 // expansion the analysis does not follow (${X:-y}, a command's output).
 func unknownVars(w string, vars map[string][]string) bool {
-	rest := varRef.ReplaceAllStringFunc(w, func(ref string) string {
-		m := varRef.FindStringSubmatch(ref)
-		if _, ok := vars[m[1]+m[2]]; ok {
-			return ""
+	for i := strings.IndexByte(w, '$'); i >= 0 && i < len(w); i++ {
+		if w[i] != '$' {
+			continue
 		}
-		return ref
-	})
-	return strings.Contains(rest, "$")
+		end, name := varRefAt(w, i)
+		if _, known := vars[name]; end == 0 || !known {
+			return true
+		}
+		i = end - 1
+	}
+	return false
+}
+
+// statResult is a memoized os.Stat.
+type statResult struct {
+	fi  os.FileInfo
+	err error
+}
+
+// stat is os.Stat, memoized for the analysis: a script may name the same paths over and
+// over (in a loop, at each call of a function), and the files do not change while it
+// is analyzed.
+func (a *execAnalysis) stat(p string) (os.FileInfo, error) {
+	if r, ok := a.stats[p]; ok {
+		return r.fi, r.err
+	}
+	fi, err := os.Stat(p)
+	if a.stats == nil {
+		a.stats = map[string]statResult{}
+	}
+	a.stats[p] = statResult{fi, err}
+	return fi, err
 }
 
 // listing records that the entries of dir are read.

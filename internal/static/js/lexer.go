@@ -441,8 +441,11 @@ func (l *lexer) punct(i int) {
 
 // jsxStart reports whether the '<' at i opens a JSX element: JSX is enabled, an
 // expression may start here, and what follows reads as a tag: <>, <Name>, <Name/>,
-// <Name attr, <Name {...props}, <Name<T>. A TypeScript type parameter list (<T,>,
-// <T extends U>, <T = U>, <const T>) does not.
+// <Name attr, <Name {...props}, <Name<T>. A TypeScript or Flow type parameter list
+// (<T,>, <T extends U>, <T = U>, <const T>, and <T> before a parameter list: a generic
+// arrow function or call signature, <T>(x: T) => T) does not. Taking a type for JSX
+// would skip the code after it as JSX text; taking JSX for code is what the lexer did
+// before it knew JSX.
 func (l *lexer) jsxStart(i int) bool {
 	if !l.jsx {
 		return false
@@ -476,7 +479,13 @@ func (l *lexer) jsxStart(i int) bool {
 		return false
 	}
 	switch c := src[k]; {
-	case c == '>', c == '/', c == '{', c == '<':
+	case c == '>':
+		m := k + 1
+		for m < n && (isSpace(src[m]) || src[m] == '\v' || src[m] == '\n' || src[m] == '\r') {
+			m++
+		}
+		return m >= n || src[m] != '('
+	case c == '/', c == '{', c == '<':
 		return true
 	case isJSXNameStart(c):
 		e := k

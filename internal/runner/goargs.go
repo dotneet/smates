@@ -57,9 +57,29 @@ func goCommandOf(rc *RunContext) *goCommand {
 	if g.goTest = isGoBin(g.argv[0]) && len(g.argv) >= 2 && g.argv[1] == "test"; g.goTest {
 		rest = g.argv[2:]
 	}
-	g.cmd, g.tail = ParseGoTestArgs(rest, false)
 	g.dashdash = slices.Contains(rest, "--")
+	if g.goTest {
+		// go test hands "--" and every word after it to the test binary
+		// (cmdflag.ErrFlagTerminator): they are not its flags.
+		rest, _ = cutTerminator(rest)
+	}
+	g.cmd, g.tail = ParseGoTestArgs(rest, false)
 	return g
+}
+
+// cutTerminator splits go test arguments at a "--" that comes before -args: the words
+// before it are go test's flags and packages, the words from it on (the "--"
+// included) are passed to the test binary as they are.
+func cutTerminator(words []string) (flags, rest []string) {
+	for i, w := range words {
+		switch w {
+		case "-args", "--args":
+			return words, nil
+		case "--":
+			return words[:i], words[i:]
+		}
+	}
+	return words, nil
 }
 
 // isGoBin reports whether argv0 runs the go command.
@@ -170,7 +190,8 @@ func (g *goCommand) withoutExec(argv []string) []string {
 	if !g.goTest || len(argv) < 2 || !isGoBin(argv[0]) || argv[1] != "test" {
 		return argv
 	}
-	args, tail := ParseGoTestArgs(argv[2:], false)
+	flags, passed := cutTerminator(argv[2:])
+	args, tail := ParseGoTestArgs(flags, false)
 	out := slices.Clone(argv[:2])
 	n := 2
 	for _, a := range args {
@@ -183,5 +204,5 @@ func (g *goCommand) withoutExec(argv []string) []string {
 		out = append(out, argv[n]) // -args
 		out = append(out, tail...)
 	}
-	return out
+	return append(out, passed...) // "--" and the test binary's words, as they are
 }

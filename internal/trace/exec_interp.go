@@ -1,7 +1,9 @@
 package trace
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -20,13 +22,19 @@ import (
 // shellState is what the next command of a script may see: its candidate working
 // directories, the candidate values of the variables assigned so far (a variable not in
 // vars is unknown: set outside the script, read from a command, assigned differently on
-// paths that merged), and the pushd stack. unknown says the state is no longer followed
+// paths that merged), the variables with attributes changing what is assigned to them
+// (attrs), and the pushd stack. unknown says the state is no longer followed
 // (a cd to an unknown directory, eval, a call past maxCalls that may have changed it):
 // the commands that follow may read anything in the repository. A nil state is
 // unreachable (after exit).
 type shellState struct {
-	cwds     []string
-	vars     map[string][]string
+	cwds []string
+	vars map[string][]string
+	// attrs are the variables declared with an attribute that changes the values
+	// assigned to them (declare -l, -u, -c, -i: attrValue) or makes them a reference to
+	// another variable (declare -n: attrRef); on any path, so a join keeps them all. An
+	// attributed variable is never in vars (see assigned).
+	attrs    map[string]byte
 	dirs     [][]string // the pushd stack, each entry the candidate directories
 	dirsLost bool       // paths with pushd stacks of different heights merged
 	unknown  bool
@@ -35,7 +43,7 @@ type shellState struct {
 
 // maxWork bounds the commands analyzed in one shell (loops are followed several
 // times, functions at each call in a new state): past it, the shell may read anything.
-const maxWork = 200000
+const maxWork = 100000
 
 // Bounds on the candidates of a state: past them, the working directory or the variable
 // is unknown.
@@ -58,8 +66,57 @@ func newState(cwd string) *shellState {
 // clone returns a copy of st that st's later changes do not affect (and conversely):
 // states are never changed once shared.
 func (st *shellState) clone() *shellState {
-	return &shellState{cwds: slices.Clone(st.cwds), vars: maps.Clone(st.vars), dirs: slices.Clone(st.dirs), dirsLost: st.dirsLost,
-		unknown: st.unknown, work: st.work}
+	return &shellState{cwds: slices.Clone(st.cwds), vars: maps.Clone(st.vars), attrs: maps.Clone(st.attrs), dirs: slices.Clone(st.dirs),
+		dirsLost: st.dirsLost, unknown: st.unknown, work: st.work}
+}
+
+// The attributes of attrs.
+const (
+	attrValue byte = 'v'
+	attrRef   byte = 'n'
+)
+
+// assigned applies the attributes of the variables names, just assigned (or unset) in
+// st, a state not shared yet: the value of one with attrValue is unknown; one with
+// attrRef assigned another variable, any of them.
+func (st *shellState) assigned(names ...string) {
+	for _, name := range names {
+		switch st.attrs[name] {
+		case 0:
+		case attrRef:
+			clear(st.vars)
+			return
+		default:
+			delete(st.vars, name)
+		}
+	}
+}
+
+// hasRef reports whether st has a reference variable (declare -n).
+func (st *shellState) hasRef() bool {
+	for _, v := range st.attrs {
+		if v == attrRef {
+			return true
+		}
+	}
+	return false
+}
+
+// joinAttrs returns the attributes of x and y (attrRef where they differ).
+func joinAttrs(x, y map[string]byte) map[string]byte {
+	if len(y) == 0 {
+		return x
+	}
+	if len(x) == 0 {
+		return y
+	}
+	r := maps.Clone(x)
+	for k, v := range y {
+		if r[k] != attrRef {
+			r[k] = v
+		}
+	}
+	return r
 }
 
 // spend counts a command analyzed in st's shell; false past maxWork.
@@ -115,7 +172,8 @@ func join(x, y *shellState) *shellState {
 	case y == nil || x == y:
 		return x
 	}
-	r := &shellState{cwds: union(x.cwds, y.cwds), vars: map[string][]string{}, unknown: x.unknown || y.unknown, work: x.work}
+	r := &shellState{cwds: union(x.cwds, y.cwds), vars: map[string][]string{}, attrs: joinAttrs(x.attrs, y.attrs),
+		unknown: x.unknown || y.unknown, work: x.work}
 	if len(r.cwds) > maxCwds {
 		r.unknown = true
 	}
@@ -141,7 +199,7 @@ func equal(x, y *shellState) bool {
 		return true
 	}
 	if x == nil || y == nil || x.unknown != y.unknown || x.dirsLost != y.dirsLost || !sameSet(x.cwds, y.cwds) ||
-		len(x.vars) != len(y.vars) || len(x.dirs) != len(y.dirs) {
+		len(x.vars) != len(y.vars) || len(x.dirs) != len(y.dirs) || !maps.Equal(x.attrs, y.attrs) {
 		return false
 	}
 	for k, xv := range x.vars {
@@ -306,6 +364,20 @@ type funcDef struct {
 	st     *shellState
 	depth  int
 	locals []string // the variables it declares local (nil: not computed yet)
+	// shifts memoizes changesPositional for the body (0: not computed yet, 1: no, 2:
+	// yes): every call would otherwise walk it again.
+	shifts int8
+}
+
+// memoBool returns the answer *m memoizes, computing it with f the first time.
+func memoBool(m *int8, f func() bool) bool {
+	if *m == 0 {
+		*m = 1
+		if f() {
+			*m = 2
+		}
+	}
+	return *m == 2
 }
 
 // callResult is what analyzing a call changed in the caller's state.
@@ -315,6 +387,7 @@ type callResult struct {
 	dirs     [][]string
 	dirsLost bool
 	unknown  bool
+	attrs    map[string]byte
 	set      map[string][]string
 	del      []string
 }
@@ -323,7 +396,8 @@ func diffStates(before, after *shellState) callResult {
 	if after == nil {
 		return callResult{dead: true}
 	}
-	r := callResult{cwds: after.cwds, dirs: after.dirs, dirsLost: after.dirsLost, unknown: after.unknown, set: map[string][]string{}}
+	r := callResult{cwds: after.cwds, dirs: after.dirs, dirsLost: after.dirsLost, unknown: after.unknown, attrs: after.attrs,
+		set: map[string][]string{}}
 	for k, v := range after.vars {
 		if old, ok := before.vars[k]; !ok || !slices.Equal(old, v) {
 			r.set[k] = v
@@ -345,6 +419,12 @@ func (r callResult) apply(st *shellState) *shellState {
 	n.cwds, n.dirs, n.dirsLost, n.unknown = slices.Clone(r.cwds), slices.Clone(r.dirs), r.dirsLost, r.unknown
 	maps.Copy(n.vars, r.set)
 	for _, k := range r.del {
+		delete(n.vars, k)
+	}
+	// The call may have declared attributes (they only add up): an attributed variable
+	// is unknown.
+	n.attrs = joinAttrs(n.attrs, r.attrs)
+	for k := range n.attrs {
 		delete(n.vars, k)
 	}
 	return n
@@ -382,9 +462,9 @@ func (a *execAnalysis) shellText(text, cwd, script string, depth int, pos []stri
 	if pos != nil && !a.changesPositional(l) {
 		bindPositional(st.vars, pos)
 	}
-	frames, zeros := a.frames, a.zeros
-	a.frames, a.zeros = nil, append(slices.Clone(a.zeros), script)
-	a.runList(l, st, depth)
+	frames, zeros, traps := a.frames, a.zeros, a.traps
+	a.frames, a.zeros, a.traps = nil, append(slices.Clone(a.zeros), script), nil
+	a.endShell(traps, a.runList(l, st, depth))
 	a.frames, a.zeros = frames, zeros
 }
 
@@ -604,10 +684,11 @@ func (a *execAnalysis) runListFlow(l *shList, st *shellState, depth int) (ok, fa
 }
 
 // runAndOr runs an and-or list: a single command is taken to succeed (the script ran
-// to its end), a list joined by && or || may have ended either way.
+// to its end), a list joined by && or || may have ended either way, and so may a
+// negated pipeline (! cmd: its status never stops a script, set -e or not).
 func (a *execAnalysis) runAndOr(ao *shAndOr, st *shellState, depth int) *shellState {
 	ok, fail := a.runAndOrFlow(ao, st, depth)
-	if len(ao.ops) == 0 && ok != nil {
+	if len(ao.ops) == 0 && !ao.pipes[0].bang && ok != nil {
 		return ok
 	}
 	return join(ok, fail)
@@ -662,10 +743,69 @@ func (a *execAnalysis) runPipeline(pl *shPipeline, st *shellState, depth int) (o
 func (a *execAnalysis) subshell(l *shList, st *shellState, depth int) *shellState {
 	a.push('s')
 	defer a.pop()
-	return a.runList(l, st, depth)
+	traps := a.traps
+	a.traps = nil // a subshell does not run the traps of its parent
+	end := a.runList(l, st, depth)
+	a.endShell(traps, end)
+	return end
+}
+
+// trap is the code a trap command set and the states the shell may run it in: the join
+// of the states of the commands that follow it in the shell (in any of them a signal
+// may arrive, an error happen, an exit run it).
+type trap struct {
+	code     string
+	body     *shList
+	depth    int
+	st, last *shellState // last: the state joined last
+}
+
+// setTrap records the trap code set in state st. The same code set again (in a loop,
+// in a function called often) is one trap, run in the states of both.
+func (a *execAnalysis) setTrap(code string, st *shellState, depth int) {
+	for _, t := range a.traps {
+		if t.code == code && t.depth == depth {
+			t.st, t.last = join(t.st, st), st
+			return
+		}
+	}
+	a.traps = append(a.traps, &trap{code: code, body: a.parse(code), depth: depth, st: st, last: st})
+}
+
+// reached records that the shell reaches state st (a command runs in it): the traps set
+// may run there.
+func (a *execAnalysis) reached(st *shellState) {
+	for _, t := range a.traps {
+		if t.last != st {
+			t.st, t.last = join(t.st, st), st
+		}
+	}
+}
+
+// endShell runs the traps the shell ending in state end has set, then restores those of
+// its parent (saved). A trap setting traps sets them for the rest of the run: they run
+// too, a few rounds of them.
+func (a *execAnalysis) endShell(saved []*trap, end *shellState) {
+	for round := 0; len(a.traps) > 0; round++ {
+		traps := a.traps
+		a.traps = nil
+		if round == 4 {
+			a.unresolved()
+			break
+		}
+		for _, t := range traps {
+			a.push('s')
+			a.runList(t.body, join(t.st, end), t.depth)
+			a.pop()
+		}
+	}
+	a.traps = saved
 }
 
 func (a *execAnalysis) runCmd(c shCmd, st *shellState, depth int) (ok, fail *shellState) {
+	if len(a.traps) > 0 {
+		a.reached(st)
+	}
 	if !st.spend() {
 		// Too much to follow: what is left may read anything.
 		a.lose()
@@ -826,6 +966,7 @@ func (a *execAnalysis) forLoop(n *shFor, st *shellState, depth int) *shellState 
 			} else {
 				delete(in.vars, n.name)
 			}
+			in.assigned(n.name)
 		}
 		end := a.runList(n.body, in, depth)
 		exit = join(exit, join(end, f.cont))
@@ -874,6 +1015,7 @@ func (a *execAnalysis) arith(ar *shArith, st *shellState, depth int) *shellState
 		for _, name := range names {
 			delete(st.vars, name)
 		}
+		st.assigned(names...)
 	}
 	return st
 }
@@ -1011,7 +1153,7 @@ func assignmentsOnly(words []string) bool {
 		switch {
 		case redirOps[words[i]]:
 			i++
-		case assign.MatchString(words[i]):
+		case isAssign(words[i]):
 			n++
 		default:
 			return false
@@ -1037,7 +1179,7 @@ func (a *execAnalysis) assignments(c *shSimple, st *shellState, depth int) (ok, 
 		}
 		w, next := a.substituteWord(w, st, depth)
 		st = defaults([]string{w}, next).clone()
-		assignWord(st.vars, w)
+		st.assigned(assignWord(st.vars, w))
 	}
 	for _, id := range c.extra {
 		_, st = a.substOutput(id, st, depth)
@@ -1060,23 +1202,35 @@ func (a *execAnalysis) assignments(c *shSimple, st *shellState, depth int) (ok, 
 // assignTarget matches the start of an assignment word: NAME=, NAME+=, NAME[i]=.
 var assignTarget = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(\[[^]]*\])?(\+)?=`)
 
-// assignWord applies the assignment word w to vars.
-func assignWord(vars map[string][]string, w string) {
-	m := assignTarget.FindStringSubmatch(w)
+// isAssign reports whether w is an assignment word (assign), at once for the words
+// without "=" (most of them: regexp matching is costly under the race detector).
+func isAssign(w string) bool { return strings.IndexByte(w, '=') > 0 && assign.MatchString(w) }
+
+// assignMatch is assignTarget.FindStringSubmatch(w), nil at once without "=".
+func assignMatch(w string) []string {
+	if strings.IndexByte(w, '=') <= 0 {
+		return nil
+	}
+	return assignTarget.FindStringSubmatch(w)
+}
+
+// assignWord applies the assignment word w to vars and returns the name it assigns.
+func assignWord(vars map[string][]string, w string) string {
+	m := assignMatch(w)
 	if m == nil {
-		return
+		return ""
 	}
 	name := m[1]
 	if m[2] != "" {
 		delete(vars, name) // an array element
-		return
+		return name
 	}
 	vals := expandValue(w[len(m[0]):], vars)
 	if m[3] != "" {
 		old, ok := vars[name]
 		if !ok || vals == nil {
 			delete(vars, name)
-			return
+			return name
 		}
 		var cat []string
 		for _, o := range old {
@@ -1087,6 +1241,7 @@ func assignWord(vars map[string][]string, w string) {
 		vals = cat
 	}
 	setVar(vars, name, vals)
+	return name
 }
 
 // expandValue returns the values a word assigned to a variable may have (no brace
@@ -1111,6 +1266,9 @@ var paramAssign = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*):?=([^}]*)\}`)
 func defaults(words []string, st *shellState) *shellState {
 	var n *shellState
 	for _, w := range words {
+		if !strings.Contains(w, "${") {
+			continue
+		}
 		for _, m := range paramAssign.FindAllStringSubmatch(w, -1) {
 			old, ok := st.vars[m[1]]
 			if !ok {
@@ -1122,9 +1280,10 @@ func defaults(words []string, st *shellState) *shellState {
 			vals := expandValue(m[2], st.vars)
 			if vals == nil {
 				delete(n.vars, m[1])
-				continue
+			} else {
+				setVar(n.vars, m[1], union(old, vals))
 			}
-			setVar(n.vars, m[1], union(old, vals))
+			n.assigned(m[1])
 		}
 	}
 	if n == nil {
@@ -1141,8 +1300,20 @@ func (a *execAnalysis) runArgv(seg []string, st *shellState, depth int) (ok, fai
 			a.redirects(w, cwd)
 		}
 		r := a.callWith(st, w[0], w[1:])
-		return r, r
+		if (a.defs[w[0]] != nil || strings.HasSuffix(w[0], "()")) && !a.unsetFuncs[w[0]] && !a.unsetFuncs[""] {
+			return r, r
+		}
+		// Not defined yet where it is called, or maybe unset since: the name runs a
+		// builtin or a program too.
+		o, f := a.runUncalled(seg, w, bypass, st, depth)
+		return join(r, o), join(r, f)
 	}
+	return a.runUncalled(seg, w, bypass, st, depth)
+}
+
+// runUncalled runs a command line that calls no shell function (w and bypass as
+// commandWords returns them).
+func (a *execAnalysis) runUncalled(seg, w []string, bypass bool, st *shellState, depth int) (ok, fail *shellState) {
 	if bypass {
 		if len(w) > 0 && (w[0] == "-v" || w[0] == "-V") {
 			return st, st // command -v NAME prints what NAME is
@@ -1214,8 +1385,8 @@ func (a *execAnalysis) mergedRoles(words, merged []string, st *shellState) (r *s
 	}
 	uses := func(ws []string) bool {
 		for _, x := range ws {
-			for _, m := range varRef.FindAllStringSubmatch(x, -1) {
-				if slices.Contains(merged, m[1]+m[2]) {
+			for _, name := range varRefNames(x) {
+				if slices.Contains(merged, name) {
 					return true
 				}
 			}
@@ -1335,6 +1506,7 @@ func (a *execAnalysis) define(name string, body shCmd, st *shellState, depth int
 	clear(a.memo)
 	clear(a.relevant)
 	clear(a.changes)
+	clear(a.leaves)
 }
 
 // callWith analyzes a call of function name with the arguments args (shell words): its
@@ -1344,7 +1516,7 @@ func (a *execAnalysis) callWith(st *shellState, name string, args []string) *she
 	saved := positionalOf(st.vars)
 	in := st.clone()
 	unbindPositional(in.vars)
-	if d := a.defs[name]; d != nil && !a.changesPositional(d.body) {
+	if d := a.defs[name]; d != nil && !memoBool(&d.shifts, func() bool { return a.changesPositional(d.body) }) {
 		bindPositional(in.vars, positional(args, true))
 	}
 	return withPositional(a.call(in, name), saved)
@@ -1359,8 +1531,12 @@ func (a *execAnalysis) call(st *shellState, name string) *shellState {
 		// analyzed).
 		return st
 	}
+	// With a reference variable (declare -n), the body may assign any variable through
+	// it: a call is not replayed in another state. Nor is it while traps are set: they
+	// may run in any state of the body (see reached).
+	refs := st.hasRef()
 	key := a.callKey(st, name)
-	if r, ok := a.memo[key]; ok {
+	if r, ok := a.memo[key]; ok && !refs && len(a.traps) == 0 {
 		return r.apply(st)
 	}
 	a.calling[name] = true
@@ -1395,7 +1571,7 @@ func (a *execAnalysis) call(st *shellState, name string) *shellState {
 	if out != nil {
 		out = a.scopeLocals(d, st, out)
 	}
-	if !escaped {
+	if !escaped && !refs && (out == nil || !out.hasRef()) {
 		// A call whose break or continue reached the caller's loops did more than
 		// change the state: it is analyzed again at each call.
 		a.memo[key] = diffStates(st, out)
@@ -1415,7 +1591,12 @@ func (a *execAnalysis) runBody(d *funcDef, st *shellState) (out *shellState, esc
 // mayLeave reports whether the body of function name, or a function it calls, has a
 // break or continue (that may reach a loop of its caller).
 func (a *execAnalysis) mayLeave(name string) bool {
-	return a.bodyHas(name, map[string]bool{}, func(w []string) bool { return w[0] == "break" || w[0] == "continue" })
+	if v, ok := a.leaves[name]; ok {
+		return v
+	}
+	v := a.bodyHas(name, map[string]bool{}, func(w []string) bool { return w[0] == "break" || w[0] == "continue" })
+	a.leaves[name] = v
+	return v
 }
 
 // bodyHas reports whether the body of function name, or a function it calls, has a
@@ -1513,14 +1694,14 @@ func (a *execAnalysis) bodyMayChange(name string, seen map[string]bool) bool {
 			changes = changes || len(assignedIn(n.text)) > 0
 		case *shWords:
 			for _, w := range n.words {
-				changes = changes || paramAssign.MatchString(w)
+				changes = changes || (strings.Contains(w, "${") && paramAssign.MatchString(w))
 			}
 		case *shSimple:
 			w := trimKeywords(n.words)
 			if len(w) == 0 {
 				return
 			}
-			changes = changes || assignTarget.MatchString(w[0]) || changers[w[0]] ||
+			changes = changes || isAssign(w[0]) || changers[w[0]] ||
 				(a.defs[w[0]] != nil && a.bodyMayChange(w[0], seen))
 		}
 	})
@@ -1532,7 +1713,7 @@ func (a *execAnalysis) bodyMayChange(name string, seen map[string]bool) bool {
 // may use or assign.
 func (a *execAnalysis) callKey(st *shellState, name string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\x00%s\x00%v\x00%v", name, strings.Join(st.cwds, "\x1f"), st.dirs, st.dirsLost)
+	fmt.Fprintf(&b, "%s\x00%s\x00%v\x00%v\x00%v", name, strings.Join(st.cwds, "\x1f"), st.dirs, st.dirsLost, st.attrs)
 	for _, v := range a.relevantVars(name, map[string]bool{}) {
 		vals, ok := st.vars[v]
 		fmt.Fprintf(&b, "\x00%s=%v:%s", v, ok, strings.Join(vals, "\x1f"))
@@ -1559,10 +1740,12 @@ func (a *execAnalysis) relevantVars(name string, seen map[string]bool) []string 
 		switch n := n.(type) {
 		case *shWords:
 			for _, w := range n.words {
-				for _, m := range paramRef.FindAllStringSubmatch(w, -1) {
-					set[m[1]] = true
+				if strings.IndexByte(w, '$') >= 0 {
+					for _, m := range paramRef.FindAllStringSubmatch(w, -1) {
+						set[m[1]] = true
+					}
 				}
-				if m := assignTarget.FindStringSubmatch(w); m != nil {
+				if m := assignMatch(w); m != nil {
 					set[m[1]] = true
 				}
 			}
@@ -1593,9 +1776,10 @@ func (a *execAnalysis) flush() {
 		a.analyzed[name] = true
 		d := a.defs[name]
 		a.calling[name] = true
-		frames := a.frames
-		a.frames = nil
-		a.runBody(d, d.st)
+		frames, traps := a.frames, a.traps
+		a.frames, a.traps = nil, nil
+		out, _ := a.runBody(d, d.st)
+		a.endShell(traps, out) // the traps it sets run at the end of a shell
 		a.frames = frames
 		delete(a.calling, name)
 	}
@@ -1626,8 +1810,6 @@ func (a *execAnalysis) redirects(seg []string, cwd string) {
 var (
 	// funcName matches the names of shell functions (bash also allows "-", "." and ":").
 	funcName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.:-]*$`)
-	// varRef also matches positional parameters ($1...$9, $@, $*; $10 is ${1}0).
-	varRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*|[1-9@*])\}|\$([A-Za-z_][A-Za-z0-9_]*|[1-9@*])`)
 	// assign matches assignment words: NAME=, NAME+=, NAME[i]=.
 	assign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 
@@ -1635,13 +1817,81 @@ var (
 	bashSourcePrefix = regexp.MustCompile(`\$\{BASH_SOURCE(?:\[0\])?%`)
 )
 
+// varRefAt returns the end of the variable reference w[i:] starts with ($NAME, ${NAME},
+// positional parameters $1...$9, $@, $*, also braced; $10 is ${1}0) and the variable's
+// name; end is 0 when there is none. It is a scanner, not a regexp: it runs for most
+// words, and regexp matching is costly, under the race detector especially.
+func varRefAt(w string, i int) (end int, name string) {
+	j := i + 1
+	braced := j < len(w) && w[j] == '{'
+	if braced {
+		j++
+	}
+	k := j
+	switch {
+	case k < len(w) && isNameStart(w[k]):
+		for k < len(w) && isNameChar(w[k]) {
+			k++
+		}
+	case k < len(w) && (w[k] >= '1' && w[k] <= '9' || w[k] == '@' || w[k] == '*'):
+		k++
+	default:
+		return 0, ""
+	}
+	if !braced {
+		return k, w[j:k]
+	}
+	if k < len(w) && w[k] == '}' {
+		return k + 1, w[j:k]
+	}
+	return 0, ""
+}
+
+// forVarRefs calls fn for each variable reference of w (see varRefAt), in order.
+func forVarRefs(w string, fn func(start, end int, name string)) {
+	for i := strings.IndexByte(w, '$'); i >= 0 && i < len(w); i++ {
+		if w[i] != '$' {
+			continue
+		}
+		if end, name := varRefAt(w, i); end > 0 {
+			fn(i, end, name)
+			i = end - 1
+		}
+	}
+}
+
+// varRefNames returns the names of the variables w refers to, in order.
+func varRefNames(w string) []string {
+	var names []string
+	forVarRefs(w, func(_, _ int, name string) { names = append(names, name) })
+	return names
+}
+
+// replaceVarRef returns w with its references to the variable name replaced by v.
+func replaceVarRef(w, name, v string) string {
+	var b strings.Builder
+	last := -1
+	forVarRefs(w, func(start, end int, n string) {
+		if n == name {
+			b.WriteString(w[max(last, 0):start])
+			b.WriteString(v)
+			last = end
+		}
+	})
+	if last < 0 {
+		return w
+	}
+	b.WriteString(w[last:])
+	return b.String()
+}
+
 // multiVars returns the variables words use that have several values (not $@ and $*,
 // which stand for several words at once).
 func multiVars(seg []string, vars map[string][]string) []string {
 	set := map[string]bool{}
 	for _, w := range seg {
-		for _, m := range varRef.FindAllStringSubmatch(w, -1) {
-			if name := m[1] + m[2]; name != "@" && name != "*" && len(vars[name]) > 1 {
+		for _, name := range varRefNames(w) {
+			if name != "@" && name != "*" && len(vars[name]) > 1 {
 				set[name] = true
 			}
 		}
@@ -1730,8 +1980,7 @@ func expandVars(seg []string, vars map[string][]string) (out []string, ok bool) 
 		}
 		words := []string{w}
 		done := map[string]bool{}
-		for _, m := range varRef.FindAllStringSubmatch(w, -1) {
-			name := m[1] + m[2]
+		for _, name := range varRefNames(w) {
 			vals, ok := vars[name]
 			if !ok || done[name] {
 				continue
@@ -1740,12 +1989,7 @@ func expandVars(seg []string, vars map[string][]string) (out []string, ok bool) 
 			var next []string
 			for _, cur := range words {
 				for _, v := range vals {
-					next = append(next, varRef.ReplaceAllStringFunc(cur, func(ref string) string {
-						if r := varRef.FindStringSubmatch(ref); r[1]+r[2] == name {
-							return v
-						}
-						return ref
-					}))
+					next = append(next, replaceVarRef(cur, name, v))
 					if len(out)+len(next)+len(seg)-i-1 > limit {
 						return nil, false
 					}
@@ -1765,7 +2009,7 @@ var keywords = map[string]bool{
 }
 
 var noops = map[string]bool{
-	"set": true, "unset": true, "shift": true, "return": true, "exit": true, "wait": true, "alias": true, ":": true,
+	"set": true, "shift": true, "return": true, "exit": true, "wait": true, "alias": true, ":": true,
 	"umask": true, "break": true, "continue": true,
 }
 
@@ -1787,6 +2031,7 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 		for _, name := range names {
 			delete(n.vars, name)
 		}
+		n.assigned(names...)
 		return n
 	}
 	switch seg[0] {
@@ -1816,12 +2061,17 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 		n.unknown = true
 		return true, n, n
 	case "trap":
-		// trap CODE SIGNAL...: the code runs when the signal arrives (at exit).
-		if len(seg) > 2 && seg[1] != "-" && !strings.HasPrefix(seg[1], "-") {
-			if strings.Contains(seg[1], "$") {
+		// trap CODE SIGNAL...: the code runs when a signal arrives, at exit, at an
+		// error: in any state the shell is in from now on (see endShell).
+		args := seg[1:]
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
+		}
+		if len(args) > 1 && args[0] != "-" && !strings.HasPrefix(args[0], "-") {
+			if strings.Contains(args[0], "$") || strings.IndexByte(args[0], substOpen) >= 0 {
 				a.unresolved()
 			} else {
-				a.subshell(a.parse(literal(seg[1])), st, depth)
+				a.setTrap(literal(args[0]), st, depth)
 			}
 		}
 		return true, st, st
@@ -1874,6 +2124,7 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 		unbound := unknown("OPTARG", "OPTIND")
 		if len(seg) > 2 {
 			delete(unbound.vars, seg[2])
+			unbound.assigned(seg[2])
 		}
 		unbindPositional(unbound.vars)
 		return true, unbound, unbound
@@ -1892,16 +2143,27 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 	case "export", "local", "declare", "typeset", "readonly":
 		redirects()
 		n := st.clone()
-		array := false
+		array, funcs := false, false
+		var attr byte // the attribute the options give the names
 		vals := map[string][]string{}
-		var names []string
+		var names, bare []string
 		for _, w := range seg[1:] {
 			if strings.HasPrefix(w, "-") || strings.HasPrefix(w, "+") {
 				array = array || strings.ContainsAny(w, "aA")
+				if w[0] == '-' {
+					a := declareAttr(seg[0], w[1:])
+					funcs = funcs || a == 'f'
+					if a == attrRef || (a == attrValue && attr == 0) {
+						attr = a
+					}
+				}
 				continue
 			}
-			m := assignTarget.FindStringSubmatch(w)
+			m := assignMatch(w)
 			if m == nil {
+				if validName.MatchString(w) {
+					bare = append(bare, w) // declared, not assigned
+				}
 				continue
 			}
 			if _, seen := vals[m[1]]; !seen {
@@ -1915,6 +2177,26 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 				vals[m[1]] = append(v, globChars.Replace(w[len(m[0]):]))
 			}
 		}
+		if funcs {
+			return true, st, st // declare -f NAME: the names are functions
+		}
+		if attr != 0 {
+			// declare -l X=v gives X a value the analysis does not follow, now and at
+			// its later assignments; declare -n R=X makes R a reference to X (R=v then
+			// assigns X), it assigns nothing through R.
+			if n.attrs == nil {
+				n.attrs = map[string]byte{}
+			}
+			for _, name := range append(bare, names...) {
+				if n.attrs[name] != attrRef {
+					n.attrs[name] = attr
+				}
+				delete(n.vars, name)
+			}
+			if attr == attrRef {
+				return true, n, n
+			}
+		}
 		for _, name := range names {
 			if v := vals[name]; v == nil {
 				delete(n.vars, name)
@@ -1922,6 +2204,11 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 				setVar(n.vars, name, union(v, nil))
 			}
 		}
+		n.assigned(names...)
+		return true, n, n
+	case "unset":
+		redirects()
+		n := a.unset(seg[1:], st)
 		return true, n, n
 	case "shift":
 		n := st.clone()
@@ -1939,6 +2226,80 @@ func (a *execAnalysis) builtin(seg []string, st *shellState, depth int) (handled
 		return true, st, st
 	}
 	return false, nil, nil
+}
+
+// unset runs unset with args in st: a variable unset is empty ($X expands to nothing);
+// with an attribute, unknown, and through a reference (declare -n), the variable it
+// refers to, any of them. A function unset (unset -f, or unset without options when no
+// variable has the name) is no longer called: the name may run a program again
+// (unsetFuncs). A name the analysis does not know may be any of them.
+func (a *execAnalysis) unset(args []string, st *shellState) *shellState {
+	n := st.clone()
+	mode := 'b' // both a variable and a function
+	i := 0
+	for ; i < len(args); i++ {
+		w := args[i]
+		if w == "--" {
+			i++
+			break
+		}
+		if len(w) < 2 || w[0] != '-' {
+			break
+		}
+		for _, c := range w[1:] {
+			if c == 'f' || c == 'v' || c == 'n' {
+				mode = c
+			}
+		}
+	}
+	for _, w := range args[i:] {
+		name, _, element := strings.Cut(literal(w), "[")
+		switch {
+		case strings.Contains(w, "$") || strings.IndexByte(w, substOpen) >= 0 || !funcName.MatchString(name):
+			// Unknown names: any variable, any function.
+			clear(n.vars)
+			a.unsetFuncs[""] = true
+			continue
+		case mode == 'f':
+		case element || mode == 'n':
+			delete(n.vars, name) // an array element, a reference itself: unknown
+		case validName.MatchString(name):
+			n.vars[name] = []string{""}
+			n.assigned(name)
+		}
+		if mode == 'f' || mode == 'b' {
+			a.unsetFuncs[name] = true
+		}
+	}
+	return n
+}
+
+// declareAttr returns the attribute the option cluster opts (after "-") of the
+// declaration builtin cmd gives the variables it names: attrRef for a reference
+// (declare -n), attrValue for an attribute changing their values (-l, -u, -c, -i, an
+// option the analysis does not know), 'f' for functions (-f, -F: the names are not
+// variables), 0 otherwise.
+func declareAttr(cmd, opts string) byte {
+	harmless := "aAgprtxI" // arrays (handled apart), global, print, readonly, trace, export, inherit
+	switch cmd {
+	case "export":
+		harmless = "pn" // export -n removes the export attribute
+	case "readonly":
+		harmless = "aAp"
+	}
+	var attr byte
+	for _, c := range opts {
+		switch {
+		case c == 'f' || c == 'F':
+			return 'f'
+		case c == 'n' && cmd != "export" && cmd != "readonly":
+			attr = attrRef
+		case strings.ContainsRune(harmless, c):
+		case attr == 0:
+			attr = attrValue
+		}
+	}
+	return attr
 }
 
 // cd returns the state after a cd or pushd command (seg) run in st.
@@ -1990,9 +2351,10 @@ func (a *execAnalysis) source(name, cwd string, st *shellState, depth int, args 
 		p = filepath.Join(cwd, p)
 	}
 	a.add(p)
-	data, err := os.ReadFile(p)
-	if err != nil || depth >= 3 || len(data) > 256*1024 {
-		// Not followed: missing (deleted after the run, say), too deep or too big.
+	data, err := readRegular(p, maxScript)
+	if err != nil || depth >= 3 {
+		// Not followed: missing (deleted after the run, say), not a regular file (a
+		// device, a pipe), too big or too deep.
 		a.unresolved()
 		n := st.clone()
 		n.unknown = true
@@ -2063,7 +2425,7 @@ func (a *execAnalysis) cdTargets(seg []string, cwd string) ([]string, bool) {
 	a.glob(arg, cwd) // the matches change with the directory's entries
 	var dirs []string
 	for _, m := range expand(arg, cwd) {
-		if fi, err := os.Stat(m); err == nil && fi.IsDir() {
+		if fi, err := a.stat(m); err == nil && fi.IsDir() {
 			dirs = append(dirs, filepath.Clean(m))
 		}
 	}
@@ -2187,13 +2549,88 @@ func (a *execAnalysis) script(name, cwd string, depth int, pos []string) {
 		p = filepath.Join(cwd, p)
 	}
 	a.add(p)
-	data, err := os.ReadFile(p)
-	if err != nil || depth >= 3 || len(data) > 256*1024 {
-		// Not followed: missing (deleted after the run, say), too deep or too big.
+	data, err := readRegular(p, maxScript)
+	if err != nil || depth >= 3 {
+		// Not followed: missing (deleted after the run, say), not a regular file (a
+		// device, a pipe), too big or too deep.
 		a.unresolved()
 		return
 	}
 	a.shellText(string(data), cwd, p, depth+1, pos)
+}
+
+// maxScript bounds the size of the shell scripts analyzed (sourced or run).
+const maxScript = 256 * 1024
+
+// errNotRegular says a file is not read: it is not a regular file (a device such as
+// /dev/zero or /dev/stdin, a pipe, a directory) or larger than the bound.
+var errNotRegular = errors.New("not a regular file of a size the analysis reads")
+
+// readRegular returns the content of the file p (symlinks followed) when it is a
+// regular file of at most limit bytes; never reads anything else: a device, a pipe or
+// a file of /proc may block or never end.
+func readRegular(p string, limit int64) ([]byte, error) {
+	f, err := openRegular(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err == nil && int64(len(data)) > limit {
+		err = errNotRegular
+	}
+	return data, err
+}
+
+// isRegular reports whether p is a regular file the analysis may read (openRegular).
+func isRegular(p string) bool {
+	f, err := openRegular(p)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
+// readHead returns the first n bytes (at most) of the regular file p.
+func readHead(p string, n int64) ([]byte, error) {
+	f, err := openRegular(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, n))
+}
+
+// openRegular opens the file p when it is a regular file outside the special file
+// systems (/dev, /proc, /sys: their files may be endless or block even when regular).
+func openRegular(p string) (*os.File, error) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return nil, err
+	}
+	for _, special := range []string{"/dev", "/proc", "/sys"} {
+		if resolved == special || strings.HasPrefix(resolved, special+"/") {
+			return nil, errNotRegular
+		}
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, err
+	}
+	// The file may have been replaced since: check the one opened.
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, errNotRegular
+	}
+	return f, nil
 }
 
 // isScriptFile reports whether a program path names a shell script in the repository.
@@ -2205,14 +2642,11 @@ func isScriptFile(prog, cwd string) bool {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(cwd, p)
 	}
-	f, err := os.Open(p)
+	head, err := readHead(p, 64)
 	if err != nil {
-		return false
+		return false // missing, or not a regular file: no script
 	}
-	defer f.Close()
-	head := make([]byte, 64)
-	n, _ := f.Read(head)
-	line := string(head[:n])
+	line := string(head)
 	if !strings.HasPrefix(line, "#!") {
 		return strings.HasSuffix(p, ".sh")
 	}
