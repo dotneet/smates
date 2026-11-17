@@ -64,6 +64,45 @@ func TestScanTreeChanges(t *testing.T) {
 	step("checkout", "a.txt")
 }
 
+// TestScanTreeFlagged: edits to files flagged skip-worktree or assume-unchanged, which
+// git status does not report, are changes; so is a commit that changes such a file
+// while its working-tree copy stays the same.
+func TestScanTreeFlagged(t *testing.T) {
+	for _, flag := range []string{"--skip-worktree", "--assume-unchanged"} {
+		t.Run(flag, func(t *testing.T) {
+			r := newTestRepo(t)
+			r.write("f.txt", "one\n")
+			r.write("g.txt", "g\n")
+			r.commit("init")
+			r.git("branch", "other")
+			r.write("f.txt", "two\n")
+			r.commit("two")
+			r.git("update-index", flag, "f.txt")
+			prev := r.scan(nil)
+			step := func(name string, want ...string) {
+				t.Helper()
+				cur := r.scan(prev)
+				got, err := r.repo.Changes(prev, cur)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("%s: changes %q, want %q", name, got, want)
+				}
+				prev = cur
+			}
+			step("nothing")
+			r.write("f.txt", "three!\n")
+			step("edit flagged", "f.txt")
+			step("nothing again")
+			// The index moves under the edited file (reset of the index only).
+			r.git("reset", "-q", "other")
+			r.git("update-index", flag, "f.txt")
+			step("index moved", "f.txt")
+		})
+	}
+}
+
 func TestScanTreeChmod(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no executable bit")

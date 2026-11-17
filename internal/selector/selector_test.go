@@ -1138,7 +1138,7 @@ func TestCoversDeclarations(t *testing.T) {
 	}
 	// Without a recording, a changed file changes its declarations.
 	tt := &Test{}
-	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, map[string]bool{"p/a.go": true})
+	decide(tt, ModeDiff, nil, []string{"p/a.go#decls", "p/"}, nil, newChangeSet(map[string]bool{"p/a.go": true}))
 	if !tt.Selected || !reflect.DeepEqual(tt.Changed, []string{"p/a.go#decls"}) {
 		t.Errorf("diff mode: %+v", tt)
 	}

@@ -230,7 +230,7 @@ func Detect(repo *gitx.Repo, files []string) ([]config.Suite, []string) {
 		// Exclude tests that belong to nested suites of the same runner.
 		for _, o := range out {
 			if o.Runner == s.Runner && o.Root != s.Root && pathutil.Under(o.Root, s.Root) {
-				s.Exclude = append(s.Exclude, pathutil.RelTo(o.Root, s.Root)+"/**")
+				s.Exclude = append(s.Exclude, literalGlob(pathutil.RelTo(o.Root, s.Root))+"/**")
 			}
 		}
 		rs, err := runner.NewSuite(repo, s)

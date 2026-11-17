@@ -400,6 +400,7 @@ func TestWatchIgnore(t *testing.T) {
 	for path, want := range map[string]bool{
 		"src/a.go": false, "README.md": false, "data/x.json": false,
 		".cache/smates.json.gz": true, ".cache/.state-123": true, ".smates/state.json.gz": true,
+		".cache/smates.json.gz.lock": true, ".cache/smates.json.gz.lock.break": true,
 		"web/node_modules/x/index.js": true, "pkg/__pycache__/m.cpython-312.pyc": true,
 		"web/reports/junit.xml": true, "src/.a.go.swp": true, "src/a.go~": true, "web/coverage/lcov.info": true,
 		// Coverage reports, but not source code in a package named coverage.

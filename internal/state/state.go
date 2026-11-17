@@ -5,14 +5,18 @@ package state
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -232,9 +236,14 @@ func (s *State) toDisk() *diskState {
 	// Intern snapshot paths first in sorted order for better compression.
 	d := &diskState{Version: Version, Tool: s.Tool, Commit: s.Commit, Created: s.Created, Suites: map[string]diskSuite{}, AgentCache: s.AgentCache, Runs: s.Runs}
 	d.Files = encodeMap(s.Files, &paths, &blobs)
-	for name, su := range s.Suites {
+	// Suites and tests in sorted order: the order paths and blobs are interned in is
+	// the order they are met, and the same state must encode to the same bytes (a
+	// state committed or cached by content).
+	for _, name := range sortedKeys(s.Suites) {
+		su := s.Suites[name]
 		ds := diskSuite{Tests: map[string]diskEntry{}}
-		for id, e := range su.Tests {
+		for _, id := range sortedKeys(su.Tests) {
+			e := su.Tests[id]
 			de := diskEntry{Deps: encodeMap(e.Deps, &paths, &blobs), Status: e.Status, DurationMs: e.DurationMs, Commit: e.Commit, At: e.At, History: historyToDisk(e.History)}
 			if f := e.Flaky; f != nil {
 				de.Flaky = &diskFlake{Count: f.Count, First: f.First, Last: f.Last, Commit: f.Commit, Flip: f.Flip}
@@ -251,6 +260,16 @@ func (s *State) toDisk() *diskState {
 		d.Blobs = []string{}
 	}
 	return d
+}
+
+// sortedKeys returns the keys of m, sorted.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func fromDisk(d *diskState) (*State, error) {
@@ -334,24 +353,72 @@ func Read(r io.Reader, gz bool) (*State, error) {
 	return fromDisk(&d)
 }
 
-// Save writes the state atomically.
+// Save writes the state atomically: to a temporary file in the same directory, synced
+// to disk before it replaces path, so a crash leaves the old state or the new one. The
+// file keeps the permissions of the one it replaces; a new one gets 0666 less the
+// umask, like any file the user creates (a state shared through a directory or cache
+// stays readable to others when the umask allows).
 func (s *State) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*")
+	tmp, err := createTemp(dir, ".state-")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
+	if fi, err := os.Stat(path); err == nil {
+		if err := tmp.Chmod(fi.Mode().Perm()); err != nil && runtime.GOOS != "windows" {
+			tmp.Close()
+			return err
+		}
+	}
 	if err := s.Write(tmp, strings.HasSuffix(path, ".gz")); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
+// createTemp creates a new file in dir whose name starts with prefix, with mode 0666
+// less the umask (os.CreateTemp makes 0600 files, which a rename would keep).
+func createTemp(dir, prefix string) (*os.File, error) {
+	for range 100 {
+		var b [6]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, prefix+hex.EncodeToString(b[:])), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return f, err
+	}
+	return nil, fmt.Errorf("cannot create a temporary file in %s", dir)
+}
+
+// syncDir makes a rename in dir durable where the platform allows (best effort: not
+// every file system supports syncing a directory).
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
 }
 
 // Write encodes the state to w.
@@ -373,21 +440,43 @@ func (s *State) Write(w io.Writer, gz bool) error {
 // Merge copies entries from other that are newer than ours (by At). The snapshot and
 // commit are taken from whichever state has the newer Created time. Outcome histories
 // and flake evidence of a unit known to both are combined, so a flake seen on one
-// branch or shard is not forgotten. Run records are unioned.
+// branch or shard is not forgotten. Run records are unioned. What s takes from other
+// is copied: changing one state afterwards does not change the other.
 func (s *State) Merge(other *State) {
 	if other.Created.After(s.Created) {
-		s.Files, s.Commit, s.Created = other.Files, other.Commit, other.Created
+		s.Files, s.Commit, s.Created = maps.Clone(other.Files), other.Commit, other.Created
+		if s.Files == nil {
+			s.Files = map[string]string{}
+		}
 	}
 	for name, osu := range other.Suites {
 		su := s.Suite(name)
 		for id, e := range osu.Tests {
-			su.Tests[id] = mergeEntry(su.Tests[id], e)
+			su.Tests[id] = mergeEntry(su.Tests[id], e.clone())
 		}
 	}
+	if s.AgentCache == nil && len(other.AgentCache) > 0 {
+		s.AgentCache = map[string]json.RawMessage{}
+	}
 	for k, v := range other.AgentCache {
-		s.AgentCache[k] = v
+		s.AgentCache[k] = bytes.Clone(v)
 	}
 	s.Runs = mergeRuns(s.Runs, other.Runs)
+}
+
+// clone returns a copy of e that shares nothing with it (nil for nil).
+func (e *Entry) clone() *Entry {
+	if e == nil {
+		return nil
+	}
+	c := *e
+	c.Deps = maps.Clone(e.Deps)
+	c.History = slices.Clone(e.History)
+	if e.Flaky != nil {
+		f := *e.Flaky
+		c.Flaky = &f
+	}
+	return &c
 }
 
 // mergeEntry combines two records of one unit: the newer one (by At) wins, outcome
@@ -439,9 +528,9 @@ func (s *State) MergeChanges(base, ours *State) {
 			switch {
 			case b != nil && SameEntry(b, o): // unchanged by ours: s's version, or deleted
 			case d == nil || (b != nil && SameEntry(d, b)): // changed by ours only
-				su.Tests[id] = o
+				su.Tests[id] = o.clone()
 			default: // changed on both sides
-				m := mergeEntry(d, o)
+				m := mergeEntry(d, o.clone())
 				if b != nil {
 					m.Flaky = mergeFlake3(b.Flaky, d.Flaky, o.Flaky)
 				}
@@ -467,7 +556,10 @@ func (s *State) MergeChanges(base, ours *State) {
 	}
 	for k, v := range ours.AgentCache {
 		if base == nil || !bytes.Equal(base.AgentCache[k], v) {
-			s.AgentCache[k] = v
+			if s.AgentCache == nil {
+				s.AgentCache = map[string]json.RawMessage{}
+			}
+			s.AgentCache[k] = bytes.Clone(v)
 		}
 	}
 	known := map[string]bool{}

@@ -15,7 +15,9 @@ import (
 )
 
 // Rel converts an absolute (or file:// URL) path to a clean repo-relative slash path.
-// It resolves symlinks when possible. ok is false for paths outside root.
+// It resolves symlinks when possible. ok is false for paths outside root. On a file
+// system that ignores case, the path is matched against root ignoring case and takes
+// the case of the files on disk (see relUnder).
 //
 // A query or fragment on a plain path (/repo/src/a.ts?v=3, as dev servers and V8
 // coverage report modules) is dropped only when the path itself does not exist, the
@@ -42,8 +44,8 @@ func Rel(root, p string) (string, bool) {
 	}
 	root = resolve(filepath.Clean(root))
 	p = resolve(filepath.Clean(p))
-	rel, err := filepath.Rel(root, p)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, ok := relUnder(root, p)
+	if !ok {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
@@ -118,7 +120,7 @@ func Links(root, p string) []string {
 		if hops++; hops > maxLinks {
 			break
 		}
-		if rel, err := filepath.Rel(root, next); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+sep) {
+		if rel, ok := relUnder(filepath.Clean(root), next); ok {
 			if r := filepath.ToSlash(rel); !IsVendored(r) && !slices.Contains(out, r) {
 				out = append(out, r)
 			}

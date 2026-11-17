@@ -16,18 +16,9 @@ type Import struct {
 // the type modifier (import { type A } from) counts as loading the module: compiler
 // options may keep it.
 func Imports(p string, src []byte) []Import {
-	var refs []ref
-	switch path.Ext(p) {
-	case ".vue", ".svelte":
-		refs = scanSFC(src, false)
-	case ".astro":
-		refs = scanSFC(src, true)
-	default:
-		refs = scanSource(src)
-	}
 	ts := typeScriptExts[path.Ext(p)]
 	var out []Import
-	for _, r := range refs {
+	for _, r := range refsOf(p, src) {
 		if r.kind == refModule {
 			out = append(out, Import{Spec: r.spec, TypeOnly: ts && r.erase == eraseAlways})
 		}

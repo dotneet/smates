@@ -138,7 +138,7 @@ func TestGoOutcomesJSON(t *testing.T) {
 `)
 	for _, c := range []struct{ ip, name, status string }{
 		{"m/a", "TestA", state.Fail}, {"m/a", "TestB", state.Pass}, {"m/a", "TestC", state.Unknown},
-		{"m/b", "TestX", state.Pass}, {"m/c", "TestY", state.Fail},
+		{"m/b", "TestX", state.Unknown}, {"m/c", "TestY", state.Fail},
 	} {
 		if st, _, _ := g.status(c.ip, c.name); st != c.status {
 			t.Errorf("%s %s: %q, want %q", c.ip, c.name, st, c.status)

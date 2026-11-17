@@ -171,40 +171,17 @@ func (r Rule) ReachesEnv() (files, env []string) {
 	return files, env
 }
 
-// checkRules validates the rules of suite s, and strips a leading "./" from their
-// globs.
+// checkRules validates the rules of suite s (their globs are checked by
+// normalizeGlobs).
 func checkRules(s *Suite) error {
 	for i := range s.Rules {
 		r := &s.Rules[i]
 		at := fmt.Sprintf("suite %q: rules[%d]", s.Name, i)
-		trimDotSlash(r.Tests)
-		trimDotSlash(r.Deps)
-		for j, g := range r.Reaches {
-			if !strings.HasPrefix(g, "$") {
-				for strings.HasPrefix(g, "./") {
-					g = g[2:]
-				}
-				r.Reaches[j] = g
-			}
-		}
-		files, env := r.ReachesEnv()
 		switch {
 		case len(r.Tests) == 0 && len(r.Reaches) == 0:
 			return fmt.Errorf("%s: needs tests or reaches (a rule with neither applies to no test)", at)
 		case len(r.Deps) == 0:
 			return fmt.Errorf("%s: needs deps", at)
-		}
-		if err := checkGlobs(at+": tests", r.Tests); err != nil {
-			return err
-		}
-		if err := checkRepoGlobs(at+": deps", r.Deps); err != nil {
-			return err
-		}
-		if err := checkRepoGlobs(at+": reaches", files); err != nil {
-			return err
-		}
-		if err := checkEnvPatterns(at+": reaches", env); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -247,13 +224,8 @@ func (r *Requirement) UnmarshalYAML(n *yaml.Node) error {
 		}
 		return fmt.Errorf("line %d: a requires entry is a mapping with one of tcp, cmd, env and file%s", n.Line, hint)
 	}
-	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
-	{
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if k := n.Content[i]; !slices.Contains(requirementKeys, k.Value) {
-				return fmt.Errorf("line %d: unknown key %q in requires entry (want one of tcp, cmd, env and file, with optional tests and timeout)", k.Line, k.Value)
-			}
-		}
+	if k := unknownKey(n, requirementKeys); k != nil {
+		return fmt.Errorf("line %d: unknown key %q in requires entry (want one of tcp, cmd, env and file, with optional tests and timeout)", k.Line, k.Value)
 	}
 	type plain Requirement
 	return n.Decode((*plain)(r))
@@ -298,7 +270,7 @@ func (r Requirement) TimeoutOrDefault() time.Duration {
 
 var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// checkRequires validates requires, and strips a leading "./" from its tests globs.
+// checkRequires validates requires (the tests globs are checked by normalizeGlobs).
 func checkRequires(s *Suite) error {
 	for i := range s.Requires {
 		r := &s.Requires[i]
@@ -342,10 +314,6 @@ func checkRequires(s *Suite) error {
 		}
 		if r.Timeout > 0 && r.TCP == "" && r.Cmd == "" {
 			return fmt.Errorf("%s: timeout applies to tcp and cmd only", at)
-		}
-		trimDotSlash(r.Tests)
-		if err := checkGlobs(at+": tests", r.Tests); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -439,18 +407,26 @@ func (d *Dependency) UnmarshalYAML(n *yaml.Node) error {
 	default:
 		return fmt.Errorf("line %d: a depends_on or serves entry is a suite name or a mapping with suite or paths", n.Line)
 	}
-	// Decoding through a custom unmarshaler loses the decoder's KnownFields check.
-	{
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			switch k := n.Content[i]; k.Value {
-			case "suite", "paths", "tests":
-			default:
-				return fmt.Errorf("line %d: field %s not found in depends_on entry (suite, paths, tests)", k.Line, k.Value)
-			}
-		}
+	if k := unknownKey(n, dependencyKeys); k != nil {
+		return fmt.Errorf("line %d: field %s not found in depends_on entry (suite, paths, tests)", k.Line, k.Value)
 	}
 	type plain Dependency
 	return n.Decode((*plain)(d))
+}
+
+// dependencyKeys are the keys of a depends_on entry.
+var dependencyKeys = []string{"suite", "paths", "tests"}
+
+// unknownKey returns the first key of the mapping node n that keys does not list (nil
+// when there is none). Decoding through a custom unmarshaler loses the decoder's
+// KnownFields check, so the UnmarshalYAML methods check the keys with it.
+func unknownKey(n *yaml.Node, keys []string) *yaml.Node {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := n.Content[i]; !slices.Contains(keys, k.Value) {
+			return k
+		}
+	}
+	return nil
 }
 
 // String describes the dependency in explanations ("depends_on suite api",
@@ -478,15 +454,11 @@ func (s *Suite) Dependencies() []Dependency {
 	return out
 }
 
-// checkDependencies validates depends_on and serves, and strips a leading "./" from
-// their globs (which would otherwise match nothing).
+// checkDependencies validates depends_on (its globs and those of serves are checked by
+// normalizeGlobs).
 func checkDependencies(s *Suite, names map[string]bool) error {
-	where := fmt.Sprintf("suite %q", s.Name)
-	trimDotSlash(s.Serves)
 	for i, d := range s.DependsOn {
-		trimDotSlash(d.Paths)
-		trimDotSlash(d.Tests)
-		at := fmt.Sprintf("%s: depends_on[%d]", where, i)
+		at := fmt.Sprintf("suite %q: depends_on[%d]", s.Name, i)
 		switch {
 		case d.Suite != "" && len(d.Paths) > 0:
 			return fmt.Errorf("%s: set either suite or paths, not both", at)
@@ -497,46 +469,8 @@ func checkDependencies(s *Suite, names map[string]bool) error {
 		case d.Suite != "" && !names[d.Suite]:
 			return fmt.Errorf("%s: unknown suite %q", at, d.Suite)
 		}
-		if err := checkRepoGlobs(at+": paths", d.Paths); err != nil {
-			return err
-		}
-		if err := checkGlobs(at+": tests", d.Tests); err != nil {
-			return err
-		}
-	}
-	return checkRepoGlobs(where+": serves", s.Serves)
-}
-
-// trimDotSlash removes leading "./" from globs in place.
-func trimDotSlash(globs []string) {
-	for i, g := range globs {
-		for strings.HasPrefix(g, "./") {
-			g = g[2:]
-		}
-		globs[i] = g
-	}
-}
-
-func checkGlobs(where string, globs []string) error {
-	for _, g := range globs {
-		if strings.Contains(g, "\\") {
-			return fmt.Errorf("%s: %q: use / as the path separator (a backslash escapes the next character in a glob)", where, g)
-		}
-		if g == "" || !doublestar.ValidatePattern(g) {
-			return fmt.Errorf("%s: bad glob %q", where, g)
-		}
 	}
 	return nil
-}
-
-// checkRepoGlobs validates repo-relative globs.
-func checkRepoGlobs(where string, globs []string) error {
-	for _, g := range globs {
-		if strings.HasPrefix(g, "/") || g == ".." || strings.HasPrefix(g, "../") {
-			return fmt.Errorf("%s: %q must be relative to the repository root", where, g)
-		}
-	}
-	return checkGlobs(where, globs)
 }
 
 // AgentConfig configures the LLM agent used for orphan files.
@@ -637,17 +571,6 @@ func matchEnv(patterns []string, name string) bool {
 	return false
 }
 
-func checkEnvPatterns(where string, lists ...[]string) error {
-	for _, l := range lists {
-		for _, p := range l {
-			if _, err := path.Match(p, ""); err != nil || p == "" {
-				return fmt.Errorf("%s: bad environment variable pattern %q", where, p)
-			}
-		}
-	}
-	return nil
-}
-
 // Load reads the config at the repo root. It returns (nil, nil) when there is none.
 func Load(root string) (*Config, error) {
 	for _, n := range FileNames {
@@ -676,6 +599,21 @@ func Parse(data []byte) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	// A later document ("---") would be ignored silently, with the suites, rules and
+	// inputs it declares: reject it. An empty one (a trailing "---") does no harm.
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(doc.Content) > 0 && (doc.Content[0].Kind != yaml.ScalarNode || doc.Content[0].Tag != "!!null") {
+			return nil, fmt.Errorf("line %d: a second YAML document (after ---): smates reads one document, so put every key in the first", doc.Line)
+		}
 	}
 	if err := c.Normalize(); err != nil {
 		return nil, err
@@ -765,21 +703,24 @@ func (c *Config) Normalize() error {
 	if c.Flaky.Retry < 0 || c.Flaky.Retry > 5 {
 		return fmt.Errorf("flaky.retry must be between 0 and 5 (got %d)", c.Flaky.Retry)
 	}
-	if err := checkEnvPatterns("env_ignore/env_track", c.EnvIgnore, c.EnvTrack); err != nil {
-		return err
-	}
 	names := map[string]bool{}
 	for i := range c.Suites {
 		s := &c.Suites[i]
 		if s.Root == "" {
 			s.Root = "."
 		}
+		// The name is filled below, from the root and the runner: until then, errors
+		// name the suite by its position.
+		label := fmt.Sprintf("suite %q", s.Name)
+		if s.Name == "" {
+			label = fmt.Sprintf("suites[%d]", i)
+		}
 		s.Root = filepath.ToSlash(filepath.Clean(s.Root))
-		if strings.HasPrefix(s.Root, "..") || filepath.IsAbs(s.Root) {
-			return fmt.Errorf("suite %q: root must be inside the repository", s.Name)
+		if s.Root == ".." || strings.HasPrefix(s.Root, "../") || strings.HasPrefix(s.Root, "/") || filepath.IsAbs(s.Root) {
+			return fmt.Errorf("%s: root %q must be inside the repository", label, s.Root)
 		}
 		if s.Runner == "" {
-			return fmt.Errorf("suite %q: runner is required", s.Name)
+			return fmt.Errorf("%s: runner is required", label)
 		}
 		if s.Name == "" {
 			s.Name = s.Runner
@@ -793,9 +734,6 @@ func (c *Config) Normalize() error {
 		names[s.Name] = true
 		if s.Runner == "custom" && s.Command == "" {
 			return fmt.Errorf("suite %q: custom runner needs a command", s.Name)
-		}
-		if err := checkEnvPatterns(fmt.Sprintf("suite %q", s.Name), s.EnvIgnore, s.EnvTrack); err != nil {
-			return err
 		}
 		switch s.Granularity {
 		case "", GranularityPackage:
@@ -813,14 +751,6 @@ func (c *Config) Normalize() error {
 		if s.MaxAge < 0 {
 			return fmt.Errorf("suite %q: max_age must not be negative (got %s)", s.Name, s.MaxAge)
 		}
-		trimDotSlash(s.Volatile)
-		if err := checkGlobs(fmt.Sprintf("suite %q: volatile", s.Name), s.Volatile); err != nil {
-			return err
-		}
-		trimDotSlash(s.Untraced)
-		if err := checkGlobs(fmt.Sprintf("suite %q: untraced", s.Name), s.Untraced); err != nil {
-			return err
-		}
 		if err := checkRules(s); err != nil {
 			return err
 		}
@@ -836,7 +766,7 @@ func (c *Config) Normalize() error {
 			return err
 		}
 	}
-	return nil
+	return c.normalizeGlobs()
 }
 
 // Go unit granularities (Suite.Granularity).

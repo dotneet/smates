@@ -262,6 +262,69 @@ func TestDepsTSConfig(t *testing.T) {
 			want: []string{"web/node/n.ts", "web/src/a.ts", "web/tools/t.ts"},
 		},
 		{
+			// No tsconfig.json: the directory is a config directory all the same.
+			name: "tsconfig.*.json without tsconfig.json",
+			files: map[string]string{
+				"web/tsconfig.app.json": `{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}`,
+				"web/src/main.ts":       `import a from "@/a"`,
+				"web/src/a.ts":          ``,
+			},
+			file: "web/src/main.ts",
+			want: []string{"web/src/a.ts"},
+		},
+		{
+			name: "extends through the package's exports",
+			files: map[string]string{
+				"packages/tsconfig/package.json":      `{"name": "@acme/tsconfig", "exports": {"./base": "./configs/base.json"}}`,
+				"packages/tsconfig/configs/base.json": `{"compilerOptions": {"paths": {"@/*": ["${configDir}/src/*"]}}}`,
+				"apps/a/tsconfig.json":                `{"extends": "@acme/tsconfig/base"}`,
+				"apps/a/src/main.ts":                  `import x from "@/x"`,
+				"apps/a/src/x.ts":                     ``,
+			},
+			file: "apps/a/src/main.ts",
+			want: []string{"apps/a/src/x.ts"},
+		},
+		{
+			name: "extends the package's root export",
+			files: map[string]string{
+				"packages/tsconfig/package.json": `{"name": "@acme/tsconfig", "exports": {".": "./shared.json"}}`,
+				"packages/tsconfig/shared.json":  `{"compilerOptions": {"paths": {"@/*": ["${configDir}/src/*"]}}}`,
+				"apps/a/tsconfig.json":           `{"extends": "@acme/tsconfig"}`,
+				"apps/a/src/main.ts":             `import x from "@/x"`,
+				"apps/a/src/x.ts":                ``,
+			},
+			file: "apps/a/src/main.ts",
+			want: []string{"apps/a/src/x.ts"},
+		},
+		{
+			name: "extends an installed config that declares paths",
+			files: map[string]string{
+				"node_modules/@acme/cfg/package.json":  `{"name": "@acme/cfg"}`,
+				"node_modules/@acme/cfg/tsconfig.json": `{"compilerOptions": {"paths": {"~/*": ["${configDir}/src/*"]}}}`,
+				"tsconfig.json":                        `{"extends": "@acme/cfg"}`,
+				"src/main.ts":                          `import x from "~/x"`,
+				"src/x.ts":                             ``,
+			},
+			file: "src/main.ts",
+			want: []string{"src/x.ts"},
+		},
+		{
+			name: "extends an installed config through exports and its tsconfig field",
+			files: map[string]string{
+				"node_modules/cfg/package.json":    `{"name": "cfg", "exports": {"./web": "./dist/web.json"}}`,
+				"node_modules/cfg/dist/web.json":   `{"compilerOptions": {"paths": {"~/*": ["${configDir}/src/*"]}}}`,
+				"node_modules/strict/package.json": `{"name": "strict", "tsconfig": "./strict.json"}`,
+				"node_modules/strict/strict.json":  `{"compilerOptions": {"paths": {"#s/*": ["${configDir}/s/*"]}}}`,
+				"app/tsconfig.json":                `{"extends": "cfg/web"}`,
+				"app/src/main.ts":                  `import x from "~/x"; import y from "#s/y"`,
+				"app/src/x.ts":                     ``,
+				"app/src/tsconfig.json":            `{"extends": "strict"}`,
+				"app/src/s/y.ts":                   ``,
+			},
+			file: "app/src/main.ts",
+			want: []string{"app/src/s/y.ts", "app/src/x.ts"},
+		},
+		{
 			name: "jsconfig and nearest config wins, ancestors are a fallback",
 			files: map[string]string{
 				"tsconfig.json":     `{"compilerOptions": {"paths": {"@/*": ["./root/*"], "@root/*": ["./root/*"]}}}`,

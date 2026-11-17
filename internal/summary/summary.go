@@ -711,13 +711,32 @@ func dur(ms int64) string {
 	return fmt.Sprintf("%dh %dm", ms/3_600_000, ms%3_600_000/60_000)
 }
 
-// code formats a path or name as inline code.
+// code formats a path or name as inline code. A code span ends at the first run of
+// backticks as long as the one that opened it, so a name holding backticks (two in a
+// row would close a double fence) gets a fence longer than its longest run; and a
+// space on each side, which CommonMark strips, keeps a backtick at either end from
+// joining the fence.
 func code(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if strings.Contains(s, "`") {
-		return "`` " + s + " ``"
+	if !strings.Contains(s, "`") {
+		return "`" + s + "`"
 	}
-	return "`" + s + "`"
+	fence := strings.Repeat("`", longestRun(s, '`')+1)
+	return fence + " " + s + " " + fence
+}
+
+// longestRun returns the length of the longest run of c in s.
+func longestRun(s string, c byte) int {
+	longest, run := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != c {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	return longest
 }
 
 // text makes free text (agent answers, notes) safe to embed: one line, see Inline.

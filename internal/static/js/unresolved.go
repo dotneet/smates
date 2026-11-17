@@ -5,41 +5,32 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/dotneet/smates/internal/static/host"
 )
 
 // Unresolved implements host.ResolveReporter: the module specifiers p imports at run
 // time (type-only declarations left out) that resolve to no file of the repository,
 // name no Node builtin and no package installed in a node_modules directory at or
 // above p: an alias only a bundler's configuration knows (Vite's resolve.alias), a
-// virtual module a plugin serves, a file that does not exist. Patterns (template
-// literals, import.meta.glob) are not checked.
+// virtual module a plugin serves, a file that does not exist. An import() or require()
+// of a computed name, or of a template literal without a static prefix
+// (import(`${dir}/x.js`)), is reported once as host.DynamicSpec: it may load any file.
+// Other patterns (templates with a prefix, import.meta.glob) are not checked.
 func (a *Analyzer) Unresolved(p string, src []byte) []string {
-	var refs []ref
-	switch path.Ext(p) {
-	case ".vue", ".svelte":
-		refs = scanSFC(src, false)
-	case ".astro":
-		refs = scanSFC(src, true)
-	default:
-		refs = scanSource(src)
-	}
 	dir := path.Dir(p)
 	var out []string
-	for _, r := range refs {
-		if r.kind != refModule || r.erase == eraseAlways {
+	dynamic := false
+	for _, r := range a.analyze(p, src).unfound {
+		switch {
+		case r.kind == refDynamic, r.kind == refTemplate && r.spec == "":
+			dynamic = true
+			continue
+		case r.kind != refModule || r.erase == eraseAlways:
 			continue
 		}
 		spec := cleanSpec(r.spec)
 		if spec == "" || strings.HasPrefix(spec, "data:") {
-			continue
-		}
-		found := false
-		a.resolveRef(dir, r, func(f string) {
-			if !outside(f) && !hasSegment(f, "node_modules") && a.h.Has(f) {
-				found = true
-			}
-		})
-		if found {
 			continue
 		}
 		if isExternalScheme(spec) {
@@ -50,6 +41,9 @@ func (a *Analyzer) Unresolved(p string, src []byte) []string {
 			continue
 		}
 		out = append(out, r.spec)
+	}
+	if dynamic {
+		out = append(out, host.DynamicSpec)
 	}
 	return out
 }

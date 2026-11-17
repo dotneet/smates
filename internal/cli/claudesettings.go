@@ -342,7 +342,9 @@ func (d *claudeDoc) write(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, d.data, 0o644)
+	// Atomically: a partial ~/.claude/settings.json (a full disk, a crash) would break
+	// every Claude Code session, not only the hook.
+	return writeFileAtomic(path, d.data)
 }
 
 func installAgentHook(a agentHook, path string, command string, stdout io.Writer) error {

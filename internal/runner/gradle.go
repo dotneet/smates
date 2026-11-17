@@ -657,6 +657,8 @@ func readGradleEvents(dir string) ([]gradleEvent, error) {
 //   - a failed test or class fails its unit;
 //   - otherwise a test an assumption aborted (or a skip Gradle cannot tell from
 //     @Disabled) makes it unknown: it did not prove anything;
+//   - otherwise a unit with a class whose tests reported but which never finished (no
+//     class event: its JVM died mid-class) is unknown, with a warning;
 //   - otherwise a unit with events passes (tests disabled count as passing);
 //   - a unit without events is unknown, with a warning, when the build succeeded (the
 //     task's own filters or tags exclude it, or it declares no test); when the build
@@ -677,6 +679,9 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		fail, unproven, any bool
 		classMs, testMs     int64
 		msg                 string
+		// The top-level classes (per task) that ran tests, and those that finished: a
+		// class whose JVM died mid-class has test events but never finishes.
+		started, finished map[string]bool
 	}
 	accs := map[string]*acc{}
 	for _, ev := range events {
@@ -686,10 +691,17 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		}
 		a := accs[u]
 		if a == nil {
-			a = &acc{}
+			a = &acc{started: map[string]bool{}, finished: map[string]bool{}}
 			accs[u] = a
 		}
 		a.any = true
+		top, _, nested := strings.Cut(ev.Class, "$")
+		switch {
+		case ev.K == "test":
+			a.started[ev.Task+" "+top] = true
+		case ev.K == "class" && !nested:
+			a.finished[ev.Task+" "+top] = true
+		}
 		switch ev.Result {
 		case "FAILURE":
 			a.fail = true
@@ -716,7 +728,7 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		}
 		return obs, nil
 	}
-	var silent []string
+	var silent, cut []string
 	for _, u := range units {
 		a := accs[u]
 		if a == nil {
@@ -735,6 +747,11 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 			o.Status = state.Fail
 		case a.unproven:
 			o.Status = state.Unknown
+		case unfinished(a.started, a.finished):
+			// Tests of a class reported, but the class never finished: its JVM died (or
+			// the build stopped) before its other tests ran.
+			o.Status = state.Unknown
+			cut = append(cut, u)
 		default:
 			o.NoTrace = record // until the recording says what it used
 		}
@@ -748,5 +765,23 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		}
 		warnings = append(warnings, w)
 	}
+	if len(cut) > 0 {
+		sort.Strings(cut)
+		w := fmt.Sprintf("%d test class file(s) did not finish (their test JVM likely stopped mid-class); they will run again next time", len(cut))
+		if len(cut) <= 3 {
+			w += ": " + strings.Join(cut, ", ")
+		}
+		warnings = append(warnings, w)
+	}
 	return obs, warnings
+}
+
+// unfinished reports whether a class of started is not in finished.
+func unfinished(started, finished map[string]bool) bool {
+	for c := range started {
+		if !finished[c] {
+			return true
+		}
+	}
+	return false
 }

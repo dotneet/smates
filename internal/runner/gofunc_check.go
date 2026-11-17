@@ -60,6 +60,13 @@ func checkArgv(rc *RunContext, pkgs []string) (argv, env []string) {
 	return append(argv, pkgs...), env
 }
 
+// checkChunks splits the package arguments of the compile checks of dirs into the
+// argument lists of the checkArgv command lines running them.
+func checkChunks(rc *RunContext, dirs []string) [][]string {
+	base, _ := checkArgv(rc, nil)
+	return chunk(base, pkgArgs(rc.Suite, dirs))
+}
+
 // checkGoflags is the suite's GOFLAGS without test flags (-run, -json, -coverprofile,
 // -exec, ...), which would change what the check runs or prints; -vet is kept.
 func checkGoflags(rc *RunContext) string {
@@ -90,14 +97,15 @@ func checkExec(rc *RunContext) string {
 // invocation (chunked when the arguments are long). A package go test reports as
 // failing to build or vet ([build failed], [setup failed]) fails its check with that
 // output; when the invocation failed before reporting any package, every check fails
-// with its output. A package whose Go files build constraints all exclude (a wrapper
-// command's flags are unseen, see buildFailures.excluded) is a skip, not a failure.
-// Checks have no dependencies of their own: recording gives them
-// their known ones (the static closure).
+// with its output, and when it failed after reporting some, the checks of the packages
+// it did not report are unknown. A package whose Go files build constraints all exclude
+// (a wrapper command's flags are unseen, see buildFailures.excluded) is a skip, not a
+// failure. Checks have no dependencies of their own: recording gives them their known
+// ones (the static closure).
 func runBuildChecks(ctx context.Context, rc *RunContext, dirs []string) (*RunResult, error) {
 	res := &RunResult{Observations: map[string]*Observation{}}
 	start := time.Now()
-	for _, args := range chunk(pkgArgs(rc.Suite, dirs)) {
+	for _, args := range checkChunks(rc, dirs) {
 		argv, env := checkArgv(rc, args)
 		failed := &buildFailures{}
 		var out bytes.Buffer
@@ -135,6 +143,10 @@ func runBuildChecks(ctx context.Context, rc *RunContext, dirs []string) (*RunRes
 			case code != 0 && len(failed.status) == 0 && len(failed.paths) == 0:
 				// go test failed before reporting any package (go.mod does not parse).
 				o.Status, o.Failure = state.Fail, string(lastMessage(out.Bytes()))
+			case code != 0 && failed.status[ip] == "" && !failed.noTests[ip]:
+				// go test failed and never reported this package (it was killed, or
+				// stopped before reaching it): not proven to build.
+				o.Status, o.Failure = state.Unknown, string(lastMessage(out.Bytes()))
 			}
 			res.Observations[FuncUnit(d, BuildCheck)] = o
 		}

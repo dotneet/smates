@@ -210,8 +210,22 @@ func TestText(t *testing.T) {
 	if got := text("hi @team\n<script>"); got != "hi @​team &lt;script&gt;" {
 		t.Errorf("text: %q", got)
 	}
-	if got := code("a`b"); got != "`` a`b ``" {
-		t.Errorf("code: %q", got)
+	// The fence is longer than every backtick run of the name, so the name cannot close
+	// the code span and inject Markdown after it.
+	for in, want := range map[string]string{
+		"a.ts":           "`a.ts`",
+		"a`b":            "`` a`b ``",
+		"a``b":           "``` a``b ```",
+		"a```b`c":        "```` a```b`c ````",
+		"`a":             "`` `a ``",
+		"a`":             "`` a` ``",
+		"``":             "``` `` ```",
+		"x``**bold**``y": "``` x``**bold**``y ```",
+		"a \n\t b":       "`a b`",
+	} {
+		if got := code(in); got != want {
+			t.Errorf("code(%q) = %q, want %q", in, got, want)
+		}
 	}
 	for ms, want := range map[int64]string{0: "<0.1s", 49: "<0.1s", 50: "0.1s", 450: "0.5s", 1000: "1s", 59_999: "59s", 61_000: "1m 1s", 3_660_000: "1h 1m"} {
 		if got := dur(ms); got != want {

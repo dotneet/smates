@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -138,6 +139,10 @@ type RunContext struct {
 	// Known returns the dependency keys a unit is known to have before it runs (static
 	// closure, inputs, rules; nil when unknown).
 	Known func(unit string) []string
+
+	// report collects the suite's JUnit report after each invocation of the run (see
+	// reportInvocation).
+	report *junitReport
 }
 
 // RunResult is the outcome of running a suite.
@@ -178,8 +183,10 @@ type Observation struct {
 	// unit (gradle, which records no dependencies yet): the run reports it, but a pass
 	// is recorded as unknown, so the unit runs again next time.
 	NoTrace bool
-	// untraced: the runner reported the unit but its process left no trace (observeAll).
-	untraced bool
+	// ev is what the run told about the unit's outcome, which settle turns into Status
+	// (runners that settle it that way: observeAll, setUnitExit). Its zero value is a
+	// unit whose process left no trace, which does not pass.
+	ev unitEvidence
 }
 
 // AddFile adds a repo-relative file.
@@ -393,6 +400,11 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 			code = 1
 		}
 		return code, nil
+	}
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
+		// It exited (with this code), but a process it started kept its output open
+		// past cmd.WaitDelay (runCmd).
+		return cmd.ProcessState.ExitCode(), nil
 	}
 	if err != nil {
 		return 127, fmt.Errorf("running %s: %w", argv[0], err)

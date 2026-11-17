@@ -24,14 +24,16 @@ func TestDepsRegressions(t *testing.T) {
 		},
 		{
 			// The conftest of a package is imported as tests.conftest with the rootdir
-			// (the parent of the package) on sys.path: tests/ itself is not a root.
+			// (the parent of the package) on sys.path: tests/ itself is not a root. No
+			// root provides "utils", so the fallback still keeps tests/utils.py: smates
+			// cannot tell whether something else puts tests/ on sys.path.
 			name: "package conftest basedir is above the package",
 			files: map[string]string{
 				"tests/__init__.py": "", "tests/conftest.py": "", "tests/utils.py": "",
 				"tests/api/__init__.py": "", "tests/api/test_x.py": "from utils import foo\n",
 			},
 			target: "tests/api/test_x.py",
-			want:   []string{"tests/__init__.py", "tests/api/__init__.py", "tests/conftest.py"},
+			want:   []string{"tests/__init__.py", "tests/api/__init__.py", "tests/conftest.py", "tests/utils.py"},
 		},
 		{
 			name: "nested conftests each add their basedir",
@@ -44,14 +46,44 @@ func TestDepsRegressions(t *testing.T) {
 			want:   []string{"tests/api/conftest.py", "tests/api/fakes.py", "tests/conftest.py", "tests/helpers.py"},
 		},
 		{
-			// Only test files load conftests.
+			// Only test files load conftests: tests/ is no root of app/x.py, but no root
+			// provides "utils" either, so the fallback keeps tests/utils.py.
 			name: "non-test module gets no conftest roots",
 			files: map[string]string{
 				"tests/conftest.py": "", "tests/utils.py": "",
 				"app/x.py": "from utils import foo\n", "conftest.py": "",
 			},
 			target: "app/x.py",
-			want:   nil,
+			want:   []string{"tests/utils.py"},
+		},
+		{
+			// A root provides "utils": the fallback does not add the other one.
+			name: "fallback only when no root provides the name",
+			files: map[string]string{
+				"utils.py": "", "tests/utils.py": "",
+				"app/x.py": "from utils import foo\n",
+			},
+			target: "app/x.py",
+			want:   []string{"utils.py"},
+		},
+		{
+			// A PEP 420 namespace package under a directory no config declares.
+			name: "fallback finds a namespace package outside every root",
+			files: map[string]string{
+				"lib/mypkg/core.py": "",
+				"tests/test_x.py":   "from mypkg import core\n",
+			},
+			target: "tests/test_x.py",
+			want:   []string{"lib/mypkg/core.py"},
+		},
+		{
+			name: "fallback finds a module outside every root",
+			files: map[string]string{
+				"tools/helper.py": "", "other/helper.py": "",
+				"tests/test_x.py": "import helper\n",
+			},
+			target: "tests/test_x.py",
+			want:   []string{"other/helper.py", "tools/helper.py"},
 		},
 		{
 			name: "type checking block",
@@ -111,6 +143,30 @@ func TestDepsRegressions(t *testing.T) {
 			want:   []string{"tests/conftest.py", "tests/helpers/__init__.py", "tests/helpers/f.py"},
 		},
 	}
+	// A package root declared by a build tool: from mypkg import core resolves under it
+	// (and, without a declaration, through the fallback).
+	for name, cfg := range map[string]map[string]string{
+		"setup.cfg package_dir":   {"setup.cfg": "[options]\npackage_dir = =lib\n"},
+		"setup.py package_dir":    {"setup.py": "from setuptools import setup\nsetup(package_dir={'': 'lib'})\n"},
+		"pdm package-dir":         {"pyproject.toml": "[tool.pdm.build]\npackage-dir = \"lib\"\n"},
+		"hatch sources":           {"pyproject.toml": "[tool.hatch.build.targets.wheel]\nsources = [\"lib\"]\n"},
+		"hatch packages":          {"pyproject.toml": "[tool.hatch.build.targets.wheel]\npackages = [\"lib/mypkg\"]\n"},
+		"no declaration fallback": {},
+	} {
+		files := map[string]string{
+			"lib/mypkg/__init__.py": "", "lib/mypkg/core.py": "",
+			"tests/test_core.py": "from mypkg import core\n",
+		}
+		for k, v := range cfg {
+			files[k] = v
+		}
+		cases = append(cases, struct {
+			name   string
+			files  map[string]string
+			target string
+			want   []string
+		}{"package root from " + name, files, "tests/test_core.py", []string{"lib/mypkg/__init__.py", "lib/mypkg/core.py"}})
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			h := newFixture(t, c.files)
@@ -120,5 +176,22 @@ func TestDepsRegressions(t *testing.T) {
 				t.Errorf("got %v want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// The build tools' package roots are import roots of the index (not only found by the
+// fallback of resolver.module).
+func TestBuildToolRoots(t *testing.T) {
+	for name, cfg := range map[string]map[string]string{
+		"setup.cfg package_dir": {"setup.cfg": "[options]\npackage_dir = =lib\n"},
+		"setup.py package_dir":  {"setup.py": "setup(package_dir={'': 'lib'})\n"},
+		"pdm package-dir":       {"pyproject.toml": "[tool.pdm.build]\npackage-dir = \"lib\"\n"},
+		"hatch sources":         {"pyproject.toml": "[tool.hatch.build.targets.wheel]\nsources = [\"lib\"]\n"},
+	} {
+		cfg["lib/mypkg/__init__.py"] = ""
+		idx := buildIndex(newFixture(t, cfg), nil)
+		if !contains(idx.roots, "lib") || !contains(idx.tops["mypkg"], "lib") {
+			t.Errorf("%s: roots %q, tops[mypkg] %q", name, idx.roots, idx.tops["mypkg"])
+		}
 	}
 }

@@ -85,9 +85,14 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	if err != nil {
 		return res, err
 	}
+	untraced := 0
 	for i, u := range rc.Units {
 		o := obs[u]
+		traced := o != nil // observeAll warns itself about the units only a report gave
 		if o == nil {
+			// Its process left no trace of the preload shim (killed before it wrote it, or
+			// the command dropped the shim): what it read is unknown, so a pass does not
+			// count (the zero unitEvidence).
 			o = &Observation{Files: map[string]bool{}}
 			obs[u] = o
 		}
@@ -117,6 +122,12 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			o.AddFile(depkey.Existence(snap))
 		}
 		setUnitExit(o, codes[u])
+		if !traced && codes[u] == 0 {
+			untraced++
+		}
+	}
+	if w := untracedWarning(untraced, len(obs) > untraced); w != "" {
+		warns = append(warns, w)
 	}
 	res.Observations, res.Warnings = obs, warns
 	return res, nil

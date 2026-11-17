@@ -212,12 +212,36 @@ func (r *resolver) absolute(m modRef) {
 
 // module adds the files of an absolute module (and of from-imported names that may
 // be submodules of it) under every root that may provide it.
+//
+// When no known root provides the top-level name, the import may still be of the
+// repository: a package under a root declared in a way smates does not read (a build
+// backend's own setting, a sys.path tweak in a conftest), or a PEP 420 namespace
+// package. A missing edge would skip the tests that need it, so the import then
+// resolves under every directory holding a module or package of that name
+// (index.anyTops): an over-approximation, like a stdlib name shadowed by a file
+// somewhere, only selects more.
 func (r *resolver) module(parts, names []string) {
+	found := false
 	r.roots(parts[0], func(root string) {
 		if base, ok := r.chain(root, parts); ok {
 			r.names(base, names)
 		}
+		found = found || r.provides(root, parts[0])
 	})
+	if found {
+		return
+	}
+	for _, dir := range r.idx.anyTops[parts[0]] {
+		if base, ok := r.chain(dir, parts); ok {
+			r.names(base, names)
+		}
+	}
+}
+
+// provides reports whether root holds a module or package named top.
+func (r *resolver) provides(root, top string) bool {
+	p := join(root, top)
+	return r.idx.dirs[p] || r.h.Has(p+".py") || r.h.Has(p+".pyi")
 }
 
 // relative resolves "from .x import y" against the importing file's package.

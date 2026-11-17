@@ -20,26 +20,69 @@ func TestPyprojectRoots(t *testing.T) {
 		},
 		{"native pytest table", "[ tool . pytest ]\npythonpath = [\"c\"]\n", []string{"c"}},
 		{"setuptools find", "[tool.setuptools.packages.find]\nwhere = [\"lib\"]\n", []string{"lib"}},
-		{"setuptools package-dir", "[tool.setuptools.package-dir]\n\"\" = \"code\"\nother = \"x/other\"\n", []string{"code"}},
+		// A package mapped to a directory ending with its name sits under a root.
+		{"setuptools package-dir", "[tool.setuptools.package-dir]\n\"\" = \"code\"\nother = \"x/other\"\n", []string{"code", "x"}},
+		{"setuptools package-dir dotted", "[tool.setuptools.package-dir]\n\"a.b\" = \"src/a/b\"\nren = \"lib\"\n", []string{"src"}},
 		{"setuptools inline package-dir", "[tool.setuptools]\npackage-dir = {\"\" = \"lib\"}\n", []string{"lib"}},
 		{
 			"setuptools inline package-dir with other keys",
 			"[tool.setuptools]\nzip-safe = false\npackage-dir = { other = \"x/other\", 'x' = \"y\", \"\"='code' }\n",
-			[]string{"code"},
+			[]string{"x", "code"},
 		},
-		{"setuptools inline package-dir without root", "[tool.setuptools]\npackage-dir = {pkg = \"lib/pkg\"}\n", nil},
+		{"setuptools inline package-dir of a package", "[tool.setuptools]\npackage-dir = {pkg = \"lib/pkg\"}\n", []string{"lib"}},
+		{"setuptools inline package-dir renaming", "[tool.setuptools]\npackage-dir = {pkg = \"lib\"}\n", nil},
 		{
 			"poetry from",
 			"[tool.poetry]\npackages = [\n  { include = \"a\", from = \"lib\" },\n  { include = \"b\" },\n]\n",
 			[]string{"lib"},
 		},
 		{"hatch packages", "[tool.hatch.build.targets.wheel]\npackages = [\"src/pkg\"]\n", []string{"src"}},
+		{"hatch build-wide packages", "[tool.hatch.build]\npackages = [\"lib/pkg\"]\n", []string{"lib"}},
+		{"hatch sources array", "[tool.hatch.build.targets.wheel]\nsources = [\"lib\"]\n", []string{"lib"}},
+		{"hatch sources inline table", "[tool.hatch.build.targets.wheel]\nsources = {\"lib\" = \"\", \"code/mypkg\" = \"mypkg\", \"x\" = \"y\"}\n", []string{"lib", "code"}},
+		{"hatch sources table", "[tool.hatch.build.targets.wheel.sources]\n\"lib\" = \"\"\n", []string{"lib"}},
+		{"pdm package-dir", "[tool.pdm.build]\npackage-dir = \"lib\"\n", []string{"lib"}},
+		{"old pdm package-dir", "[tool.pdm]\npackage-dir = \"code\"\n", []string{"code"}},
 		{"escaped quote", "[tool.pytest.ini_options]\npythonpath = [\"a\\\"b\", \"c\"]\n", []string{"a\\\"b", "c"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := pyprojectRoots(tt.doc); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("pyprojectRoots = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetupRoots(t *testing.T) {
+	cfg := []struct {
+		name, doc string
+		want      []string
+	}{
+		{"package_dir inline", "[options]\npackage_dir = =lib\npackages = find:\n", []string{"lib"}},
+		{"package_dir lines", "[options]\npackage_dir =\n    = src  # root\n    other = x/other\n    ren = elsewhere\n", []string{"src", "x"}},
+		{"packages.find where", "[options.packages.find]\nwhere = code\n", []string{"code"}},
+		{"other section", "[metadata]\npackage_dir = =no\n", nil},
+	}
+	for _, tt := range cfg {
+		t.Run("setup.cfg "+tt.name, func(t *testing.T) {
+			if got := setupCfgRoots(tt.doc); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("setupCfgRoots = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	py := []struct {
+		name, doc string
+		want      []string
+	}{
+		{"single quotes", "setup(name='x', package_dir={'': 'lib'}, packages=find_packages('lib'))\n", []string{"lib"}},
+		{"double quotes multi-line", "setup(\n    package_dir={\n        \"\": \"src\",\n        \"a.b\": \"code/a/b\",\n    },\n)\n", []string{"src", "code"}},
+		{"none", "setup(name='x')\n", nil},
+	}
+	for _, tt := range py {
+		t.Run("setup.py "+tt.name, func(t *testing.T) {
+			if got := setupPyRoots(tt.doc); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("setupPyRoots = %q, want %q", got, tt.want)
 			}
 		})
 	}

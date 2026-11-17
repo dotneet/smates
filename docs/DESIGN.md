@@ -68,6 +68,17 @@ and git diff report a mode-only change as a modification, so the snapshot, diff 
 and watch mode see it too. A symlink hashes as its target path (as git stores it), a
 submodule as `commit:` and its pinned commit.
 
+Files flagged `skip-worktree` or `assume-unchanged` (`git update-index`: local
+configuration overrides, sparse checkouts) are hashed from disk like dirty files: git
+status and git diff do not report edits to them, so the index hash would let a test
+reading a locally edited flagged file skip. They are found with `git ls-files -s -v`
+(tag `S`, or any lowercase tag); the executable-bit rules above apply. A flagged file
+not on disk keeps its index hash when it is `skip-worktree` (a sparse checkout leaves
+it out of the working tree, and git counts it as unchanged) and is deleted otherwise.
+Diff mode (`ChangedSince`, which also fails rather than drop the untracked files when
+listing them fails) and watch mode (which stats flagged files on every poll, like
+dirty ones, and counts a commit that changes one) report their edits too.
+
 Compatibility: an older smates recorded executable files by their blob alone, and may
 still be writing the state (CI on an older version, a shared or cached state). Entries
 carry no version of their own, so a recorded hash without the marker matches the
@@ -87,11 +98,26 @@ no content change").
 A path a test reads through a symlink inside the repository depends on the file it
 resolves to and on every link on the way (`pathutil.Links`: the file itself, a linked
 directory, a link to a link), each hashed as its target: retargeting
-`data/current.json -> v2.json` selects the tests that read `data/current.json`. Links
-outside the repository (a root reached through one) and vendored ones are left out. A
+`data/current.json -> v2.json` selects the tests that read `data/current.json`. A link
+of the repository that points outside of it is recorded too (the file it reaches is
+not): the shims report the path as the program used it (the Python shim keeps paths
+below the repository unresolved), and `Collect` records the links on the way whether or
+not the path resolves into the repository. Links outside the repository (a root reached
+through one) and vendored ones are left out. A
 module Node or Bun loads through a link is traced by its resolved path only (the
 runtime resolves the link before loading it; coverage lists the target), so retargeting
-such a link may be an orphan.
+such a link may be an orphan. An existence check of a symlink (`path?`) hashes as
+`dangling` while the link does not resolve, so a test that probed a link whose target
+was missing runs again once the target appears, and the other way round.
+
+On a file system that ignores case (macOS and Windows by default; detected per
+repository root by looking an entry up with its case flipped), a traced path may name a
+file in a case of its own (`/Users/me/Repo/SRC/a.ts`, `/PRIVATE/var/...`). The root is
+then matched ignoring case, and the part below it takes the case of the entries on disk
+(`src/a.ts`, as git lists it; `pathutil.Rel`), so the read is neither dropped as outside
+the repository nor recorded under a key no change ever matches. A part that does not
+exist (a probe) keeps the case it was given. Directory listings used for this are cached
+and read again when a name is missing and the directory changed since.
 
 **Cross-suite dependencies.** Tracing follows the test process and its children; it
 cannot follow a request into a server running in another process or container (an e2e
@@ -162,7 +188,7 @@ Dependency keys:
 |---|---|---|
 | `path` | blob SHA-1, `+x` appended for an executable file (`""` = absent) | a file is executed or read (also a symlink the path went through) |
 | `dir/` | hash of the entry names (of a directory git ignores entirely: from disk) | a directory is listed (readdir, os.listdir, Bun.Glob) |
-| `path?` | `exists` / `absent` | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
+| `path?` | `exists` / `absent` / `dangling` (a symlink that does not resolve) | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
 | `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: paths and sizes on disk) | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies, comments other than directives left out (of a test file: its imports, types, method signatures and what runs for every test; the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
@@ -211,8 +237,8 @@ and sizes of its files on disk, without vendored ones (the `ignore` globs do not
 here either: the command ran there); contents are not read (build output can be gigabytes, and a build that is not
 reproducible would rerun the tests forever), so a rebuilt file of the same size is no
 change. A tree of more than 20,000 entries hashes as a constant (`tree:over:20000`): its
-changes select nothing while it stays that large. A tree the snapshot has files below
-leaves its ignored files out.
+changes select nothing while it stays that large, and the selection says so in a note
+naming the directory. A tree the snapshot has files below leaves its ignored files out.
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
@@ -408,12 +434,12 @@ can alter test results.
 
 | Runner | Unit | Code deps | Data deps | Attribution |
 |---|---|---|---|---|
-| vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
+| vitest | test file | V8 coverage per worker (`NODE_V8_COVERAGE`) | fs hooks (`--require` preload; also `fs.openAsBlob`, and `node:sqlite`'s `DatabaseSync` once the program loads it with `require` or `process.getBuiltinModule`: loading it early would print an ExperimentalWarning) | one worker per file (vitest `isolate`); globalSetup window marked by the reporter |
 | node:test | test file | V8 coverage per process | fs hooks | one process per file (files always passed explicitly, escaped as globs on Node 21+); `isolate: true` = one process per file under `--test-isolation=none` |
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run, else its existence (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
-| pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy`; results keyed by each item's file (node ids of files outside the rootdir are relative to the arguments); a file some of whose collected tests did not run (`-x`, `--maxfail`, `pytest.exit()`, an interrupt; with pytest-xdist counted by the controller) is `unknown` |
-| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then); `isolate: true` = one process per module |
+| pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy`; results keyed by each item's file (node ids of files outside the rootdir are relative to the arguments); a file some of whose collected tests did not run (`-x`, `--maxfail`, `pytest.exit()`, an interrupt; with pytest-xdist counted by the controller) is `unknown`, and so is one a test of which skipped itself (see section 3) |
+| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then, or when a test of it skipped itself, see section 3); `isolate: true` = one process per module |
 | go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output |
 | go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process and of re-executions of the binary; other children as for a package | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
 | gradle | test class source file | classes the test JVM loaded (JDK Flight Recorder `jdk.ClassLoad`), mapped to the sources declaring them, + the static Java closure | `jdk.FileRead` (resources mapped to their sources, a project's jar to its resource trees), the listing of each read file's directory, `jdk.ProcessStart` command lines; Node, Bun and Python children trace themselves | one JVM per test class while recording (`forkEvery = 1`; `isolate: false` keeps Gradle's forking); JVMs matched to classes by their Gradle test executor; outcomes per class from a `TestListener` (see "Gradle") |
@@ -508,8 +534,14 @@ Processes are linked to their test even through untraced intermediaries: every t
 process records `pid`/`ppid` and `SMATES_TRACE_PARENT` (inherited through the environment,
 so `sh -c "node x | tr"` or `make` in between does not break the chain). A process
 without a test of its own belongs to its nearest traced ancestor that has one; processes
-under a Go test binary belong to that package. A process started inside a test of a
-process with contexts (`SMATES_TRACE_CTX`) is that test's helper even when it runs test
+under a Go test binary belong to that package. pids are reused: every process writes a
+stream of its own (`proc-<pid>-<tid>-<nonce>.jsonl`, as the JVM recordings use `%p-%t`),
+so a later process with an earlier one's pid, or the program an `os.exec*` replaced a
+Python process with, is a process of its own (`Proc.Inst`), and a `pid-tid` reference
+(traced ancestor, spawning context, parent pid, coverage file) names the one that had
+the pid when the referring process started (or the file was written). A process started
+inside a test of a process with contexts (`SMATES_TRACE_CTX`, which the Node shim, like
+the Python one, records as inherited and passes on) is that test's helper even when it runs test
 files itself: a pytest session a test runs in a subprocess (which inherits the context
 and then records none of its own) belongs to the test, even through an untraced chain
 of parents. smates itself clears the inherited context for the runners it starts, so a
@@ -519,7 +551,14 @@ multiprocessing forkserver, started during the first test using it, forks the wo
 of later tests too) leaves the child to the context its nearest traced ancestor with
 contexts is in when it starts. Helpers of the runner itself that execute
 repository code (a server from global setup) are global dependencies; helpers that only
-read files (crawlers, transformers) are ignored. A process smates started that names a
+read files (crawlers, transformers) are ignored. A Node or Bun helper (not a pool worker)
+that ended without an exit event and left no coverage (killed by its test or teardown:
+Node writes V8 coverage at exit, Bun's modules are listed at exit) may have run any code,
+so it counts as one that runs repository code, its script included (`codeUnknown`). The
+Node shim flushes coverage (Bun: the loaded modules) on SIGTERM, SIGINT and SIGHUP in a
+process that handles the signal itself, with a listener put first that goes away with
+the program's last one; a process without a handler keeps the default action (a listener
+would defer the signal while the process is busy, so it could no longer be killed). A process smates started that names a
 test file on its command line is the runner even when that test left no trace (a jest
 worker force-killed before writing its coverage, with one runner per test file): only
 its code is global, not its reads (jest's watchman probe and `find` crawl stand for the
@@ -557,7 +596,14 @@ source files (`go list -find`) are added to every package's dependencies.
 Node, Bun or Python children that do not load the shims: their environment lacks the
 runtime's shim, as the exec event's `rt` says, or Python runs with `-I`, `-E` or `-S`)
 are analyzed from their command line when the child starts (`child_process.*` in Node,
-`subprocess.Popen`/`os.system` audit events in Python). Every recording runner exports
+`subprocess.Popen`/`os.system` audit events in Python). A runtime counts as tracing
+itself only when the trace shows it did (`resolveExecs`, once every stream is read): a
+traced process of that runtime whose traced ancestor is the process that ran the
+command (or that has its pid: an `os.exec*`), started no earlier than the exec event, or
+a descendant of one; a command that runs the runtime itself (`node app.js`, not through
+a shell) must also have passed the process its arguments. Otherwise (a wrapper or
+launcher that replaced the environment, a child that crashed before the shim loaded)
+the runtime's programs in the command are opaque. Every recording runner exports
 the tracing environment of all three runtimes, so a pytest test's `node` child traces
 itself like a Node test's `python3` child:
 
@@ -571,12 +617,18 @@ itself like a Node test's `python3` child:
   of command substitutions (`$(<file)` reads the file) and the script's positional
   parameters (`$1`, `"$@"`; a function's body sees its call's arguments; not followed in
   a script or function that uses `shift`, `getopts` or `set --`); an unresolved input
-  redirection (`< "$X"`) is opaque;
+  redirection (`< "$X"`) is opaque, and after a `cd` to an unknown directory (`cd "$X"`,
+  `cd -`, `cd ~`, which is `$HOME`) the working directory is unknown;
 - anything else may read anything below its working directory: the test depends on
-  `cwd/**` (commands running outside the repository only on the paths they name), and on
-  the program itself when it is named by path (`../bin/tool`) and the paths in its option
-  values and response files (`--config=cfg/app.ini`, `-Dk=v`, `@args.txt`); so does a
-  command line the shims cut short (beyond 256 Ki characters).
+  `cwd/**` (the whole repository when it runs in the root, also through a symlink, or in
+  an ancestor of it; commands running elsewhere outside the repository only on the paths
+  they name), and on the program itself when it is named by path (`../bin/tool`) and the
+  paths in its option values and response files (`--config=cfg/app.ini`, `-Dk=v`,
+  `@args.txt`);
+- whatever cannot be resolved (an unset variable, a command's output, an unknown working
+  directory, commands read from stdin or a here-document, a script that cannot be read, a
+  command line the shims cut short beyond 256 Ki characters) may name any path: `cwd/**`,
+  and the whole repository when the command runs outside it.
 
 Go has no hook on process creation, but a test log shows every program a test starts:
 `os.StartProcess` logs it as an `open` of the program, followed by a `stat` of `cmd.Dir`
@@ -586,7 +638,11 @@ opened only to be read counts too (more dependencies, never fewer), and a progra
 before the test ends (built into `t.TempDir()`) is not seen. The command line is not in
 the log, so such a child is analyzed as the last case above without the paths it names:
 
-- Node, Bun and Python (by name, or a `#!` script running on them) trace themselves;
+- Node, Bun and Python (by name, or a `#!` script running on them) trace themselves,
+  when the trace directory holds as many traced processes of that runtime whose traced
+  ancestor is the package's test binary (`SMATES_TRACE_PARENT=go:<dir>`) as starts of
+  it; otherwise (a test that gives the command an environment of its own, `cmd.Env =
+  []string{"PATH=..."}`) every start of that runtime counts as the last case below;
 - a re-execution of the test binary run as a test binary (the helper-process pattern)
   runs the package's own test code and keeps a test log of its own, read like the
   parent's (see "Test logs of re-executions" below). When it is cut short, what that
@@ -605,8 +661,10 @@ the log, so such a child is analyzed as the last case above without the paths it
 
 **Environment variables** (see section 1). Node and Bun: `process.env` becomes an
 accessor returning a proxy (re-created when a test assigns `process.env`); `get`, `has`
-and `getOwnPropertyDescriptor` record a name after checking the stack (`Error().stack`,
-at most 32 checks per name and context); an `ownKeys` call followed, within the same
+and `getOwnPropertyDescriptor` record a name after checking the stack (V8 call sites
+through `Error.captureStackTrace`, no stack text formatted; every read until one with
+repository code on the stack, per name and context, so a library reading a variable
+over and over does not hide a test's later read); an `ownKeys` call followed, within the same
 tick, by lookups of the returned keys in order is a copy. jest-util's
 `installCommonGlobals` is shadowed on load so the copy jest gives each test file is
 proxied too; vitest's `import.meta.env` reads through `process.env`. A proxy cannot be
@@ -828,8 +886,10 @@ run passes no class list: Gradle's own detection runs everything the task runs.
 Outcomes per unit, from the listener's events: a failed test or class fails it; otherwise a
 test an assumption aborted (`TestResult.getAssumptionFailure`; a Gradle without it cannot
 tell a skip from `@Disabled`, so every skip counts) makes it `unknown`, since it proved
-nothing about the environment it needs; otherwise it passes (disabled and conditionally
-disabled tests do not keep it from passing). A unit without events in a successful build
+nothing about the environment it needs; otherwise a top-level class whose tests reported
+but that never finished in that task (no class event: its test JVM died mid-class) makes
+it `unknown`, with a warning; otherwise it passes (disabled and conditionally disabled
+tests do not keep it from passing). A unit without events in a successful build
 (the task's filters or tags exclude it, or it runs no test) is `unknown`, with a warning. A
 build that failed before any test reported (a compile error) fails every unit of the batch
 (`Inferred`).
@@ -1024,7 +1084,22 @@ not reported as definite misses; so is a process exit code that covers several u
 an interrupted run: never started, or tests that were declared to run but did not
 finish) and files the pytest plugin saw only some tests of run. Go packages that fail to
 build are failures (with `granularity: func`, of the package's compile check
-`dir#(build)` and of the functions that ran).
+`dir#(build)` and of the functions that ran); when the check's go test fails after
+reporting some packages (it was killed), the checks of the others are `unknown`.
+
+No reliable result means no pass. One function (`settleStatus`) turns what a run says
+about a unit into its status for the runners that trace through the shims (observeAll,
+bun, the isolated Node and unittest runs, Go functions recorded one per process): a
+failure reported, traced or from the unit's own process fails it; otherwise the
+reporter's status, else the trace's, decides (a skip or `unknown` stays so), else the
+exit code (of several units: an inferred failure); and a pass whose process left no
+trace (killed before writing it, or a command that drops smates' environment) is
+`unknown`. A JUnit report (`junit:`) counts only when this run wrote it: smates removes
+it before each invocation of the runner (a leftover of an earlier run would otherwise
+pass a unit that crashed) and reads it after each one (chunked invocations overwrite
+it). A Gradle class passes only once its class-completion event arrived (tests that
+reported before the test JVM died do not prove it): otherwise it is `unknown`, with a
+warning.
 
 A test that skips itself is not proven to pass. Go test functions recorded one per
 process run with `-test.v` (added unless the flags already print every result line:
@@ -1035,11 +1110,37 @@ no `=== RUN` line for the function (a `TestMain` that exits before `m.Run`), rec
 anywhere, since output without a final newline precedes the result line; text a test
 prints that looks like a skip can only cause a rerun. go test's own output (plain
 `--- SKIP` lines, `-json` test events) maps a top-level skip to `skip` the same way,
-fail > skip > pass across iterations; a package-level skip event (no test files) and a
-package with no tests to run stay passes. A `skip` entry is selected with reason
+fail > skip > pass across iterations. A function whose package passed but for which the
+output shows no result line is a pass only in plain output without `-v`, where passing
+tests print nothing; in `-json` output, after a `[no tests to run]` summary, and for the
+packages `granularity: func` records as a whole (smates adds `-v` there) it did not
+run, so it is `unknown`, as is a function of such a package whose output go test never
+printed (a wrapper's format) or whose package left no trace. A `skip` entry is selected with reason
 `unproven` until a run passes; flake detection ignores it (`decisive`), and the
-outcome line counts the run's skips. Package granularity, and other runners, record a
-skip as a pass (the package's or the file's summary).
+outcome line counts the run's skips. Package granularity records a skip as a pass (the
+package's summary). Per-file runners follow Gradle (see "Gradle": a test an assumption
+aborted makes its unit `unknown`, disabled tests do not keep it from passing): a file
+any test of which skipped itself at run time is `unknown`, whether all or some of its
+tests skipped; a disabled test, an expected failure and a test the user deselected
+(`-k`, `-m`, `-t`, `.only`: never reported) are not skips. pytest: `pytest.skip()` in a
+test or fixture, a `skipif` condition that held, `importorskip` and a module-level skip
+(a collection report) count, an unconditional `@pytest.mark.skip` (also through
+`pytestmark`) and `xfail` do not. unittest (`smates_unittest`): `skipTest`, `SkipTest`
+raised in a test, `setUpClass` or at import, and a `skipIf`/`skipUnless` whose
+condition held (the wrapper marks what they decorate) count, an unconditional
+`@unittest.skip` does not. vitest: a test the runner marks pending (`ctx.skip()`), or
+skipped although declared to run, counts; `it.skip`, `it.skipIf`, `.todo` and tests
+left out by `.only` or `-t` (mode `skip` at collection) do not, as the reporter cannot
+tell a condition from a plain skip there. A JUnit report cannot tell a disabled test
+from one that skipped itself: any `<skipped/>` makes its file `unknown` (as a Gradle
+without assumption information). jest has no run-time skip; node:test and bun report
+exit codes only, so `t.skip()` there still records a pass. These `unknown` statuses go to
+results files (`results-*.jsonl`), which are final, since a status in a process trace is
+combined with the run's exit code.
+
+A unit whose status comes from process exit codes is `""` (left to the run's exit code)
+when one of the processes that ran it died without an exit code, even when another one
+passed it.
 
 `smates run --shadow` runs everything while evaluating the selection and reports
 *escapes*: tests that failed but would have been skipped (and, separately, unselected
@@ -1108,11 +1209,13 @@ and reported (`interrupted` in `--report`), and smates exits 1.
 A batch whose runner cannot start (not installed, a failed preflight check) does not end
 the run: its units count as not run (`not_run`, they stay selected), later batches run,
 and what ran is recorded and reported; smates then exits 1 when tests failed, else 4
-(the exit code `--report`, the summary and the GitHub outputs give, `cycle.exitCode`).
+(the exit code `--report`, the summary and the GitHub outputs give, `reportedExit`,
+comes from the same `resolveExit` as the process exit code).
 For the snapshot its suite counts as one `--suite` left out: a full run refreshes it only
 for the suites that ran (markers for files the others also own), and the orphans a
 selective run handled are marked seen by those suites alone. A suite command line that
-cannot be parsed still ends the run as a configuration error (exit 3).
+cannot be parsed stops the run (later batches are not run and stay selected); what ran
+is recorded and reported, then it is a configuration error (exit 3).
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
 ### `--max-time` and `requires`: units left for later
@@ -1268,13 +1371,27 @@ describes one working tree and stays in it: `.smates/state.snapshot.json.gz`, re
 place of the shared file's snapshot. A worktree without one has none (no files, commit
 or time), and judges changed files against the default branch.
 
-Loading reads the shared file once and decodes it twice: the process's working copy and
-`base`, what it started from. (Two reads without the lock could see two versions; a
+Loading reads the state once and decodes it twice: the process's working copy and
+`base`, what it started from. This holds for every state, shared or not: a state of one
+worktree is written by more than one process too (`watch` and the pre-push hook, two
+terminals), so every save is the locked load-merge-save below, which keeps what the
+other process recorded (flaky history, run records, agent cache) instead of the last
+writer's copy. (Two reads without the lock could see two versions; a
 `base` newer than the working copy would make an entry another worktree just updated
 look changed by this process, and the save would put the older copy back.) Writes are
 load-merge-save under an exclusive lock file (`O_CREATE|O_EXCL`, portable to every OS
 and file system git runs on; a lock older than two minutes is stale, since a save takes
-seconds). Inside the lock the shared file is re-read and `State.MergeChanges(base, ours)`
+seconds, and so is one whose holder is a process of this host, named in the lock file,
+that no longer runs: smates killed while saving, whose lock would otherwise make the
+next save wait out `LockWait` (one minute) and fail. A holder on another host, or one
+the platform cannot check (Windows), counts as alive.) The lock file holds a token unique to its holder. Two processes may find the
+same lock stale at once; were each to remove what it found, the slower one could remove
+the fresh lock the faster one just created, and both would hold it. So a stale lock is
+removed under a second lock file (`.break`, held for a moment), and only after reading
+it again and finding the same token and modification time; a release removes the lock
+only while it still holds the releaser's token. A save writes a temporary file (mode
+0666 less the umask, or the mode of the file it replaces), syncs it, renames it over
+the state and syncs the directory, and the same state always encodes to the same bytes. Inside the lock the shared file is re-read and `State.MergeChanges(base, ours)`
 applies this process's changes, a three-way merge per entry:
 
 - an entry ours left unchanged keeps the disk's version (another worktree may have
@@ -1353,7 +1470,8 @@ be a dependency (fsnotify), needs one watch per directory (inotify limits) or pe
 reimplement `.gitignore`. A poll is one `git --no-optional-locks status --porcelain=v2
 --branch --untracked-files=all` (cheap with git's stat cache, and with `core.fsmonitor`
 on huge trees; it takes no locks, so it never races the user's own git commands) plus an
-`lstat` of each listed file. A tree state is HEAD plus the metadata (size, mtime, mode)
+`lstat` of each listed file and of each file flagged `skip-worktree` or
+`assume-unchanged` (listed from the index, read again only when the index file changed). A tree state is HEAD plus the metadata (size, mtime, mode)
 of every dirty file. Two states differ in a file when:
 
 - it is dirty in either and its metadata differs (an edit or a revert; staging and
@@ -1391,10 +1509,17 @@ turns into a burst of LLM calls; without it `orphans: agent` behaves like
 counts what ran and how many selected units were not started. Rerun (`Enter`) still
 reruns the whole previous selection, not only what started.
 
-**Stopping.** Watch runs test commands in their own process group; cancelling a cycle
-(`q`, Ctrl-C, SIGTERM, SIGHUP) sends SIGINT to the whole group and SIGKILL after 5 s, and
-kills stragglers that outlive the runner. (Tests get no stdin; one that opened the terminal itself would
-be stopped by job control, as a background job.) Keys are read in non-canonical, no-echo
+**Stopping.** Every run (`run`, `watch`, `hook`) runs test commands in their own
+process group, so that what a runner starts (pool workers, test JVMs, test binaries)
+stops with it: SIGTERM and SIGHUP (a cancelled CI job, `timeout`, a closed terminal)
+reach only smates, which cancels. Cancelling a run or a watch cycle (`q`, Ctrl-C,
+SIGTERM, SIGHUP) sends SIGINT to the whole group and SIGKILL after 5 s, and kills
+stragglers that outlive the runner. Ctrl-C reaches the tests through smates, not from
+the terminal: they are not in its foreground process group. A second signal
+terminates smates while it winds down (a runner that ignores SIGINT, a save waiting for
+the lock); it first kills the groups still running, since the SIGKILL their grace
+would send dies with smates. (Tests get no stdin; one that opened the terminal itself would
+be stopped by job control, as a background job, and Ctrl-Z stops smates, not them.) Keys are read in non-canonical, no-echo
 terminal mode with signals left on, so Ctrl-C keeps working (line mode where termios is
 not available).
 

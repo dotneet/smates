@@ -125,39 +125,60 @@ func TestRelArgsAndDir(t *testing.T) {
 }
 
 func TestChunk(t *testing.T) {
-	if got := chunk(nil); len(got) != 1 || len(got[0]) != 0 {
+	if got := chunk([]string{"run"}, nil); len(got) != 1 || len(got[0]) != 0 {
 		t.Errorf("empty input yields one empty batch: %v", got)
 	}
 	small := []string{"a", "b"}
-	if got := chunk(small); len(got) != 1 || !reflect.DeepEqual(got[0], small) {
+	if got := chunk([]string{"run"}, small); len(got) != 1 || !reflect.DeepEqual(got[0], small) {
 		t.Errorf("%v", got)
 	}
 	arg := strings.Repeat("x", 1000)
 	var many []string
 	for i := 0; i < 250; i++ {
-		many = append(many, fmt.Sprintf("%s%03d", arg, i))
+		many = append(many, fmt.Sprintf(`%s\"%03d`, arg, i))
 	}
-	got := chunk(many)
-	if len(got) < 3 {
-		t.Fatalf("expected several batches, got %d", len(got))
-	}
-	var flat []string
-	for _, b := range got {
-		size := 0
-		for _, a := range b {
-			size += len(a) + 1
+	longBase := []string{"runner", strings.Repeat("f", 5000)}
+	// The whole command line, command and flags included, stays within the platform's
+	// limit: 32767 characters on Windows (8191 through a .cmd or .bat launcher, which
+	// cmd.exe runs), quotes and escapes counted.
+	for _, c := range []struct {
+		goos  string
+		base  []string
+		limit int
+	}{
+		{"linux", []string{"run"}, maxArgBytes},
+		{"linux", longBase, maxArgBytes},
+		{"darwin", longBase, maxArgBytes},
+		{"windows", []string{"run"}, maxWindowsCmdLine},
+		{"windows", longBase, maxWindowsCmdLine},
+		{"windows", []string{`node_modules\.bin\jest.cmd`}, maxWindowsBatch},
+		{"windows", []string{"RUN.BAT", "--ci"}, maxWindowsBatch},
+	} {
+		got := chunkFor(c.goos, c.base, many)
+		if len(got) < 2 {
+			t.Fatalf("%s %q: expected several batches, got %d", c.goos, c.base[0], len(got))
 		}
-		if size > maxArgBytes {
-			t.Errorf("batch of %d bytes", size)
+		var flat []string
+		for _, b := range got {
+			size := 0
+			for _, a := range append(slices.Clone(c.base), b...) {
+				size += len(a) + 1
+				if c.goos == "windows" {
+					size += 2 + strings.Count(a, `"`) + strings.Count(a, `\`)
+				}
+			}
+			if size > c.limit {
+				t.Errorf("%s %q: command line of %d bytes, limit %d", c.goos, c.base[0], size, c.limit)
+			}
+			flat = append(flat, b...)
 		}
-		flat = append(flat, b...)
-	}
-	if !reflect.DeepEqual(flat, many) {
-		t.Error("chunking must keep every argument in order")
+		if !reflect.DeepEqual(flat, many) {
+			t.Errorf("%s %q: chunking must keep every argument in order", c.goos, c.base[0])
+		}
 	}
 	// A single oversized argument still runs (alone).
 	huge := strings.Repeat("y", maxArgBytes+10)
-	got = chunk([]string{"a", huge, "b"})
+	got := chunk([]string{"run"}, []string{"a", huge, "b"})
 	if len(got) != 3 || got[1][0] != huge {
 		t.Errorf("oversized argument: %d batches", len(got))
 	}
@@ -576,11 +597,14 @@ func TestObserve(t *testing.T) {
 	// JUnit results override, and a missing report is a warning, not an error.
 	os.WriteFile(abs("junit.xml"), []byte(`<testsuites><testsuite name="a.test.ts"><testcase classname="a.test.ts" time="0.003"><failure/></testcase></testsuite></testsuites>`), 0o644)
 	rc.Suite.Junit = "junit.xml"
+	rc.collectReport()
 	obs, warns, err := observe(rc, 0, traceOptions{})
 	if err != nil || obs["a.test.ts"].Status != state.Fail || obs["a.test.ts"].DurationMs != 3 || len(warns) != 0 {
 		t.Errorf("junit: %+v %v %v", obs["a.test.ts"], warns, err)
 	}
 	rc.Suite.Junit = "missing.xml"
+	rc.beginReport() // another run
+	rc.collectReport()
 	if _, warns, err := observe(rc, 0, traceOptions{}); err != nil || len(warns) != 1 {
 		t.Errorf("missing junit: %v %v", warns, err)
 	}
@@ -661,6 +685,7 @@ func TestJUnitKeepsWorseReporterStatus(t *testing.T) {
 		`<testcase file="test_b.py" name="t2"><failure message="junit"/></testcase>`+
 		`<testcase file="test_c.py" name="t3"/></testsuite>`), 0o644)
 	rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: ".", Junit: "junit.xml"}}, TraceDir: td}
+	rc.collectReport()
 	res, _ := reportedResults(rc)
 	for f, want := range map[string]string{"test_a.py": state.Unknown, "test_b.py": state.Fail, "test_c.py": state.Fail} {
 		if res[f].Status != want {
@@ -793,7 +818,7 @@ func TestIsolatedRunCommandLineError(t *testing.T) {
 // the process exits 0: what it used is unknown, so it runs again (and the warning
 // saying so holds). A failing exit still records the failure.
 func TestSetUnitExitUntraced(t *testing.T) {
-	o := &Observation{Files: map[string]bool{}, Status: state.Unknown, untraced: true}
+	o := &Observation{Files: map[string]bool{}, Status: state.Unknown}
 	setUnitExit(o, 0)
 	if o.Status != state.Unknown {
 		t.Errorf("untraced unit, exit 0: %s, want unknown", o.Status)
@@ -802,9 +827,50 @@ func TestSetUnitExitUntraced(t *testing.T) {
 	if o.Status != state.Fail {
 		t.Errorf("untraced unit, exit 1: %s, want fail", o.Status)
 	}
-	traced := &Observation{Files: map[string]bool{"a.js": true}, Status: state.Unknown}
+	traced := &Observation{Files: map[string]bool{"a.js": true}, ev: unitEvidence{hasTrace: true}}
 	setUnitExit(traced, 0)
 	if traced.Status != state.Pass {
 		t.Errorf("traced unit, exit 0: %s, want pass", traced.Status)
+	}
+}
+
+// settleStatus is the one place a unit's evidence becomes its status: only a unit seen
+// passing, by a process that left its trace, passes.
+func TestSettleStatus(t *testing.T) {
+	const P, F, U, S = state.Pass, state.Fail, state.Unknown, state.Skip
+	for _, c := range []struct {
+		name     string
+		ev       unitEvidence
+		want     string
+		inferred bool
+	}{
+		{"reported pass, traced", unitEvidence{reported: P, hasTrace: true}, P, false},
+		{"traced pass", unitEvidence{traced: P, hasTrace: true}, P, false},
+		{"run passed, traced", unitEvidence{hasTrace: true}, P, false},
+		{"own process passed, traced", unitEvidence{own: true, hasTrace: true}, P, false},
+		// Must not pass: no trace.
+		{"reported pass, no trace", unitEvidence{reported: P}, U, false},
+		{"own process passed, no trace", unitEvidence{own: true}, U, false},
+		{"run passed, no trace", unitEvidence{}, U, false},
+		// Must not pass: the reporter or trace said it did not finish or skipped.
+		{"reported unknown, run passed", unitEvidence{reported: U, hasTrace: true}, U, false},
+		{"reported skip, own process passed", unitEvidence{reported: S, own: true, hasTrace: true}, S, false},
+		{"traced unknown, run passed", unitEvidence{traced: U, hasTrace: true}, U, false},
+		{"reported unknown over a traced pass", unitEvidence{reported: U, traced: P, hasTrace: true}, U, false},
+		// Must not pass: a failure anywhere.
+		{"reported fail, own process passed", unitEvidence{reported: F, own: true, hasTrace: true}, F, false},
+		{"traced fail, reported pass", unitEvidence{reported: P, traced: F, hasTrace: true}, F, false},
+		{"own process crashed, reported pass", unitEvidence{reported: P, exit: 1, own: true, hasTrace: true}, F, false},
+		{"own process killed, no trace", unitEvidence{exit: 137, own: true}, F, false},
+		{"reported fail, no trace", unitEvidence{reported: F}, F, false},
+		// A failed run of several units: inferred unless the unit's own status says.
+		{"run failed", unitEvidence{exit: 1, hasTrace: true}, F, true},
+		{"run failed, unit reported passing", unitEvidence{reported: P, exit: 1, hasTrace: true}, P, false},
+		{"run failed, unit reported passing, no trace", unitEvidence{reported: P, exit: 1}, U, false},
+	} {
+		st, inf := settleStatus(c.ev)
+		if st != c.want || inf != c.inferred {
+			t.Errorf("%s: %s (inferred %v), want %s (inferred %v)", c.name, st, inf, c.want, c.inferred)
+		}
 	}
 }

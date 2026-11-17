@@ -40,8 +40,9 @@ type stateStore struct {
 	shared   bool
 	// snapPath is this worktree's snapshot file in shared mode.
 	snapPath string
-	// base is the shared entries as last loaded or saved by this process, to tell its
-	// own changes from concurrent ones.
+	// base is the entries as last loaded or saved by this process, to tell its own
+	// changes from concurrent ones (another worktree's run in shared mode; `smates
+	// watch` and a pre-push hook in the same worktree otherwise).
 	base *state.State
 	wt   *gitx.Worktrees
 }
@@ -142,12 +143,10 @@ func (s *stateStore) Load() (*state.State, error) {
 			s.seed()
 		}
 	}
-	if !s.shared {
-		return state.Load(s.path)
-	}
 	// One read, decoded twice: st is this process's copy, base what it started from.
 	// Two reads could see different versions (no lock is held here), and a base newer
 	// than st would make Save take st's older entries for changes of this process.
+	s.base = nil
 	st, base := state.New(), state.New()
 	data, err := readSharedState(s.path)
 	switch {
@@ -164,6 +163,9 @@ func (s *stateStore) Load() (*state.State, error) {
 		}
 	}
 	s.base = base
+	if !s.shared {
+		return st, nil
+	}
 	// The shared file's snapshot is the last writer's, possibly another worktree's on
 	// another branch: use this worktree's own, or none (no snapshot also means no
 	// snapshot time, which the hook's staleness check and State.Merge go by).
@@ -176,7 +178,7 @@ func (s *stateStore) Load() (*state.State, error) {
 	return st, nil
 }
 
-// readSharedState reads the shared state file (a variable for tests).
+// readSharedState reads the state file, shared or not (a variable for tests).
 var readSharedState = os.ReadFile
 
 // dropSnapshot removes the full-tree snapshot and what describes it.
@@ -184,14 +186,14 @@ func dropSnapshot(st *state.State) {
 	st.Files, st.Commit, st.Created = map[string]string{}, "", time.Time{}
 }
 
-// Save writes the state. In shared mode it re-reads the shared file under the lock and
-// applies this process's changes to it (state.MergeChanges), so concurrent runs in
-// other worktrees keep theirs; st then holds the merged entries. This worktree's
-// snapshot is written only after the entries are saved.
+// Save writes the state. It re-reads the file under the lock and applies this
+// process's changes to it (state.MergeChanges), so concurrent runs keep theirs: other
+// worktrees' in shared mode, and in any mode another smates process of this worktree
+// (`smates watch` and a pre-push hook) whose flake evidence and run records would
+// otherwise be lost to the last writer. st then holds the merged entries. The snapshot
+// is this process's (the last writer's); in shared mode this worktree's snapshot is
+// written only after the entries are saved.
 func (s *stateStore) Save(st *state.State) error {
-	if !s.shared {
-		return st.Save(s.path)
-	}
 	lock, err := state.AcquireLock(s.lockPath(), state.LockWait, state.LockStale)
 	if err != nil {
 		return err
@@ -202,7 +204,11 @@ func (s *stateStore) Save(st *state.State) error {
 		if !errors.Is(err, state.ErrUnreadable) {
 			return err
 		}
-		fmt.Fprintf(s.log, "smates: replacing the unreadable shared state at %s (%v)\n", s.path, err)
+		what := "state"
+		if s.shared {
+			what = "shared state"
+		}
+		fmt.Fprintf(s.log, "smates: replacing the unreadable %s at %s (%v)\n", what, s.path, err)
 		disk = state.New()
 	}
 	disk.MergeChanges(s.base, st)
@@ -215,6 +221,9 @@ func (s *stateStore) Save(st *state.State) error {
 	st.Suites, st.AgentCache, st.Runs, st.Tool = disk.Suites, disk.AgentCache, disk.Runs, disk.Tool
 	if s.base, err = state.Load(s.path); err != nil {
 		s.base = nil
+	}
+	if !s.shared {
+		return nil
 	}
 	// The snapshot last, once the entries it goes with are saved: a snapshot ahead of
 	// its entries would hide changes from the next run, one behind only reports some

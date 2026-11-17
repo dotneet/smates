@@ -23,8 +23,13 @@ type FileSig struct {
 	Size   int64
 	Mtime  int64 // ns
 	Mode   os.FileMode
-	// Dirty: the file differs from HEAD or the index (it was listed by git status).
+	// Dirty: the file differs from HEAD or the index (it was listed by git status), or
+	// is Flagged.
 	Dirty bool
+	// Flagged: the file is flagged skip-worktree or assume-unchanged, so git status does
+	// not report its edits: it is always stat'ed, like a dirty file, and a commit that
+	// changes it still counts (its index content moved).
+	Flagged bool
 	// Racy: modified so shortly before the scan that a later write could keep the same
 	// size and mtime (coarse file system clocks); its content hash is then recorded,
 	// and recorded again by the next scan that is given this signature in also.
@@ -75,6 +80,13 @@ func (r *Repo) ScanTree(also map[string]FileSig) (*TreeState, error) {
 			ts.Files[p] = FileSig{Dirty: true}
 		}
 	}
+	flagged, err := r.flaggedPaths()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range flagged {
+		ts.Files[p] = FileSig{Dirty: true, Flagged: true}
+	}
 	for p := range also {
 		if _, ok := ts.Files[p]; !ok {
 			ts.Files[p] = FileSig{}
@@ -93,6 +105,49 @@ func (r *Repo) ScanTree(also map[string]FileSig) (*TreeState, error) {
 		ts.Files[p] = sig
 	}
 	return ts, nil
+}
+
+// flaggedPaths lists the files of the index flagged skip-worktree or assume-unchanged
+// (see indexEntry.flagged), other than submodules. The list is kept while the index
+// file keeps its size and modification time, so polling reads the index only after git
+// wrote it.
+func (r *Repo) flaggedPaths() ([]string, error) {
+	r.flagMu.Lock()
+	defer r.flagMu.Unlock()
+	if r.indexFile == "" {
+		p, err := r.Git("rev-parse", "--git-path", "index")
+		if err != nil {
+			return nil, err
+		}
+		r.indexFile = strings.TrimSpace(p)
+		if !filepath.IsAbs(r.indexFile) {
+			r.indexFile = filepath.Join(r.Root, r.indexFile)
+		}
+	}
+	var sig FileSig
+	if fi, err := os.Stat(r.indexFile); err == nil {
+		sig = FileSig{Exists: true, Size: fi.Size(), Mtime: fi.ModTime().UnixNano()}
+		// An index written within the racy window may be rewritten with the same
+		// size and modification time: it is read again.
+		if r.flagSig != nil && *r.flagSig == sig && sig.Mtime < time.Now().Add(-racyWindow).UnixNano() {
+			return r.flagged, nil
+		}
+	}
+	idx, err := r.index()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range idx {
+		if e.flagged() && e.mode != "160000" {
+			out = append(out, e.path)
+		}
+	}
+	r.flagged, r.flagSig = out, nil
+	if sig.Exists {
+		r.flagSig = &sig
+	}
+	return out, nil
 }
 
 // Dirty returns the files the state lists as dirty (for the next ScanTree's also).
@@ -145,7 +200,7 @@ func (r *Repo) Changes(a, b *TreeState) ([]string, error) {
 			}
 			sa, inA := a.Files[p]
 			sb, inB := b.Files[p]
-			if (inA && sa.Dirty) || (inB && sb.Dirty) {
+			if (inA && sa.Dirty && !sa.Flagged) || (inB && sb.Dirty && !sb.Flagged) {
 				continue // decided by metadata above
 			}
 			add(p)

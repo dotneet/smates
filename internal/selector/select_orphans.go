@@ -20,8 +20,9 @@ func (s *selection) classifyOrphans() {
 		return
 	}
 	own := NewOwnership(in.Suites, in.Others)
+	ignore := IgnoreGlobs(in.Config)
 	for _, f := range res.Changed {
-		if pathutil.IsVendored(f) || pathutil.Match(IgnoreGlobs(in.Config), f) {
+		if pathutil.IsVendored(f) || pathutil.Match(ignore, f) {
 			continue
 		}
 		existenceChanged := in.Snap[f] == "" || !existedBefore(in, f)

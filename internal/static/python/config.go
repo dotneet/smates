@@ -2,6 +2,7 @@ package python
 
 import (
 	"path"
+	"regexp"
 	"strings"
 )
 
@@ -18,22 +19,105 @@ func pyprojectRoots(doc string) []string {
 		out = append(out, tomlStrings(doc, sec, "pythonpath")...)
 	}
 	// setuptools: [tool.setuptools.packages.find] where = ["src"], and
-	// [tool.setuptools.package-dir] "" = "src" or its inline form
+	// [tool.setuptools.package-dir] "" = "src" (or pkg = "src/pkg") or its inline form
 	// [tool.setuptools] package-dir = {"" = "src"}.
 	out = append(out, tomlStrings(doc, "tool.setuptools.packages.find", "where")...)
-	out = append(out, tomlStrings(doc, "tool.setuptools.package-dir", "")...)
+	pairs := tomlSectionPairs(doc, "tool.setuptools.package-dir")
 	for _, v := range tomlRaw(doc, "tool.setuptools", "package-dir") {
-		out = append(out, inlineTableValues(v, "")...)
+		pairs = append(pairs, inlineTablePairs(v)...)
+	}
+	for _, kv := range pairs {
+		if r, ok := mappedRoot(strings.ReplaceAll(kv[0], ".", "/"), kv[1]); ok {
+			out = append(out, r)
+		}
 	}
 	// poetry: packages = [{ include = "pkg", from = "src" }].
 	for _, v := range tomlRaw(doc, "tool.poetry", "packages") {
 		out = append(out, inlineKeyStrings(v, "from")...)
 	}
-	// hatch: packages = ["src/pkg"] makes "src" a root.
-	for _, p := range tomlStrings(doc, "tool.hatch.build.targets.wheel", "packages") {
-		out = append(out, path.Dir(p))
+	// pdm-backend: [tool.pdm.build] package-dir = "src" (older: [tool.pdm]).
+	for _, sec := range []string{"tool.pdm.build", "tool.pdm"} {
+		out = append(out, tomlStrings(doc, sec, "package-dir")...)
+	}
+	// hatch, build-wide or for the wheel: packages = ["src/pkg"] makes "src" a root;
+	// sources = ["src"] strips the prefix "src", and sources = {"src/a" = "a"} (or a
+	// [...sources] table) rewrites a prefix.
+	for _, sec := range []string{"tool.hatch.build.targets.wheel", "tool.hatch.build"} {
+		for _, p := range tomlStrings(doc, sec, "packages") {
+			out = append(out, path.Dir(p))
+		}
+		hatch := tomlSectionPairs(doc, sec+".sources")
+		for _, v := range tomlRaw(doc, sec, "sources") {
+			if strings.HasPrefix(v, "{") {
+				hatch = append(hatch, inlineTablePairs(v)...)
+			} else {
+				out = append(out, tomlStringLits(v)...)
+			}
+		}
+		for _, kv := range hatch {
+			if r, ok := mappedRoot(kv[1], kv[0]); ok {
+				out = append(out, r)
+			}
+		}
 	}
 	return out
+}
+
+// setupCfgRoots returns the import roots a setup.cfg declares for setuptools:
+// [options] package_dir (lines "= lib" or "pkg = src/pkg") and
+// [options.packages.find] where.
+func setupCfgRoots(doc string) []string {
+	var out []string
+	for _, line := range iniLines(doc, "options", "package_dir") {
+		if pkg, dir, ok := strings.Cut(line, "="); ok {
+			if r, ok := mappedRoot(strings.ReplaceAll(strings.TrimSpace(pkg), ".", "/"), dir); ok {
+				out = append(out, r)
+			}
+		}
+	}
+	return append(out, iniValues(doc, "options.packages.find", "where")...)
+}
+
+// setupPyPackageDir matches the package_dir argument of setup() in a setup.py, and
+// setupPyPair one entry of it (” : 'lib').
+var (
+	setupPyPackageDir = regexp.MustCompile(`\bpackage_dir\s*=\s*\{([^}]*)\}`)
+	setupPyPair       = regexp.MustCompile(`(?:'([^']*)'|"([^"]*)")\s*:\s*(?:'([^']*)'|"([^"]*)")`)
+)
+
+// setupPyRoots returns the import roots the package_dir={...} literal of a setup.py
+// declares.
+func setupPyRoots(doc string) []string {
+	var out []string
+	for _, m := range setupPyPackageDir.FindAllStringSubmatch(doc, -1) {
+		for _, p := range setupPyPair.FindAllStringSubmatch(m[1], -1) {
+			if r, ok := mappedRoot(strings.ReplaceAll(p[1]+p[2], ".", "/"), p[3]+p[4]); ok {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// mappedRoot returns the import root that a mapping of the import path mod ("a/b" for
+// package a.b; "" for the top level) to the directory dir makes: dir itself for "",
+// and the part of dir before mod when dir ends with it (src for a/b at src/a/b). A
+// mapping that renames (pkg at lib) has no root: such imports are found by the
+// fallback of resolver.module.
+func mappedRoot(mod, dir string) (string, bool) {
+	mod = strings.Trim(strings.TrimSpace(mod), "/")
+	dir = strings.TrimSuffix(strings.TrimSpace(dir), "/")
+	switch {
+	case mod == "" && dir == "":
+		return ".", true
+	case mod == "":
+		return dir, true
+	case dir == mod:
+		return ".", true
+	case strings.HasSuffix(dir, "/"+mod):
+		return strings.TrimSuffix(dir, "/"+mod), true
+	}
+	return "", false
 }
 
 // pyprojectTestGlobs returns the pytest python_files patterns of a pyproject.toml
@@ -222,10 +306,10 @@ func inlineKeyStrings(v, key string) []string {
 	return out
 }
 
-// inlineTableValues returns the string values assigned to key (quoted or bare) in a
-// TOML inline table such as {"" = "lib", pkg = "src/pkg"}.
-func inlineTableValues(v, key string) []string {
-	var out []string
+// inlineTablePairs returns the keys (quoted or bare) with string values of a TOML
+// inline table such as {"" = "lib", pkg = "src/pkg"}.
+func inlineTablePairs(v string) [][2]string {
+	var out [][2]string
 	k, haveKey, afterEq := "", false, false
 	for i := 0; i < len(v); i++ {
 		switch c := v[i]; {
@@ -238,9 +322,7 @@ func inlineTableValues(v, key string) []string {
 			s, i = tomlString(v, i)
 			switch {
 			case afterEq:
-				if k == key {
-					out = append(out, s)
-				}
+				out = append(out, [2]string{k, s})
 				haveKey, afterEq = false, false
 			case !haveKey:
 				k, haveKey = s, true
@@ -251,7 +333,7 @@ func inlineTableValues(v, key string) []string {
 			haveKey, afterEq = false, false
 		case isIdentChar(c) || c == '-':
 			j := i
-			for j < len(v) && (isIdentChar(v[j]) || v[j] == '-') {
+			for j < len(v) && (isIdentChar(v[j]) || v[j] == '-' || v[j] == '.') {
 				j++
 			}
 			switch {
@@ -266,9 +348,58 @@ func inlineTableValues(v, key string) []string {
 	return out
 }
 
+// tomlSectionPairs returns the keys with a string value of table section, such as
+// "" = "src" and pkg = "src/pkg" under [tool.setuptools.package-dir].
+func tomlSectionPairs(doc, section string) [][2]string {
+	var out [][2]string
+	cur := ""
+	for i := 0; i < len(doc); {
+		var line string
+		line, i = nextLine(doc, i)
+		t := strings.TrimSpace(line)
+		if t == "" || t[0] == '#' {
+			continue
+		}
+		if t[0] == '[' {
+			cur = tomlHeader(t)
+			continue
+		}
+		if cur != section {
+			continue
+		}
+		k, rest := "", t
+		if t[0] == '"' || t[0] == '\'' {
+			var end int
+			k, end = tomlString(t, 0)
+			rest = t[min(end+1, len(t)):]
+		} else if kk, _, ok := strings.Cut(t, "="); ok {
+			k = strings.TrimSpace(kk)
+			rest = t[len(kk):]
+		}
+		rest = strings.TrimSpace(rest)
+		if !strings.HasPrefix(rest, "=") {
+			continue
+		}
+		if lits := tomlStringLits(rest[1:]); len(lits) > 0 {
+			out = append(out, [2]string{k, lits[0]})
+		}
+	}
+	return out
+}
+
 // iniValues returns the whitespace separated values of key in an INI section,
 // including indented continuation lines.
 func iniValues(doc, section, key string) []string {
+	var out []string
+	for _, line := range iniLines(doc, section, key) {
+		out = append(out, strings.Fields(line)...)
+	}
+	return out
+}
+
+// iniLines returns the value of key in an INI section line by line: the rest of the
+// key's line, then its indented continuation lines, without comments.
+func iniLines(doc, section, key string) []string {
 	var out []string
 	cur := ""
 	collecting := false
@@ -282,7 +413,7 @@ func iniValues(doc, section, key string) []string {
 			}
 			if line[0] == ' ' || line[0] == '\t' {
 				if t[0] != '#' && t[0] != ';' {
-					out = append(out, strings.Fields(iniStripComment(t))...)
+					out = append(out, strings.TrimSpace(iniStripComment(t)))
 				}
 				continue
 			}
@@ -304,7 +435,9 @@ func iniValues(doc, section, key string) []string {
 		if k < 0 || strings.TrimSpace(t[:k]) != key {
 			continue
 		}
-		out = append(out, strings.Fields(iniStripComment(t[k+1:]))...)
+		if v := strings.TrimSpace(iniStripComment(t[k+1:])); v != "" {
+			out = append(out, v)
+		}
 		collecting = true
 	}
 	return out

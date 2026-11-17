@@ -328,14 +328,17 @@ func (fr *funcRecorder) runFunc(ctx context.Context, gp *goPackage, work, bin, d
 		return nil, err
 	}
 	o := &Observation{Files: map[string]bool{}, DurationMs: elapsed.Milliseconds()}
-	setUnitExit(o, code)
+	// Its coverage profile and test log are its trace (a missing profile widens its
+	// dependencies below).
+	o.ev.hasTrace = true
 	if code != 0 {
 		o.Failure = string(lastMessage(buf.Bytes()))
-	} else if o.Status == state.Pass {
+	} else {
 		// A process that passed proves the function passed only if it ran and did not
 		// skip itself.
-		o.Status = funcOutcome(buf.Bytes(), name)
+		o.ev.reported = funcOutcome(buf.Bytes(), name)
 	}
+	setUnitExit(o, code)
 	files, envs := trace.GoTestLogs(testLog, pkgDir, bin, childDir)
 	addTestLog(o, rc.Repo.Root, files, envs)
 	if procs, err := trace.Collect(work, rc.Repo.Root); err == nil {
@@ -534,7 +537,9 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 	if len(run) > maxRunRegex {
 		run = ""
 	}
-	oc := &goOutcomes{}
+	// Verbose: a function the output shows no result for did not run (a TestMain that
+	// exits before m.Run, -run matching nothing), or skipped itself; neither is a pass.
+	oc := &goOutcomes{verbose: true}
 	r, err := runPackages(ctx, &sub, whole, false, run, oc)
 	if r != nil {
 		fr.res.ExitCode = max(fr.res.ExitCode, r.ExitCode)
@@ -565,6 +570,12 @@ func (fr *funcRecorder) recordWhole(ctx context.Context, dirs []string, funcs ma
 				if !ran {
 					o.Status, o.Inferred, o.Failure = po.Status, po.Status == state.Fail, po.Failure
 				}
+			}
+			// Only go test's result line for the function proves it passed (-v prints one
+			// for each test that ran; see goOutcomes.verbose), and only a traced package
+			// says what it used.
+			if o.Status == state.Pass && (!ran || po == nil) {
+				o.Status = state.Unknown
 			}
 			if rc.Known != nil {
 				for _, k := range rc.Known(unit) {

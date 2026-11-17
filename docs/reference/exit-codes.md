@@ -6,7 +6,7 @@ command uses the same codes.
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | Success: the tests passed, or there was nothing to run. | Nothing. |
-| `1` | Tests failed, whatever code the runner exited with. Also an interrupted run, a failing `smates doctor` check, and unexpected errors. | Fix the code or the test. |
+| `1` | Tests failed, whatever code the runner exited with. Also an interrupted run and a failing `smates doctor` check; never smates' own errors. | Fix the code or the test. |
 | `2` | Usage error: an invalid command line. | Fix the command line (`smates <command> -h`). |
 | `3` | Configuration error. | Fix `smates.yml` (`smates config ...`), or the name you passed (`smates list`). |
 | `4` | Environment problem. | Run `smates doctor`; each failed check has a fix. |
@@ -28,7 +28,9 @@ tests that did not run stay selected.
   unknown `--format`);
 - flags that cannot be combined (see [`smates run`](cli.md#smates-run));
 - `--add` naming a test that is not part of the run;
-- `--base` naming no commit (in a clone that is not shallow).
+- `--base` naming no commit (in a clone that is not shallow);
+- `smates state merge` naming a file that does not exist;
+- `smates state push` on a detached HEAD without `--ref` (or `SMATES_BRANCH`).
 
 ## 3: configuration error
 
@@ -37,6 +39,10 @@ tests that did not run stay selected.
 - no suites at all (none configured and none detected);
 - a suite or test named on the command line that the configuration does not define
   (`--suite`, `--only`, `smates deps <test>`).
+
+A suite command that cannot be parsed stops the run where its batch would start: the
+batches that ran before it are recorded and reported (log, summary, `--report`) first,
+and the rest stay selected.
 
 ## 4: environment problem
 
@@ -47,8 +53,13 @@ tests that did not run stay selected.
 - in a recorded run, a runner process that exits 126 or 127 (the shell's "not
   executable" and "command not found", also through `npm test`, `yarn`, `pnpm exec` or
   `sh -c`) before any test reported a result;
-- a state that cannot be saved (for example, the shared state's lock is held by another
-  worktree's run);
+- a state that cannot be saved (for example, the state's lock is held by another
+  smates process: another worktree's run, or `smates watch` next to a pre-push hook);
+- a state file that cannot be read at all (permission denied). A state that is damaged
+  or written by a newer smates is only a warning: the command starts cold, and the next
+  save replaces it;
+- a `--report` file that cannot be written, a trace directory that cannot be created;
+- `smates state push` with no state to push, and git failing to push or fetch it;
 - a suite's [`requires`](configuration.md#requires) (a database, a browser) that are not
   met here;
 - a `--base` missing from a shallow clone (fetch it: `fetch-depth: 0`, or
@@ -70,7 +81,11 @@ In `--output failures` mode the summary line reads `NOT STARTED` instead of `PAS
 
 Failing tests matter more. When tests of another suite failed in the same run, smates
 exits 1 and prints the environment problem as a note. The same holds for a state that
-could not be saved: exit 1 when tests failed, else 4.
+could not be saved, or a `--report` that could not be written: exit 1 when tests
+failed, else 4.
+
+Any error smates does not classify exits 4, never 1: exit 1 always means a test
+failed (or the run was cut short).
 
 ## In reports and CI outputs
 

@@ -134,7 +134,7 @@ func (goTest) Commands(rc *RunContext) ([][]string, error) {
 	}
 	pkgs, dirs, funcs, checks := splitUnits(rc.Units)
 	var out [][]string
-	for _, args := range chunk(pkgArgs(rc.Suite, checks)) {
+	for _, args := range checkChunks(rc, checks) {
 		if len(args) > 0 {
 			// With its environment, so that it can be run as printed.
 			argv, env := checkArgv(rc, args)

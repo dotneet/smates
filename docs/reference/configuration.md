@@ -80,12 +80,11 @@ agent:
 Unknown keys are an error, and so are the invalid values smates checks when it loads
 the file, such as a value outside a key's list (`orphans`, `granularity`, an unknown
 `runner`), a negative `record_jobs`, `max_age` or `explain_max`, a `flaky.retry` outside
-0–5, a bad glob where [Globs](#globs) says it is checked, or a malformed `requires`
-entry. smates then exits with code 3 and names the key (see
-[Exit codes](exit-codes.md)). Some values are not checked: the globs listed as unchecked
-under [Globs](#globs), and `agent.model` and `agent.effort`, which go to the provider
-as written. `smates config set`, `smates config add-ignore` and `smates config add-input`
-edit the file and validate it before writing (see [Commands](cli.md#smates-config)).
+0–5, a bad glob (see [Globs](#globs)), a malformed `requires` entry, or a second YAML
+document. smates then exits with code 3 and names the key (see
+[Exit codes](exit-codes.md)). Some values are not checked: `agent.model` and
+`agent.effort`, which go to the provider as written. `smates config set`,
+`smates config add-ignore` and `smates config add-input` edit the file and validate it before writing (see [Commands](cli.md#smates-config)).
 
 !!! note "What an edit reruns"
     Editing a suite's entry reruns that suite's tests: every test depends on its suite's
@@ -104,14 +103,23 @@ Globs use `/` as the separator, and `**` matches any depth. Write them relative 
 directory the key names (the repository root or the suite `root`), without a leading
 `./`.
 
-The globs of `rules`, `depends_on`, `serves`, `volatile`, `untraced` and the `tests` of `requires`
-are checked when smates loads the file: an invalid one is a configuration error
-(exit 3), and a leading `./` is removed. The globs of the top-level `ignore` and
-`inputs`, and of a suite's `tests`, `exclude` and `inputs`, are used as written: one that
-is invalid or starts with `./` matches nothing, without an error.
-(`smates config add-ignore` and `add-input` refuse such globs.) A `requires` `file` is
-a path that may hold a glob: an invalid glob there is a configuration error, and a
-leading `./` does no harm.
+Every glob list is checked when smates loads the file: the top-level `ignore` and
+`inputs`; a suite's `tests`, `exclude`, `inputs`, `volatile`, `untraced` and `serves`;
+and the globs of `rules`, `depends_on` and the `tests` of `requires`. A leading `./` is
+removed, and an invalid glob is a configuration error (exit 3), as is a glob of a
+repo-relative list that starts with `/` or `..`, and a suite `inputs` glob that starts
+with `../` (write it repo-relative with a leading `/`). A backslash escapes the next
+character in a glob, so one written as a Windows path separator would match nothing:
+it is an error, unless it escapes a bracket or brace (`app/\[id\]/**`, the way to
+match a directory named `[id]`). The top-level `ignore` and `inputs` also accept an
+escaped `*`, `?` or `\`, as `smates orphans` suggests them; elsewhere `src\**` is taken
+for a Windows path separator and is an error. A
+suite's `python_roots` are paths, not globs: a leading `./` is removed and a backslash is
+an error. A `requires` `file` is a path that may hold a glob: an invalid glob there is a
+configuration error, and a leading `./` does no harm.
+
+The file holds one YAML document: a second one (after `---`) is a configuration error
+rather than being ignored.
 
 ## Top-level keys
 

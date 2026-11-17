@@ -3,9 +3,46 @@ package detect
 import (
 	"reflect"
 	"testing"
+
+	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/dotneet/smates/internal/config"
 )
 
 const nodeTestSrc = "import test from 'node:test'\ntest('x', () => {})\n"
+
+// A glob detection builds from a path with glob metacharacters (a route directory
+// such as app/[id]) matches that path only, and is one config accepts: an invalid
+// glob would make the detected configuration fail to load, and a bracket left as a
+// class would match other paths, not this one.
+func TestLiteralGlob(t *testing.T) {
+	for _, c := range []struct {
+		glob, path, other string
+	}{
+		{literalGlob("app/[id]") + "/**", "app/[id]/x.test.js", "app/i/x.test.js"},
+		{literalGlob("a[b") + "/**", "a[b/x.js", "ab/x.js"},
+		{literalGlob("a*b?c") + "/**", "a*b?c/x.js", "aXbYc/x.js"},
+		{literalGlob("{a,b}") + "/**", "{a,b}/x.js", "a/x.js"},
+		{literalGlob("a]b") + "/**", "a]b/x.js", "ab/x.js"},
+		{nodeTestGlob("app/[slug]/a.test.js"), "app/[slug]/b.test.js", "app/s/b.test.js"},
+		{nodeTestGlob("x[1]/test/a.js"), "x[1]/test/sub/b.js", "x1/test/sub/b.js"},
+		{nodeTestGlob("[a].js"), "[a].js", "a.js"},
+	} {
+		if ok, _ := doublestar.Match(c.glob, c.path); !ok {
+			t.Errorf("%q does not match %q", c.glob, c.path)
+		}
+		if ok, _ := doublestar.Match(c.glob, c.other); ok {
+			t.Errorf("%q matches %q", c.glob, c.other)
+		}
+		cfg := config.Config{Suites: []config.Suite{{Runner: "node", Tests: []string{c.glob}, Exclude: []string{c.glob}}}}
+		if err := cfg.Normalize(); err != nil {
+			t.Errorf("%q: %v", c.glob, err)
+		}
+	}
+	if g := literalGlob("plain/dir"); g != "plain/dir" {
+		t.Errorf("literalGlob(plain/dir) = %q", g)
+	}
+}
 
 // suiteSpec is what a test checks of a detected suite.
 type suiteSpec struct {

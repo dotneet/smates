@@ -150,10 +150,11 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		return res, err
 	}
 	worst, done := 0, 0
-	for _, b := range chunk(modules) {
+	rc.beginReport()
+	for _, b := range chunk(uc.argv(rc, rc.Record, nil), modules) {
 		batchUnits := moduleUnits[done : done+len(b)]
 		done += len(b)
-		code, err := rc.Exec(ctx, uc.argv(rc, rc.Record, b), env)
+		code, err := rc.reportInvocation(func() (int, error) { return rc.Exec(ctx, uc.argv(rc, rc.Record, b), env) })
 		if err != nil {
 			res.ExitCode, res.Duration = code, time.Since(start)
 			return res, err

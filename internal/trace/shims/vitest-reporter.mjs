@@ -61,11 +61,17 @@ const fileMessage = (f) => {
 // reports files it never started, and the tests a started file did not get to, without
 // failing them. Such a file is "unknown" (it runs again next time), not "pass".
 //
+// A test that skips itself (ctx.skip(), at run time) is not proven to pass either: like
+// a test an assumption aborted under Gradle, its file is "unknown". One declared skipped
+// (it.skip, describe.skip, it.skipIf, .todo, or left out by .only or -t) is a disabled
+// test and does not keep its file from passing. The runner marks a test that skipped
+// itself pending (on the task or its result).
+const selfSkipped = (task) => Boolean(task && (task.pending || (task.result && task.result.pending)));
+
 // Vitest 3+ (TestModule): a module that never started is pending or queued. Tests that
 // did not run are pending (3.x) or skipped (4+, where cancelled tests also get the skip
-// mode); in an interrupted run, a test declared to run (options.mode, taken at
-// collection) that did not pass did not finish. A test skipping itself (ctx.skip) cannot
-// be told from a cancelled one there, so it counts as unfinished in interrupted runs.
+// mode); a test declared to run (options.mode, taken at collection) that was skipped
+// skipped itself, or was cancelled.
 const moduleStatus = (m, failed, interrupted) => {
   if (failed) return 'fail';
   const state = typeof m.state === 'function' ? m.state() : undefined;
@@ -77,7 +83,9 @@ const moduleStatus = (m, failed, interrupted) => {
       const s = r && r.state;
       if (s === 'pending') return 'unknown';
       const mode = t.options && t.options.mode;
-      if (interrupted && s !== 'passed' && mode !== 'skip' && mode !== 'todo') return 'unknown';
+      const declared = mode === 'skip' || mode === 'todo';
+      if (s === 'skipped' && (!declared || selfSkipped(t.task))) return 'unknown';
+      if (interrupted && s !== 'passed' && !declared) return 'unknown';
     }
   } catch {
     return 'unknown';
@@ -87,7 +95,8 @@ const moduleStatus = (m, failed, interrupted) => {
 
 // Older API (File): a file that never started has no result or no collected tasks
 // (Vitest 1 reports it as skipped), and a test that did not get to run has no result
-// while its mode is still run (declared and dynamic skips change the mode to skip).
+// while its mode is still run (declared and dynamic skips change the mode to skip; a
+// dynamic one leaves the test pending).
 const fileStatus = (f, failed) => {
   if (failed) return 'fail';
   const state = f.result && f.result.state;
@@ -96,6 +105,7 @@ const fileStatus = (f, failed) => {
   const walk = (tasks) => {
     for (const t of tasks || []) {
       if (t.tasks) walk(t.tasks);
+      else if (selfSkipped(t)) finished = false;
       else if ((t.mode === 'run' || t.mode === 'only') && !(t.result && (t.result.state === 'pass' || t.result.state === 'skip'))) finished = false;
     }
   };

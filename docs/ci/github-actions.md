@@ -611,7 +611,10 @@ The comment says:
 Long lists are cut with counts. Details:
 
 - It works with `command: run` and `command: select`. The comment is found again by a
-  hidden marker (`<!-- smates-summary -->`), so there is one per pull request.
+  hidden marker (`<!-- smates-summary -->`), so there is one per pull request. Only a
+  comment the action's token posted is updated (`github-actions[bot]` with the default
+  token, the token's user with a personal token, any app's bot with a GitHub App token),
+  so a comment someone else writes with the marker is left alone.
 - Several smates jobs in one pull request (matrix entries, suites split across jobs)
   overwrite each other's comment unless each sets its own `comment-key`. With a key
   the marker is `<!-- smates-summary:<key> -->` (characters other than letters, digits,

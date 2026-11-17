@@ -247,7 +247,7 @@ func installHook(h *hookTarget, runArgs []string, appendTo bool, stdout, stderr 
 			fmt.Fprintf(stdout, "smates %s hook already installed in %s\n", h.kind, h.path)
 			return nil
 		}
-		if err := os.WriteFile(h.path, []byte(updated), 0o755); err != nil {
+		if err := writeExecutableAtomic(h.path, []byte(updated)); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "updated the smates %s hook in %s\n", h.kind, h.path)
@@ -273,7 +273,10 @@ func installHook(h *hookTarget, runArgs []string, appendTo bool, stdout, stderr 
 		if !strings.HasSuffix(content, "\n") {
 			content += "\n"
 		}
-		if err := os.WriteFile(h.path, []byte(content+"\n"+block), 0o755); err != nil {
+		if fi, err := os.Stat(h.path); err == nil && fi.Mode().Perm()&0o111 == 0 {
+			fmt.Fprintf(stderr, "smates: warning: %s was not executable, so git did not run it; it is now, and its own commands run too\n", h.path)
+		}
+		if err := writeExecutableAtomic(h.path, []byte(content+"\n"+block)); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "appended the smates %s hook to %s\n", h.kind, h.path)
@@ -282,7 +285,7 @@ func installHook(h *hookTarget, runArgs []string, appendTo bool, stdout, stderr 
 	if err := os.MkdirAll(filepath.Dir(h.path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(h.path, []byte("#!/bin/sh\n"+block), 0o755); err != nil {
+	if err := writeExecutableAtomic(h.path, []byte("#!/bin/sh\n"+block)); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "installed the smates %s hook in %s\n", h.kind, h.path)
@@ -363,7 +366,7 @@ func uninstallHook(h *hookTarget, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "removed %s\n", h.path)
 		return nil
 	}
-	if err := os.WriteFile(h.path, []byte(rest), 0o755); err != nil {
+	if err := writeFileAtomic(h.path, []byte(rest)); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "removed the smates block from %s (the rest of the hook is kept)\n", h.path)

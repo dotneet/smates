@@ -76,11 +76,12 @@ smates は `testMatch` などのテストのパターンを jest の設定から
 ??? note "詳細: 静的解析が読み取るもの"
     - `.js`、`.mjs`、`.cjs`、`.jsx`、`.ts`、`.mts`、`.cts`、`.tsx`。`.vue`、`.svelte`、`.astro` のコンポーネントでは `<script>` ブロック、Astro のフロントマター、相対パスの `src` 属性
     - `import`、`export … from`、`import()`、`require()`、`require.resolve()`、`import.meta.resolve()`
-    - 最も近い設定ディレクトリにある tsconfig と jsconfig の `paths` と `baseUrl`（`extends` もたどります）。対象は `tsconfig.json`、`jsconfig.json`、同じディレクトリの `tsconfig.*.json`（`tsconfig.app.json` など）と、それらが `references` に並べるプロジェクトです
+    - 最も近い設定ディレクトリ（`tsconfig.json`、`jsconfig.json`、または `tsconfig.*.json` だけがあるディレクトリ）にある tsconfig と jsconfig の `paths` と `baseUrl`（`extends` もたどります）。対象は `tsconfig.json`、`jsconfig.json`、同じディレクトリの `tsconfig.*.json`（`tsconfig.app.json` など）と、それらが `references` に並べるプロジェクトです。`extends` は、ワークスペースのパッケージにもインストール済みのパッケージ（`node_modules`）にも、パッケージの `exports` や `tsconfig` フィールドを通してたどります
     - package.json の `imports`（`#internal/x`）
     - 名前で参照するワークスペースのパッケージ。`exports`（すべての条件）、`main`、`module` をたどります。`package.json` のあるディレクトリはすべて対象になるので、ワークスペースの設定は読みません。エントリポイントが作業ツリーにない場合（ビルドしていない `dist/`）、その import はパッケージのすべてのソースファイルに依存します。どちらの場合も、パッケージの `package.json` はその import の依存になります
     - ほかで解決できない `@/x` と `~/x` は最も近いパッケージの `src/x`（なければ `x`）、`$lib/x` は `src/lib/x` として扱います（ふつうバンドラーの設定で定義するエイリアスです）
     - `import.meta.glob(...)` のパターン、`require.context(dir)`、テンプレートリテラルの import（`` import(`./locales/${lang}.json`) `` は一致するすべてのファイルに依存します）、`new URL("./file", import.meta.url)`、`/// <reference path="...">`
+    - 名前を実行時に計算する `import()` と `require()`（`import(name)`、`` `${dir}/x.js` ``）はたどれません。smates はそうしたファイルを、解決できないもの（`<dynamic>`）を import するファイルとして扱います。読めなかったソース（8 MB より大きいもの）も同じです。静的なクロージャを信頼する判定は、そうしたファイルに届くクロージャを信頼しません
     - `jest.mock`、`vi.mock` とその仲間（`doMock`、`requireActual` など）。モジュール自体と、隣の `__mocks__` ディレクトリにある手動モックです
     - bare な import（`lodash`、`@scope/pkg`）すべてについて、パッケージのルートとリポジトリのルートの `__mocks__/<name>`。Jest や Vitest が代わりに読み込むことがあります
 
@@ -164,10 +165,12 @@ smates は選択したファイルを、トップレベルディレクトリか�
     ルートは次のとおりです。
 
     - リポジトリのルート、すべての Python のプロジェクトディレクトリ（`pyproject.toml`、`setup.py`、`setup.cfg`）とその `src/`、リポジトリの `src/`
-    - pytest の `pythonpath`（`pyproject.toml`、`pytest.ini`、`tox.ini`、`setup.cfg`）と、setuptools（`packages.find.where`、`package-dir`）、poetry（`packages = [{ from = … }]`）、hatch（`packages`）のパッケージの場所
+    - pytest の `pythonpath`（`pyproject.toml`、`pytest.ini`、`tox.ini`、`setup.cfg`）と、setuptools（`packages.find.where`、`pyproject.toml` の `package-dir`、`setup.cfg` と `setup.py` の `package_dir`）、poetry（`packages = [{ from = … }]`）、hatch（`packages`、`sources`）、pdm（`package-dir`）のパッケージの場所
     - スイートの `python_roots`
     - import するファイルのトップレベルパッケージの親ディレクトリ。テストファイルではさらに、pytest がそのファイルのために読み込むすべての `conftest.py` のディレクトリ（pytest の既定の `prepend` import モード）
     - import するファイル自身のディレクトリ
+
+    トップレベルの名前をどのルートも提供しない絶対 import は、リポジトリにあるその名前のすべてのモジュールとパッケージ（`<dir>/<name>.py`、`<dir>/<name>/`）に依存します。smates が読まない方法でルートが宣言されていることがあるためです。
 
     `from a import b` は、`a` とサブモジュール `a.b` の両方に依存します。`importlib.import_module`、`__import__`、`pytest.importorskip` は、名前がリテラルならたどります。リテラルの接頭辞だけが分かる場合（`import_module(f"app.plugins.{name}")`）は、その下のすべてのモジュールに依存します。
 

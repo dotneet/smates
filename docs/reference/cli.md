@@ -433,7 +433,7 @@ smates state clear
 | `path` | Print the state file's path. |
 | `pull` | Fetch the state from a git ref and save it. Without `--ref` it tries `refs/smates/state/<branch>`, then the ref of the branch a merge or pull request targets (its base branch, when the CI reports one), then the default branch's ref. With `state_shared: true` the pulled entries are merged in. |
 | `push` | Push the state as a commit of its own to `refs/smates/state/<branch>` (or `--ref`) on the remote (force-push, hooks skipped). |
-| `merge` | Merge the given state files into the state (or into `-o file`). |
+| `merge` | Merge the given state files into the state (or into `-o file`). A file that does not exist is an error (exit 2), not an empty state. |
 | `clear` | Delete the state. In a linked worktree it is then not seeded again. With `state_shared: true` this clears it for every worktree. |
 
 | Flag | Value | Default | Meaning |

@@ -182,8 +182,11 @@ specifier may mean several files, the test depends on all of them.
     - `import`, `export … from`, `import()`, `require()`, `require.resolve()` and
       `import.meta.resolve()`;
     - tsconfig and jsconfig `paths` and `baseUrl`, through `extends`, of the nearest
-      config directory: `tsconfig.json`, `jsconfig.json`, sibling `tsconfig.*.json` files
-      (such as `tsconfig.app.json`) and the projects they list in `references`;
+      config directory (one with a `tsconfig.json`, a `jsconfig.json` or only
+      `tsconfig.*.json` files): `tsconfig.json`, `jsconfig.json`, sibling
+      `tsconfig.*.json` files (such as `tsconfig.app.json`) and the projects they list in
+      `references`. `extends` is followed into workspace packages and installed ones
+      (`node_modules`), through the package's `exports` or `tsconfig` field;
     - package.json `imports` (`#internal/x`);
     - workspace packages by name, through `exports` (every condition), `main` and
       `module`. Every directory with a `package.json` counts, so no workspace
@@ -196,6 +199,10 @@ specifier may mean several files, the test depends on all of them.
     - `import.meta.glob(...)` patterns, `require.context(dir)`, template-literal imports
       (`` import(`./locales/${lang}.json`) `` depends on every file that matches),
       `new URL("./file", import.meta.url)` and `/// <reference path="...">`;
+    - `import()` and `require()` of a computed name (`import(name)`, `` `${dir}/x.js` ``)
+      cannot be followed: smates reports such a file as importing something it cannot
+      resolve (`<dynamic>`), like a source it could not read (larger than 8 MB), and
+      the checks that trust a static closure do not trust one that reaches it;
     - `jest.mock`, `vi.mock` and their relatives (`doMock`, `requireActual`, …): the
       module, and its manual mock in the adjacent `__mocks__` directory;
     - for any bare import (`lodash`, `@scope/pkg`), `__mocks__/<name>` at the package root
@@ -351,12 +358,18 @@ code on `sys.path` some other way, add the directory to the suite's
       `setup.py`, `setup.cfg`) and its `src/`, and the repository's `src/`;
     - pytest's `pythonpath` (in `pyproject.toml`, `pytest.ini`, `tox.ini` or
       `setup.cfg`) and the package locations of setuptools (`packages.find.where`,
-      `package-dir`), poetry (`packages = [{ from = … }]`) and hatch (`packages`);
+      `package-dir` in `pyproject.toml`, `package_dir` in `setup.cfg` and `setup.py`),
+      poetry (`packages = [{ from = … }]`), hatch (`packages`, `sources`) and pdm
+      (`package-dir`);
     - the suite's `python_roots`;
     - the parent of the importing file's top-level package and, for a test file, the
       directory of every `conftest.py` pytest loads for it (pytest's default `prepend`
       import mode);
     - the importing file's own directory.
+
+    An absolute import whose top-level name no root provides depends on every module
+    or package of that name in the repository (`<dir>/<name>.py`, `<dir>/<name>/`):
+    the root may be declared in a way smates does not read.
 
     `from a import b` depends on both `a` and the submodule `a.b`.
     `importlib.import_module`, `__import__` and `pytest.importorskip` with a literal name

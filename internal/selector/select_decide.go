@@ -28,6 +28,25 @@ func (s *selection) decideTests() {
 		}
 		ss.sr.All = allSelected(ss.sr)
 	}
+	s.noteOversizedTrees()
+}
+
+// noteOversizedTrees notes the directories outside the snapshot that tests depend on
+// as a whole (a command ran there) and that have too many entries to hash: changes
+// below them select nothing (see diskTree).
+func (s *selection) noteOversizedTrees() {
+	if s.hasher == nil {
+		return
+	}
+	trees := s.hasher.OversizedTrees()
+	if len(trees) == 0 {
+		return
+	}
+	names := trees
+	if len(names) > 5 {
+		names = append(slices.Clip(names[:5]), fmt.Sprintf("… (+%d)", len(trees)-5))
+	}
+	s.res.Notes = append(s.res.Notes, fmt.Sprintf("%d untracked director(y/ies) that tests depend on as a whole have more than %d entries, so changes below them select nothing (list what the tests use there as inputs to track it): %s", len(trees), maxDiskTree, strings.Join(names, ", ")))
 }
 
 // findUnrecordedReads returns, in a DiffUnrecorded selection with a suite that has
@@ -91,7 +110,7 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 	deps := ss.sr.Deps[u.id]
 	sets := ss.setChanged
 	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil {
-		decide(t, ModeDiff, nil, deps, ss.hasher, ss.baseChanged)
+		decide(t, ModeDiff, nil, deps, ss.hasher, ss.baseChangeSet)
 		sets = ss.setChangedBase
 		if reads := s.unrecordedReads[ss.sr.Name]; !t.Selected && len(reads) > 0 {
 			t.Selected, t.Reason = true, ReasonNew
@@ -101,7 +120,7 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 			}
 		}
 	} else {
-		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changed)
+		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changeSet)
 	}
 	s.runAnyway(t, ss, u)
 	s.reportConfig(t, u.known)
@@ -160,7 +179,7 @@ func (s *selection) reportConfig(t *Test, known *unitKnown) {
 // change with the file); otherwise a test with no recorded entry, a test with a
 // dependency whose hash differs from the recorded one (or that was not recorded) and a
 // test that did not pass last time (skipping itself is no pass: ReasonUnproven).
-func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed map[string]bool) {
+func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, changed changeSet) {
 	switch mode {
 	case ModeAll:
 		t.Selected, t.Reason = true, ReasonAll
@@ -170,7 +189,7 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 			// Without a recording, a Go file's declarations change when the file does,
 			// and a Go package's shape and method sets when one of its Go files does.
 			f, isFile := depkey.File(d)
-			if changed[d] || (isFile && changed[f]) || goPackageChanged(d, changed) {
+			if changed.files[d] || (isFile && changed.files[f]) || changed.goPackage(d) {
 				t.Changed = append(t.Changed, d)
 			}
 		}
@@ -256,17 +275,27 @@ func explain(t *Test, sr *Suite, known *unitKnown, sets map[*ServiceDeps][]strin
 	t.Changed = changed
 }
 
-// goPackageChanged reports whether d is the shape or a method set of a Go package
-// (depkey.Shape, depkey.Methods) one of whose Go files is among the changed files.
-func goPackageChanged(d string, changed map[string]bool) bool {
-	kind, dir := depkey.Parse(d)
-	if kind != depkey.KindShape && kind != depkey.KindMethods {
-		return false
-	}
-	for f := range changed {
-		if strings.HasSuffix(f, ".go") && path.Dir(f) == dir {
-			return true
+// changeSet is a set of changed files (nil: none) indexed for decide.
+type changeSet struct {
+	files map[string]bool
+	// goDirs are the directories of the changed Go files.
+	goDirs map[string]bool
+}
+
+// newChangeSet indexes changed files.
+func newChangeSet(files map[string]bool) changeSet {
+	cs := changeSet{files: files, goDirs: map[string]bool{}}
+	for f := range files {
+		if strings.HasSuffix(f, ".go") {
+			cs.goDirs[path.Dir(f)] = true
 		}
 	}
-	return false
+	return cs
+}
+
+// goPackage reports whether d is the shape or a method set of a Go package
+// (depkey.Shape, depkey.Methods) one of whose Go files is among the changed files.
+func (cs changeSet) goPackage(d string) bool {
+	kind, dir := depkey.Parse(d)
+	return (kind == depkey.KindShape || kind == depkey.KindMethods) && cs.goDirs[dir]
 }
