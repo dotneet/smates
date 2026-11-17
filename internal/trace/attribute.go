@@ -56,44 +56,18 @@ type Options struct {
 func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribution {
 	res := &Attribution{Units: map[string]*Unit{}, Global: map[string]bool{}}
 	byKey := map[string]*Proc{}
-	byPid := map[int][]*Proc{}
 	for _, p := range procs {
 		byKey[p.Key()] = p
-		byPid[p.Pid] = append(byPid[p.Pid], p)
 	}
-	// pidAt returns the process (its main thread, the lowest thread id traced) that had
-	// pid at time t, other than self: pids are reused, so of several processes with it,
-	// the last one started by then (else the first).
-	pidAt := func(pid int, t int64, self *Proc) *Proc {
-		var out *Proc
-		for _, q := range byPid[pid] {
-			switch {
-			case q == self:
-			case out == nil || q.Tid < out.Tid:
-				out = q
-			case q.Tid == out.Tid && q.Start <= t && (out.Start > t || q.Start >= out.Start):
-				out = q
-			}
+	ix := newProcIndex(procs)
+	parent := func(p *Proc) *Proc { return parentOf(p, ix, byKey) }
+	// A process that lost events (Proc.Lost) may have read anything, in any of its
+	// contexts (the event lost may have been a context switch): outside every context,
+	// which all its units share, it depends on the whole repository.
+	for _, p := range procs {
+		if p.Lost {
+			p.add("", "key", lostKey)
 		}
-		return out
-	}
-	parent := func(p *Proc) *Proc {
-		if p.Tid != 0 {
-			if m := pidAt(p.Pid, p.Start, p); m != nil && m.Tid < p.Tid {
-				return m
-			}
-		}
-		if p.Ppid != 0 && p.Ppid != p.Pid {
-			if a := pidAt(p.Ppid, p.Start, nil); a != nil {
-				return a
-			}
-		}
-		// The direct parent was not traced (a shell, npx, uv...): use the nearest traced
-		// ancestor recorded in the environment.
-		if a := byKey[p.Anc]; a != nil && a != p {
-			return a
-		}
-		return nil
 	}
 
 	// A process started inside a test of a process with contexts (a script, a pool
@@ -192,6 +166,10 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		switch {
 		case target != nil && target.HasContexts():
+			if p.Lost {
+				// What it lost is not known to belong to the context it was started in.
+				target.add("", "key", lostKey)
+			}
 			for ctx, files := range p.contextsIn(target, files) {
 				m := target.Ctx[ctx]
 				if m == nil {
@@ -209,12 +187,13 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			for f := range files {
 				extra[target][f] = true
 			}
-		case !infra[p] && (len(p.Code) > 0 || opt.WorkersOwnArgv || unknownCode):
+		case !infra[p] && (len(p.Code) > 0 || opt.WorkersOwnArgv || unknownCode || p.Lost):
 			// A helper that runs repository code (a server started by global setup) is
 			// something every test may talk to. Helpers that only read files (the
 			// runner's own crawlers and transformers) are not. Without coverage
 			// (WorkersOwnArgv) what a helper runs is unknown: it counts as such a helper,
-			// and so does one killed before it could say (codeUnknown).
+			// and so does one killed before it could say (codeUnknown), or one whose
+			// trace lost events (the code it ran among them, say).
 			for f := range files {
 				res.Global[f] = true
 			}
@@ -225,6 +204,10 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	// custom reporters or resolvers) can affect every test. Its reads are not counted:
 	// runners read every test and source file to transform or crawl them.
 	for p := range infra {
+		// The runner's events lost may have been its code, or global setup's reads.
+		if p.Lost {
+			res.Global[lostKey] = true
+		}
 		if p.HasContexts() {
 			continue
 		}
@@ -311,6 +294,9 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 	}
 	return res
 }
+
+// lostKey is what a process that lost events depends on: every file of the repository.
+var lostKey = depkey.Tree(".")
 
 // codeUnknown reports whether p may have run code its trace does not show: a Node or
 // Bun process (not a test runner's worker) that ended without recording its exit, and

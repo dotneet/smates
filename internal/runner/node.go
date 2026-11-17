@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,8 +124,8 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 		// The project runs files in shared workers (isolate: false), or no coverage
 		// tells which file a worker ran (untraced): run each file on its own while
 		// recording.
-		return runIsolatedNode(ctx, rc, func(u string) []string {
-			return append(append([]string{}, extra...), relToSuite(rc.Suite, u))
+		return runIsolatedNodeWithFallback(ctx, rc, extra, func(u string, injected []string) []string {
+			return append(append([]string{}, injected...), relToSuite(rc.Suite, u))
 		}, untracedOptions(rc, traceOptions{}))
 	}
 	return runNodeWithFallback(ctx, rc, extra, rc.RelArgs(""), traceOptions{})
@@ -136,8 +137,35 @@ func (vitest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 // The V8 coverage goes to the user's NODE_V8_COVERAGE once, from the attempt kept: a
 // rejected first attempt's files are discarded with its trace.
 func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs []string, opt traceOptions) (*RunResult, error) {
-	res, err := runNodeAttempt(ctx, rc, injected, testArgs, opt)
-	if err != nil || len(injected) == 0 || res.ExitCode == 0 || len(res.Observations) > 0 || rc.TraceDir == "" {
+	return withInjectedFallback(ctx, rc, injected, func(injected []string) (*RunResult, bool, error) {
+		res, err := runNodeAttempt(ctx, rc, injected, testArgs, opt)
+		return res, res != nil && len(res.Observations) > 0, err
+	})
+}
+
+// runIsolatedNodeWithFallback is runIsolatedNode with smates' injected arguments
+// (args adds them to the command line of a unit), and the fallback of
+// runNodeWithFallback: when every unit's process failed and none ran a test file with
+// them, the units run again without them.
+func runIsolatedNodeWithFallback(ctx context.Context, rc *RunContext, injected []string, args func(unit string, injected []string) []string, opt traceOptions) (*RunResult, error) {
+	return withInjectedFallback(ctx, rc, injected, func(injected []string) (*RunResult, bool, error) {
+		res, codes, err := runIsolatedNodeAttempt(ctx, rc, func(u string) []string { return args(u, injected) }, opt)
+		// The units of an isolated run are observed from their command lines too
+		// (untraced), so an observation does not show that a test file ran; a process
+		// that passed does.
+		ran := slices.Contains(slices.Collect(maps.Values(codes)), 0)
+		return res, ran, err
+	})
+}
+
+// withInjectedFallback runs attempt with smates' injected arguments and, when it failed
+// before any test file ran because of them, again without them (keeping only those
+// the units are named by). ran says whether an attempt ran a test file. A run that
+// loaded smates' reporter or reported a result, or that would run with the same
+// arguments again, failed on its own. The V8 coverage of the attempt kept is exported.
+func withInjectedFallback(ctx context.Context, rc *RunContext, injected []string, attempt func(injected []string) (*RunResult, bool, error)) (*RunResult, error) {
+	res, ran, err := attempt(injected)
+	if err != nil || len(injected) == 0 || res.ExitCode == 0 || ran || rc.TraceDir == "" {
 		exportNodeV8(rc, res)
 		return res, err
 	}
@@ -151,8 +179,6 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 			keep = append(keep, a)
 		}
 	}
-	// A run that loaded the reporter, or would run again with the same arguments,
-	// failed on its own.
 	if len(keep) == len(injected) || trace.ReporterLoaded(rc.TraceDir) || len(trace.Results(rc.TraceDir, rc.Repo.Root)) > 0 {
 		exportNodeV8(rc, res)
 		return res, nil
@@ -164,7 +190,8 @@ func runNodeWithFallback(ctx context.Context, rc *RunContext, injected, testArgs
 	if err := os.MkdirAll(rc.TraceDir, 0o755); err != nil {
 		return res, err
 	}
-	res, err = runNode(ctx, rc, keep, testArgs, opt)
+	res, _, err = attempt(keep)
+	exportNodeV8(rc, res)
 	if res != nil {
 		res.Warnings = append(res.Warnings, "smates' reporter could not be loaded; per-file pass/fail falls back to the overall exit code")
 	}
@@ -288,8 +315,8 @@ func (jest) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// as it does each untraced unit (one jest per file, see untracedOptions).
 	opt := traceOptions{dropDirs: inBand || rc.Untraced}
 	if rc.Record && (config.Bool(rc.Suite.Isolate, false) || rc.Untraced) {
-		return runIsolatedNode(ctx, rc, func(u string) []string {
-			return append(append([]string{}, extra...), "--runTestsByPath", relToSuite(rc.Suite, u))
+		return runIsolatedNodeWithFallback(ctx, rc, extra, func(u string, injected []string) []string {
+			return append(append([]string{}, injected...), "--runTestsByPath", relToSuite(rc.Suite, u))
 		}, untracedOptions(rc, opt))
 	}
 	if !rc.All {
@@ -330,10 +357,18 @@ func hasArg(rc *RunContext, arg string) bool {
 
 // runIsolatedNode runs each unit in its own runner process while recording.
 func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []string, opt traceOptions) (*RunResult, error) {
+	res, _, err := runIsolatedNodeAttempt(ctx, rc, args, opt)
+	exportNodeV8(rc, res)
+	return res, err
+}
+
+// runIsolatedNodeAttempt is runIsolatedNode without exporting the coverage, returning
+// the exit code of each unit's process too.
+func runIsolatedNodeAttempt(ctx context.Context, rc *RunContext, args func(string) []string, opt traceOptions) (*RunResult, map[string]int, error) {
 	// rc.Units lists every unit even when rc.All is set.
 	units := rc.Units
 	if err := os.MkdirAll(trace.V8Dir(rc.TraceDir), 0o755); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	env := traceEnv(rc)
 	start := time.Now()
@@ -351,7 +386,7 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 	worst := worstCode(codes)
 	res := &RunResult{ExitCode: worst, Duration: time.Since(start)}
 	if err != nil {
-		return res, err
+		return res, codes, err
 	}
 	obs, warns, err := observe(rc, worst, opt)
 	for u, o := range obs {
@@ -359,8 +394,8 @@ func runIsolatedNode(ctx context.Context, rc *RunContext, args func(string) []st
 			setUnitExit(o, c)
 		}
 	}
-	res.Observations, res.Warnings = obs, append(warns, exportV8(rc)...)
-	return res, err
+	res.Observations, res.Warnings = obs, warns
+	return res, codes, err
 }
 
 // ---- node --test ----

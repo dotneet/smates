@@ -16,7 +16,8 @@ import (
 // virtual module a plugin serves, a file that does not exist. An import() or require()
 // of a computed name, or of a template literal without a static prefix
 // (import(`${dir}/x.js`)), is reported once as host.DynamicSpec: it may load any file.
-// Other patterns (templates with a prefix, import.meta.glob) are not checked.
+// Other patterns (templates with a prefix, import.meta.glob) are not checked, nor are
+// specifiers only the coarse scan found (see withCoarse), which may be a comment's.
 func (a *Analyzer) Unresolved(p string, src []byte) []string {
 	dir := path.Dir(p)
 	var out []string
@@ -26,7 +27,9 @@ func (a *Analyzer) Unresolved(p string, src []byte) []string {
 		case r.kind == refDynamic, r.kind == refTemplate && r.spec == "":
 			dynamic = true
 			continue
-		case r.kind != refModule || r.erase == eraseAlways:
+		case r.kind != refModule || r.erase == eraseAlways || r.coarse:
+			// A specifier only the coarse scan found may be a comment's or a
+			// string's; it adds dependencies but does not make the file unknown.
 			continue
 		}
 		spec := cleanSpec(r.spec)

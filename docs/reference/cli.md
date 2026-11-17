@@ -26,7 +26,8 @@ Run `smates <command> -h` to print a command's flags (exit code 0); for `config`
 `state` and `hook` it also lists the subcommands. Flags take one dash or two (`-all`
 and `--all` are the same). Flags may come before or after positional arguments
 (`smates why src/a.ts --format json`); `--` ends the flags. In `run`, `select` and
-`watch`, arguments after `--` go to the test runner.
+`watch`, arguments after `--` go to the test runner. A positional argument a command
+does not take (`smates list foo`, `smates state clear foo`) is a usage error (exit 2).
 
 ## Common flags
 
@@ -96,7 +97,9 @@ Combinations that are rejected (exit code 2):
 
 In `run` and `watch`, arguments after `--` reach every suite's runner
 (`smates run -- -t name`). They may filter tests, so a run or a watch cycle with them
-never records a test as passed. Put permanent flags in the suite's `command` instead.
+never records a test as passed. A full run with them (`--all`, or the default branch on
+CI) is not a refresh either: it drops no recorded test and keeps the recorded
+snapshot. Put permanent flags in the suite's `command` instead.
 
 ??? note "Details: what `--output failures` prints"
     Each runner batch's output is buffered and printed only when the batch fails. For

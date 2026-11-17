@@ -111,6 +111,49 @@ func TestCovers(t *testing.T) {
 			t.Errorf("CoverIndex.Covers(%q, %v) = %q, want %q", c.key, c.existenceChanged, got, c.want)
 		}
 	}
+	// A submodule at lib (recorded as one entry for its commit): only keys inside it
+	// whose hash follows the content there explain a new commit; a listing or an
+	// existence check inside it, a Go package's shape or method sets (hashed from the
+	// files git lists, which a submodule's are not) can stay the same across it, so
+	// the bump stays an orphan of the tests holding only those (must keep).
+	for _, c := range []struct {
+		key              string
+		existenceChanged bool
+		want             CoverKind
+	}{
+		{"lib/VERSION", false, CoverContent},
+		{"lib/pkg/a.go", false, CoverContent},
+		{Decls("lib/pkg/a.go"), false, CoverContent},
+		{Decl("lib/pkg/a.go", "F"), false, CoverContent},
+		{Sig("lib/pkg/a.go", "F"), false, CoverContent},
+		{Config("lib/smates.yml"), false, CoverContent},
+		{Tree("lib"), false, CoverContent},     // the submodule's tree: its hash includes the commit
+		{Tree("lib/pkg"), false, CoverContent}, // a tree inside it: so does its hash
+		{Listing("lib"), false, CoverNone},
+		{Listing("lib"), true, CoverNone},
+		{Listing("lib/pkg"), false, CoverNone},
+		{Existence("lib/VERSION"), false, CoverNone},
+		{Existence("lib/VERSION"), true, CoverNone},
+		{Shape("lib/pkg"), false, CoverNone},
+		{Methods("lib/pkg", "T"), false, CoverNone},
+		{Tree("."), false, CoverNone},
+		{Listing("."), false, CoverNone},
+		{Listing("."), true, CoverListing}, // the submodule added or removed
+		{Existence("lib"), true, CoverExistence},
+	} {
+		deps := map[string]bool{c.key: true}
+		if got := Covers(deps, "lib", c.existenceChanged); got != c.want {
+			t.Errorf("submodule: Covers(%q, %v) = %q, want %q", c.key, c.existenceChanged, got, c.want)
+		}
+		if got := NewCoverIndex(deps).Covers("lib", c.existenceChanged); got != c.want {
+			t.Errorf("submodule: CoverIndex.Covers(%q, %v) = %q, want %q", c.key, c.existenceChanged, got, c.want)
+		}
+		// Next to keys that do not reflect content, sorting before and after it.
+		deps[Listing("lib/a")], deps[Existence("lib/z")] = true, true
+		if got, want := NewCoverIndex(deps).Covers("lib", c.existenceChanged), Covers(deps, "lib", c.existenceChanged); got != want {
+			t.Errorf("submodule: with listings, CoverIndex.Covers(%q) = %q, Covers = %q", c.key, got, want)
+		}
+	}
 	// The strongest explanation wins.
 	deps := map[string]bool{Tree("a"): true, Existence(f): true, Decls(f): true}
 	if got := Covers(deps, f, true); got != CoverDecls {
@@ -225,7 +268,8 @@ func TestCoverIndexMatchesCovers(t *testing.T) {
 	files := []string{"a/b/c.go", "a/b/c.go.bak", "a/b/c-go", "a/b/c.gox", "a/b/c", "a/b", "a", "go.mod", "a/b/c.go/sub"}
 	var pool []string
 	for _, f := range files {
-		pool = append(pool, f, Decls(f), Decl(f, "F"), Sig(f, "T.M"), Config(f), Listing(f), Existence(f), Tree(f), Shape(f), Methods(f, "T"), f+"-x", f+".x", f+"/x/y")
+		pool = append(pool, f, Decls(f), Decl(f, "F"), Sig(f, "T.M"), Config(f), Listing(f), Existence(f), Tree(f), Shape(f), Methods(f, "T"), f+"-x", f+".x", f+"/x/y",
+			Listing(f+"/x"), Existence(f+"/x"), Tree(f+"/x"), Shape(f+"/x"))
 	}
 	pool = append(pool, Env("A"), Set("suite:a"), Tree("."), Listing("."))
 	for i := 0; i < 3000; i++ {

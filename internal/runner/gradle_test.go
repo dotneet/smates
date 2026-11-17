@@ -2,6 +2,7 @@ package runner
 
 import (
 	"maps"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -283,10 +284,10 @@ func TestGradleInputsSiblingBuild(t *testing.T) {
 
 func TestGradleObservations(t *testing.T) {
 	yes, no := true, false
-	classes := map[string]string{
+	classes := newGradleClassMap(map[string]string{
 		"com.example.ATest": "a", "com.example.BTest": "b", "com.example.CTest": "c",
 		"com.example.DTest": "d", "com.example.ETest": "e", "com.example.Second": "e",
-	}
+	})
 	units := []string{"a", "b", "c", "d", "e", "f"}
 	ev := func(k, class, name, result string, assumption *bool) gradleEvent {
 		return gradleEvent{K: k, Class: class, Name: name, Result: result, Ms: 5, Assumption: assumption, Msg: "boom"}
@@ -353,6 +354,91 @@ func TestGradleObservations(t *testing.T) {
 		if obs[u] == nil || obs[u].Status != state.Fail || !obs[u].Inferred {
 			t.Errorf("%s: %+v, want an inferred failure", u, obs[u])
 		}
+	}
+}
+
+// Two projects of a build may declare test classes of the same qualified name. The
+// settings say which project each task is in, and so which file an event is for; a
+// class of the same name the selection by name also runs elsewhere is not the
+// selected file's. When the settings cannot tell, the events of such a class prove
+// nothing for either file: a failure fails both (inferred), a pass passes neither.
+func TestGradleSameClassInTwoProjects(t *testing.T) {
+	const (
+		a = "app/src/test/java/p/FooTest.java"
+		b = "lib/src/test/java/p/FooTest.java"
+		n = "lib/nested/src/test/java/p/FooTest.java"
+		c = "lib/src/test/java/p/BarTest.java"
+	)
+	repo := tempRepo(t)
+	for _, f := range []string{a, b, n} {
+		testutil.Write(t, repo.Root, f, "package p;\nclass FooTest { @org.junit.jupiter.api.Test void t() {} }\n")
+	}
+	testutil.Write(t, repo.Root, c, "package p;\nclass BarTest { @org.junit.jupiter.api.Test void t() {} }\n")
+	ev := func(task, class, result string) gradleEvent {
+		return gradleEvent{K: "test", Task: task, Class: class, Name: "t()", Result: result, Msg: "boom"}
+	}
+	cases := []struct {
+		name     string
+		settings string // "" = no settings file
+		units    []string
+		events   []gradleEvent
+		want     map[string]string // unit -> status ("" = no observation)
+		inferred bool              // the failures are inferred
+	}{
+		{"settings tell them apart", "include 'app', 'lib', 'lib:nested'\n", []string{a, b, n},
+			[]gradleEvent{ev(":app:test", "p.FooTest", "FAILURE"), ev(":lib:test", "p.FooTest", "SUCCESS"), ev(":lib:nested:test", "p.FooTest", "SUCCESS")},
+			map[string]string{a: state.Fail, b: state.Pass, n: state.Pass}, false},
+		// Must keep: the other project's class of the same name runs too (the selection
+		// is by name) and passes; the selected one ran nothing.
+		{"the other project's class is not the selected one's", "include 'app', 'lib'\n", []string{a, c},
+			[]gradleEvent{ev(":lib:test", "p.FooTest", "SUCCESS"), ev(":lib:test", "p.BarTest", "SUCCESS")},
+			map[string]string{a: state.Unknown, c: state.Pass}, false},
+		// Must keep: no settings to tell the projects apart.
+		{"ambiguous pass", "", []string{a, b},
+			[]gradleEvent{ev(":app:test", "p.FooTest", "SUCCESS"), ev(":lib:test", "p.FooTest", "SUCCESS")},
+			map[string]string{a: state.Unknown, b: state.Unknown}, false},
+		{"ambiguous failure", "", []string{a, b},
+			[]gradleEvent{ev(":app:test", "p.FooTest", "SUCCESS"), ev(":lib:test", "p.FooTest", "FAILURE")},
+			map[string]string{a: state.Fail, b: state.Fail}, true},
+		// Must keep: settings that compute a project smates cannot read.
+		{"unreadable settings", "include 'app', 'lib'\ninclude(System.getenv('X'))\n", []string{a, b},
+			[]gradleEvent{ev(":app:test", "p.FooTest", "SUCCESS"), ev(":lib:test", "p.FooTest", "SUCCESS")},
+			map[string]string{a: state.Unknown, b: state.Unknown}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Remove(filepath.Join(repo.Root, "settings.gradle"))
+			if tc.settings != "" {
+				testutil.Write(t, repo.Root, "settings.gradle", tc.settings)
+			}
+			rc := &RunContext{Repo: repo, Suite: &Suite{Suite: config.Suite{Root: "."}}, Units: tc.units}
+			classes := gradleClasses(rc)
+			// The selection names each class once.
+			if got := classes.names(); len(slices.Compact(slices.Clone(got))) != len(got) || !slices.Contains(got, "p.FooTest") {
+				t.Errorf("names %v", got)
+			}
+			exit := 0
+			var events []gradleEvent
+			for _, e := range tc.events { // each class finishes after its test
+				if e.Result == "FAILURE" {
+					exit = 1
+				}
+				done := e
+				done.K, done.Name = "class", e.Class
+				events = append(events, e, done)
+			}
+			obs, _ := gradleObservations(tc.units, classes, events, exit, false)
+			for u, want := range tc.want {
+				o := obs[u]
+				if o == nil || o.Status != want {
+					t.Errorf("%s: %+v, want %s", u, o, want)
+					continue
+				}
+				if want == state.Fail && o.Inferred != tc.inferred {
+					t.Errorf("%s: inferred %v, want %v", u, o.Inferred, tc.inferred)
+				}
+			}
+		})
 	}
 }
 

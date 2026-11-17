@@ -407,26 +407,22 @@ func (m *gradleMapper) read(p, wd string) []string {
 // dependencies of every JVM that ran a class of the unit. A unit that ran in a JVM
 // whose recording is missing or unreadable, or that ran in no known JVM, stays NoTrace.
 // procs are the Node, Bun and Python processes that traced themselves.
-func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes map[string]string, recs []*jvmRecording, facts []gradleFacts, m *gradleMapper, procs []*trace.Proc) {
+func gradleRecorded(obs map[string]*Observation, events []gradleEvent, classes *gradleClassMap, recs []*jvmRecording, facts []gradleFacts, m *gradleMapper, procs []*trace.Proc) {
 	wd := map[string]string{}
 	for _, fa := range facts {
 		wd[fa.Task] = fa.WorkingDir
 	}
-	unitOf := func(class string) string {
-		if i := strings.IndexByte(class, '$'); i >= 0 {
-			class = class[:i]
-		}
-		return classes[class]
-	}
-	// The units and the task of each executor.
+	// The units and the task of each executor. An event several units may be for (a
+	// class of the same name) is attributed to none: those units stay untraced.
 	byExec := map[string]map[string]bool{}
 	taskOf := map[string]string{}
 	ranIn := map[string]map[string]bool{} // unit -> executors
 	for _, ev := range events {
-		u := unitOf(ev.Class)
-		if u == "" || ev.Executor == "" {
+		us := classes.unitsOf(ev.Class, ev.Task)
+		if len(us) != 1 || ev.Executor == "" {
 			continue
 		}
+		u := us[0]
 		if byExec[ev.Executor] == nil {
 			byExec[ev.Executor] = map[string]bool{}
 		}

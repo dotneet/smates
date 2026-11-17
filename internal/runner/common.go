@@ -111,7 +111,20 @@ func runBatches(ctx context.Context, rc *RunContext, extra []string, testArgs []
 	if err != nil {
 		return 1, err
 	}
-	return runChunks(ctx, rc, extra, chunk(base, testArgs), env, okCodes...)
+	return runChunks(ctx, rc, extra, rc.chunk(base, testArgs), env, okCodes...)
+}
+
+// chunk is chunk for a command line run with the suite's environment: on Windows its
+// limit depends on the program the suite's PATH finds (a .cmd launcher).
+func (rc *RunContext) chunk(base, args []string) [][]string {
+	if runtime.GOOS == "windows" && len(base) > 0 {
+		if path, ok := envPath(MergeEnv(baseEnv(), suiteEnv(rc.Suite))); ok {
+			if p, err := lookPathIn(base[0], path, rc.Dir()); err == nil {
+				base = append([]string{p}, base[1:]...)
+			}
+		}
+	}
+	return chunk(base, args)
 }
 
 // runChunks runs the suite command once per batch of test arguments, returning the
@@ -124,6 +137,9 @@ func runChunks(ctx context.Context, rc *RunContext, extra []string, batches [][]
 		argv, err := rc.CommandLine(extra, b)
 		if err != nil {
 			return 1, err
+		}
+		if rc.rewrite != nil {
+			argv = rc.rewrite(argv)
 		}
 		// Each invocation writes V8 coverage to a directory of its own: a coverage tool
 		// cleaning it when it starts (c8) must not delete an earlier invocation's files.

@@ -64,6 +64,11 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err := fs.Parse(args); err != nil {
 		return 2, usageError{err}
 	}
+	// Runner arguments after "--" are accepted, as by run (a workflow may pass the same
+	// arguments to both); any other positional argument is a mistake.
+	if n := fs.NArg(); n > 0 && (len(args) <= n || args[len(args)-n-1] != "--") {
+		return 2, usageError{fmt.Errorf("unexpected arguments %v", fs.Args())}
+	}
 	// Before selecting: a selection can call the agent, write --markdown and save the state.
 	if !slices.Contains([]string{"text", "files", "json", "markdown", "github"}, f.format) {
 		return 2, usageError{fmt.Errorf("unknown format %q", f.format)}
@@ -99,7 +104,7 @@ func cmdSelect(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	if err != nil {
 		return 1, err
 	}
-	applyShard(sel.res, shardI, shardN)
+	applyShard(sel.res, shardI, shardN, false)
 	var shardLines []string
 	if f.maxShards > 0 {
 		n := shardCount(sel.res, f.maxShards, f.shardTime)

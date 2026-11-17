@@ -9,29 +9,15 @@ package runner
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dotneet/smates/internal/gitx"
 )
-
-// goBuildFlagsVisible reports whether smates sees every build flag the suite's command
-// passes: the command is go test itself (not a wrapper such as gotestsum, make or
-// sh -c, whose flags reach go test unseen) and no "--" hands the rest of the words to
-// something smates does not parse. When it cannot tell, a constraint excluding a file
-// under the flags it does see proves nothing.
-func goBuildFlagsVisible(s *Suite) bool {
-	argv, err := SplitWords(s.Command)
-	if err != nil || len(argv) < 2 || strings.TrimSuffix(filepath.Base(argv[0]), ".exe") != "go" || argv[1] != "test" {
-		return false
-	}
-	return !slices.Contains(argv, "--") && !slices.Contains(s.ExtraArgs, "--")
-}
 
 // buildInfo is what is known about one test file (absolute path), valid while its size
 // and modification time and the build flags stay the same.
@@ -50,14 +36,18 @@ var buildInfos sync.Map // absolute path -> buildInfo
 // command flags and the arguments passed through, its environment). Only files that may be constrained are looked up,
 // with one go list for all their packages; results are cached by file stat. When go
 // list fails, or when the command may pass build flags smates cannot see (see
-// goBuildFlagsVisible), nothing is excluded.
+// goCommand.visible), nothing is excluded.
 func excludedTestFiles(s *Suite, testFiles []string) map[string]bool {
-	if s.RepoRoot == "" || !goBuildFlagsVisible(s) {
+	if s.RepoRoot == "" {
 		return nil
 	}
 	rc := &RunContext{Repo: &gitx.Repo{Root: s.RepoRoot}, Suite: s, ExtraArgs: s.ExtraArgs}
+	gc := goCommandOf(rc)
+	if !gc.visible() {
+		return nil
+	}
 	env := MergeEnv(baseEnv(), suiteEnv(s), []string{"GOFLAGS="})
-	flags := strings.Join(append(goListFlags(rc), Getenv(env, "GOOS"), Getenv(env, "GOARCH"), Getenv(env, "CGO_ENABLED")), "\x00")
+	flags := strings.Join(append(gc.listFlags(), gc.bin, Getenv(env, "GOOS"), Getenv(env, "GOARCH"), Getenv(env, "CGO_ENABLED")), "\x00")
 	infos := map[string]buildInfo{}
 	var dirs []string
 	seenDir := map[string]bool{}
@@ -84,7 +74,7 @@ func excludedTestFiles(s *Suite, testFiles []string) map[string]bool {
 		}
 	}
 	if len(dirs) > 0 {
-		ignored, ok := goIgnoredFiles(rc, env, dirs)
+		ignored, ok := goIgnoredFiles(rc, gc, env, dirs)
 		for abs, info := range infos {
 			if info.constrained && !info.listed && seenDir[filepath.Dir(abs)] {
 				info.listed, info.ignored = true, ok && ignored[abs]
@@ -110,11 +100,12 @@ func excludedTestFiles(s *Suite, testFiles []string) map[string]bool {
 // goIgnoredFiles runs go list for the package directories dirs and returns the
 // absolute paths of their files that build constraints exclude; ok is false when go
 // list fails.
-func goIgnoredFiles(rc *RunContext, env, dirs []string) (map[string]bool, bool) {
-	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", "{{.Dir}}{{range .IgnoredGoFiles}}|{{.}}{{end}}", "--")
-	cmd := exec.Command("go", append(args, dirs...)...)
-	cmd.Dir = rc.Dir()
-	cmd.Env = withPWD(env, cmd.Dir)
+func goIgnoredFiles(rc *RunContext, gc *goCommand, env, dirs []string) (map[string]bool, bool) {
+	argv := append(append([]string{gc.bin, "list", "-e", "-find"}, gc.listFlags()...), "-f", "{{.Dir}}{{range .IgnoredGoFiles}}|{{.}}{{end}}", "--")
+	cmd, err := commandIn(context.Background(), rc.Dir(), append(argv, dirs...), withPWD(env, rc.Dir()))
+	if err != nil {
+		return nil, false
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false

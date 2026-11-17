@@ -119,15 +119,23 @@ func (a *Analyzer) SplitDeps(p string, src []byte) (all, runtime []string) {
 }
 
 // refsOf returns the references in the source of file p: the <script> blocks (and
-// the Astro frontmatter) of a component, else the whole source.
+// the Astro frontmatter) of a component, else the whole source; plus what a coarse
+// scan of the text finds that lexing missed (see withCoarse).
 func refsOf(p string, src []byte) []ref {
+	var refs []ref
+	var jsx [][2]int
 	switch path.Ext(p) {
 	case ".vue", ".svelte":
-		return scanSFC(src, false)
+		refs, jsx = scanSFCSpans(src, false)
 	case ".astro":
-		return scanSFC(src, true)
+		refs, jsx = scanSFCSpans(src, true)
+	case ".ts", ".mts", ".cts":
+		// <T>x is a type assertion there, not JSX.
+		refs = scanCode(src, false)
+	default:
+		refs, jsx = scanCodeSpans(src, true)
 	}
-	return scanSource(src)
+	return withCoarse(refs, src, jsx)
 }
 
 // fileResult is what resolving the references of one file found.
@@ -394,6 +402,25 @@ func (a *Analyzer) resolveAliasHeuristic(dir, spec string, add func(string)) {
 	}
 }
 
+// extensionMap lists, for the extension a specifier ends in, the extensions TypeScript
+// tries in its place (moduleNameResolver's tryAddingExtensions, with allowJs): an
+// import of ./a.js may load a.ts, a.tsx, a.d.ts, a.js or a.jsx, one of ./a.mjs a.mts,
+// a.d.mts or a.mjs. A specifier with a TypeScript extension (allowImportingTsExtensions)
+// is mapped like the JavaScript one it compiles to.
+var extensionMap = func() map[string][]string {
+	js := []string{".ts", ".tsx", ".d.ts", ".js", ".jsx"}
+	jsx := []string{".tsx", ".ts", ".d.ts", ".jsx", ".js"}
+	mjs := []string{".mts", ".d.mts", ".mjs"}
+	cjs := []string{".cts", ".d.cts", ".cjs"}
+	return map[string][]string{
+		".js": js, ".ts": js,
+		".jsx": jsx, ".tsx": jsx,
+		".mjs": mjs, ".mts": mjs,
+		".cjs": cjs, ".cts": cjs,
+		".json": {".d.json.ts", ".json"},
+	}
+}()
+
 // resolvePath resolves a repo-relative path with TypeScript's rules and reports
 // whether anything was found.
 func (a *Analyzer) resolvePath(p string, add func(string)) bool {
@@ -416,19 +443,8 @@ func (a *Analyzer) resolvePathDepth(p string, add func(string), depth int) bool 
 	// source. Over-approximate: keep the exact file too if both exist.
 	ext := path.Ext(p)
 	stem := strings.TrimSuffix(p, ext)
-	switch ext {
-	case ".js":
-		try(stem + ".ts")
-		try(stem + ".tsx")
-		try(stem + ".d.ts")
-	case ".jsx":
-		try(stem + ".tsx")
-	case ".mjs":
-		try(stem + ".mts")
-		try(stem + ".d.mts")
-	case ".cjs":
-		try(stem + ".cts")
-		try(stem + ".d.cts")
+	for _, e := range extensionMap[ext] {
+		try(stem + e)
 	}
 	if p != "." {
 		for _, e := range resolveExts {

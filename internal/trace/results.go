@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"os"
@@ -19,6 +20,11 @@ func ReporterLoaded(traceDir string) bool {
 
 // Results reads per-test-file results written by runner reporters
 // (results-*.jsonl in the trace directory), keyed by repo-relative file.
+//
+// A results file that lost a line (its reporter could not write one: {"k":"lost"}, or a
+// line cut short or overlong) records no pass: the line lost may have been a failure,
+// or the "unknown" a reporter writes for a file it cannot vouch for after all. Its
+// passes are unknown; failures and unknowns stand.
 func Results(traceDir, repoRoot string) map[string]Result {
 	out := map[string]Result{}
 	rel := relCache(repoRoot)
@@ -28,16 +34,31 @@ func Results(traceDir, repoRoot string) map[string]Result {
 		if err != nil {
 			continue
 		}
-		_ = eachLine(f, maxLine, func(line []byte) {
+		got := map[string]Result{}
+		lost := false
+		skipped, err := eachLine(f, maxLine, func(line []byte) {
 			var ev event
-			if json.Unmarshal(line, &ev) != nil || ev.K != "result" {
+			if json.Unmarshal(line, &ev) != nil {
+				lost = lost || len(bytes.TrimSpace(line)) > 0
 				return
 			}
-			if r, ok := rel(ev.ID); ok {
-				addResult(out, r, ev.Status, ev.Ms, ev.Msg)
+			switch ev.K {
+			case "lost":
+				lost = true
+			case "result":
+				if r, ok := rel(ev.ID); ok {
+					addResult(got, r, ev.Status, ev.Ms, ev.Msg)
+				}
 			}
 		})
 		f.Close()
+		lost = lost || skipped > 0 || err != nil
+		for r, res := range got {
+			if lost && res.Status == state.Pass {
+				res.Status = state.Unknown
+			}
+			addResult(out, r, res.Status, res.Ms, res.Message)
+		}
 	}
 	return out
 }

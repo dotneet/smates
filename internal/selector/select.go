@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/dotneet/smates/internal/gitx"
 	"github.com/dotneet/smates/internal/runner"
 )
 
@@ -39,7 +40,11 @@ func Select(in *Input) (*Result, error) {
 type selection struct {
 	in  *Input
 	res *Result
-	// files are the paths of the snapshot, sorted.
+	// files are the paths of the snapshot, sorted, without the skip-worktree files not
+	// on disk (gitx.OffDisk): a test file outside a sparse checkout's cone is no unit
+	// (it cannot run), and globs (inputs, rules, depends_on) do not expand to files
+	// that are not there. The tests that recorded such a file still depend on it and
+	// are selected through its hash.
 	files []string
 	// changed are the changed files (deleted ones included) against the state's
 	// snapshot or Base, plus the settings key when the configuration file changed; nil
@@ -85,8 +90,10 @@ func newSelection(in *Input) *selection {
 	}
 
 	files := make([]string, 0, len(in.Snap))
-	for f := range in.Snap {
-		files = append(files, f)
+	for f, h := range in.Snap {
+		if !gitx.IsOffDisk(h) {
+			files = append(files, f)
+		}
 	}
 	sort.Strings(files)
 	return &selection{in: in, res: res, files: files}

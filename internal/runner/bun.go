@@ -50,7 +50,8 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	// recording each file runs in its own process with lcov coverage (loaded modules)
 	// and the preload shim (files read). The shim must load before the project's own
 	// preloads (bunfig [test].preload), which may import node:fs first: smates passes a
-	// copy of bunfig.toml with the shim prepended. Child processes get the shim through
+	// copy of the bunfig.toml bun reads (the command's --config, else the suite
+	// directory's) with the shim prepended, in place of the command's own --config. Child processes get the shim through
 	// BUN_OPTIONS (bun, also preloading it into bun test itself: loaded once) and
 	// NODE_OPTIONS (node), both set by NodeEnv.
 	shim := rc.Shims().Node
@@ -74,7 +75,9 @@ func (bun) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 			extra = append(extra, "--coverage", "--coverage-reporter=lcov", "--coverage-dir="+cov)
 		}
 		argv, err := rc.CommandLine(extra, []string{"./" + relToSuite(rc.Suite, u)})
-		return argv, env, err
+		// The user's own config, if the command names one, is what the copy is made of:
+		// one --config is enough.
+		return withoutBunConfig(argv, pre[0]), env, err
 	})
 	worst := worstCode(codes)
 	res := &RunResult{ExitCode: worst, Duration: time.Since(start)}
@@ -161,14 +164,97 @@ func bunSnapshotFile(unit string) string {
 	return path.Join(path.Dir(unit), "__snapshots__", path.Base(unit)+".snap")
 }
 
-// bunConfigWithShim writes a copy of the suite's bunfig.toml whose [test].preload starts
-// with the shim (relative preload paths made absolute). It returns "" when the project
-// has no bunfig.toml (then --preload is enough).
+// bunConfigFlag reports whether word w is bun's --config flag (-c): its value when it
+// holds one ("--config=x"), and whether it takes the next word as its value instead
+// (separate: a word that names a TOML file follows).
+func bunConfigFlag(w, next string, hasNext bool) (value string, ok, separate bool) {
+	for _, f := range []string{"--config", "-c"} {
+		if v, found := strings.CutPrefix(w, f+"="); found {
+			return v, true, false
+		}
+		if w == f {
+			if hasNext && strings.HasSuffix(next, ".toml") {
+				return next, true, true
+			}
+			return "", true, false // bun's default config
+		}
+	}
+	return "", false, false
+}
+
+// bunCommand reports whether argv runs bun itself (not a wrapper, whose -c may be its
+// own: sh -c).
+func bunCommand(argv []string) bool {
+	return len(argv) > 0 && strings.TrimSuffix(filepath.Base(filepath.ToSlash(argv[0])), ".exe") == "bun"
+}
+
+// bunUserConfig returns the config file the suite command (with the arguments passed
+// through) tells bun to read (absolute; the last --config wins, as with bun), or
+// bunfig.toml of the suite directory, bun's default; explicit is set when the command
+// names the file (bun fails when it does not exist).
+func bunUserConfig(rc *RunContext) (cfg string, explicit bool) {
+	def := filepath.Join(rc.Dir(), "bunfig.toml")
+	argv, err := rc.CommandLine(nil, nil)
+	if err != nil || !bunCommand(argv) {
+		return def, false
+	}
+	cfg = def
+	for i := 1; i < len(argv); i++ {
+		v, ok, separate := bunConfigFlag(argv[i], next(argv, i), i+1 < len(argv))
+		if !ok {
+			continue
+		}
+		if separate {
+			i++
+		}
+		cfg, explicit = def, v != ""
+		if explicit {
+			cfg = absFrom(rc.Dir(), filepath.FromSlash(v))
+		}
+	}
+	return cfg, explicit
+}
+
+func next(words []string, i int) string {
+	if i+1 < len(words) {
+		return words[i+1]
+	}
+	return ""
+}
+
+// withoutBunConfig removes the --config flags of a bun command line other than ours
+// (the word own), whose copy of the user's config replaces them.
+func withoutBunConfig(argv []string, own string) []string {
+	if !bunCommand(argv) {
+		return argv
+	}
+	out := []string{argv[0]}
+	for i := 1; i < len(argv); i++ {
+		if argv[i] != own {
+			if _, ok, separate := bunConfigFlag(argv[i], next(argv, i), i+1 < len(argv)); ok {
+				if separate {
+					i++
+				}
+				continue
+			}
+		}
+		out = append(out, argv[i])
+	}
+	return out
+}
+
+// bunConfigWithShim writes a copy of the bunfig.toml the suite's bun reads (bunUserConfig)
+// whose [test].preload starts with the shim (relative preload paths made absolute: bun
+// resolves them from its working directory, the suite directory).
 func bunConfigWithShim(rc *RunContext, shim string) (string, func(), error) {
-	src := filepath.Join(rc.Dir(), "bunfig.toml")
+	src, explicit := bunUserConfig(rc)
 	data, err := os.ReadFile(src)
-	if err != nil && !os.IsNotExist(err) {
+	switch {
+	case err != nil && !os.IsNotExist(err):
 		return "", nil, err
+	case err != nil && explicit:
+		// A config the command names must exist: bun would not run without it.
+		return "", nil, &CommandError{Suite: rc.Suite.Name, Err: fmt.Errorf("bun --config: %w", err)}
 	}
 	// A byte order mark is no TOML statement: left in front, it would hide a [test]
 	// header or a test.preload key on the first line (bun accepts the file without it).

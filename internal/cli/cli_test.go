@@ -64,7 +64,7 @@ func TestApplyShard(t *testing.T) {
 		loads := make([]int64, n)
 		for i := 1; i <= n; i++ {
 			r := shardResult()
-			applyShard(r, i, n)
+			applyShard(r, i, n, false)
 			for _, s := range r.Suites {
 				if s.All {
 					t.Errorf("n=%d: All must be cleared when sharding", n)
@@ -87,7 +87,7 @@ func TestApplyShard(t *testing.T) {
 			}
 			// Determinism: the same input gives the same shard.
 			r2 := shardResult()
-			applyShard(r2, i, n)
+			applyShard(r2, i, n, false)
 			if !reflect.DeepEqual(selectedIDs(r), selectedIDs(r2)) {
 				t.Errorf("n=%d shard %d not deterministic", n, i)
 			}
@@ -111,8 +111,8 @@ func TestApplyShard(t *testing.T) {
 					tt.Selected = true
 				}
 			}
-			applyShard(a, i, n)
-			applyShard(b, i, n)
+			applyShard(a, i, n, false)
+			applyShard(b, i, n, false)
 			sa, sb := selectedIDs(a), selectedIDs(b)
 			for _, id := range sa {
 				if !contains(sb, id) {

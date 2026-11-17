@@ -186,9 +186,9 @@ func TestOverTime(t *testing.T) {
 			suite: "go", est: 30 * time.Second, ran: []ran{{"go", 0, 90 * time.Second}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed), started: map[string][]string{}}
+			c := &cycle{f: &runFlags{maxTime: tc.maxTime}, start: time.Now().Add(-tc.elapsed)}
 			if tc.started {
-				c.started["go"] = []string{"pkg/a"}
+				c.units.start("go", []string{"pkg/a"})
 			}
 			for _, r := range tc.ran {
 				c.addRan(&batch{sr: &selector.Suite{Name: r.suite}, est: r.est}, r.wall)
@@ -221,7 +221,7 @@ func TestDeferUnmetReestimates(t *testing.T) {
 	prioritize(res, st, nil)
 	repo := t.TempDir()
 	c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: repo}, log: io.Discard}, f: &runFlags{maxTime: time.Hour}, sel: &selection{res: res},
-		checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+		checked: map[string]error{}}
 	plan := c.plan()
 	if len(plan) != 1 || plan[0].est != 100*time.Second {
 		t.Fatalf("plan %+v", plan)
@@ -235,7 +235,8 @@ func TestDeferUnmetReestimates(t *testing.T) {
 	}
 	// The 10s that ran took 30s: a later 30s batch is counted as 50s.
 	c.addRan(b, 30*time.Second)
-	c.start, c.started = time.Now().Add(-40*time.Second), map[string][]string{"s": {"ui/b.test.ts"}}
+	c.start = time.Now().Add(-40 * time.Second)
+	c.units.start("s", []string{"ui/b.test.ts"})
 	c.f.maxTime = 85 * time.Second
 	if !c.overTime(&batch{sr: sr, est: 30 * time.Second}) {
 		t.Error("a later batch was not grown by the overrun of the units that ran")
@@ -279,25 +280,26 @@ func TestAdmitMaxTimeAfterRequires(t *testing.T) {
 			res := &selector.Result{Mode: selector.ModeState, Suites: []*selector.Suite{sr, next}}
 			prioritize(res, st, nil)
 			c := &cycle{p: &project{state: st, repo: &gitx.Repo{Root: t.TempDir()}, log: io.Discard}, f: &runFlags{maxTime: 8 * time.Minute}, sel: &selection{res: res},
-				checked: map[string]error{}, unstarted: map[string][]string{}, notRun: map[string][]string{}, unmet: map[string][]string{}, unmetWhy: map[string][]string{}}
+				checked: map[string]error{}}
 			plan := c.plan()
 			slices.SortStableFunc(plan, func(a, b *batch) int { return strings.Compare(a.sr.Name, b.sr.Name) })
 			if len(plan) != 2 {
 				t.Fatalf("plan %+v", plan)
 			}
 			// Another suite's batch already ran; 7 of the 8 minutes are gone.
-			c.start, c.started = time.Now().Add(-7*time.Minute), map[string][]string{"other": {"x"}}
+			c.start = time.Now().Add(-7 * time.Minute)
+			c.units.start("other", []string{"x"})
 			if got := c.admit(context.Background(), plan[0], plan); got != tc.admitS {
 				t.Errorf("suite s admitted %v, want %v (units %v, est %s)", got, tc.admitS, plan[0].units, plan[0].est)
 			}
-			if c.capped != tc.capped {
-				t.Errorf("capped %v, want %v", c.capped, tc.capped)
+			if c.capped() != tc.capped {
+				t.Errorf("capped %v, want %v", c.capped(), tc.capped)
 			}
 			if got := c.admit(context.Background(), plan[1], plan[1:]); got != tc.admitNext {
 				t.Errorf("suite t admitted %v, want %v", got, tc.admitNext)
 			}
-			if !slices.Equal(c.unmet["s"], tc.unmet) {
-				t.Errorf("unmet %v, want %v", c.unmet["s"], tc.unmet)
+			if got := c.units.in("s", unitUnmet); !slices.Equal(got, tc.unmet) {
+				t.Errorf("unmet %v, want %v", got, tc.unmet)
 			}
 		})
 	}

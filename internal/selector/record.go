@@ -228,7 +228,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		}
 		if kind, f := depkey.Parse(k); kind == depkey.KindDecls || kind == depkey.KindDecl || kind == depkey.KindSig {
 			// The declarations of a Go file, or one of them: unchanged if the file is.
-			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, h.Hash(f))) {
+			if was, ok := files[f]; len(files) > 0 && (!ok && v != "" || ok && !gitx.ByKey.Same(was, h.Hash(f))) {
 				return false
 			}
 			continue
@@ -236,7 +236,7 @@ func sameInputs(prev *state.Entry, deps, files map[string]string, h *Hasher) boo
 		if depkey.IsPseudo(k) {
 			continue
 		}
-		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && !gitx.SameHash(was, v)) {
+		if was, ok := files[k]; len(files) > 0 && (!ok && v != "" || ok && !gitx.ByKey.Same(was, v)) {
 			return false
 		}
 	}

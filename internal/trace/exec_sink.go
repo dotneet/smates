@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -28,13 +29,13 @@ func (a *execAnalysis) opaque(dir string) {
 	}
 }
 
-// unresolved records that a command run in cwd uses something the analysis does not
-// know (an unset variable, a command's output, a script it could not read, commands
-// read from standard input, a cut command line): like an opaque program it may read
-// anything below cwd, and outside the repository the unknown value may still name a
-// path in it, so the whole repository is recorded.
-func (a *execAnalysis) unresolved(cwd string) {
-	a.out = append(a.out, treeKey(cwd, a.root, a.rel, true))
+// unresolved records that a command uses something the analysis does not know (an
+// unset variable, a command's output, a script it could not read or parse, commands
+// read from standard input): the unknown value may name any path, "../x" or an absolute
+// one too, and unknown code may change directory first, so the whole repository is
+// recorded, wherever the command runs.
+func (a *execAnalysis) unresolved() {
+	a.out = append(a.out, depkey.Tree("."))
 }
 
 // treeKey is the key of everything below dir: its tree in the repository, the whole
@@ -83,7 +84,7 @@ func (a *execAnalysis) absoluteTrees(seg []string, cwd string, vars map[string][
 		prefix = literal(prefix)
 		if !filepath.IsAbs(prefix) {
 			if unknownVars(w, vars) {
-				a.unresolved(cwd)
+				a.unresolved()
 			}
 			continue
 		}
@@ -97,14 +98,38 @@ func (a *execAnalysis) absoluteTrees(seg []string, cwd string, vars map[string][
 // unknownVars reports whether the word w uses a variable that is not in vars, or an
 // expansion the analysis does not follow (${X:-y}, a command's output).
 func unknownVars(w string, vars map[string][]string) bool {
-	rest := varRef.ReplaceAllStringFunc(w, func(ref string) string {
-		m := varRef.FindStringSubmatch(ref)
-		if _, ok := vars[m[1]+m[2]]; ok {
-			return ""
+	for i := strings.IndexByte(w, '$'); i >= 0 && i < len(w); i++ {
+		if w[i] != '$' {
+			continue
 		}
-		return ref
-	})
-	return strings.Contains(rest, "$")
+		end, name := varRefAt(w, i)
+		if _, known := vars[name]; end == 0 || !known {
+			return true
+		}
+		i = end - 1
+	}
+	return false
+}
+
+// statResult is a memoized os.Stat.
+type statResult struct {
+	fi  os.FileInfo
+	err error
+}
+
+// stat is os.Stat, memoized for the analysis: a script may name the same paths over and
+// over (in a loop, at each call of a function), and the files do not change while it
+// is analyzed.
+func (a *execAnalysis) stat(p string) (os.FileInfo, error) {
+	if r, ok := a.stats[p]; ok {
+		return r.fi, r.err
+	}
+	fi, err := os.Stat(p)
+	if a.stats == nil {
+		a.stats = map[string]statResult{}
+	}
+	a.stats[p] = statResult{fi, err}
+	return fi, err
 }
 
 // listing records that the entries of dir are read.

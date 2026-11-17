@@ -14,15 +14,19 @@ import (
 // objects, Regex for regular expression literals and Unknown for anything that would
 // need evaluation (identifiers, calls, functions, concatenations).
 
-// Object is an object literal. Spread is set when it contains a ...spread, whose keys
-// are unknown: a key missing from Fields may then still be set.
+// Object is an object literal. Spread is set when it contains a ...spread (or a
+// computed key), whose keys are unknown: a key missing from Fields may then still be
+// set. Members apply in order, so a spread overrides the keys written before it:
+// Fields holds only the keys written after the last spread, the ones whose value is
+// known ({ enabled: false, ...shared } leaves enabled unknown; { ...shared, enabled:
+// false } knows it).
 type Object struct {
 	Fields map[string]any
 	Spread bool
 }
 
-// Get returns the value of key and whether it is known: a missing key is known to be
-// absent unless the object has a spread.
+// Get returns the value of key and whether it is known: a key written after every
+// spread is known, a missing key is known to be absent unless the object has a spread.
 func (o *Object) Get(key string) (any, bool) {
 	if o == nil {
 		return nil, true
@@ -429,13 +433,19 @@ func (p *cfgParser) spread(i int) bool {
 // object parses object members from i (after '{') and returns the index after '}'.
 func (p *cfgParser) object(i int) (*Object, int) {
 	o := &Object{Fields: map[string]any{}}
+	// unknownKeys records a member whose keys are unknown (a spread, a computed key):
+	// it may override every key written before it, whose values are then unknown.
+	unknownKeys := func() {
+		o.Spread = true
+		clear(o.Fields)
+	}
 	for i < len(p.toks) && !p.punct(i, '}') {
 		if p.punct(i, ',') {
 			i++
 			continue
 		}
 		if p.spread(i) {
-			o.Spread = true
+			unknownKeys()
 			i = p.skip(i + 3)
 			continue
 		}
@@ -448,8 +458,9 @@ func (p *cfgParser) object(i int) (*Object, int) {
 			key = p.text(i)
 		default:
 			// Computed key ([k]: v) or something unexpected (a stray ';' or ')'): skip
-			// the member. Keys after it may have been missed, so none reads as absent.
-			o.Spread = true
+			// the member. It may set any key, so none before it is known and none
+			// reads as absent.
+			unknownKeys()
 			if j := p.skip(i); j > i {
 				i = j
 			} else {
@@ -467,8 +478,27 @@ func (p *cfgParser) object(i int) (*Object, int) {
 			o.Fields[key] = Unknown(key)
 			i++
 		default:
-			// Method, getter, async member: not a literal.
-			o.Fields[key] = Unknown(key)
+			// Method, getter, async member: not a literal. The key of get x(),
+			// set x(v), async x() and async *x() is x; a computed one ([k]()) may be
+			// any key.
+			name := key
+			if k := i + 1; key == "get" || key == "set" || key == "async" {
+				if p.punct(k, '*') {
+					k++
+				}
+				switch t := p.at(k); {
+				case t.kind == tIdent || t.kind == tNumber:
+					name = p.text0(k)
+				case p.literal(k):
+					name = p.text(k)
+				case p.punct(k, '['):
+					name = ""
+					unknownKeys()
+				}
+			}
+			if name != "" {
+				o.Fields[name] = Unknown(name)
+			}
 			i = p.skipMember(i)
 		}
 	}

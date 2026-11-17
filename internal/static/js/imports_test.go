@@ -21,8 +21,13 @@ const e = require("e-pkg")
 const f = await import("f-pkg")`,
 			want: []Import{{Spec: "types-pkg", TypeOnly: true}, {Spec: "./b"}, {Spec: "elided-pkg"}, {Spec: "./d", TypeOnly: true}, {Spec: "e-pkg"}, {Spec: "f-pkg"}}},
 		{name: "JavaScript has no type-only imports", file: "a.js", src: `import x from "x"`, want: []Import{{Spec: "x"}}},
-		{name: "comments and strings are not imports", file: "a.ts", src: `// import x from "x"
-const s = "from 'y'"`},
+		// The coarse safety net reads comments and strings too: more is safe.
+		{name: "comments and strings come last, from the coarse scan", file: "a.ts", src: `// import x from "x"
+import z from "z"
+const s = "from 'y'"`,
+			want: []Import{{Spec: "z"}, {Spec: "x"}, {Spec: "y"}}},
+		{name: "a type-only import stays type-only beside the coarse scan", file: "a.ts", src: `import type { A } from "t"`,
+			want: []Import{{Spec: "t", TypeOnly: true}}},
 	}
 	for _, c := range cases {
 		if got := Imports(c.file, []byte(c.src)); !reflect.DeepEqual(got, c.want) {

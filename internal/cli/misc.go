@@ -42,6 +42,9 @@ func cmdInit(args []string, stdout, stderr io.Writer) error {
 	if err := c.parse(args); err != nil {
 		return err
 	}
+	if err := c.noArgs(); err != nil {
+		return err
+	}
 	asJSON := c.asJSON()
 	d := *dir
 	if d == "" {
@@ -587,6 +590,9 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 	if err := c.parse(args); err != nil {
 		return err
 	}
+	if err := c.noArgs(); err != nil {
+		return err
+	}
 	p, err := load(&cf, stderr)
 	if err != nil {
 		return err
@@ -651,6 +657,12 @@ func stateCommand(args []string, stdout, stderr io.Writer) error {
 	files, err := c.parseInterspersed(rest)
 	if err != nil {
 		return err
+	}
+	// Only merge takes arguments: the files it merges.
+	if slices.Contains([]string{"path", "clear", "show", "push", "pull"}, sub) {
+		if err := c.noArgs(); err != nil {
+			return err
+		}
 	}
 	store, err := resolveStore(*dir, *statePath, stderr)
 	if err != nil {
@@ -722,7 +734,13 @@ func stateCommand(args []string, stdout, stderr io.Writer) error {
 			refs = stateRefs(repo)
 		}
 		if !store.shared {
-			return pullState(repo, path, *remote, refs, stderr)
+			// Replaced under the lock Save takes: a run saving at the same time applies its
+			// changes to the pulled state instead of overwriting it.
+			st, err := fetchState(repo, *remote, refs, stderr)
+			if st == nil || err != nil {
+				return err
+			}
+			return store.Replace(st)
 		}
 		// Shared: merge into the entries other worktrees use instead of replacing them.
 		tmp := filepath.Join(filepath.Dir(store.snapPath), ".pull-"+filepath.Base(store.path))
@@ -895,6 +913,16 @@ func pushState(repo *gitx.Repo, path, remote, ref string, log io.Writer) error {
 // version cannot read (one a newer smates pushed) is skipped for the next ref, the
 // default branch's: it is an error only when no ref has a state to use.
 func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Writer) error {
+	st, err := fetchState(repo, remote, refs, log)
+	if st == nil || err != nil {
+		return err
+	}
+	return st.Save(path)
+}
+
+// fetchState fetches the state of the first of refs on remote that holds a readable
+// one (nil when none does; an error when one could not be read and none could).
+func fetchState(repo *gitx.Repo, remote string, refs []string, log io.Writer) (*state.State, error) {
 	var unreadable error
 	for _, ref := range refs {
 		if _, err := repo.Git("fetch", "--quiet", "--no-tags", remote, "+"+ref+":"+ref); err != nil {
@@ -914,17 +942,14 @@ func pullState(repo *gitx.Repo, path, remote string, refs []string, log io.Write
 			}
 			continue
 		}
-		if err := st.Save(path); err != nil {
-			return err
-		}
 		fmt.Fprintf(log, "smates: pulled state from %s %s\n", remote, ref)
-		return nil
+		return st, nil
 	}
 	if unreadable != nil {
-		return unreadable
+		return nil, unreadable
 	}
 	fmt.Fprintf(log, "smates: no remote state found (%s); the next run will start fresh\n", strings.Join(refs, ", "))
-	return nil
+	return nil, nil
 }
 
 // isGzip reports whether data starts with the gzip magic number.

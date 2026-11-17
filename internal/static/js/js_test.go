@@ -338,6 +338,37 @@ func TestDepsTSConfig(t *testing.T) {
 			want: []string{"app/src/a.js", "root/b.ts"},
 		},
 		{
+			// tsc resolves each extends entry on its own: b's chain applies the shared
+			// base again, after a, so base's paths win over a's.
+			name: "extends array with a shared base (diamond)",
+			files: map[string]string{
+				"base.json":     `{"compilerOptions": {"paths": {"@/*": ["./base/*"]}}}`,
+				"a.json":        `{"extends": "./base.json", "compilerOptions": {"paths": {"@/*": ["./a/*"]}}}`,
+				"b.json":        `{"extends": "./base.json"}`,
+				"tsconfig.json": `{"extends": ["./a.json", "./b.json"]}`,
+				"main.ts":       `import x from "@/x"`,
+				"base/x.ts":     ``,
+				"a/x.ts":        ``,
+			},
+			file: "main.ts",
+			want: []string{"base/x.ts"},
+		},
+		{
+			name: "diamond of baseUrl through nested chains",
+			files: map[string]string{
+				"cfg/base.json": `{"compilerOptions": {"baseUrl": "../lib"}}`,
+				"cfg/a.json":    `{"extends": "./base.json", "compilerOptions": {"baseUrl": "../a"}}`,
+				"cfg/b.json":    `{"extends": "./c.json"}`,
+				"cfg/c.json":    `{"extends": "./base.json"}`,
+				"tsconfig.json": `{"extends": ["./cfg/a.json", "./cfg/b.json"]}`,
+				"main.ts":       `import x from "x"`,
+				"lib/x.ts":      ``,
+				"a/x.ts":        ``,
+			},
+			file: "main.ts",
+			want: []string{"lib/x.ts"},
+		},
+		{
 			name: "invalid config is ignored",
 			files: map[string]string{
 				"tsconfig.json": `{"compilerOptions": {"paths": `,

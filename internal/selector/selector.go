@@ -249,6 +249,10 @@ type Result struct {
 	// OrphanHandling says how each orphan was handled (Orphan* constants).
 	OrphanHandling map[string]string `json:"orphan_handling,omitempty"`
 	Notes          []string          `json:"notes,omitempty"`
+	// ChangesSince is the commit the changes were taken since because the state holds
+	// no snapshot and there is no base (see selection.changes); "" otherwise. A run
+	// that handles the orphans starts the state's snapshot from that commit's tree.
+	ChangesSince string `json:"-"`
 	// Covered is the union of every test's D(T), including the suites --suite left out
 	// (Input.Others): a changed file it does not explain (Covers) is an orphan.
 	Covered map[string]bool `json:"-"`

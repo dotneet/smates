@@ -69,19 +69,19 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	if f.shadow && f.shardN > 1 {
 		preShard = selectedUnits(sel.res)
 	}
-	applyShard(sel.res, f.shardI, f.shardN)
+	applyShard(sel.res, f.shardI, f.shardN, f.shadow)
 	printSelection(p, sel, stderr, f.explain)
 
 	c := &cycle{p: p, f: f, sel: sel, preShard: preShard, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
-		ran: map[string]map[string]string{}, inferred: map[string]map[string]bool{}, started: map[string][]string{}, notRun: map[string][]string{}, unstarted: map[string][]string{}, results: map[string]*suiteResult{},
-		unmet: map[string][]string{}, unmetWhy: map[string][]string{}, checked: map[string]error{}}
+		results: map[string]*suiteResult{}, unmetWhy: map[string][]string{}, checked: map[string]error{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection), and so
-	// does a sharded shadow run (units).
+	// does a sharded shadow run (suiteRun).
 	c.runAll = (sel.res.Mode == selector.ModeAll || f.shadow) && f.shardN <= 1
 	prioritize(sel.res, p.state, p.direct())
 	batches := c.plan()
+	c.units.plan(batches)
 	c.logSkipped()
 	if f.dryRun || (f.skipEmpty && len(batches) == 0) {
 		if f.dryRun {
@@ -111,17 +111,15 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		return 0, envError{fmt.Errorf("preparing the trace directory: %w", err)}
 	}
 	defer cleanup()
-	c.hasher = selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root).WithConfig(p.cfg)
-	c.failures = newFailureHints(ctx, p, sel.res, c.hasher, f.base, f.noAgent)
 	c.now = time.Now().UTC()
 	start := time.Now()
 	c.start = start
-	// Files git does not list are recorded as they were before the tests ran.
-	var ran []string
-	for _, sr := range sel.res.Suites {
-		ran = append(ran, sr.Name)
-	}
-	c.hasher.PinBefore(p.state, ran, start)
+	// Files git does not list are recorded as they were before the tests ran. Failure
+	// hints hash what changed while the batches run, with a hasher of their own: what
+	// they read from disk mid-run must not stand in for what Record reads after the
+	// last batch, or the recorded hashes would depend on whether an earlier batch failed.
+	c.hasher = p.runHasher(sel.res, start)
+	c.failures = newFailureHints(ctx, p, sel.res, p.runHasher(sel.res, start), f.base, f.noAgent)
 	for i, b := range batches {
 		if !c.admit(ctx, b, batches[i:]) {
 			continue
@@ -139,29 +137,28 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			var ce configError
 			switch {
 			case errors.As(err, &ce):
-				c.configErr, c.stopped = err, true
+				c.configErr, c.stop = err, stopConfig
 			case c.envErr == nil:
 				c.envErr = orEnvError(err)
 			default:
 				p.logf("%v", err) // only the first is reported at the end
 			}
-			c.unstarted[b.sr.Name] = append(c.unstarted[b.sr.Name], b.units...)
-			c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+			c.units.set(b.sr.Name, b.units, unitUnstarted)
 			continue
 		}
-		if code != 0 && f.failFast && i < len(batches)-1 {
-			c.stopped = true
+		if code != 0 && f.failFast && i < len(batches)-1 && c.stop == stopNone {
+			c.stop = stopFailFast
 			if !c.quiet {
 				p.logf("--fail-fast: %s failed; starting no further test batch", b.sr.Name)
 			}
 		}
 	}
-	if c.interrupted {
+	if c.interrupted() {
 		// What ran is recorded and reported; the run itself failed.
 		c.worst = max(c.worst, ExitFailed)
 	}
 	c.unmetErr = c.unmetError()
-	hooks.onRan(c.started)
+	hooks.onRan(c.units.startedUnits())
 	c.failures.wait()
 	elapsed := time.Since(start).Round(time.Millisecond)
 	// A state that cannot be saved (e.g. the shared state stays locked by another
@@ -199,13 +196,20 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	for _, n := range notes {
 		p.logf("%v", n)
 	}
+	if cycleDone != nil {
+		cycleDone(c)
+	}
 	return code, err
 }
+
+// cycleDone, when set (by tests), is called with every cycle that ran batches, once it
+// has ended.
+var cycleDone func(*cycle)
 
 // end is how the cycle ended, for resolveExit (saveErr and reportErr are set by the
 // caller).
 func (c *cycle) end() runEnd {
-	return runEnd{worst: c.worst, testsFailed: c.testsFailed, interrupted: c.interrupted, configErr: c.configErr, envErr: c.envErr, unmetErr: c.unmetErr}
+	return runEnd{worst: c.worst, testsFailed: c.testsFailed, interrupted: c.interrupted(), configErr: c.configErr, envErr: c.envErr, unmetErr: c.unmetErr}
 }
 
 // runEnd is how a run ended: what its exit code is decided from (resolveExit).
@@ -333,11 +337,12 @@ type cycle struct {
 	now       time.Time
 
 	// Accumulated over the batches.
-	worst    int
-	exit     int                          // the run's exit code as reported (reportedExit), set after recording
-	ran      map[string]map[string]string // suite -> unit -> status
-	inferred map[string]map[string]bool   // suite -> unit -> status inferred from the run's exit code
-	// failedBatches are the batches that exited non-zero.
+	worst int
+	exit  int // the run's exit code as reported (reportedExit), set after recording
+	// units is what became of each planned unit (unitState): ran, not run, not started
+	// or deferred by unmet requirements.
+	units unitRuns
+	// failedBatches are the batches whose tests ran and exited non-zero.
 	failedBatches []failedBatch
 	// envErr is set when a batch's tests never started (notStarted); testsFailed when
 	// another batch exited non-zero. configErr: a suite command that cannot be parsed
@@ -345,30 +350,32 @@ type cycle struct {
 	envErr      error
 	configErr   error
 	testsFailed bool
-	started     map[string][]string     // suite -> units started
-	notRun      map[string][]string     // --fail-fast, --max-time, interrupt, unstarted: suite -> units not started (or cut short)
-	unstarted   map[string][]string     // suite -> units of batches whose runner could not start, or whose requirements are not met (also in notRun)
-	stopped     bool                    // --fail-fast, --max-time (or an interrupt) stopped the run
-	results     map[string]*suiteResult // suite -> outcomes to record
-	escapes     []string                // shadow: failing tests the selection would have skipped
-	possible    []string                // shadow: skipped tests failed only by the run's exit code
-	flakes      []flakeReport
-	// interrupted: the run was cancelled (Ctrl-C); the batch it cut short counts as
-	// not run.
-	interrupted bool
-	// capped: --max-time stopped the run.
-	capped bool
+	// stop is what stopped the run before every batch started (stopNone: nothing did).
+	stop     stopReason
+	results  map[string]*suiteResult // suite -> outcomes to record
+	escapes  []string                // shadow: failing tests the selection would have skipped
+	possible []string                // shadow: skipped tests failed only by the run's exit code
+	flakes   []flakeReport
 	// ran adds up the batches of known duration that ran, per suite name and for all
 	// of them ("\x00all"): overTime adds their mean overrun to later estimates.
 	batchTimes map[string]*ranTime
-	// unmet are the units (also in unstarted) left out because requirements they need
-	// are not met (suite -> units); unmetWhy the failed checks (suite -> descriptions);
-	// unmetErr the error the run reports for them; checked caches the checks of the run.
-	unmet    map[string][]string
+	// unmetWhy are the failed requirement checks (suite -> descriptions) of the units
+	// left out by unmet requirements (unitUnmet); unmetErr the error the run reports for
+	// them; checked caches the checks of the run.
 	unmetWhy map[string][]string
 	unmetErr error
 	checked  map[string]error
 }
+
+// stopped reports whether something stopped the run before every batch started.
+func (c *cycle) stopped() bool { return c.stop != stopNone }
+
+// interrupted reports whether the run was cancelled (Ctrl-C, SIGTERM, SIGHUP): the
+// batch it cut short counts as not run.
+func (c *cycle) interrupted() bool { return c.stop == stopInterrupt }
+
+// capped reports whether --max-time stopped the run.
+func (c *cycle) capped() bool { return c.stop == stopMaxTime }
 
 // selfPath is the smates executable with symlinks resolved ("" if unknown).
 func selfPath() string {
@@ -379,22 +386,6 @@ func selfPath() string {
 		}
 	}
 	return self
-}
-
-// units returns the units of a suite this cycle runs, and whether they are the whole
-// suite. A sharded shadow run runs every unit its shard owns, selected or not, so the
-// shards of one run together run every test once.
-func (c *cycle) units(sr *selector.Suite) ([]string, bool) {
-	if c.runAll || c.shadowShard() {
-		ids := make([]string, 0, len(sr.Tests))
-		for _, t := range sr.Tests {
-			if c.runAll || t.Shard == c.f.shardI {
-				ids = append(ids, t.ID)
-			}
-		}
-		return ids, c.runAll
-	}
-	return sr.Selected(), sr.All && c.f.shardN <= 1
 }
 
 // shadowShard reports whether the cycle is a sharded shadow run (--shadow --shard).
@@ -440,8 +431,22 @@ func (c *cycle) logSkipped() {
 		return
 	}
 	for _, sr := range c.sel.res.Suites {
-		if units, _ := c.units(sr); len(units) == 0 {
+		if len(c.suiteRun(sr).units) == 0 {
 			c.p.logf("%s: no tests selected, skipping", sr.Name)
 		}
 	}
+}
+
+// runHasher is a hasher for what a run records (or its failure hints compare) with:
+// the snapshot, files git does not list read from disk, existence checks of paths
+// outside the snapshot pinned as they were before the tests started (PinBefore, for
+// the entries of res's suites).
+func (p *project) runHasher(res *selector.Result, start time.Time) *selector.Hasher {
+	h := selector.NewHasher(p.snap, selector.IgnoreGlobs(p.cfg)...).WithRoot(p.repo.Root).WithConfig(p.cfg)
+	names := make([]string, 0, len(res.Suites))
+	for _, sr := range res.Suites {
+		names = append(names, sr.Name)
+	}
+	h.PinBefore(p.state, names, start)
+	return h
 }

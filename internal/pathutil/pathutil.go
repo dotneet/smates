@@ -23,8 +23,10 @@ import (
 // coverage report modules) is dropped only when the path itself does not exist, the
 // part before it is an existing file and the name holding the '?' or '#' is not an
 // existing directory, so names that merely contain them (/repo/notes#1/new.txt, a probe
-// of a file not created yet) are kept. A file:// URL's query and fragment are already
-// separated by url.Parse.
+// of a file not created yet) are kept. Every '?' and '#' is a candidate, the last one
+// first, so the longest existing file wins: in /repo/c#/x.ts?v=3 the query starts at
+// the '?', not at the '#' of the directory (see stripQuery). A file:// URL's query and
+// fragment are already separated by url.Parse.
 //
 // Module ids that name no file are not paths: Node's builtins (node:fs, joined to a
 // directory by resolvers probing them: /repo/pkg/node:internal/x) and bundlers' virtual
@@ -36,8 +38,8 @@ func Rel(root, p string) (string, bool) {
 			return "", false
 		}
 		p = fileURLPath(u.Path, runtime.GOOS == "windows")
-	} else if i := strings.IndexAny(p, "?#"); i >= 0 && !fileExists(p) && isFile(p[:i]) && !nameExists(p, i) {
-		p = p[:i]
+	} else {
+		p = stripQuery(p)
 	}
 	if !filepath.IsAbs(p) || strings.ContainsRune(p, 0) || strings.Contains(filepath.ToSlash(p), "/node:") {
 		return "", false
@@ -137,6 +139,21 @@ func Links(root, p string) []string {
 		rest = append(split(target), rest...)
 	}
 	return out
+}
+
+// stripQuery drops a query or fragment from a plain path that does not exist (see Rel):
+// at the last '?' or '#' after which the part before it is an existing file and the
+// name holding the mark is no existing directory. p is returned as is when none is.
+func stripQuery(p string) string {
+	if strings.IndexAny(p, "?#") < 0 || fileExists(p) {
+		return p
+	}
+	for i := strings.LastIndexAny(p, "?#"); i >= 0; i = strings.LastIndexAny(p[:i], "?#") {
+		if isFile(p[:i]) && !nameExists(p, i) {
+			return p[:i]
+		}
+	}
+	return p
 }
 
 func fileExists(p string) bool {

@@ -1,6 +1,10 @@
 package python
 
-import "strings"
+import (
+	"slices"
+	"strconv"
+	"strings"
+)
 
 // tokKind classifies lexer tokens.
 type tokKind uint8
@@ -24,7 +28,7 @@ type token struct {
 	// partial (tokString) reports that text is only the static prefix of an f-string
 	// that contains replacement fields.
 	partial bool
-	text    string // tokName: the identifier; tokString: the raw literal content
+	text    string // tokName: the identifier; tokString: the raw literal content; tokNumber: the literal
 }
 
 // lexer is a single-pass, allocation-light Python tokenizer. It knows exactly as much
@@ -130,7 +134,7 @@ func (lx *lexer) run() {
 			for j < len(s) && (isIdentChar(s[j]) || s[j] == '.') {
 				j++
 			}
-			lx.emit(token{kind: tokNumber})
+			lx.emit(token{kind: tokNumber, text: s[i:j]})
 			i = j
 		case c == '"' || c == '\'':
 			text, partial, end := scanString(s, i, "")
@@ -518,7 +522,9 @@ func dynamic(toks []token, out *scanned) {
 			continue
 		}
 		switch t.text {
-		case "import_module", "__import__", "importorskip":
+		case "__import__":
+			out.refs = append(out.refs, dunderImport(toks, i)...)
+		case "import_module", "importorskip":
 			if ref, ok := dynamicImport(toks, i); ok {
 				out.refs = append(out.refs, ref)
 			}
@@ -591,6 +597,164 @@ func dynamicImport(toks []token, i int) (modRef, bool) {
 		}
 	}
 	return ref, true
+}
+
+// dunderImport returns the references of a call __import__(name, globals, locals,
+// fromlist, level) whose name is at toks[i]: its name (see dynamicImport) with the
+// fromlist and level arguments, positional or keyword:
+//
+//	__import__("pkg", fromlist=["a", "b"])    from pkg import a, b
+//	__import__("pkg", g, l, ["a"])            from pkg import a
+//	__import__("pkg", fromlist=["*"])         from pkg import *
+//	__import__("m", g, l, ["a"], 1)           from .m import a
+//	__import__("", g, l, ["a"], 1)            from . import a
+//	__import__("pkg", fromlist=names)         from pkg import <any submodule>
+//
+// A fromlist that is not a list of string literals may name any submodule: a prefix
+// reference to every module under the package is added. A level that is not an integer
+// literal may make the import relative: the references are then also added relative to
+// the importing file's package (level 1).
+func dunderImport(toks []token, i int) []modRef {
+	ref, ok := dynamicImport(toks, i)
+	empty := !ok && isOp(toks, i+1, '(') && i+2 < len(toks) && toks[i+2].kind == tokString &&
+		!toks[i+2].partial && toks[i+2].text == ""
+	if !ok && !empty {
+		return nil
+	}
+	args := callArgs(toks, i+1)
+	var fromlist, level []token
+	for k, a := range args {
+		switch {
+		case len(a) >= 2 && a[0].kind == tokName && isOp(a, 1, '='):
+			switch a[0].text {
+			case "fromlist":
+				fromlist = a[2:]
+			case "level":
+				level = a[2:]
+			}
+		case k == 3:
+			fromlist = a
+		case k == 4:
+			level = a
+		}
+	}
+	out := []modRef{ref}
+	if !ref.prefix && fromlist != nil {
+		names, known := literalNames(fromlist)
+		if len(names) > 0 {
+			out[0].names = names
+		}
+		if !known {
+			pre := ref.name
+			if pre != "" {
+				pre += "."
+			}
+			out = append(out, modRef{name: pre, prefix: true})
+		}
+	}
+	switch {
+	case level == nil:
+	case len(level) == 1 && level[0].kind == tokNumber:
+		n, err := strconv.Atoi(level[0].text)
+		if err == nil && n > 0 && n < 64 {
+			for k := range out {
+				out[k].level = n
+			}
+		}
+	default:
+		for _, r := range out[:len(out):len(out)] {
+			r.level = 1
+			out = append(out, r)
+		}
+	}
+	if empty {
+		// __import__("") names no absolute module: only its relative forms count.
+		out = slices.DeleteFunc(out, func(r modRef) bool { return r.level == 0 })
+	}
+	return out
+}
+
+// literalNames returns the strings of a list or tuple of string literals (a bare
+// string, None and an empty list name nothing), and whether every element was one: a
+// computed element, or a computed list, may name anything. "*" is left out: like
+// "from pkg import *" it names no submodule by itself.
+func literalNames(arg []token) ([]string, bool) {
+	if len(arg) == 1 && arg[0].kind == tokName && arg[0].text == "None" {
+		return nil, true
+	}
+	if len(arg) < 2 || !(isOp(arg, 0, '[') || isOp(arg, 0, '(')) || !(isOp(arg, len(arg)-1, ']') || isOp(arg, len(arg)-1, ')')) {
+		return nil, false
+	}
+	var names []string
+	known := true
+	for _, e := range splitArgs(arg[1 : len(arg)-1]) {
+		switch {
+		case len(e) == 1 && e[0].kind == tokString && !e[0].partial:
+			if e[0].text != "*" {
+				names = append(names, e[0].text)
+			}
+		default:
+			known = false
+		}
+	}
+	return names, known
+}
+
+// callArgs returns the tokens of each argument of the call whose '(' is toks[open], up
+// to its matching ')' (or the end of the statement).
+func callArgs(toks []token, open int) [][]token {
+	if !isOp(toks, open, '(') {
+		return nil
+	}
+	depth := 0
+	for j := open + 1; j < len(toks); j++ {
+		t := toks[j]
+		if t.kind == tokNewline {
+			return splitArgs(toks[open+1 : j])
+		}
+		if t.kind != tokOp {
+			continue
+		}
+		switch t.op {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth == 0 {
+				return splitArgs(toks[open+1 : j])
+			}
+			depth--
+		}
+	}
+	return splitArgs(toks[open+1:])
+}
+
+// splitArgs splits tokens at the commas outside brackets; empty pieces (a trailing
+// comma) are dropped.
+func splitArgs(toks []token) [][]token {
+	var out [][]token
+	depth, start := 0, 0
+	for j, t := range toks {
+		if t.kind != tokOp {
+			continue
+		}
+		switch t.op {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				if j > start {
+					out = append(out, toks[start:j])
+				}
+				start = j + 1
+			}
+		}
+	}
+	if len(toks) > start {
+		out = append(out, toks[start:])
+	}
+	return out
 }
 
 // validPrefix reports whether s can be the static prefix of a dotted module name: dot

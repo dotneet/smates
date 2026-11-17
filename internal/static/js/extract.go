@@ -41,6 +41,10 @@ type ref struct {
 	mock bool
 	// erase says whether TypeScript removes the reference before the code runs.
 	erase eraseKind
+	// coarse marks a reference only the coarse scan found (see withCoarse): it may
+	// come from a comment or a string, so it adds dependencies but is not reported
+	// as unresolved.
+	coarse bool
 }
 
 // eraseKind says whether compiling TypeScript to JavaScript removes an import or
@@ -70,11 +74,43 @@ var mockFns = map[string]bool{
 	"createMockFromModule": true, "genMockFromModule": true, "setMock": true,
 }
 
-// scanSource returns the references in JavaScript or TypeScript source.
-func scanSource(src []byte) []ref {
-	l := lex(src)
+// scanSource returns the references in JavaScript or TypeScript source that may hold
+// JSX.
+func scanSource(src []byte) []ref { return scanCode(src, true) }
+
+// scanCode returns the references in JavaScript or TypeScript source, recognizing JSX
+// if jsx is set.
+func scanCode(src []byte, jsx bool) []ref {
+	refs, _ := scanCodeSpans(src, jsx)
+	return refs
+}
+
+// scanCodeSpans is scanCode, also returning the spans of src the lexer read as JSX
+// text or tags (see lexer.skipped).
+func scanCodeSpans(src []byte, jsx bool) ([]ref, [][2]int) {
+	l := lexCode(src, jsx)
 	p := parser{src: src, toks: l.toks}
 	refs := l.refs
+	// consumed holds the import()/require() calls an enclosing call already took as
+	// its argument (vi.mock(import("./x"))), so they are not added twice.
+	var consumed map[int]bool
+	// specArg appends, like appendArg, the specifier the argument at token i names,
+	// unwrapping import("x"), require("x"), require.resolve("x") and
+	// import.meta.resolve("x"). It returns the number of references appended. A
+	// wrapped call naming nothing static (vi.mock(import(name))) is left to its own
+	// case, which reports a load of a computed name.
+	specArg := func(i int) int {
+		n := len(refs)
+		call, arg := p.unwrapLoad(i)
+		refs = p.appendArg(refs, arg)
+		if arg != i && len(refs) > n {
+			if consumed == nil {
+				consumed = map[int]bool{}
+			}
+			consumed[call] = true
+		}
+		return len(refs) - n
+	}
 	// erase holds, by the index of its specifier token, the declarations TypeScript
 	// may remove (see typeOnlyDecl); the import or export keyword comes first.
 	var erase map[int]eraseKind
@@ -103,8 +139,8 @@ func scanSource(src []byte) []ref {
 				}
 			}
 		case "import":
-			if p.punct(i-1, '.') {
-				continue // obj.import(...)
+			if p.punct(i-1, '.') || consumed[i] {
+				continue // obj.import(...), or the argument of vi.mock(import("./x"))
 			}
 			if lit, k := p.typeOnlyDecl(i, true); k != eraseNever {
 				if erase == nil {
@@ -127,7 +163,7 @@ func scanSource(src []byte) []ref {
 				case p.ident(i+4, "glob") || p.ident(i+4, "globEager"):
 					refs = p.appendGlobs(refs, j+1)
 				case p.ident(i+4, "resolve"):
-					refs = p.appendArg(refs, j+1)
+					specArg(j + 1)
 				}
 			}
 		case "from":
@@ -137,6 +173,9 @@ func scanSource(src []byte) []ref {
 				refs = appendErasable(refs, i+1)
 			}
 		case "require":
+			if consumed[i] {
+				continue
+			}
 			switch {
 			case p.punct(i+1, '('):
 				if p.punct(i-1, '.') || p.ident(i-1, "function") {
@@ -147,7 +186,7 @@ func scanSource(src []byte) []ref {
 				}
 				refs = p.appendLoad(refs, i+2, appendErasable) // import type X = require("./x")
 			case p.punct(i+1, '.') && p.ident(i+2, "resolve") && p.punct(i+3, '('):
-				refs = p.appendArg(refs, i+4)
+				specArg(i + 4)
 			case p.punct(i+1, '.') && p.ident(i+2, "context") && p.punct(i+3, '(') && p.literal(i+4):
 				recursive := !(p.punct(i+5, ',') && p.ident(i+6, "false"))
 				refs = append(refs, ref{kind: refContext, spec: p.text(i + 4), recursive: recursive})
@@ -158,22 +197,31 @@ func scanSource(src []byte) []ref {
 			}
 			mock, ok := mockFns[string(src[p.toks[i+2].s:p.toks[i+2].e])]
 			// jest.requireActual<typeof import("./x")>("./x")
+			// vi.mock(import("./x")): the same module as vi.mock("./x").
 			if j := p.typeArgs(i + 3); ok && p.punct(j, '(') {
-				n := len(refs)
-				refs = p.appendArg(refs, j+1)
-				if mock && len(refs) > n && refs[n].kind == refModule {
-					refs[n].mock = true
+				if n := specArg(j + 1); mock && n > 0 && refs[len(refs)-n].kind == refModule {
+					refs[len(refs)-n].mock = true
 				}
 			}
 		case "URL":
-			// new URL("./file", import.meta.url)
-			if p.punct(i+1, '(') && p.literal(i+2) && p.punct(i+3, ',') && p.ident(i+4, "import") &&
-				p.punct(i+5, '.') && p.ident(i+6, "meta") && p.punct(i+7, '.') && p.ident(i+8, "url") {
-				refs = append(refs, ref{kind: refFile, spec: p.text(i + 2)})
+			// new URL("./file", import.meta.url): a path relative to the file, not a
+			// module specifier.
+			if !p.punct(i+1, '(') {
+				continue
+			}
+			end := p.argEnd(i + 2)
+			if !p.punct(end, ',') || !p.ident(end+1, "import") || !p.punct(end+2, '.') || !p.ident(end+3, "meta") ||
+				!p.punct(end+4, '.') || !p.ident(end+5, "url") {
+				continue
+			}
+			n := len(refs)
+			specArg(i + 2)
+			for k := n; k < len(refs); k++ {
+				refs[k] = fileRef(refs[k])
 			}
 		}
 	}
-	return refs
+	return refs, l.skipped
 }
 
 // typeOnlyDecl inspects the import (isImport) or export declaration whose keyword is
@@ -348,6 +396,68 @@ func (p *parser) typeArgs(i int) int {
 func (p *parser) text(i int) string {
 	t := p.at(i)
 	return unescape(p.src[t.s:t.e])
+}
+
+// unwrapLoad recognizes, at token i, a call whose argument is the specifier of a
+// module it loads or resolves: import("x"), require("x"), require.resolve("x") or
+// import.meta.resolve("x"). It returns the index of the call's first token and of its
+// argument, or i and i for anything else.
+func (p *parser) unwrapLoad(i int) (call, arg int) {
+	switch {
+	case p.punct(i-1, '.'):
+	case p.ident(i, "import") && p.punct(i+1, '('):
+		return i, i + 2
+	case p.ident(i, "require") && p.punct(i+1, '('):
+		return i, i + 2
+	case p.ident(i, "require") && p.punct(i+1, '.') && p.ident(i+2, "resolve") && p.punct(i+3, '('):
+		return i, i + 4
+	case p.ident(i, "import") && p.punct(i+1, '.') && p.ident(i+2, "meta") && p.punct(i+3, '.') &&
+		p.ident(i+4, "resolve") && p.punct(i+5, '('):
+		return i, i + 6
+	}
+	return i, i
+}
+
+// argEnd returns the index of the ',' or ')' ending the call argument that starts at
+// token i (nested brackets skipped), or len(toks) if there is none nearby.
+func (p *parser) argEnd(i int) int {
+	depth := 0
+	for j := i; j < len(p.toks) && j < i+256; j++ {
+		t := p.toks[j]
+		if t.kind != tPunct {
+			continue
+		}
+		switch t.c {
+		case '(', '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+		case ')':
+			if depth == 0 {
+				return j
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return len(p.toks)
+}
+
+// fileRef turns a reference appendArg made into one to a path relative to the file
+// (new URL(spec, import.meta.url)): a URL is never a package name.
+func fileRef(r ref) ref {
+	switch r.kind {
+	case refModule:
+		r.kind = refFile
+	case refTemplate:
+		if r.spec != "" && !isRelative(r.spec) && r.spec[0] != '/' {
+			r.spec = "./" + r.spec
+		}
+	}
+	return r
 }
 
 // appendLoad appends, with appendArg, the argument at token i of a call that loads a
@@ -576,12 +686,18 @@ func (p *parser) appendGlobs(refs []ref, i int) []ref {
 // references. <script src> and <style src> are file references. For .astro, the
 // leading --- frontmatter fence is code.
 func scanSFC(src []byte, astro bool) []ref {
-	var refs []ref
+	refs, _ := scanSFCSpans(src, astro)
+	return refs
+}
+
+// scanSFCSpans is scanSFC, also returning the spans of src that the lexer read as JSX
+// text or tags in <script> blocks (see lexer.skipped).
+func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 	lower := asciiLower(src)
 	i := 0
 	if astro {
 		if body, end := frontmatter(src); end > 0 {
-			refs = append(refs, scanSource(body)...)
+			refs = append(refs, scanCode(body, false)...) // TypeScript
 			i = end
 		}
 	}
@@ -596,7 +712,7 @@ func scanSFC(src []byte, astro bool) []ref {
 			end := bytes.Index(src[j+4:], []byte("-->"))
 			if end < 0 {
 				refs = append(refs, scanMarkup(src[markup:j])...)
-				return refs
+				return refs, skipped
 			}
 			refs = append(refs, scanMarkup(src[markup:j])...)
 			i = j + 4 + end + 3
@@ -632,10 +748,19 @@ func scanSFC(src []byte, astro bool) []ref {
 			end += bodyStart
 		}
 		if name == "script" && bodyStart < end {
-			refs = append(refs, scanSource(src[bodyStart:end])...)
+			// JSX only where the block says so (lang="jsx" or "tsx"): a script without
+			// it is JavaScript, or TypeScript in Astro and with lang="ts", whose type
+			// assertions (<T>x) would read as JSX.
+			lang, _ := attrValue(attrs, "lang")
+			jsx := strings.EqualFold(lang, "jsx") || strings.EqualFold(lang, "tsx")
+			r, spans := scanCodeSpans(src[bodyStart:end], jsx)
+			refs = append(refs, r...)
+			for _, s := range spans {
+				skipped = append(skipped, [2]int{bodyStart + s[0], bodyStart + s[1]})
+			}
 		}
 		if end >= len(src) {
-			return refs
+			return refs, skipped
 		}
 		i = tagClose(src, end) + 1
 		markup = i
@@ -643,7 +768,7 @@ func scanSFC(src []byte, astro bool) []ref {
 	if markup < len(src) {
 		refs = append(refs, scanMarkup(src[markup:])...)
 	}
-	return refs
+	return refs, skipped
 }
 
 // scanMarkup returns the references in template markup: code-like references found by
@@ -661,7 +786,8 @@ func scanMarkup(b []byte) []ref {
 		}
 		code[i] = c
 	}
-	refs := scanSource(code)
+	// HTML-like markup is not JSX: lexed as code, the bindings in it are found.
+	refs := scanCode(code, false)
 	for off := 0; off < len(b); {
 		k := bytes.Index(b[off:], []byte("src"))
 		if k < 0 {

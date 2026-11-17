@@ -97,6 +97,9 @@ func cmdDoctor(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := c.parse(args); err != nil {
 		return 2, err
 	}
+	if err := c.noArgs(); err != nil {
+		return 2, err
+	}
 	r := runDoctor(&cf)
 	if err := c.emit(stdout, r, func() { r.printText(stdout) }); err != nil {
 		return 1, err

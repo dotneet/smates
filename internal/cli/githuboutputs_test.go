@@ -79,7 +79,7 @@ func TestGitHubOutputsSuites(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			res := &selector.Result{Suites: c.suites}
-			applyShard(res, c.shard[0], c.shard[1])
+			applyShard(res, c.shard[0], c.shard[1], false)
 			out := outputMap(t, githubOutputs(&selection{res: res}))
 			var got map[string]suiteOutput
 			if err := json.Unmarshal([]byte(out["suites"]), &got); err != nil {

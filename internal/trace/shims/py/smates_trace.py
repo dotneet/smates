@@ -17,6 +17,7 @@ the Node shim:
     {"k": "ctx", "id": "test:/abs/file", "t": ms}   attribution context switch
     {"k": "uses", "id": "/abs/test_file", "ctx": ["fixture:..."]}
     {"k": "result", "id": "/abs/test_file", "status": "pass|fail", "ms": 12}
+    {"k": "lost", "n": 2}                  that many events before this one could not be written
     {"k": "exit", "code": 0, "t": ms}
 
 Code execution is observed with sys.monitoring (Python 3.12+; each code object reports
@@ -77,6 +78,9 @@ class _Tracer:
         self._follow = None  # a forked child: its parent's shared memory
         self._gen = 0  # the generation of the parent's context last seen in _follow
         self._pending = None  # a forked child that has not written its start event yet
+        self._lost = 0  # events that could not be written since the last one written
+        self._partial = False  # the last write left part of a line
+        self._dead = False  # install() failed: nothing is written
         self._real = {}
         self._code_real = {}
         self._seen_codes = {}  # sys.setprofile: code object -> context it was recorded in
@@ -115,17 +119,34 @@ class _Tracer:
             os.environ["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
 
     def _write(self, obj):
-        line = self._json.dumps(obj) + "\n"
+        """Appends one event. One that cannot be written (a full disk, say) is counted,
+        and the next one written is preceded by {"k": "lost", "n": count}: smates then
+        takes the process for one that may have read anything. A write cut short leaves
+        part of a line, which the next write ends first (smates counts it as lost too)."""
+        if self._dead:
+            return
         open_, write, close, flags = _io
         try:
+            line = self._json.dumps(obj) + "\n"
+            if self._lost:
+                line = self._json.dumps({"k": "lost", "n": self._lost}) + "\n" + line
+            if self._partial:
+                line = "\n" + line
+            data = memoryview(line.encode("utf-8", "surrogateescape"))
             # os.open/os.write do not raise "open" audit events for our own file.
             fd = open_(self.out, flags, 0o644)
             try:
-                write(fd, line.encode("utf-8", "surrogateescape"))
+                while data:
+                    n = write(fd, data)
+                    if not n or n <= 0:
+                        raise OSError("short write")
+                    data = data[n:]
+                    self._partial = bool(data)
             finally:
                 close(fd)
-        except OSError:
-            pass
+            self._lost = 0
+        except Exception:
+            self._lost += 1
 
     def _norm(self, p, root=False):
         if isinstance(p, bytes):
@@ -316,11 +337,36 @@ class _Tracer:
         }
 
     def install(self):
+        """Installs the hooks, then writes the start event: a process whose tracing
+        failed half-way writes nothing, so smates takes it for an untraced one (a
+        command it analyzes from its command line) rather than one that read nothing.
+        Recording is off until then."""
         env = os.environ
+        self.enabled = False
+        anc = env.get("SMATES_TRACE_PARENT")
+        try:
+            start = self._install(env, anc or "")
+        except BaseException:
+            self._dead = True
+            try:
+                if anc is None:
+                    env.pop("SMATES_TRACE_PARENT", None)
+                else:
+                    env["SMATES_TRACE_PARENT"] = anc
+                if self.tool is not None:
+                    sys.monitoring.set_events(self.tool, 0)
+                    sys.monitoring.free_tool_id(self.tool)
+            except Exception:
+                pass
+            raise
+        self.enabled = True
+        self.write(start)
+
+    def _install(self, env, anc):
         # Children of a process that does not switch contexts belong to the context the
         # process itself was started in: they inherit its SMATES_TRACE_CTX unchanged.
         self.exported = env.get("SMATES_TRACE_CTX") or None
-        self.write(self._start_event(env.get("SMATES_TRACE_PARENT", ""), self.exported or ""))
+        start = self._start_event(anc, self.exported or "")
         # Children started through a shell still find their traced ancestor.
         env["SMATES_TRACE_PARENT"] = "%d-0" % os.getpid()
         # What a child given an environment of its own needs to be traced (child_env).
@@ -346,6 +392,7 @@ class _Tracer:
         import atexit
 
         atexit.register(self._exit)
+        return start
 
     def _forked(self):
         # A forked child (multiprocessing's fork start method, os.fork) is a process of
@@ -359,6 +406,7 @@ class _Tracer:
         try:
             self.lock = threading.RLock()  # another thread may have held it
             self.out = _stream_file(self.trace_dir)
+            self._lost, self._partial = 0, False  # the parent's, in its own stream
             self.seen = set()
             self._seen_codes.clear()
             if self._shared is not None and self._shared is not False:
@@ -1054,17 +1102,29 @@ def _safe_cwd():
         return ""
 
 
+_failed = False  # install() failed: this process is not traced
+
+
 def install():
-    """Start tracing this process (idempotent). Returns the tracer or None."""
-    global _state
-    if _state is not None:
+    """Start tracing this process (idempotent). Returns the tracer or None (also when
+    installing failed: the process then writes no trace, and the pytest plugin writes
+    its results to a file of their own, which smates does not take for traced passes)."""
+    global _state, _failed
+    if _state is not None or _failed:
         return _state
     trace_dir = os.environ.get("SMATES_TRACE_DIR")
     repo_root = os.environ.get("SMATES_REPO_ROOT")
     if not trace_dir or not repo_root:
         return None
     _state = _Tracer(trace_dir, repo_root)
-    _state.install()
+    try:
+        _state.install()
+    except Exception as exc:  # never break the user's program
+        _state, _failed = None, True
+        try:
+            sys.stderr.write("smates: tracing disabled: %r\n" % (exc,))
+        except Exception:
+            pass
     return _state
 
 

@@ -205,11 +205,7 @@ func decide(t *Test, mode Mode, entry *state.Entry, deps []string, h *Hasher, ch
 		return
 	}
 	for _, d := range deps {
-		recorded, ok := entry.Deps[d]
-		if !ok && h.legacyConfig(d, entry.Deps) {
-			continue
-		}
-		if !ok || !h.Unchanged(d, recorded) && !h.legacySuite(d, recorded) {
+		if !h.DepUnchanged(d, entry.Deps) {
 			t.Changed = append(t.Changed, d)
 		}
 	}

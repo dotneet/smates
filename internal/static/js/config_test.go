@@ -189,6 +189,68 @@ func TestObjectGet(t *testing.T) {
 	}
 }
 
+// TestObjectMemberOrder checks that a member whose keys are unknown (a spread, a
+// computed key) makes the keys written before it unknown, and leaves those after it
+// known.
+func TestObjectMemberOrder(t *testing.T) {
+	type get struct {
+		val   any
+		known bool
+	}
+	unknown := get{nil, false}
+	tests := []struct {
+		name string
+		obj  string
+		want map[string]get
+	}{
+		{"key before a spread", `{ enabled: false, ...shared.browser }`,
+			map[string]get{"enabled": unknown, "other": unknown}},
+		{"key after a spread", `{ ...shared.browser, enabled: false }`,
+			map[string]get{"enabled": {false, true}, "other": unknown}},
+		{"keys around a spread", `{ a: 1, ...x, b: 2 }`,
+			map[string]get{"a": unknown, "b": {2.0, true}}},
+		{"key repeated after a spread", `{ a: 1, ...x, a: 2 }`,
+			map[string]get{"a": {2.0, true}}},
+		{"keys before and after two spreads", `{ a: 1, ...x, b: 2, ...y, c: 3 }`,
+			map[string]get{"a": unknown, "b": unknown, "c": {3.0, true}}},
+		{"key before a computed key", `{ a: 1, [k]: 2 }`,
+			map[string]get{"a": unknown}},
+		{"key after a computed key", `{ [k]: 2, a: 1 }`,
+			map[string]get{"a": {1.0, true}}},
+		{"key before a computed method", `{ a: 1, [k]() {} }`,
+			map[string]get{"a": unknown}},
+		{"key before a computed getter", `{ a: 1, get [k]() { return 2 } }`,
+			map[string]get{"a": unknown}},
+		{"getter named like a key", `{ get a() { return 1 } }`,
+			map[string]get{"a": {Unknown("a"), true}}},
+		{"setter, async and generator methods", `{ set a(v) {}, async b() {}, async *c() {}, get() {} }`,
+			map[string]get{"a": {Unknown("a"), true}, "b": {Unknown("b"), true}, "c": {Unknown("c"), true}, "get": {Unknown("get"), true}}},
+		{"no spread", `{ a: 1 }`,
+			map[string]get{"a": {1.0, true}, "b": {nil, true}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, ok := ConfigObject([]byte("export default " + tt.obj))
+			o, _ := v.(*Object)
+			if !ok || o == nil {
+				t.Fatalf("ConfigObject = %#v, %v", v, ok)
+			}
+			for key, want := range tt.want {
+				if val, known := o.Get(key); known != want.known || known && !reflect.DeepEqual(val, want.val) {
+					t.Errorf("Get(%q) = %#v, %v; want %#v, %v", key, val, known, want.val, want.known)
+				}
+			}
+		})
+	}
+	// Nested objects follow the same rule.
+	v, _ := ConfigObject([]byte(`export default { test: { browser: { enabled: false, ...shared } } }`))
+	test, _ := v.(*Object).Get("test")
+	browser, _ := test.(*Object).Get("browser")
+	if e, known := browser.(*Object).Get("enabled"); known {
+		t.Errorf("nested enabled before a spread = %#v, known", e)
+	}
+}
+
 func TestDecodeJSONObject(t *testing.T) {
 	o, err := DecodeJSONObject([]byte(`{ "testMatch": ["a/**"], // c
 	"roots": ["src",], "nested": {"x": 1} }`))

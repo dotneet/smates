@@ -102,8 +102,11 @@ type goPkgRes struct {
 	// listed is set when the output names every test that ran: go test -json events,
 	// or a summary saying no test ran ("[no tests to run]").
 	listed bool
-	tests  map[string]string
-	fails  map[string]string // test -> failure output
+	// noTests is set when go test found no test files in it ("[no test files]", see
+	// goPackageResult): its test files were not compiled.
+	noTests bool
+	tests   map[string]string
+	fails   map[string]string // test -> failure output
 }
 
 func (g *goOutcomes) pkg(ip string) *goPkgRes {
@@ -176,16 +179,12 @@ func (g *goOutcomes) line(l string) {
 		g.pending[m[2]] = worseOutcome(g.pending[m[2]], st)
 		return
 	}
-	if m := goSummaryRe.FindStringSubmatch(l); m != nil {
-		p := g.pkg(m[2])
+	if r, ok := parseGoSummary(l); ok {
+		p := g.pkg(r.ip)
 		g.flushCur()
-		switch m[1] {
-		case "FAIL":
-			p.status = state.Fail
-		default:
-			p.status = state.Pass
-		}
-		p.listed = p.listed || strings.HasSuffix(strings.TrimSpace(l), "[no tests to run]")
+		p.status = r.status
+		p.noTests = p.noTests || r.noTests
+		p.listed = p.listed || r.noneRun
 		for t, st := range g.pending {
 			p.tests[t] = st
 		}
@@ -222,12 +221,10 @@ func (g *goOutcomes) event(ev goTestEvent) {
 	p := g.pkg(ev.Package)
 	p.listed = true // -json reports every test that ran
 	if ev.Test == "" {
-		switch ev.Action {
-		case "pass", "skip":
-			p.status = state.Pass
-		case "fail":
-			p.status = state.Fail
-			p.build = p.build || ev.FailedBuild != ""
+		if r, ok := goPackageEventResult(ev.Action, ev.Package); ok {
+			p.status = r.status
+			p.noTests = p.noTests || r.noTests
+			p.build = p.build || r.status == state.Fail && ev.FailedBuild != ""
 		}
 		return
 	}
@@ -236,7 +233,7 @@ func (g *goOutcomes) event(ev goTestEvent) {
 	}
 	// With -count=N a test reports once per iteration (worseOutcome); one that failed
 	// keeps the output of that iteration. (A package-level skip, above, is a package
-	// with no test files: a pass.)
+	// with no test files.)
 	failed := p.tests[ev.Test] == state.Fail
 	switch ev.Action {
 	case "output":
@@ -266,8 +263,10 @@ func (g *goOutcomes) buildFailed(ip string) bool {
 }
 
 // status returns the outcome of test name in package ip: reported for the test
-// itself, or derived from the package: a failed build fails them all; a failed package
-// makes it unknown and inferred; a passing summary covers every test only when the
+// itself, or derived from the package: a failed build fails them all; a package with
+// no test files compiled none of its tests, a skip (as buildFailures.skipped has it for
+// package units); a failed package makes it unknown and inferred; a passing summary
+// covers every test only when the
 // output prints nothing for a test that passed (plain go test without -v). Otherwise a
 // test the output says nothing about did not run (a TestMain exiting before m.Run, -run
 // matching nothing, "[no tests to run]"): unknown, never a pass. ran is false when the
@@ -285,6 +284,8 @@ func (g *goOutcomes) status(ip, name string) (st string, inferred, ran bool) {
 	switch {
 	case p.build:
 		return state.Fail, false, true
+	case p.noTests:
+		return state.Skip, false, true
 	case p.status == state.Pass && (g.verbose || p.listed):
 		return state.Unknown, false, true
 	case p.status == state.Pass:

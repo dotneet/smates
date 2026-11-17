@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/testutil"
 )
 
@@ -148,8 +149,9 @@ func TestCollectStreams(t *testing.T) {
 }
 
 // A line too long to read (an exec event of an old shim with a huge command line) is
-// skipped; the rest of the stream is read. A command line the shim cut short makes the
-// command opaque.
+// skipped; the rest of the stream is read, and the process has lost an event. A command
+// line the shim cut short makes the command opaque. A results file with such a line
+// records no pass.
 func TestCollectOverlongLine(t *testing.T) {
 	root := repoDir(t)
 	touch(t, root, "a.txt", "b.txt", "sub/")
@@ -174,13 +176,17 @@ func TestCollectOverlongLine(t *testing.T) {
 		t.Fatalf("procs %v", procs)
 	}
 	p := procs[0]
-	if got, want := keys(p.Reads), []string{"./**", "a.txt", "b.txt", "sub/**"}; !reflect.DeepEqual(got, want) {
+	// A cut command line may name any path, wherever it runs: the whole repository.
+	if got, want := keys(p.Reads), []string{"./**", "a.txt", "b.txt"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("reads %v, want %v", got, want)
 	}
 	if p.End != 1500 || p.Exit == nil {
 		t.Errorf("exit after the long line: %+v", p)
 	}
-	if r := Results(td, root); r["a.txt"].Status != "pass" {
+	if !p.Lost {
+		t.Error("the long line is not counted as lost")
+	}
+	if r := Results(td, root); r["a.txt"].Status != state.Unknown {
 		t.Errorf("results %v", r)
 	}
 }
@@ -189,20 +195,22 @@ func TestEachLine(t *testing.T) {
 	long := strings.Repeat("z", 200)
 	var got []string
 	in := "a\n" + long + "\nb\r\n\nc" // no newline at the end
-	if err := eachLine(strings.NewReader(in), 100, func(l []byte) { got = append(got, string(l)) }); err != nil {
+	skipped, err := eachLine(strings.NewReader(in), 100, func(l []byte) { got = append(got, string(l)) })
+	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"a", "b", "", "c"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %q, want %q", got, want)
+	if want := []string{"a", "b", "", "c"}; !reflect.DeepEqual(got, want) || skipped != 1 {
+		t.Errorf("got %q (skipped %d), want %q (skipped 1)", got, skipped, want)
 	}
 	// Lines longer than the reader's buffer.
 	got = nil
 	big := strings.Repeat("w", 100_000)
-	if err := eachLine(strings.NewReader(big+"\n"+big+"x\nd\n"), 100_000, func(l []byte) { got = append(got, string(l[:1])+fmt.Sprint(len(l))) }); err != nil {
+	skipped, err = eachLine(strings.NewReader(big+"\n"+big+"x\nd\n"), 100_000, func(l []byte) { got = append(got, string(l[:1])+fmt.Sprint(len(l))) })
+	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"w100000", "d1"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("got %q, want %q", got, want)
+	if want := []string{"w100000", "d1"}; !reflect.DeepEqual(got, want) || skipped != 1 {
+		t.Errorf("got %q (skipped %d), want %q (skipped 1)", got, skipped, want)
 	}
 }
 
@@ -481,7 +489,6 @@ func TestResults(t *testing.T) {
 		`{"k":"result","id":"`+a+`","status":"pass","ms":5}`+"\n"+
 			`{"k":"result","id":"`+b+`","status":"fail","ms":1,"msg":"AssertionError: boom"}`+"\n"+
 			`{"k":"read","id":"`+a+`","status":"fail"}`+"\n"+
-			`not json`+"\n"+
 			`{"k":"result","id":"/outside/x.test.ts","status":"fail"}`+"\n"), 0o644)
 	os.WriteFile(filepath.Join(td, "results-jest-2.jsonl"), []byte(
 		`{"k":"result","id":"`+b+`","status":"pass","ms":2}`+"\n"+

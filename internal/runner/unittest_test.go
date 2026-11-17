@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -309,6 +310,79 @@ class T(unittest.TestCase):
 		}
 	}
 	s.Isolate = nil
+}
+
+// With isolate: true, each module's own exit code settles it: a module whose tests
+// passed but whose process then failed (an atexit handler calling os._exit, a crash
+// during shutdown) is not recorded as passed, also when another module failed; and a
+// module's pass does not depend on the others.
+func TestUnittestIsolatedOwnExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix paths")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	pass := "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n"
+	modules := map[string]string{
+		"tests/test_ok.py": pass,
+		// Must keep: passed, then the process exits 3 after the wrapper wrote the pass.
+		"tests/test_exit_after.py": "import atexit, os\natexit.register(lambda: os._exit(3))\n" + pass,
+		// Must keep: passed, then the process dies by a signal.
+		"tests/test_killed_after.py": "import atexit, os, signal\natexit.register(lambda: os.kill(os.getpid(), signal.SIGKILL))\n" + pass,
+		"tests/test_fail.py":         "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.fail('no')\n",
+		"tests/test_support.py":      "X = 1\n", // a helper: exit 5, no failure
+	}
+	want := map[string]string{
+		"tests/test_ok.py": state.Pass, "tests/test_exit_after.py": state.Fail, "tests/test_killed_after.py": state.Fail,
+		"tests/test_fail.py": state.Fail, "tests/test_support.py": state.Pass,
+	}
+	for _, only := range []bool{false, true} {
+		repo := tempRepo(t)
+		testutil.Write(t, repo.Root, "tests/__init__.py", "")
+		var units []string
+		for rel, src := range modules {
+			testutil.Write(t, repo.Root, rel, src)
+			units = append(units, rel)
+		}
+		if only { // without a failing module the run's exit code would say 0
+			units = []string{"tests/test_ok.py", "tests/test_exit_after.py"}
+		}
+		slices.Sort(units)
+		shimDir := t.TempDir()
+		if _, err := trace.ExtractShims(shimDir); err != nil {
+			t.Fatal(err)
+		}
+		isolate := true
+		s := &Suite{Suite: config.Suite{Name: "u", Root: ".", Runner: "unittest", Command: "python3 -m unittest discover -s tests -t .",
+			Env: map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}, Isolate: &isolate}, Adapter: unittestRunner{}}
+		s.Tests = []string{"tests/test*.py"}
+		var out bytes.Buffer
+		rc := &RunContext{
+			Repo: repo, Suite: s, Units: units, All: true, Record: true,
+			TraceDir: t.TempDir(), ShimDir: shimDir, Stdout: &out, Stderr: &out,
+			IsTest: s.IsTestFile,
+			UnitOf: func(f string) string {
+				if s.IsTestFile(f) {
+					return f
+				}
+				return ""
+			},
+		}
+		res, err := unittestRunner{}.Run(context.Background(), rc)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out.String())
+		}
+		for _, u := range units {
+			o := res.Observations[u]
+			if want[u] == state.Pass && (o == nil || o.Status != state.Pass) || want[u] != state.Pass && o != nil && o.Status == state.Pass {
+				t.Errorf("only=%v %s: %+v, want %s\n%s", only, u, o, want[u], out.String())
+			}
+			if want[u] == state.Fail && (o == nil || o.Status != state.Fail || o.Inferred) {
+				t.Errorf("only=%v %s: %+v, want its own failure", only, u, o)
+			}
+		}
+	}
 }
 
 func TestPytestStyle(t *testing.T) {

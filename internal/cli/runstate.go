@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/dotneet/smates/internal/gitx"
@@ -11,8 +12,11 @@ import (
 )
 
 // recordSuites writes the collected outcomes into the state. Units that did not run
-// (--fail-fast) keep their entries, so they stay selected; a suite whose run covered
-// all its tests replaces its entries only when every batch of it ran.
+// (--fail-fast, --max-time, unmet requirements, a runner that could not start) keep
+// their entries, so they stay selected. A suite whose run covered all its tests
+// replaces its entries (dropping those of tests that no longer exist) only when it
+// ran all of them (fullyRan), and even then the entries of its tests that ran without
+// leaving an observation are kept.
 func (c *cycle) recordSuites() {
 	p := c.p
 	for _, sr := range c.sel.res.Suites {
@@ -20,12 +24,43 @@ func (c *cycle) recordSuites() {
 		if res == nil {
 			continue
 		}
-		full := res.full && len(c.notRun[sr.Name]) == 0
+		full := res.full && c.fullyRan(sr.Name)
 		if w := untrustedWarning(sr, res.obs); w != "" {
 			p.logf("%s: %s", sr.Name, w)
 		}
+		var old map[string]*state.Entry
+		if full {
+			old = maps.Clone(p.state.Suite(sr.Name).Tests)
+		}
 		events := selector.Record(p.state, sr, res.obs, c.hasher.ForSuite(sr.Suite), selector.RecordOptions{Commit: p.repo.Head(), Now: c.now, Full: full, ReadsBy: res.readsBy, Retried: res.retried, Unreliable: len(c.f.extra) > 0})
+		if full {
+			keepUnobserved(p.state.Suite(sr.Name), sr, res.obs, old)
+		}
 		c.flakes = append(c.flakes, flakeReports(sr.Name, events)...)
+	}
+}
+
+// fullyRan reports whether the cycle ran every unit it planned for suite with nothing
+// that may have filtered the tests: no unit
+// left out (by a stop, unmet requirements or a runner that could not start) and no
+// runner arguments passed through (-t, -k, -run: tests they filter out run nowhere).
+// Only such a run may replace a suite's entries or advance the snapshot as if every
+// test ran.
+func (c *cycle) fullyRan(suite string) bool {
+	if len(c.f.extra) > 0 {
+		return false
+	}
+	return c.units.countIn(suite, unitNotRun, unitUnstarted, unitUnmet) == 0
+}
+
+// keepUnobserved puts back, after a full recording replaced the entries of su, the
+// entries old held for tests of sr that left no observation (a passing batch they left
+// no trace in): a full run drops only the entries of tests that no longer exist.
+func keepUnobserved(su *state.Suite, sr *selector.Suite, obs map[string]*runner.Observation, old map[string]*state.Entry) {
+	for _, t := range sr.Tests {
+		if e := old[t.ID]; e != nil && obs[t.ID] == nil && su.Tests[t.ID] == nil {
+			su.Tests[t.ID] = e
+		}
 	}
 }
 
@@ -34,10 +69,11 @@ func (c *cycle) saveState() error {
 	p, res := c.p, c.sel.res
 	picked, left := c.ranSuites()
 	switch {
-	case c.stopped || len(picked) == 0:
-		// --fail-fast stopped the run (or no suite's runner could start): the
-		// repository-wide snapshot stays as it was, so changes and orphans the tests
-		// that did not run would have covered are seen again next time.
+	case c.stopped() || len(picked) == 0 || len(c.f.extra) > 0:
+		// --fail-fast stopped the run (or no suite's runner could start, or runner
+		// arguments may have filtered the tests): the repository-wide snapshot stays as
+		// it was, so changes and orphans the tests that did not run would have covered
+		// are seen again next time.
 	case len(left) > 0 && (res.Mode == selector.ModeAll || c.f.shadow):
 		// Every test of the suites --suite picked ran (a suite whose runner could not
 		// start counts as left out). Files only they own get their hash; files suites
@@ -64,21 +100,32 @@ func (c *cycle) saveState() error {
 		p.state.Commit = p.repo.Head()
 		p.state.Created = c.now
 	default:
+		if len(p.state.Files) == 0 && res.ChangesSince != "" {
+			// The changes were taken since an entry's commit for want of a snapshot:
+			// start one from that commit's tree, so that the orphans handled now are
+			// marked seen and the next run does not take every change since that
+			// commit as an orphan again. Those not handled stay changed.
+			if snap, err := p.repo.TreeSnapshot(res.ChangesSince); err == nil {
+				p.state.Files = map[string]string(snap)
+			}
+		}
 		c.markHandledOrphans(picked, left)
 	}
 	return c.save()
 }
 
 // ranSuites splits the suites of the run into those that ran (picked) and those
-// --suite left out or whose runner could not start (left).
+// --suite left out, or of which a unit did not start (its runner could not start, or
+// exited 126/127 before any test reported a result) or was left out by unmet
+// requirements (left).
 func (c *cycle) ranSuites() (picked, left []*runner.Suite) {
 	p := c.p
-	if len(c.unstarted) == 0 {
+	if c.units.count(unitUnstarted, unitUnmet) == 0 {
 		return p.suites, p.others
 	}
 	left = slices.Clip(p.others)
 	for _, s := range p.suites {
-		if _, ok := c.unstarted[s.Name]; ok {
+		if c.units.countIn(s.Name, unitUnstarted, unitUnmet) > 0 {
 			left = append(left, s)
 		} else {
 			picked = append(picked, s)

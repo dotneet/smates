@@ -169,6 +169,7 @@ func TestCollectExecVerified(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		exec   ev
+		end    int64 // when the process running the command recorded its exit
 		kids   []child
 		opaque bool
 	}{
@@ -190,6 +191,11 @@ func TestCollectExecVerified(t *testing.T) {
 		{name: "bun child by parent pid", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}},
 		{name: "child of another parent pid (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, kids: []child{{ppid: 99, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}, opaque: true},
 		{name: "parent pid of a process started later (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 800}}, opaque: true},
+		// The parent pid was reused: the process that ran the command had ended long
+		// before, or the child names another traced ancestor.
+		{name: "by a parent pid reused after the end (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, end: 1050, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1050 + startSlack + 1}}, opaque: true},
+		{name: "by parent pid, within the slack after the end", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, end: 1050, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}},
+		{name: "by parent pid, naming another ancestor (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, kids: []child{{pid: 99, lang: "node", t: 950}, {ppid: 10, anc: "99-0", pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}, opaque: true},
 		{name: "by parent pid, other arguments (must keep)", exec: ev{"args": []string{"bun", abs("app.js"), "1"}, "t": 1000}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js"), "2"}, t: 1100}}, opaque: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,7 +204,11 @@ func TestCollectExecVerified(t *testing.T) {
 			for k, v := range tc.exec {
 				e[k] = v
 			}
-			stream(t, td, 10, 0, ev{"k": "start", "pid": 10, "t": 900, "lang": "node"}, e)
+			evs := []any{ev{"k": "start", "pid": 10, "t": 900, "lang": "node"}, e}
+			if tc.end != 0 {
+				evs = append(evs, ev{"k": "exit", "code": 0, "t": tc.end})
+			}
+			stream(t, td, 10, 0, evs...)
 			for _, k := range tc.kids {
 				ppid := k.ppid
 				if ppid == 0 {

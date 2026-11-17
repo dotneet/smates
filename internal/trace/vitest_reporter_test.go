@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dotneet/smates/internal/state"
@@ -64,12 +65,35 @@ new Reporter().onFinished([
   file('old-dynskip-result.test.ts', 'skip', [{ type: 'test', name: 'dyn', mode: 'skip', result: { state: 'skip', pending: true } }]),
   file('old-failed.test.ts', 'fail', [leaf('a1', 'run', 'fail'), leaf('a2', 'run')]),
 ]);
+
+// Unhandled errors leave the module passed: the error's VITEST_TEST_PATH names the file
+// that was running. Vitest 3+ (onTestRunEnd's second argument):
+const ok = (file) => mod(file, 'passed', [r('t', 'run', 'passed')]);
+const named = (file, msg) => Object.assign(new Error(msg || 'boom in ' + file), { VITEST_TEST_PATH: root + '/' + file });
+new Reporter().onTestRunEnd([ok('uh-src.test.ts'), ok('uh-other.test.ts')], [named('uh-src.test.ts', 'unhandled boom')], 'failed');
+new Reporter().onTestRunEnd([ok('uh-twice.test.ts')], [named('uh-twice.test.ts'), named('uh-twice.test.ts')], 'failed');
+new Reporter().onTestRunEnd([ok('uh-rel.test.ts')], [{ message: 'relative', VITEST_TEST_PATH: './uh-rel.test.ts' }], 'failed');
+new Reporter().onTestRunEnd([ok('uh-win.test.ts')], [{ message: 'backslashes', VITEST_TEST_PATH: (root + '/uh-win.test.ts').split('/').join('\\') }], 'failed');
+// Errors naming no file of the run: no file passes; failures stand.
+new Reporter().onTestRunEnd([ok('uh-anon.test.ts'), mod('uh-anon-fail.test.ts', 'failed', [r('x', 'run', 'failed')])], [new Error('no file')], 'failed');
+new Reporter().onTestRunEnd([ok('uh-elsewhere.test.ts')], [named('not-in-this-run.test.ts')], 'failed');
+new Reporter().onTestRunEnd([ok('uh-primitive.test.ts')], ['a thrown string'], 'failed');
+new Reporter().onTestRunEnd([ok('uh-mixed-src.test.ts'), ok('uh-mixed-other.test.ts')], [named('uh-mixed-src.test.ts'), {}], 'failed');
+new Reporter().onTestRunEnd([ok('uh-none.test.ts')], [], 'passed');
+new Reporter().onTestRunEnd([ok('uh-undefined.test.ts')], undefined, 'passed');
+// Vitest 1/2 (onFinished's second argument).
+const okFile = (name) => file(name, 'pass', [leaf('t', 'run', 'pass')]);
+new Reporter().onFinished([okFile('old-uh-src.test.ts'), okFile('old-uh-other.test.ts')], [named('old-uh-src.test.ts', 'old unhandled boom')]);
+new Reporter().onFinished([okFile('old-uh-anon.test.ts'), file('old-uh-anon-fail.test.ts', 'fail', [leaf('a', 'run', 'fail')])], [new Error('no file')]);
+new Reporter().onFinished([okFile('old-uh-none.test.ts')]);
 `
 
 // A file Vitest did not run to the end (--bail, an interrupted run) is not a pass: the
 // tests it skipped would otherwise be recorded as passing. Nor is one a test of which
 // skipped itself (ctx.skip()), all or some of its tests; declared skips (it.skip, .todo)
-// are disabled tests and keep it passing.
+// are disabled tests and keep it passing. An unhandled error fails the file it names
+// (VITEST_TEST_PATH), which Vitest leaves passed; one naming no file of the run keeps
+// every file from passing.
 func TestVitestReporterUnfinishedFiles(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -98,11 +122,24 @@ func TestVitestReporterUnfinishedFiles(t *testing.T) {
 		"old-dynskip.test.ts": state.Unknown, "old-dynskip-result.test.ts": state.Unknown,
 		"old-cancelled.test.ts": state.Unknown, "old-never.test.ts": state.Unknown, "old-never-v1.test.ts": state.Unknown,
 		"old-done.test.ts": state.Pass, "old-allskip.test.ts": state.Pass, "old-failed.test.ts": state.Fail,
+		// Unhandled errors.
+		"uh-src.test.ts": state.Fail, "uh-other.test.ts": state.Pass, "uh-twice.test.ts": state.Fail,
+		"uh-rel.test.ts": state.Fail, "uh-win.test.ts": state.Fail,
+		"uh-anon.test.ts": state.Unknown, "uh-anon-fail.test.ts": state.Fail, "uh-elsewhere.test.ts": state.Unknown,
+		"uh-primitive.test.ts": state.Unknown, "uh-mixed-src.test.ts": state.Fail, "uh-mixed-other.test.ts": state.Unknown,
+		"uh-none.test.ts": state.Pass, "uh-undefined.test.ts": state.Pass,
+		"old-uh-src.test.ts": state.Fail, "old-uh-other.test.ts": state.Pass,
+		"old-uh-anon.test.ts": state.Unknown, "old-uh-anon-fail.test.ts": state.Fail, "old-uh-none.test.ts": state.Pass,
 	}
 	got := Results(td, root)
 	for f, st := range want {
 		if got[f].Status != st {
 			t.Errorf("%s: status %q, want %q", f, got[f].Status, st)
+		}
+	}
+	for f, msg := range map[string]string{"uh-src.test.ts": "unhandled boom", "old-uh-src.test.ts": "old unhandled boom"} {
+		if !strings.Contains(got[f].Message, msg) {
+			t.Errorf("%s: message %q, want the unhandled error", f, got[f].Message)
 		}
 	}
 	if len(got) != len(want) {

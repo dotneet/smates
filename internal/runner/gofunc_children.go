@@ -248,7 +248,7 @@ func goBuildContext(rc *RunContext) build.Context {
 	if v := Getenv(env, "CGO_ENABLED"); v != "" {
 		bctx.CgoEnabled = v == "1"
 	}
-	for _, f := range goListFlags(rc) {
+	for _, f := range goCommandOf(rc).listFlags() {
 		if tags, ok := strings.CutPrefix(f, "-tags="); ok {
 			bctx.BuildTags = strings.FieldsFunc(tags, func(r rune) bool { return r == ',' || r == ' ' })
 		}

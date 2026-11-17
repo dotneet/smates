@@ -143,6 +143,9 @@ type RunContext struct {
 	// report collects the suite's JUnit report after each invocation of the run (see
 	// reportInvocation).
 	report *junitReport
+	// rewrite, when set, changes each command line runChunks builds before it runs (Go:
+	// a user's -exec moves behind smates' own, see runPackages).
+	rewrite func(argv []string) []string
 }
 
 // RunResult is the outcome of running a suite.
@@ -389,11 +392,14 @@ func (rc *RunContext) ExecIn(ctx context.Context, dir string, argv []string, env
 	if len(argv) == 0 {
 		return 0, fmt.Errorf("empty command")
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Dir = dir
-	cmd.Env = withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), env), dir)
+	// The command is found through the PATH its processes get (the suite's env: may set
+	// one), not smates' own.
+	cmd, err := commandIn(ctx, dir, argv, withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), env), dir))
+	if err != nil {
+		return 127, fmt.Errorf("running %s: %w", argv[0], err)
+	}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
-	err := runCmd(ctx, cmd)
+	err = runCmd(ctx, cmd)
 	if ee, ok := err.(*exec.ExitError); ok {
 		code := ee.ExitCode()
 		if code < 0 {

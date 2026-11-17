@@ -33,7 +33,7 @@ func TestCoverPkgs(t *testing.T) {
 		if c.goflags != "" {
 			s.Env = map[string]string{"GOFLAGS": c.goflags}
 		}
-		got := coverPkgs(&RunContext{Suite: s, ExtraArgs: c.extra})
+		got := goCommandOf(&RunContext{Suite: s, ExtraArgs: c.extra}).coverPkgs()
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%q %v GOFLAGS=%q: %v, want %v", c.cmd, c.extra, c.goflags, got, c.want)
 		}
@@ -82,7 +82,7 @@ func TestGoListFlags(t *testing.T) {
 		Command: "go test -tags=integration -race -coverpkg=./... -count=1 ./x -- -tags=notmine",
 		Env:     map[string]string{"GOFLAGS": "-mod=mod -exec=/bin/false -tags=ignored -coverpkg=./..."},
 	}}
-	got := goListFlags(&RunContext{Suite: s, ExtraArgs: []string{"-tags", "late"}})
+	got := goCommandOf(&RunContext{Suite: s, ExtraArgs: []string{"-tags", "late"}}).listFlags()
 	want := []string{"-mod=mod", "-tags=ignored", "-tags=integration", "-race"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("goListFlags = %v, want %v", got, want)

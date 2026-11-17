@@ -32,10 +32,11 @@ func TestShadowShardUnits(t *testing.T) {
 			runs := map[string]int{}
 			for i := 1; i <= n; i++ {
 				res := shardResult()
-				applyShard(res, i, n)
+				applyShard(res, i, n, shadow)
 				c := &cycle{f: &runFlags{shadow: shadow, shardI: i, shardN: n}, sel: &selection{res: res}}
 				for _, sr := range res.Suites {
-					units, full := c.units(sr)
+					run := c.suiteRun(sr)
+					units, full := run.units, run.full
 					if full {
 						t.Errorf("n=%d shadow=%t: shard %d runs %s as a whole suite", n, shadow, i, sr.Name)
 					}

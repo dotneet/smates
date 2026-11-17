@@ -93,6 +93,39 @@ func TestSplitDeps(t *testing.T) {
 		{name: "extends a config that is not there", extra: map[string]string{
 			"tsconfig.json": `{"extends":"@acme/missing"}`,
 		}, runtime: kept},
+		// tsc resolves each extends entry on its own: a base two entries share applies
+		// again where the second starts.
+		{name: "diamond: the second entry's base overrides the first entry", extra: map[string]string{
+			"cfg/base.json": `{"compilerOptions":{"verbatimModuleSyntax":true}}`,
+			"cfg/a.json":    `{"extends":"./base.json","compilerOptions":{"verbatimModuleSyntax":false}}`,
+			"cfg/b.json":    `{"extends":"./base.json"}`,
+			"tsconfig.json": `{"extends":["./cfg/a.json","./cfg/b.json"]}`,
+		}, runtime: kept},
+		{name: "diamond: the second entry's base is known", extra: map[string]string{
+			"cfg/base.json": `{"compilerOptions":{"verbatimModuleSyntax":false}}`,
+			"cfg/a.json":    `{"extends":"./base.json","compilerOptions":{"verbatimModuleSyntax":true}}`,
+			"cfg/b.json":    `{"extends":"./base.json"}`,
+			"tsconfig.json": `{"extends":["./cfg/a.json","./cfg/b.json"]}`,
+		}, runtime: elided},
+		// Must keep: a config that cannot be read, applied after one that sets every
+		// option, may override them.
+		{name: "missing config after one setting every option", extra: map[string]string{
+			"cfg/off.json":  `{"compilerOptions":{"verbatimModuleSyntax":false,"preserveValueImports":false,"importsNotUsedAsValues":"remove"}}`,
+			"tsconfig.json": `{"extends":["./cfg/off.json","@acme/missing"]}`,
+		}, runtime: kept},
+		{name: "missing config deep in a chain", extra: map[string]string{
+			"cfg/a.json":    `{"extends":"./gone.json"}`,
+			"tsconfig.json": `{"extends":"./cfg/a.json"}`,
+		}, runtime: kept},
+		{name: "missing config before one setting every option", extra: map[string]string{
+			"cfg/off.json":  `{"compilerOptions":{"verbatimModuleSyntax":false,"preserveValueImports":false,"importsNotUsedAsValues":"remove"}}`,
+			"tsconfig.json": `{"extends":["@acme/missing","./cfg/off.json"]}`,
+		}, runtime: elided},
+		{name: "extends cycle", extra: map[string]string{
+			"cfg/a.json":    `{"extends":"./b.json","compilerOptions":{"verbatimModuleSyntax":true}}`,
+			"cfg/b.json":    `{"extends":"./a.json"}`,
+			"tsconfig.json": `{"extends":"./cfg/a.json"}`,
+		}, runtime: kept},
 		{name: "missing extended config overridden on every option", extra: map[string]string{
 			"tsconfig.json": `{"extends":"@acme/missing","compilerOptions":{"verbatimModuleSyntax":false,"preserveValueImports":false,"importsNotUsedAsValues":"remove"}}`,
 		}, runtime: elided},

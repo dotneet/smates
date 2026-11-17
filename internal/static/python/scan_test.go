@@ -144,6 +144,47 @@ func TestScanDynamic(t *testing.T) {
 	}
 }
 
+// TestScanDunderImport covers the fromlist and level arguments of __import__, which
+// make it a from-import (fromlist) or a relative import (level). What cannot be read
+// keeps every module it may name.
+func TestScanDunderImport(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{"name only", "__import__('pkg')\n", []string{"pkg"}},
+		{"fromlist keyword", "__import__('pkg', fromlist=['mod'])\n", []string{"pkg[mod]"}},
+		{"fromlist positional", "__import__('pkg', globals(), locals(), ['a', 'b'])\n", []string{"pkg[a,b]"}},
+		{"fromlist tuple", "__import__('pkg.sub', fromlist=('a',))\n", []string{"pkg.sub[a]"}},
+		{"fromlist multi-line", "m = __import__(\n    'pkg',\n    fromlist=[\n        'mod',\n    ],\n)\n", []string{"pkg[mod]"}},
+		{"fromlist star", "__import__('pkg', fromlist=['*'])\n", []string{"pkg"}},
+		{"fromlist empty", "__import__('pkg', fromlist=[])\n", []string{"pkg"}},
+		{"fromlist None", "__import__('pkg', None, None, None)\n", []string{"pkg"}},
+		{"importlib.__import__", "importlib.__import__('pkg', fromlist=['m'])\n", []string{"pkg[m]"}},
+		// Must keep: an unknown fromlist may name any submodule.
+		{"fromlist computed", "__import__('pkg', fromlist=names)\n", []string{"pkg", "pkg.*"}},
+		{"fromlist with a computed element", "__import__('pkg', fromlist=['a', n])\n", []string{"pkg[a]", "pkg.*"}},
+		{"fromlist f-string element", "__import__('pkg', fromlist=[f'm_{x}'])\n", []string{"pkg", "pkg.*"}},
+		{"level positional", "__import__('m', globals(), locals(), ['a'], 1)\n", []string{".m[a]"}},
+		{"level keyword", "__import__('m', fromlist=['a'], level=2)\n", []string{"..m[a]"}},
+		{"level zero", "__import__('m', level=0)\n", []string{"m"}},
+		{"empty name relative", "__import__('', globals(), locals(), ['a'], 1)\n", []string{".[a]"}},
+		{"empty name relative computed fromlist", "__import__('', fromlist=names, level=1)\n", []string{".", ".*"}},
+		{"empty name absolute", "__import__('')\n__import__('', fromlist=['a'])\n", nil},
+		// Must keep: an unknown level may make the import relative.
+		{"level computed", "__import__('m', fromlist=['a'], level=lvl)\n", []string{"m[a]", ".m[a]"}},
+		{"level computed empty name", "__import__('', fromlist=['a'], level=lvl)\n", []string{".[a]"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scanRefs(tt.src); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("refs = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestScanAll(t *testing.T) {
 	tests := []struct {
 		name string

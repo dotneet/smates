@@ -116,9 +116,13 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		code, err = cmdDoctor(rest, stdout, stderr)
 	case "guide":
-		_, err = io.WriteString(stdout, docs.Agents)
+		if err = noArgs(rest); err == nil {
+			_, err = io.WriteString(stdout, docs.Agents)
+		}
 	case "version", "--version", "-v":
-		fmt.Fprintln(stdout, "smates", Version)
+		if err = noArgs(rest); err == nil {
+			fmt.Fprintln(stdout, "smates", Version)
+		}
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
@@ -139,6 +143,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return code
+}
+
+// noArgs rejects the arguments of a command that takes none and has no flags.
+func noArgs(args []string) error {
+	if len(args) > 0 {
+		return usageError{fmt.Errorf("unexpected arguments %v", args)}
+	}
+	return nil
 }
 
 // notifyOnce is signal.NotifyContext for the first of sigs only: once ctx is done (the
@@ -183,21 +195,30 @@ func notifyOnce(parent context.Context, sigs ...os.Signal) (context.Context, con
 // the environment, never "tests failed", which would send the user (or an agent) to
 // fix code that is fine.
 func exitCodeFor(err error) int {
+	if code, ok := classifiedExit(err); ok {
+		return code
+	}
+	return ExitEnv
+}
+
+// classifiedExit is the exit code the type of err decides (usageError, configError,
+// envError, testsFailedError, in that order), and whether it has one of them.
+func classifiedExit(err error) (int, bool) {
 	var ue usageError
 	var ce configError
 	var ee envError
 	var tf testsFailedError
 	switch {
 	case errors.As(err, &ue):
-		return ExitUsage
+		return ExitUsage, true
 	case errors.As(err, &ce):
-		return ExitConfig
+		return ExitConfig, true
 	case errors.As(err, &ee):
-		return ExitEnv
+		return ExitEnv, true
 	case errors.As(err, &tf):
-		return ExitFailed
+		return ExitFailed, true
 	}
-	return ExitEnv
+	return 0, false
 }
 
 // Exit codes of smates (see `smates help`). A command returns an exit code with a nil
@@ -254,11 +275,7 @@ func asEnvError(err error) error {
 // orEnvError returns err unchanged when it already decides an exit code (usageError,
 // configError, envError, testsFailedError), else marks it as an environment error.
 func orEnvError(err error) error {
-	var ue usageError
-	var ce configError
-	var ee envError
-	var tf testsFailedError
-	if err == nil || errors.As(err, &ue) || errors.As(err, &ce) || errors.As(err, &ee) || errors.As(err, &tf) {
+	if _, ok := classifiedExit(err); err == nil || ok {
 		return err
 	}
 	return envError{err}
@@ -334,9 +351,14 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	if err != nil {
 		return nil, asEnvError(err)
 	}
+	// The working tree's files: a skip-worktree file left out of a sparse checkout is in
+	// the snapshot (its hash says it is off disk) but is not a file to detect, list or
+	// run, as the selection leaves it out too.
 	files := make([]string, 0, len(snap))
-	for f := range snap {
-		files = append(files, f)
+	for f, h := range snap {
+		if !gitx.IsOffDisk(h) {
+			files = append(files, f)
+		}
 	}
 	sort.Strings(files)
 	if cfg == nil {
@@ -561,12 +583,28 @@ func parseShard(s string) (int, int, error) {
 
 // applyShard keeps the selected tests owned by shard i of n. Ownership is a stable hash
 // of suite and test ID, so every shard agrees on it whatever state each one restored
-// (shards may hold different recorded durations and selections).
-func applyShard(res *selector.Result, i, n int) {
+// (shards may hold different recorded durations and selections). A suite that must run
+// whole (mustRunWhole; everything: a shadow run, which runs every test) is never split:
+// one shard (wholeShard) owns all of its tests and runs it unfiltered, the others none.
+func applyShard(res *selector.Result, i, n int, everything bool) {
 	if n <= 1 {
 		return
 	}
 	for _, s := range res.Suites {
+		if mustRunWhole(s, everything) {
+			owner := wholeShard(s.Name, n)
+			for _, t := range s.Tests {
+				t.Shard = owner
+				if t.Selected && owner != i {
+					t.Selected = false
+					t.Detail = fmt.Sprintf("in shard %d/%d, which runs the suite whole", owner, n)
+				}
+			}
+			if owner != i {
+				s.All = false
+			}
+			continue
+		}
 		for _, t := range s.Tests {
 			h := fnv.New32a()
 			h.Write([]byte(s.Name + "\x00" + t.ID))
