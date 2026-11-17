@@ -1384,7 +1384,8 @@ and file system git runs on; a lock older than two minutes is stale, since a sav
 seconds, and so is one whose holder is a process of this host and PID namespace, named
 in the lock file, that no longer runs: smates killed while saving, whose lock would
 otherwise make the next save wait out `LockWait` (one minute) and fail. A holder on
-another host or in another PID namespace (a container sharing the host name), or one
+another host or in another PID namespace or kernel boot (a container sharing the host
+name, a machine cloned from the same image on a shared file system), or one
 the platform cannot check (Windows), counts as alive.) The lock file holds a token unique to its holder. Two processes may find the
 same lock stale at once; were each to remove what it found, the slower one could remove
 the fresh lock the faster one just created, and both would hold it. So a stale lock is

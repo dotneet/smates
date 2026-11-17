@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +47,8 @@ func TestLockOfDeadHolder(t *testing.T) {
 		// Containers that share the host name but not the PID namespace.
 		{"must keep: another PID namespace", line(dead, host, " pidns pid:[1]"), false},
 		{"must keep: no PID namespace where there are some", line(dead, host, ""), ns == ""},
+		// The same namespace inode on another kernel (two machines of one host name).
+		{"must keep: same namespace, other boot", line(dead, host, " pidns "+strings.TrimPrefix(strings.SplitN(ns, "/", 2)[0], " pidns ")+"/other-boot"), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.lock")

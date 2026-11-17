@@ -147,7 +147,7 @@ func breakStale(path string, stale time.Duration) bool {
 }
 
 // holderRe matches the holder a lock file names: "pid 123 on host at ...", and
-// holderNSRe the PID namespace it ran in (Linux: " pidns pid:[4026531836]").
+// holderNSRe the PID namespace it ran in (Linux: " pidns pid:[4026531836]/<boot id>").
 var (
 	holderRe   = regexp.MustCompile(`^pid (\d+) on (\S+) at `)
 	holderNSRe = regexp.MustCompile(` pidns (\S+)\s*$`)
@@ -156,9 +156,11 @@ var (
 // holderDead reports whether the lock file content data names a holder that is
 // certainly gone: a process of this host (by name) and of this PID namespace that no
 // longer runs. A host name is shared by containers with their own PID namespace
-// (--uts=host, a host network, a fixed --hostname): a pid of another one may name a
-// live process there, so the namespace must match too (a lock file without one, from
-// a platform that has them, is another namespace's). A lock left
+// (--uts=host, a host network, a fixed --hostname), and two machines may share one
+// (a cloned image) and a repository on a network file system: a pid of another
+// namespace or kernel may name a live process there, so the namespace and the boot of
+// its kernel must match too (a lock file without them, from a platform that has them,
+// is another namespace's). A lock left
 // by smates killed while holding it (a second Ctrl-C, the OOM killer) is then broken
 // at once rather than after the stale timeout, which is longer than LockWait. Any
 // doubt (another host, a format it does not know, a platform that cannot tell) is a
