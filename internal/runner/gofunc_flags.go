@@ -4,13 +4,13 @@ package runner
 // and running it directly (granularity: func recording).
 
 import (
-	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 // goFlags is the suite command split for building a test binary and running it.
 type goFlags struct {
+	bin   string   // the go command (goCommand.bin)
 	build []string // flags for go list / go test -c
 	test  []string // -test.* flags for the binary
 	tail  []string // arguments after -args
@@ -44,21 +44,25 @@ var goBuildValueFlags = map[string]bool{
 
 // parseGoFlags splits the suite command (with the run's extra arguments).
 func parseGoFlags(rc *RunContext) goFlags {
-	var g goFlags
-	argv, err := rc.CommandLine(nil, nil)
-	if err != nil {
-		g.why = err.Error()
+	return goFlagsOf(goCommandOf(rc))
+}
+
+// goFlagsOf translates the suite's go test configuration.
+func goFlagsOf(gc *goCommand) goFlags {
+	g := goFlags{bin: gc.bin}
+	if gc.err != nil {
+		g.why = gc.err.Error()
 		return g
 	}
-	if len(argv) < 2 || strings.TrimSuffix(filepath.Base(argv[0]), ".exe") != "go" || argv[1] != "test" {
+	if !gc.goTest {
 		g.why = "the suite command is not `go test ...`"
 		return g
 	}
 	// GOFLAGS first: flags on the command line come later and win (the binary, like the
 	// flag package, takes the last value of a repeated flag).
 	timeout := false
-	g.words(strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS")), true, &timeout)
-	g.words(argv[2:], false, &timeout)
+	g.words(gc.env, nil, true, &timeout)
+	g.words(gc.cmd, gc.tail, false, &timeout)
 	if !timeout {
 		g.test = append(g.test, "-test.timeout=10m0s") // go test's default
 	}
@@ -102,14 +106,14 @@ func ParseGoTestArgs(words []string, oneWord bool) (args []GoArg, tail []string)
 	return args, nil
 }
 
-// words translates go test arguments: from GOFLAGS (fromEnv: one flag per word; build
-// flags are left to the go command, which reads GOFLAGS itself) or from the command.
-func (g *goFlags) words(words []string, fromEnv bool, timeout *bool) {
+// words translates go test arguments (args, then tail after -args): from GOFLAGS
+// (fromEnv; build flags are left to the go command, which reads GOFLAGS itself) or
+// from the command.
+func (g *goFlags) words(args []GoArg, tail []string, fromEnv bool, timeout *bool) {
 	where := "the suite command"
 	if fromEnv {
 		where = "GOFLAGS"
 	}
-	args, tail := ParseGoTestArgs(words, fromEnv)
 	if tail != nil {
 		g.tail = tail
 	}

@@ -1,15 +1,27 @@
 // smates reporter for Vitest: writes per-file results to $SMATES_TRACE_DIR.
-// Supports the Vitest 3+ API (onTestRunEnd) and the older onFinished(files).
+// Supports the Vitest 3+ API (onTestRunEnd) and the older onFinished(files, errors).
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const out = () => join(process.env.SMATES_TRACE_DIR || '.', `results-vitest-${process.pid}.jsonl`);
+// A result that cannot be written is counted, and the next line written says so
+// ({"k":"lost"}): smates then records no pass from this file of results.
+let lost = 0;
+const append = (line) => {
+  try {
+    appendFileSync(out(), (lost ? JSON.stringify({ k: 'lost', n: lost }) + '\n' : '') + line);
+    lost = 0;
+  } catch {
+    lost++;
+  }
+};
 const write = (id, status, ms, msg) => {
   const ev = { k: 'result', id, status, ms: Math.round(ms || 0) };
   if (status === 'fail' && msg) ev.msg = msg;
-  try {
-    appendFileSync(out(), JSON.stringify(ev) + '\n');
-  } catch {}
+  append(JSON.stringify(ev) + '\n');
+};
+const flushLost = () => {
+  if (lost) append('');
 };
 
 // Failure messages are bounded: they only feed smates' failure hints.
@@ -113,6 +125,39 @@ const fileStatus = (f, failed) => {
   return finished ? 'pass' : 'unknown';
 };
 
+// Unhandled errors (an uncaught exception or rejection while a file ran, a failing
+// teardown) do not fail a module: Vitest leaves it passed and fails only the run. It tags
+// each error with the test file that was running (VITEST_TEST_PATH, the file's absolute
+// path; taken relative to the root too, in case a version gives it so), and that file
+// fails. An error naming no file of the run could have come from any of them: then no
+// file passes.
+const normPath = (p) => String(p).replace(/\\/g, '/');
+const sameFile = (id, p) => {
+  if (typeof id !== 'string' || !id) return false;
+  id = normPath(id);
+  p = normPath(p).replace(/^\.\//, '');
+  return id === p || (!p.startsWith('/') && !/^[A-Za-z]:\//.test(p) && id.endsWith('/' + p));
+};
+// unhandled sorts errors by the entries (modules or files) they name: paths(entry) lists
+// an entry's file paths. It returns the errors of each entry and whether any named none.
+const unhandled = (errors, entries, paths) => {
+  const byEntry = new Map();
+  let unattributed = false;
+  for (const e of Array.isArray(errors) ? errors : []) {
+    let p;
+    try {
+      p = e && typeof e === 'object' ? e.VITEST_TEST_PATH : undefined;
+    } catch {}
+    const hits = typeof p === 'string' && p ? entries.filter((x) => paths(x).some((id) => sameFile(id, p))) : [];
+    if (hits.length === 0) unattributed = true;
+    for (const x of hits) byEntry.set(x, (byEntry.get(x) || []).concat([e]));
+  }
+  return { byEntry, unattributed };
+};
+// settle is an entry's status given the run's unhandled errors (the entry's own ones
+// already fail it): a pass stands only when every error named a file.
+const settle = (status, unattributed) => (status === 'pass' && unattributed ? 'unknown' : status);
+
 // Global setup (globalSetup files, project.provide) runs in the main process between
 // onTestRunStart and the first test module: whatever it reads affects every test, so
 // that window is marked as a "global:" context for the trace shim.
@@ -156,24 +201,32 @@ export default class SmatesReporter {
   onCollected() {
     this.endGlobal();
   }
-  onTestRunEnd(testModules, _unhandledErrors, reason) {
+  onTestRunEnd(testModules, unhandledErrors, reason) {
     this.endGlobal();
     if (!Array.isArray(testModules)) return;
     this.done = true;
+    const { byEntry, unattributed } = unhandled(unhandledErrors, testModules, (m) => [m.moduleId, m.task && m.task.filepath]);
     for (const m of testModules) {
       const state = typeof m.state === 'function' ? m.state() : undefined;
       const diag = typeof m.diagnostic === 'function' ? m.diagnostic() : undefined;
-      const errors = typeof m.errors === 'function' ? m.errors() : [];
-      const failed = state === 'failed' || (errors && errors.length > 0);
-      write(m.moduleId, moduleStatus(m, failed, reason === 'interrupted'), diag && diag.duration, failed ? moduleMessage(m, errors) : '');
+      const errors = (typeof m.errors === 'function' ? m.errors() : []) || [];
+      const all = errors.concat(byEntry.get(m) || []);
+      const failed = state === 'failed' || all.length > 0;
+      const status = settle(moduleStatus(m, failed, reason === 'interrupted'), unattributed);
+      write(m.moduleId, status, diag && diag.duration, failed ? moduleMessage(m, all) : '');
     }
+    flushLost();
   }
-  onFinished(files) {
+  onFinished(files, errors) {
     if (this.done || !Array.isArray(files)) return;
+    const { byEntry, unattributed } = unhandled(errors, files, (f) => [f.filepath]);
     for (const f of files) {
       const state = f.result && f.result.state;
-      const failed = state === 'fail' || (f.result && f.result.errors && f.result.errors.length > 0);
-      write(f.filepath, fileStatus(f, failed), f.result && f.result.duration, failed ? fileMessage(f) : '');
+      const own = byEntry.get(f) || [];
+      const failed = state === 'fail' || (f.result && f.result.errors && f.result.errors.length > 0) || own.length > 0;
+      const msg = failed ? joinMsgs([fileMessage(f)].concat(own.map(errText))) : '';
+      write(f.filepath, settle(fileStatus(f, failed), unattributed), f.result && f.result.duration, msg);
     }
+    flushLost();
   }
 }

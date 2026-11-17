@@ -46,9 +46,10 @@ func IsGoCheck() bool { return os.Getenv(GoCheckEnv) != "" }
 // check mode (when smates' path is known; otherwise the binaries run with -run '^$',
 // which still runs TestMain and init functions).
 func checkArgv(rc *RunContext, pkgs []string) (argv, env []string) {
-	g := parseGoFlags(rc)
-	argv = []string{"go", "test", "-run=^$", "-count=1"}
-	env = []string{"GOFLAGS=" + checkGoflags(rc)}
+	gc := goCommandOf(rc)
+	g := goFlagsOf(gc)
+	argv = []string{gc.bin, "test", "-run=^$", "-count=1"}
+	env = []string{"GOFLAGS=" + checkGoflags(gc)}
 	if exe := checkExec(rc); exe != "" {
 		argv = append(argv, "-exec="+exe)
 		env = append(env, GoCheckEnv+"=1")
@@ -64,21 +65,15 @@ func checkArgv(rc *RunContext, pkgs []string) (argv, env []string) {
 // argument lists of the checkArgv command lines running them.
 func checkChunks(rc *RunContext, dirs []string) [][]string {
 	base, _ := checkArgv(rc, nil)
-	return chunk(base, pkgArgs(rc.Suite, dirs))
+	return rc.chunk(base, pkgArgs(rc.Suite, dirs))
 }
 
 // checkGoflags is the suite's GOFLAGS without test flags (-run, -json, -coverprofile,
 // -exec, ...), which would change what the check runs or prints; -vet is kept.
-func checkGoflags(rc *RunContext) string {
-	var kept []string
-	for _, w := range strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS")) {
-		name, _, _ := strings.Cut(strings.TrimLeft(w, "-"), "=")
-		if name != "vet" && (goTestValueFlags[name] || goTestBoolFlags[name] || strings.HasPrefix(name, "test.")) {
-			continue
-		}
-		kept = append(kept, w)
-	}
-	return strings.Join(kept, " ")
+func checkGoflags(gc *goCommand) string {
+	return strings.Join(gc.goflags(func(a GoArg) bool {
+		return a.Name != "vet" && (goTestValueFlags[a.Name] || goTestBoolFlags[a.Name] || strings.HasPrefix(a.Name, "test."))
+	}), " ")
 }
 
 // checkExec is the -exec value running smates in check mode ("" when its path is not

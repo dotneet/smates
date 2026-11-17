@@ -218,6 +218,11 @@ type Proc struct {
 	// Exited reports whether the process recorded its end (an exit event). A Node or Bun
 	// process killed without one may have run code its trace does not show (codeUnknown).
 	Exited bool
+	// Lost reports that events of the process are missing from its stream: its shim
+	// could not write some ({"k":"lost"}), or a line could not be read (cut short by a
+	// failed write, overlong). Any of them may have been a read, a context switch or a
+	// child: Attribute makes the process depend on the whole repository (lostKey).
+	Lost bool
 	// Inst tells apart processes of one trace that had the same pid and thread id (pids
 	// are reused; each process writes a stream of its own): 0 for the first to start.
 	// Key includes it for the others, and Collect makes references to "pid-tid" (Anc,
@@ -389,45 +394,9 @@ var (
 	v8FileRe   = regexp.MustCompile(`^coverage-(\d+)-(\d+)-(\d+)\.json$`)
 )
 
-// instances groups the processes of a trace by pid and thread id ("pid-tid"), in the
-// order they started.
-type instances map[string][]*Proc
-
-func (in instances) add(p *Proc) {
-	k := fmt.Sprintf("%d-%d", p.Pid, p.Tid)
-	in[k] = append(in[k], p)
-}
-
-// at returns the instance of "pid-tid" ref running at time t (the last one started by
-// then, else the first), other than self; nil when there is none.
-func (in instances) at(ref string, t int64, self *Proc) *Proc {
-	var out *Proc
-	for _, p := range in[ref] {
-		if p == self {
-			continue
-		}
-		if out == nil || p.Start <= t {
-			out = p
-		}
-	}
-	return out
-}
-
-// resolve rewrites a "pid-tid" reference made by a process started at t to the key of
-// the instance it names (see Proc.Inst).
-func (in instances) resolve(ref string, t int64, self *Proc) string {
-	if len(in[ref]) < 2 {
-		return ref
-	}
-	if p := in.at(ref, t, self); p != nil {
-		return p.Key()
-	}
-	return ref
-}
-
 // Collect reads a trace directory. repoRoot must be absolute with symlinks resolved.
 func Collect(traceDir, repoRoot string) ([]*Proc, error) {
-	byID := instances{}
+	byID := newProcIndex(nil)
 	rel, links := relCache(repoRoot), linksCache(repoRoot)
 
 	entries, err := os.ReadDir(traceDir)
@@ -447,16 +416,15 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		byID.add(p)
 	}
-	for _, ps := range byID {
-		sort.SliceStable(ps, func(i, j int) bool { return ps[i].Start < ps[j].Start })
+	byID.sort()
+	for _, ps := range byID.procs {
 		for i, p := range ps {
 			p.Inst = i
 		}
 	}
 	// A coverage file belongs to the instance running when it was written.
 	get := func(pid, tid int, t int64) *Proc {
-		k := fmt.Sprintf("%d-%d", pid, tid)
-		if p := byID.at(k, t, nil); p != nil {
+		if p := byID.named(pid, tid, t, nil); p != nil {
 			return p
 		}
 		p := newProc(pid, tid)
@@ -499,7 +467,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 	})
 
 	var out []*Proc
-	for _, ps := range byID {
+	for _, ps := range byID.procs {
 		out = append(out, ps...)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -526,13 +494,8 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 // whose environment the program or a wrapper replaced (env -i, a container, a minimal
 // env a launcher builds) records nothing, and is then analyzed as an opaque command.
 func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
-	byPid := map[int][]*Proc{}
-	for _, p := range procs {
-		if p.Tid == 0 {
-			byPid[p.Pid] = append(byPid[p.Pid], p)
-		}
-	}
-	children := childrenOf(procs, byPid)
+	ix := newProcIndex(procs)
+	children := childrenOf(procs, ix)
 	for _, p := range procs {
 		if len(p.execs) == 0 {
 			continue
@@ -540,8 +503,8 @@ func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
 		// The program an os.exec* replaces the process with (also in a forked child,
 		// whose traced ancestor its program does not become) has its pid.
 		kids := children[p.Key()]
-		for _, q := range byPid[p.Pid] {
-			if q != p && q.Start >= p.Start && !slices.Contains(kids, q) {
+		for _, q := range ix.instances(p.Pid, 0) {
+			if q != p && execedBy(q, p) && !slices.Contains(kids, q) {
 				kids = append(kids, q)
 			}
 		}
@@ -557,11 +520,16 @@ func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
 
 // childrenOf maps the key of each traced process to the traced processes it started:
 // by the traced ancestor a child names (SMATES_TRACE_PARENT, which reaches it through a
-// shell or launcher), and by its parent pid. The latter links children whose runtime
-// passes on the environment the process started with rather than the one its shim
-// changed (Bun.spawn without an env option): they name no ancestor. Of several
-// processes that had the parent pid, it is the last one started by the child's start.
-func childrenOf(procs []*Proc, byPid map[int][]*Proc) map[string][]*Proc {
+// shell or launcher), and by its parent (parentOf: the process that had its parent pid
+// when it started, when that agrees with the ancestor it names). The latter links
+// children whose runtime passes on the environment the process started with rather
+// than the one its shim changed (Bun.spawn without an env option): they name the
+// process's own ancestor.
+func childrenOf(procs []*Proc, ix *procIndex) map[string][]*Proc {
+	byKey := make(map[string]*Proc, len(procs))
+	for _, p := range procs {
+		byKey[p.Key()] = p
+	}
 	children := map[string][]*Proc{}
 	for _, p := range procs {
 		if p.Tid != 0 {
@@ -570,20 +538,23 @@ func childrenOf(procs []*Proc, byPid map[int][]*Proc) map[string][]*Proc {
 		if p.Anc != "" {
 			children[p.Anc] = append(children[p.Anc], p)
 		}
-		if p.Ppid == 0 || p.Ppid == p.Pid {
-			continue
-		}
-		var parent *Proc
-		for _, q := range byPid[p.Ppid] {
-			if q != p && q.Start <= p.Start && (parent == nil || q.Start >= parent.Start) {
-				parent = q
-			}
-		}
-		if parent != nil && parent.Key() != p.Anc {
+		if parent := parentOf(p, ix, byKey); parent != nil && parent.Key() != p.Anc {
 			children[parent.Key()] = append(children[parent.Key()], p)
 		}
 	}
 	return children
+}
+
+// execedBy reports whether q, a process with p's pid, may be the program an os.exec*
+// replaced p with: it started after p, while p was running (p records no end when it is
+// replaced), and has p or p's own traced ancestor as its traced ancestor (a forked
+// child that execs keeps its parent's). Another process that got p's pid later fails
+// one of these.
+func execedBy(q, p *Proc) bool {
+	if q.Start < p.Start || p.End > 0 && q.Start > p.End+startSlack {
+		return false
+	}
+	return q.Anc == p.Key() || q.Anc == p.Anc
 }
 
 // execRuntimes are the runtimes whose shims trace a process.
@@ -716,12 +687,20 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 	defer f.Close()
 	ctx, spawn := "", ""
 	add := func(kind, r string) string { return p.addIn(ctx, spawn, kind, r) }
-	return eachLine(f, maxLine, func(line []byte) {
+	skipped, err := eachLine(f, maxLine, func(line []byte) {
 		var ev event
 		if json.Unmarshal(line, &ev) != nil {
-			return // partial line from a killed process
+			// A line cut short (a write that failed half-way, a process killed while
+			// writing) or garbled: whatever event it was is lost. Blank lines are not
+			// events.
+			if len(bytes.TrimSpace(line)) > 0 {
+				p.Lost = true
+			}
+			return
 		}
 		switch ev.K {
+		case "lost": // the shim could not write some events ({"k":"lost","n":count})
+			p.Lost = true
 		case "start":
 			p.Ppid, p.Anc, p.Argv, p.Cwd, p.Lang, p.Start = ev.Ppid, ev.Anc, ev.Argv, ev.Cwd, ev.Lang, ev.T
 			if key, c, ok := strings.Cut(ev.Pctx, ":"); ok && key != "" && p.SpawnKey == "" {
@@ -777,10 +756,9 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 			}
 			if ev.Trunc {
 				// The shim cut a huge command line short: nothing can be told from what
-				// is left, so the command may read anything below its working directory.
-				if k := treeKey(cwd, root, rel, true); k != "" {
-					add("key", k)
-				}
+				// is left (the words cut off may name any path, "../x" too), so the
+				// command may read anything in the repository.
+				add("key", depkey.Tree("."))
 				break
 			}
 			var rt map[string]bool
@@ -815,16 +793,20 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 			}
 		}
 	})
+	if skipped > 0 {
+		p.Lost = true
+	}
+	return err
 }
 
 // maxLine bounds a line of a trace stream or results file. The shims keep theirs far
 // shorter (they cut the command lines of exec events); a longer line is skipped rather
-// than failing the whole collection.
+// than failing the whole collection, and the event it held counts as lost.
 const maxLine = 16 << 20
 
 // eachLine calls fn with every line of r (without its line ending) of at most limit
-// bytes; longer lines are skipped. fn must not keep the slice.
-func eachLine(r io.Reader, limit int, fn func([]byte)) error {
+// bytes; longer lines are skipped and counted (skipped). fn must not keep the slice.
+func eachLine(r io.Reader, limit int, fn func([]byte)) (skipped int, err error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var buf []byte
 	skip := false
@@ -838,6 +820,7 @@ func eachLine(r io.Reader, limit int, fn func([]byte)) error {
 		case skip:
 		case n > limit:
 			skip, buf = true, buf[:0]
+			skipped++
 		case err == nil && len(buf) == 0:
 			fn(bytes.TrimRight(chunk, "\r\n")) // a whole line in the buffer: no copy
 			continue
@@ -852,10 +835,10 @@ func eachLine(r io.Reader, limit int, fn func([]byte)) error {
 		}
 		buf, skip = buf[:0], false
 		if err == io.EOF {
-			return nil
+			return skipped, nil
 		}
 		if err != nil {
-			return err
+			return skipped, err
 		}
 	}
 }

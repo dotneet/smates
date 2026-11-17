@@ -34,7 +34,7 @@ func (e requiresError) Unwrap() error { return e.error }
 // batchOverrun), not by a ratio: a short batch whose startup took longer than its tests
 // says nothing about how much longer a long batch's tests take.
 func (c *cycle) overTime(b *batch) bool {
-	if c.f.maxTime <= 0 || countUnits(c.started) == 0 {
+	if c.f.maxTime <= 0 || !c.units.anyStarted() {
 		return false
 	}
 	elapsed := time.Since(c.start)
@@ -104,7 +104,9 @@ func (c *cycle) unitsFrom(batches []*batch) int {
 
 // deferUnmet takes out of batch b the units that need a requirement (requires) that is
 // not met: they do not start and stay selected. A check that cannot tell (it fails to
-// run, times out) counts as unmet. It reports whether nothing is left to run.
+// run, times out) counts as unmet. A suite that must run whole (batch.whole) is
+// deferred entirely when any of its units is. It reports whether nothing is left to
+// run.
 func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 	sr := b.sr
 	reqs := sr.Suite.Requires
@@ -131,12 +133,17 @@ func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 	}
 	if ctx.Err() != nil {
 		// Cancelled while checking: like a batch cut short.
-		c.interrupted, c.stopped = true, true
-		c.notRun[sr.Name] = append(c.notRun[sr.Name], b.units...)
+		c.stop = stopInterrupt
+		c.units.set(sr.Name, b.units, unitNotRun)
 		return true
 	}
 	if len(left) == 0 {
 		return false
+	}
+	if b.whole {
+		// A suite that must run whole cannot run without the units left out: they stay
+		// selected, and so does the rest of it.
+		keep, left = nil, b.units
 	}
 	var why []string
 	for i, r := range reqs {
@@ -145,9 +152,10 @@ func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 		}
 	}
 	c.p.logf("%s: not runnable here: requires %s; %d test unit(s) not run (they stay selected)", sr.Name, strings.Join(why, ", "), len(left))
-	c.unstarted[sr.Name] = append(c.unstarted[sr.Name], left...)
-	c.notRun[sr.Name] = append(c.notRun[sr.Name], left...)
-	c.unmet[sr.Name] = append(c.unmet[sr.Name], left...)
+	c.units.set(sr.Name, left, unitUnmet)
+	if c.unmetWhy == nil {
+		c.unmetWhy = map[string][]string{}
+	}
 	for _, w := range why {
 		if !slices.Contains(c.unmetWhy[sr.Name], w) {
 			c.unmetWhy[sr.Name] = append(c.unmetWhy[sr.Name], w)
@@ -167,20 +175,20 @@ func (c *cycle) deferUnmet(ctx context.Context, b *batch) bool {
 // first (deferUnmet), and --max-time is checked against the estimate of the units
 // that are left: units that never start neither cap the run nor make it stop early.
 func (c *cycle) admit(ctx context.Context, b *batch, rest []*batch) bool {
-	if !c.stopped && ctx.Err() != nil {
-		c.interrupted, c.stopped = true, true // Ctrl-C between batches
+	if !c.stopped() && ctx.Err() != nil {
+		c.stop = stopInterrupt // Ctrl-C between batches
 	}
-	if c.stopped {
-		c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+	if c.stopped() {
+		c.units.set(b.sr.Name, b.units, unitNotRun)
 		return false
 	}
 	if c.deferUnmet(ctx, b) {
 		return false
 	}
 	if c.overTime(b) {
-		c.stopped, c.capped = true, true
+		c.stop = stopMaxTime
 		c.p.logf("--max-time %s: starting no further test batch (%d selected unit(s) left; they stay selected)", c.f.maxTime, c.unitsFrom(rest))
-		c.notRun[b.sr.Name] = append(c.notRun[b.sr.Name], b.units...)
+		c.units.set(b.sr.Name, b.units, unitNotRun)
 		return false
 	}
 	return true
@@ -203,13 +211,13 @@ func (c *cycle) checkRequirement(ctx context.Context, s *runner.Suite, r config.
 // unmetError is the error the run reports for the units left out by unmet
 // requirements (nil when there are none).
 func (c *cycle) unmetError() error {
-	if len(c.unmet) == 0 {
+	if c.units.count(unitUnmet) == 0 {
 		return nil
 	}
 	var parts []string
 	for _, sr := range c.sel.res.Suites {
-		if units := c.unmet[sr.Name]; len(units) > 0 {
-			parts = append(parts, fmt.Sprintf("%s: %d test unit(s) need %s", sr.Name, len(units), strings.Join(c.unmetWhy[sr.Name], ", ")))
+		if n := c.units.countIn(sr.Name, unitUnmet); n > 0 {
+			parts = append(parts, fmt.Sprintf("%s: %d test unit(s) need %s", sr.Name, n, strings.Join(c.unmetWhy[sr.Name], ", ")))
 		}
 	}
 	return envError{requiresError{fmt.Errorf("requirements not met, so these tests did not run and stay selected: %s", strings.Join(parts, "; "))}}
@@ -219,12 +227,12 @@ func (c *cycle) unmetError() error {
 // why: --max-time, unmet requirements ("" when it left none).
 func (c *cycle) deferredLine() string {
 	var parts []string
-	if n := countUnits(c.notRun) - countUnits(c.unstarted); c.capped && n > 0 {
+	if n := c.units.count(unitNotRun); c.capped() && n > 0 {
 		parts = append(parts, fmt.Sprintf("%d by --max-time %s", n, c.f.maxTime))
 	}
 	for _, sr := range c.sel.res.Suites {
-		if units := c.unmet[sr.Name]; len(units) > 0 {
-			parts = append(parts, fmt.Sprintf("%d of %s, which needs %s", len(units), sr.Name, strings.Join(c.unmetWhy[sr.Name], ", ")))
+		if n := c.units.countIn(sr.Name, unitUnmet); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d of %s, which needs %s", n, sr.Name, strings.Join(c.unmetWhy[sr.Name], ", ")))
 		}
 	}
 	if len(parts) == 0 {

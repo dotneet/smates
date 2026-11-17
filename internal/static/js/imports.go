@@ -11,10 +11,11 @@ type Import struct {
 	TypeOnly bool
 }
 
-// Imports returns the module specifiers of the source of file p, in order. Specifiers
-// in comments and strings are not imports. A specifier list whose specifiers all carry
-// the type modifier (import { type A } from) counts as loading the module: compiler
-// options may keep it.
+// Imports returns the module specifiers of the source of file p: those the lexer finds
+// in order, then those only a coarse scan of the text finds (see withCoarse), which may
+// come from comments or strings: a file the lexer misreads loses none. A specifier
+// list whose specifiers all carry the type modifier (import { type A } from) counts as
+// loading the module: compiler options may keep it.
 func Imports(p string, src []byte) []Import {
 	ts := typeScriptExts[path.Ext(p)]
 	var out []Import

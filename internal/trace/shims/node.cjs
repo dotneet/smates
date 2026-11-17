@@ -17,6 +17,7 @@
 //   {"k":"code","p":"/abs/file"}   a module was loaded (Bun, which has no V8 coverage)
 //   {"k":"env","p":"NAME"}         an environment variable was read (never its value)
 //   {"k":"ctx","id":"test:/abs/file","t":ms}  attribution context switch (runner hooks)
+//   {"k":"lost","n":2}             that many events before this one could not be written
 //   {"k":"exit","code":0,"t":ms}
 // Executed code is not recorded here: it comes from V8 coverage (NODE_V8_COVERAGE),
 // which also covers worker threads, vm-evaluated modules and child processes.
@@ -76,13 +77,34 @@
     } catch (_) {}
     setQuiet(quiet);
   }
+  // An event that cannot be written (a full disk, a descriptor the program closed) is
+  // counted, and the next one written is preceded by {"k":"lost","n":count}: smates then
+  // takes the process for one that may have read anything. A write cut short leaves part
+  // of a line, which the next write ends first (smates counts it as lost too). Events
+  // are written as bytes: writeSync may write less than it was given.
+  let lost = 0;
+  let partial = false;
   const write = (obj) => {
     const mocked = fsBinding && fsBinding._mockedBinding;
     try {
       if (mocked) fsBinding._mockedBinding = undefined;
       if (fd < 0) fd = openSync0(out, 'a');
-      writeSync0(fd, JSON.stringify(obj) + '\n');
-    } catch (_) {
+      let line = JSON.stringify(obj) + '\n';
+      if (lost) line = JSON.stringify({ k: 'lost', n: lost }) + '\n' + line;
+      if (partial) line = '\n' + line;
+      const buf = Buffer.from(line);
+      for (let off = 0; off < buf.length; ) {
+        const n = writeSync0(fd, buf, off, buf.length - off);
+        if (!(n > 0)) throw new Error('short write');
+        off += n;
+        partial = off < buf.length;
+      }
+      lost = 0;
+    } catch (e) {
+      lost++;
+      // The program closed the descriptor (a test closing every fd): open the file
+      // again for the next event, which then says what was lost.
+      if (e && e.code === 'EBADF') fd = -1;
     } finally {
       if (mocked) fsBinding._mockedBinding = mocked;
     }
@@ -403,6 +425,192 @@
     a[i] = Object.assign(Object.create(Object.getPrototypeOf(o)), o, { env });
     return a;
   };
+  // Bun.$ runs a shell of Bun's own: its builtins (cat, ls...) read files in process, and
+  // the programs it starts do not go through Bun.spawn. Each command is recorded as a
+  // shell exec event, which smates analyzes like any shell command: the template, with
+  // the values interpolated rendered as the words (or, inside quotes, the text) Bun
+  // makes of them, run in the shell's directory (.cwd() on the shell or the command).
+  // A value the shim cannot render becomes an unset variable, which smates takes for an
+  // unknown path.
+  const UNKNOWN_VALUE = '$SMATES_UNKNOWN_VALUE';
+  const shQuote = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  // The words of a value, null when unknown: a Bun.file stands for its path, other data
+  // a redirect reads or writes (Response, Blob, buffers, streams) for no file.
+  const shellWords = (v) => {
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return [String(v)];
+    if (Array.isArray(v)) {
+      const out = [];
+      for (const x of v) {
+        const w = shellWords(x);
+        if (!w) return null;
+        out.push(...w);
+      }
+      return out;
+    }
+    if (!v || typeof v !== 'object') return null;
+    if (typeof Blob === 'function' && v instanceof Blob) return [typeof v.name === 'string' && v.name ? path.resolve(v.name) : '/dev/null'];
+    const data = [globalThis.Response, globalThis.ReadableStream, ArrayBuffer, globalThis.SharedArrayBuffer];
+    if (ArrayBuffer.isView(v) || data.some((C) => typeof C === 'function' && v instanceof C)) return ['/dev/null'];
+    return null;
+  };
+  // q: the quote the value is in ("", "'" or '"').
+  const valueText = (v, q) => {
+    const words = shellWords(v);
+    if (!words) return q === '"' ? UNKNOWN_VALUE : q === "'" ? `'"${UNKNOWN_VALUE}"'` : `"${UNKNOWN_VALUE}"`;
+    if (q === '"') return words.join(' ').replace(/[\\"$`]/g, '\\$&');
+    if (q === "'") return "'" + shQuote(words.join(' ')) + "'";
+    return words.map(shQuote).join(' ');
+  };
+  // scanQuotes follows the quotes of shell text (st: {q, esc}).
+  const scanQuotes = (text, st) => {
+    for (const c of text) {
+      if (st.esc) st.esc = false;
+      else if (c === '\\' && st.q !== "'") st.esc = true;
+      else if (st.q === '' && (c === "'" || c === '"')) st.q = c;
+      else if (c === st.q) st.q = '';
+    }
+  };
+  const shellCommand = (strings, values) => {
+    const parts = Array.isArray(strings.raw) ? strings.raw : strings;
+    const st = { q: '', esc: false };
+    let cmd = '';
+    for (let i = 0; i < parts.length; i++) {
+      const part = String(parts[i]);
+      cmd += part;
+      scanQuotes(part, st);
+      if (i >= parts.length - 1 || i >= values.length) continue;
+      const v = values[i];
+      if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.raw === 'string') {
+        cmd += v.raw;
+        scanQuotes(v.raw, st);
+      } else {
+        cmd += valueText(v, st.q);
+      }
+    }
+    return cmd;
+  };
+  // traceShell returns Bun.$ traced, invisibly to the program: a Proxy of it (typeof,
+  // name, length, own keys, prototype and instanceof stay those of Bun.$; its methods,
+  // called on the proxy, keep their state on Bun.$ itself). A call records the command
+  // in the shell's directory and environment, read from the state Bun keeps on the shell
+  // (Symbol(cwd), Symbol(env)); an environment set with $.env() gets the tracing
+  // variables added. Commands are recorded when they are made, before they run.
+  //
+  // Shells made with new $.Shell() are not wrapped ($.Shell cannot be replaced: Bun
+  // freezes it, and wrapping the shells it makes shows). Every command of every shell
+  // runs through ShellPromise.prototype.then (await, .text(), .run()...): one of a shell
+  // not traced is recorded there as an unknown command, which may read anything in the
+  // repository. ShellPromise.prototype.cwd records a command again in the directory
+  // given, and .env() adds the tracing variables, both with their descriptors, names and
+  // lengths kept.
+  const tracedShells = new WeakSet();
+  const shellCommands = new WeakMap(); // ShellPromise -> records its command in a directory
+  const ranPromises = new WeakSet();
+  const shellState = (shell, name) => {
+    for (const s of Object.getOwnPropertySymbols(shell)) {
+      if (s.description === name) return { sym: s, value: shell[s] };
+    }
+    return null;
+  };
+  // replaceMethod replaces the function proto[name] with make(orig), keeping the
+  // property's attributes and the function's name and length. make returns a method
+  // (shorthand syntax), which like a class method has no prototype and is no constructor.
+  const patched = new WeakSet();
+  const replaceMethod = (proto, name, make) => {
+    const d = Object.getOwnPropertyDescriptor(proto, name);
+    if (!d || typeof d.value !== 'function' || patched.has(d.value)) return;
+    const orig = d.value;
+    const f = make(orig);
+    Object.defineProperty(f, 'name', Object.getOwnPropertyDescriptor(orig, 'name') || { value: orig.name });
+    Object.defineProperty(f, 'length', Object.getOwnPropertyDescriptor(orig, 'length') || { value: orig.length });
+    patched.add(f);
+    Object.defineProperty(proto, name, Object.assign({}, d, { value: f }));
+  };
+  const unknownCommand = () => execEv([`"${UNKNOWN_VALUE}"`], true, { cwd: path.sep });
+  const patchShellPromise = (SP) => {
+    const proto = SP && SP.prototype;
+    if (!proto || typeof proto !== 'object') return;
+    replaceMethod(
+      proto,
+      'then',
+      (orig) =>
+        ({
+          then() {
+            try {
+              if (this && typeof this === 'object' && !ranPromises.has(this)) {
+                ranPromises.add(this);
+                if (!shellCommands.has(this)) unknownCommand();
+              }
+            } catch (_) {}
+            return Reflect.apply(orig, this, arguments);
+          },
+        }).then,
+    );
+    replaceMethod(
+      proto,
+      'cwd',
+      (orig) =>
+        ({
+          cwd(dir) {
+            try {
+              const ev = shellCommands.get(this);
+              const d = dir === undefined || dir === null ? '.' : toPath(dir);
+              if (ev && d !== null) ev(path.resolve(d || '.'));
+            } catch (_) {}
+            return Reflect.apply(orig, this, arguments);
+          },
+        }).cwd,
+    );
+    replaceMethod(
+      proto,
+      'env',
+      (orig) =>
+        ({
+          env(e) {
+            let args = arguments;
+            try {
+              if (e && typeof e === 'object') args = [tracedEnv(e, false)].concat(Array.prototype.slice.call(arguments, 1));
+            } catch (_) {}
+            return Reflect.apply(orig, this, args);
+          },
+        }).env,
+    );
+  };
+  const traceShell = (orig) => {
+    try {
+      patchShellPromise(orig.ShellPromise);
+    } catch (_) {}
+    const proxy = new Proxy(orig, {
+      apply(target, thisArg, args) {
+        let ev = null;
+        try {
+          const strings = args[0];
+          if (strings && typeof strings === 'object' && Array.isArray(strings.raw)) {
+            const cmd = shellCommand(strings, Array.prototype.slice.call(args, 1));
+            const cwd = shellState(target, 'cwd');
+            const env = shellState(target, 'env');
+            const opts = { env: env && env.value && typeof env.value === 'object' ? env.value : undefined };
+            ev = (dir) => execEv([cmd], true, Object.assign({ cwd: dir }, opts));
+            ev(cwd && typeof cwd.value === 'string' && cwd.value ? path.resolve(cwd.value) : undefined);
+          }
+        } catch (_) {}
+        const p = Reflect.apply(target, thisArg, args);
+        try {
+          if (ev && p && typeof p === 'object') shellCommands.set(p, ev);
+        } catch (_) {}
+        return p;
+      },
+      set(target, key, value, receiver) {
+        try {
+          // $.env(obj): the shell's children get the tracing variables too.
+          if (typeof key === 'symbol' && key.description === 'env' && value && typeof value === 'object') value = tracedEnv(value, false);
+        } catch (_) {}
+        return Reflect.set(target, key, value, receiver);
+      },
+    });
+    tracedShells.add(proxy);
+    return proxy;
+  };
   try {
     const cp = require('child_process');
     const wrapCP = (name, ev, at) => {
@@ -614,7 +822,7 @@
     } catch (_) {}
     // Bun.spawn(cmd, options?) and Bun.spawn({cmd, ...options}), like child_process
     // (whose Bun implementation calls them: those children are recorded already). Bun.$
-    // runs its own shell, with builtins such as cat, and is not traced.
+    // (below) starts its programs itself.
     for (const name of ['spawn', 'spawnSync']) {
       try {
         const orig = Bun[name];
@@ -629,6 +837,9 @@
         });
       } catch (_) {}
     }
+    try {
+      if (typeof Bun.$ === 'function' && !tracedShells.has(Bun.$)) Bun.$ = traceShell(Bun.$);
+    } catch (_) {}
   }
 
   globalThis.__smatesTrace = {
@@ -885,6 +1096,12 @@
   process.on('exit', (code) => {
     loadedModules();
     write({ k: 'exit', code, t: Date.now() });
+    // The last chance to say that events were lost (the exit event among them): once
+    // more, with the file opened again.
+    if (lost) {
+      fd = -1;
+      write({ k: 'exit', code, t: Date.now() });
+    }
     // A pool worker that exits by itself may still get the pool's SIGTERM (jest-worker
     // restarting a worker over its idle memory limit) before Node writes the coverage
     // at exit, and no handler runs after "exit": write it now.

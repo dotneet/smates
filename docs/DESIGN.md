@@ -66,26 +66,53 @@ ignores it: a tracked file keeps the index's mode, an untracked one is not execu
 so a `chmod -x` on a script a test runs selects the test, committed or not. git status
 and git diff report a mode-only change as a modification, so the snapshot, diff mode
 and watch mode see it too. A symlink hashes as its target path (as git stores it), a
-submodule as `commit:` and its pinned commit.
+submodule as `commit:` and its pinned commit (`gitx.CommitPrefix`). The files inside a
+submodule are not in the snapshot: a test reading one depends on it as read from disk,
+and a `dir/**` tree hash includes the pinned commit of every submodule at `dir`, above
+it (`dir` is inside the submodule) or below it, so bumping a submodule changes the
+trees over it even when its files keep their paths and sizes (`VERSION` 1.2.3 ->
+1.2.4), which is all a tree read from disk hashes (see below). A tree with no
+submodule at or above it hashes as before; one recorded by an older smates over a
+submodule hashed without the commit and is a change once, so the test runs again.
 
 Files flagged `skip-worktree` or `assume-unchanged` (`git update-index`: local
 configuration overrides, sparse checkouts) are hashed from disk like dirty files: git
 status and git diff do not report edits to them, so the index hash would let a test
 reading a locally edited flagged file skip. They are found with `git ls-files -s -v`
 (tag `S`, or any lowercase tag); the executable-bit rules above apply. A flagged file
-not on disk keeps its index hash when it is `skip-worktree` (a sparse checkout leaves
-it out of the working tree, and git counts it as unchanged) and is deleted otherwise.
+not on disk is deleted when it is only `assume-unchanged`. One flagged `skip-worktree`
+(a sparse checkout leaves it out of the working tree, or it was removed) hashes as
+`offdisk:` and its index hash (`gitx.OffDisk`): git counts it as unchanged, and so does
+the tree snapshot (the changed files, the `--suite` markers: no orphan when a cone
+narrows), but a test that read or probed it finds nothing there now, so every key a
+test observed over it reflects its absence: its content key (`offdisk:` differs from
+the blob), an existence check (`absent`), the listing of its directory and a Go
+package's shape (it is no entry: a directory holding only such files is not there, and
+is listed or walked on disk), a `dir/**` tree and an `@set:` declaration (summed with
+the `offdisk:` hash), its declarations (the `offdisk:` hash: there is nothing to parse).
+Narrowing the cone selects the tests that used a file it took away, and widening it
+again selects those that ran without it. A test file outside the cone is no unit (the
+selection's file list leaves such files out, as do the globs of inputs, rules and
+`depends_on`), so no runner is asked to run a file that is not there; its entry stays
+for when the cone widens. An older smates recorded such a file with its index hash,
+which hid its absence: against `offdisk:` it is a change, so the test runs once more.
 Diff mode (`ChangedSince`, which also fails rather than drop the untracked files when
 listing them fails) and watch mode (which stats flagged files on every poll, like
-dirty ones, and counts a commit that changes one) report their edits too.
+dirty ones, and counts a commit that changes one) report their edits too; a
+skip-worktree file off disk is no edit for them, as for git.
 
 Compatibility: an older smates recorded executable files by their blob alone, and may
 still be writing the state (CI on an older version, a shared or cached state). Entries
 carry no version of their own, so a recorded hash without the marker matches the
-current hash with it (`gitx.SameHash`, used for the snapshot's changed files and the
-`--suite` markers, `Hasher.Unchanged` for dependency keys, the flaky comparison and
-failure hints): a `dir/**` tree or an `@set:` declaration recorded that way matches
-while the same sum over its files' blobs without the marker does. Otherwise every
+current hash with it. Every comparison of a recorded hash with a current one goes
+through one API with one table test (`gitx.Compare`): `gitx.ByContent` for the
+snapshot's changed files and the `--suite` markers (`gitx.SameHash`; a skip-worktree
+file off disk matches its index hash there), `gitx.ByKey` for dependency keys
+(`Hasher.Unchanged`, the flaky comparison, failure hints; off disk is a change there),
+and `Hasher.DepUnchanged` for a key of an entry, which adds the settings key's legacy
+forms (below): a `dir/**` tree or an `@set:` declaration recorded without the marker
+matches while the same sum over its files' blobs without the marker
+(`gitx.LegacyHash`, which keeps `offdisk:`) does. Otherwise every
 executable file (`gradlew`, `scripts/*.sh`, `.husky/*`) would be a change, an orphan or
 a changed tree after each such recording. The price: a file that only gains the
 executable bit, with its content unchanged, is no change, against any state; losing
@@ -188,8 +215,8 @@ Dependency keys:
 |---|---|---|
 | `path` | blob SHA-1, `+x` appended for an executable file (`""` = absent) | a file is executed or read (also a symlink the path went through) |
 | `dir/` | hash of the entry names (of a directory git ignores entirely: from disk) | a directory is listed (readdir, os.listdir, Bun.Glob) |
-| `path?` | `exists` / `absent` / `dangling` (a symlink that does not resolve) | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
-| `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely: paths and sizes on disk) | a command smates cannot see into ran in `dir` |
+| `path?` | `exists` / `absent` / `dangling` (a symlink that does not resolve; `absent` for a skip-worktree file off disk) | existence is checked (exists/stat/access, Go `stat`) — also for files that do not exist yet |
+| `dir/**` | hash of every non-ignored file below (of a directory git ignores entirely or a submodule: paths and sizes on disk), with the commit of each submodule at, above or below `dir` | a command smates cannot see into ran in `dir` |
 | `$NAME` | `env:` + truncated SHA-256 of the value (`""` = unset) | test code read the environment variable (see below) |
 | `f.go#decls` | `decls:` + SHA-1 of the file's tokens without function bodies, comments other than directives left out (of a test file: its imports, types, method signatures and what runs for every test; the blob when it does not parse) | Go test functions: every Go file of the static closure (see "Go test functions") |
 | `f.go#decl:N` | `decl:` + SHA-1 of the tokens of top-level declaration `N` (function `N`, method `T.N`, a variable, constant or type with its whole group), with the imports of its file, comments other than directives and example output left out (`""` = absent; the blob when the file does not parse) | Go test functions: a function body it executed, a test-file declaration it reaches |
@@ -232,13 +259,16 @@ on purpose: with `granularity: func` every Go test function depends on its packa
 listing, so a log a test writes into the package, a `go test -c` binary, `cover.out`,
 profiles, `.DS_Store` or an editor's swap file would rerun the whole package (on every
 fresh checkout, for files a test writes there), where only the test reading the file
-should run. A `dir/**` tree of a directory git ignores entirely is the relative paths
+should run. A `dir/**` tree of a directory git ignores entirely (or of a submodule, or
+a directory inside one: the snapshot lists no file there) is the relative paths
 and sizes of its files on disk, without vendored ones (the `ignore` globs do not apply
-here either: the command ran there); contents are not read (build output can be gigabytes, and a build that is not
+here either: the command ran there), after the commit of a submodule at or above
+`dir`; contents are not read (build output can be gigabytes, and a build that is not
 reproducible would rerun the tests forever), so a rebuilt file of the same size is no
-change. A tree of more than 20,000 entries hashes as a constant (`tree:over:20000`): its
-changes select nothing while it stays that large, and the selection says so in a note
-naming the directory. A tree the snapshot has files below leaves its ignored files out.
+change. A tree of more than 20,000 entries hashes as a constant (`tree:over:20000`,
+followed by a sum of the commits of the submodules at or above it): its changes select
+nothing while it stays that large (a bump of such a submodule still does), and the
+selection says so in a note naming the directory. A tree the snapshot has files below leaves its ignored files out.
 
 Soundness argument: an entry's dependencies and hashes are captured from one tree state. If
 no input differs between that state and now, the test sees the same inputs and its outcome
@@ -334,7 +364,27 @@ and that is not ignored is an **orphan**: a Dockerfile, a CI script, an SQL migr
 applied by a service. `Covers` defines "explains": the file itself is a dependency; or a
 listing or existence check of it, but only when the file appeared or disappeared (an
 edited file that tests merely list may still be read by something untraced); or a
-`dir/**` tree other than the repository root. With `--suite`, the suites left out still
+`dir/**` tree other than the repository root. A submodule (one snapshot entry for its
+commit) is also explained by a key inside it whose hash follows the content there
+(`depkey.ReflectsContent`): a file read in it, a Go file's declarations, a tree in or
+over it (whose hash includes the commit). A listing, an existence check or a Go
+package's shape inside it is not: a new commit can leave them as they were, and a test
+holding only those would skip a bump no test accounts for.
+
+Without a snapshot in the state (a state started in diff mode, a worktree of a shared
+state with no snapshot of its own) the changed files come from the base revision. When
+none is given or found (a shallow clone, no upstream, no default branch), they come
+from the oldest commit the entries of the selection's suites ran at that is in the
+clone (`gitx.Repo.OldestBase`: the merge base of HEAD and those commits, so an entry
+recorded on another branch counts from where it forked; the commits are folded in
+chunks so that thousands of them make no huge command line), with a note naming it
+(`Result.ChangesSince`). The run then starts the state's snapshot from that commit's
+tree (`gitx.Repo.TreeSnapshot`) and marks the orphans it handled as seen, so the next
+selection has a snapshot and does not take every change since that commit as an
+orphan again (those not handled stay changed). When
+none of those commits is in the clone (or the entries have none) every test runs, with
+a note: a change no test depends on could not be told, and selecting nothing would hide
+it silently. That run records a snapshot, so the next selection has one. With `--suite`, the suites left out still
 explain the changes their tests depend on (`Input.Others`), so a run limited to some
 suites selects what a run over every suite selects for them; and a change that only
 suites left out would run for under the orphan policy (it is under their root, not under
@@ -439,8 +489,8 @@ can alter test results.
 | jest | test file | V8 coverage per worker | fs hooks | workers recycled after each file (`--workerIdleMemoryLimit=0`); `isolate: true` = one jest process per file |
 | bun | test file | `bun test --coverage` lcov + `require.cache` per process, read by a global `afterAll` registered from the preload (bun test emits no exit event; lcov leaves out JSON loaded at run time) (no lcov: bun covered nothing, or the file failed; only a passing file whose static closure has source files is then not recorded) | preload fs + `Bun.file`/`Bun.Glob` hooks (a glob lists the literal directory before its first glob segment when only the last segment is one, else may read everything below it); the test file's `__snapshots__/<file>.snap` when it exists after the run, else its existence (bun reads snapshots natively, past the hooks) | one process per file while recording; shim prepended to bunfig preloads (top-level `test.*` dotted keys and `test = {...}` move into the `[test]` table); bun children preload it through `BUN_OPTIONS` (bun ignores `NODE_OPTIONS --require`) |
 | pytest | test file | `sys.monitoring` PY_START (3.12+) / `sys.setprofile` | audit hook `open`, `os.listdir`/`scandir`, wrapped `os.stat/lstat/access` | contexts per collected module, test and fixture; module-level reads via `ReadsBy`; results keyed by each item's file (node ids of files outside the rootdir are relative to the arguments); a file some of whose collected tests did not run (`-x`, `--maxfail`, `pytest.exit()`, an interrupt; with pytest-xdist counted by the controller) is `unknown`, and so is one a test of which skipped itself (see section 3) |
-| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then, or when a test of it skipped itself, see section 3); `isolate: true` = one process per module |
-| go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output |
+| unittest | test module | as pytest | as pytest | selected modules passed by dotted name (relative to the discovery top-level dir) and run in one process by `python -m smates_unittest` (unittest's main, patched loader/suite and a result class): contexts per imported module and per module's tests including `setUpModule`/`setUpClass` and their teardowns; per-module status from the result class (a module that ran no test passes when it is a helper, and is `unknown` when it looks written for pytest or the run stopped early, `--failfast` or an interrupt, as is the module running then, or when a test of it skipped itself, see section 3); `isolate: true` = one process per module, whose own exit code settles it too (a pass the wrapper wrote does not outlive a process that then failed, an `atexit` calling `os._exit`; exit 5, no test ran, counts only for a module written for pytest, which stays `unknown`) |
+| go test | package | static import closure (exact for Go) incl. packages named in test string literals | `-test.testlogfile` via `GOFLAGS=-exec=smates`, and of re-executions of the binary; other children as opaque trees (see below) | one binary per package; build failures parsed from output; a user `-exec` (any spelling, in `GOFLAGS`, on a `go test` command or among the arguments passed through) is removed there and run by smates' wrapper; a wrapper command passing one gets a warning (its packages stay unrecorded) |
 | go test, `granularity: func` | top-level test function, plus a compile check per package | coverage profile per function (`go test -c -cover -coverpkg=<linked repository packages>`, re-executions of the binary included) + declarations of the static closure; the check: content of the static closure | `-test.testlogfile` of the function's process and of re-executions of the binary; other children as for a package | one process per function (`-test.run '^Name$'`); checks in one `go test -run '^$'` with the binaries not run |
 | gradle | test class source file | classes the test JVM loaded (JDK Flight Recorder `jdk.ClassLoad`), mapped to the sources declaring them, + the static Java closure | `jdk.FileRead` (resources mapped to their sources, a project's jar to its resource trees), the listing of each read file's directory, `jdk.ProcessStart` command lines; Node, Bun and Python children trace themselves | one JVM per test class while recording (`forkEvery = 1`; `isolate: false` keeps Gradle's forking); JVMs matched to classes by their Gradle test executor; outcomes per class from a `TestListener` (see "Gradle") |
 
@@ -465,7 +515,14 @@ project (`Matcher.Browser`). Storybook's stories become units: `storybookMatcher
 each entry to a matcher (MDX excluded). Unreadable stories fall back to
 `**/*.stories.*` under the project, marked `Whole`: `Result.WholeSuites` then selects
 the whole suite whenever one of them is selected, so the runner, unfiltered, runs every
-story whatever the guess. Browser projects give their units `Deps` (the configuration
+story whatever the guess. Such a suite must stay one unfiltered runner call however the
+run is cut, which `mustRunWhole` and `cycle.suiteRun` decide for every caller: `--shard`
+gives all of it to one shard (`wholeShard`, a hash of the suite name; in a sharded
+shadow run too) and the others neither select nor own any of it; `--fail-fast`,
+`--max-time` and untraced units do not split it (it runs at its best priority,
+estimated as one call, and untraced as a whole when any of its units is untraced); unmet `requires` of any of its units defer all of it; a watch
+rerun (failed tests, the last selection) applies `WholeSuites` again. `--only` runs
+exactly the named units. Browser projects give their units `Deps` (the configuration
 directory and static directories, as globs) and `Starts` (`preview.*`, whose static
 closure is added), and a unit that runs only in browser projects also depends on what
 the suite's configuration loads (`RunnerConfig.Files`). Such a unit leaves no trace:
@@ -481,7 +538,8 @@ module).
 timings or their ratios can fail only while recording. A suite's `untraced` globs
 (`selector.UntracedUnit`, matched like `volatile`; never a Go compile check) put those
 units, while recording, in batches of their own (`cycle.untracedGroups`, also under
-`--fail-fast` and `--max-time`; the suite is then never one full batch). For the
+`--fail-fast` and `--max-time`; the suite is then never one full batch, except a suite
+that must run whole, see Browser projects, which then runs untraced as a whole). For the
 runners `runner.TracesUntraced` names (vitest, jest, node, bun) the batch runs with
 `RunContext.Untraced`: `traceEnv` drops smates' `NODE_V8_COVERAGE` (the user's own value
 then applies) and bun runs without `--coverage`, so the shim still records reads,
@@ -681,11 +739,15 @@ depends on the outer value of a variable it sets: more runs, never fewer).
 **Go test functions.** With `granularity: func` a unit is `dir#Name` for every top-level
 `TestXxx(*testing.T)`, `FuzzXxx(*testing.F)` and `ExampleXxx()` found by parsing the
 package's `_test.go` files (a file that does not parse makes the package itself a unit).
-Recording builds the package's test binary once with `-cover -coverpkg=` set to the
+Every go command recording runs (`go list`, `go test -c`, the compile checks) is the
+suite command's own go (any path whose base name is `go`), found through the suite's
+`PATH`, and every flag it takes from `GOFLAGS`, the command and the arguments passed
+through is read by one parser (`goCommand`). Recording builds the package's test binary once with `-cover -coverpkg=` set to the
 main-module packages it links (`go list -deps -test`), lists its tests from the test
 files `go list` says it compiles (`TestGoFiles`, `XTestGoFiles`; examples without an
 output comment are compiled, never run, by go/doc's rule as go test applies it; only
-when that fails does it ask the binary, `-test.list`, which runs `TestMain`), and runs
+when that fails does it ask the binary, `-test.list`, which runs `TestMain`; a function
+neither shows built is not recorded and runs again), and runs
 each selected function in its own process (`-test.run '^Name$'`, a coverage
 profile, a test log, `GOCOVERDIR` and the Node/Python tracing environment in a trace
 directory of its own), bounded by `record_jobs` per package (default 1, like `go test`)
@@ -892,7 +954,14 @@ it `unknown`, with a warning; otherwise it passes (disabled and conditionally di
 tests do not keep it from passing). A unit without events in a successful build
 (the task's filters or tags exclude it, or it runs no test) is `unknown`, with a warning. A
 build that failed before any test reported (a compile error) fails every unit of the batch
-(`Inferred`).
+(`Inferred`). Events name a class, and two projects of a build may declare one of the same
+qualified name (the selection by name runs both): the event's task path tells which
+project it ran in, and the build's settings which directory that is, so an event goes to
+the unit declaring the class in that project, and to none when that project has no
+selected unit declaring it. When the settings cannot tell (computed includes, included
+builds), an event of a class several units declare proves nothing for any of them: a
+failure fails each (`Inferred`), otherwise they are `unknown` and recording attributes
+nothing to them, with a warning.
 
 **Recording Gradle tests** (`gradle_record.go`). A class loads once per JVM, so attributing
 code to a test class through class loading needs a JVM per class: while recording, the
@@ -1076,7 +1145,9 @@ types) stays in the closure: erasing the import does not stop the runner loading
 ## 3. Status and shadow mode
 
 Per-file status comes from reporters (vitest, jest — injected only when the user configures
-none), the pytest plugin, process exit codes (node:test, bun, go), or a JUnit file. When only
+none; a run that failed before any test file ran with them, the reporter not loaded and
+nothing reported, runs again without them, in one process per file too (`isolate: true`,
+untraced) when every file's process failed), the pytest plugin, process exit codes (node:test, bun, go), or a JUnit file. When only
 the run's exit code is known, failures are *inferred*: such units are re-run next time but
 not reported as definite misses; so is a process exit code that covers several units (node
 `--test-isolation=none`). Units that ran but left no trace in a failing run are
@@ -1195,11 +1266,18 @@ plain run pays nothing for the ordering. A full suite run (`--all`, the default 
 under `--fail-fast` is split too when some of its units failed last time, passing explicit units instead of letting the runner
 discover its tests, so previously failed units can run first without running twice.
 
-Recording stays on the safe side. Outcomes of a suite's calls are merged and recorded once
-per suite; units that did not start get no observation, so their old entry (or the
-absence of one) stays and they are selected again for the same reason. A suite's entries
-are replaced wholesale (the full-run rule) only when every call of it ran. A run that
-stopped early does not touch the repository-wide snapshot, neither the full-run refresh
+Recording stays on the safe side. Every unit a run plans ends in exactly one state
+(`unitState`: ran, not run, not started, unmet), from which the log, the summary, the
+GitHub outputs, `--report`, the run record and recording all read. Outcomes of a suite's
+calls are merged and recorded once per suite; units that did not start get no
+observation, so their old entry (or the absence of one) stays and they are selected
+again for the same reason. A suite's entries are replaced wholesale (the full-run rule,
+which drops the entries of tests that no longer exist) only when every unit of it ran
+and no runner arguments were passed through (`cycle.fullyRan`: `-t`, `-k`, `-run` may
+filter out tests that then run nowhere); even then a unit that ran without leaving an
+observation (a passing call it left no trace in) keeps its old entry. A run that
+stopped early, or that passed runner arguments through, does not touch the
+repository-wide snapshot, neither the full-run refresh (`Files`, `Commit`, `Created`)
 nor the orphans it handled: tests that would have covered them may not have run. Results,
 failure hints, flake evidence, the summary and `--report` only contain what ran;
 `--report` lists the rest under `not_run` and the summary and log count them. An
@@ -1211,11 +1289,16 @@ the run: its units count as not run (`not_run`, they stay selected), later batch
 and what ran is recorded and reported; smates then exits 1 when tests failed, else 4
 (the exit code `--report`, the summary and the GitHub outputs give, `reportedExit`,
 comes from the same `resolveExit` as the process exit code).
-For the snapshot its suite counts as one `--suite` left out: a full run refreshes it only
-for the suites that ran (markers for files the others also own), and the orphans a
+A runner that exits 126 or 127 before any test reported a result (`notStarted`) is
+handled the same way: its units did not start. For the snapshot its suite counts as one
+`--suite` left out: a full run refreshes it only for the suites that ran (markers for
+files the others also own, `Commit` and `Created` unchanged), and the orphans a
 selective run handled are marked seen by those suites alone. A suite command line that
 cannot be parsed stops the run (later batches are not run and stay selected); what ran
-is recorded and reported, then it is a configuration error (exit 3).
+is recorded and reported, then it is a configuration error (exit 3). The log, the
+summary and `--report` (`stopped_by`) name what stopped a run (`stopReason`:
+`--fail-fast`, `--max-time`, an interrupt, a configuration error), never another of
+them.
 `--fail-fast` is rejected with `--shadow`, whose point is to run everything.
 
 ### `--max-time` and `requires`: units left for later
@@ -1250,7 +1333,8 @@ each distinct check (cached by root, check and env). A check that cannot tell (i
 to start, times out, its address does not parse) counts as unmet: running the tests
 anyway would record outcomes of a broken environment. Only the units a requirement's
 `tests` globs match (`UnitMatches`, as for rules) are taken out of the call; the call
-then passes explicit units. Their suite counts as left out for the snapshot, like a
+then passes explicit units, except in a suite that must run whole (Browser projects),
+which is deferred entirely. Their suite counts as left out for the snapshot, like a
 suite whose runner could not start, so the orphans it would have covered stay unseen
 for it. The run exits 4 when no test failed (`requiresError` inside an `envError`); a
 runner that could not start or a state that could not be saved is reported first. The
@@ -1262,7 +1346,8 @@ worktree without the database, every turn would otherwise end with the same mess
 
 `--shard I/N` hashes suite and unit ID (FNV-1a) modulo `N`: ownership needs no
 coordination and no state, but it depends on `N`, so every shard of a run must use the
-same count. `smates select --max-shards N` sizes `N` for a CI matrix (`shardCount`): `0`
+same count. A suite that must run whole (Browser projects) is owned by one shard, all
+of it, by a hash of its name (`wholeShard`). `smates select --max-shards N` sizes `N` for a CI matrix (`shardCount`): `0`
 when nothing is selected, else the recorded duration of the selected units over
 `--shard-time`, rounded up and kept within `1..N`. A selected unit without a duration
 weighs its suite's median; a suite with selected units and no duration at all yields `N`
@@ -1310,6 +1395,10 @@ in `T`'s previous entry — "changed since this test last ran". Without an entry
 `D(T)` ∩ the selection's changed files (snapshot or base revision); in a full run with
 neither, there is no basis and the hint says so. The hints are computed per suite right
 after it runs and before its results are recorded, since recording overwrites the entry.
+They hash the current inputs with a hasher of their own (`project.runHasher`, pinned
+like the recording one): the disk reads they make between batches (files git does not
+list, listings, trees) must not be memoized for `Record`, which hashes those as the last
+batch left them, or what is recorded would depend on whether an earlier batch failed.
 
 Ranking is by tier, then most recent modification, then directory proximity to the test
 file: code the test imports directly (static graph), other code, the test file itself,
@@ -1369,7 +1458,8 @@ agent cache and the run records describe the code and are shared: one file,
 `<git common dir>/smates/state.json.gz`. The snapshot (with its commit and time)
 describes one working tree and stays in it: `.smates/state.snapshot.json.gz`, read in
 place of the shared file's snapshot. A worktree without one has none (no files, commit
-or time), and judges changed files against the default branch.
+or time), and judges changed files against the default branch (or, with none to be
+found, since the oldest commit its entries ran at; see "Orphans").
 
 Loading reads the state once and decodes it twice: the process's working copy and
 `base`, what it started from. This holds for every state, shared or not: a state of one
@@ -1414,7 +1504,10 @@ the merged entries and `base` is re-read under the lock. The shared file also ca
 the last writer's snapshot, so it stays a complete state for `state push` (which in
 shared mode pushes the entries with this worktree's snapshot) and for older smates
 versions. `state pull` in shared mode merges into the shared entries instead of
-replacing them.
+replacing them. Outside shared mode it replaces the state (`stateStore.Replace`, also
+the hook's pull into a missing state), and `state clear` removes it, under the same
+lock: a run saving meanwhile then applies its own changes to what they left instead of
+writing back the state it read before.
 
 The state also keeps a short record of each `smates run` (`runs`: selection mode, units
 selected/total, recorded duration of the skipped units, exit code, shadow misses, orphan

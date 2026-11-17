@@ -21,7 +21,7 @@
 | [`smates hook`](#smates-hook) | git の pre-push / pre-commit フック、または Claude Code や Codex の Stop フックを設定する |
 | [`smates version`](#smates-version-and-help) | バージョンを表示する |
 
-各コマンドのフラグは `smates <command> -h` で確認できます（終了コード 0）。`config`、`state`、`hook` ではサブコマンドの一覧も表示されます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数の前にも後ろにも置けます（`smates why src/a.ts --format json`）。`--` 以降はフラグとして扱いません。`run`、`select`、`watch` では、`--` より後ろの引数はテストランナーに渡されます。
+各コマンドのフラグは `smates <command> -h` で確認できます（終了コード 0）。`config`、`state`、`hook` ではサブコマンドの一覧も表示されます。フラグはダッシュ 1 つでも 2 つでもかまいません（`-all` と `--all` は同じです）。フラグは位置引数の前にも後ろにも置けます（`smates why src/a.ts --format json`）。`--` 以降はフラグとして扱いません。`run`、`select`、`watch` では、`--` より後ろの引数はテストランナーに渡されます。コマンドが受け付けない位置引数（`smates list foo`、`smates state clear foo`）は使い方の誤り（終了コード 2）です。
 
 ## 共通フラグ { #common-flags }
 
@@ -79,7 +79,7 @@ smates run [flags] [-- runner args]
 - `--shadow` と `--fail-fast`、`--max-time`
 - `--dry-run` と `--report`、`--markdown`、`--summary`（代わりに `smates select --format json|markdown` を使います）
 
-`run` と `watch` では、`--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行やウォッチの各回の実行ではテストを成功として記録しません。常に使うフラグはスイートの `command` に書いてください。
+`run` と `watch` では、`--` より後ろの引数はすべてのスイートのランナーに渡されます（`smates run -- -t name`）。テストを絞り込む可能性があるため、こうした引数付きの実行やウォッチの各回の実行ではテストを成功として記録しません。こうした引数付きの全件実行（`--all`、CI のデフォルトブランチ）も記録の更新にはならず、記録済みのテストを消さず、記録済みのスナップショットもそのまま残します。常に使うフラグはスイートの `command` に書いてください。
 
 ??? note "詳細: `--output failures` の出力内容"
     ランナーのバッチごとに出力をバッファし、バッチが失敗したときだけ表示します。失敗したテストごとの出力を報告できるランナー（vitest、jest、pytest、`go test`、JUnit）ではその部分だけを、それ以外ではバッチの出力を最大 200 行（先頭 30 行と末尾 170 行）表示します。smates 自身の進捗行は省略されます。出力のないまま 30 秒経つと `smates: still running <suite> (...)` を表示します。間隔は `SMATES_HEARTBEAT` で変えられます。[コーディングエージェントから使う](../guides/coding-agents.md) を参照してください。

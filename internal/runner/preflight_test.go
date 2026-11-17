@@ -1,6 +1,9 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,6 +57,28 @@ func TestPreflight(t *testing.T) {
 			t.Errorf("%s: %v", c.name, err)
 		case c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)):
 			t.Errorf("%s: %v, want %q", c.name, err, c.err)
+		}
+	}
+	// The tool is looked up on the PATH the suite's env: sets, which the launcher gets.
+	if runtime.GOOS != "windows" {
+		repo := tempRepo(t, "tools/smates-only-tool", "package-lock.json")
+		tools := filepath.Join(repo.Root, "tools")
+		for _, c := range []struct {
+			name string
+			path string // the suite's PATH ("" = none)
+			want bool   // a hard problem
+		}{
+			{"on the suite's PATH", tools + string(os.PathListSeparator) + os.Getenv("PATH"), false},
+			{"not on smates' PATH, no suite PATH", "", true},
+			{"suite PATH without it", os.Getenv("PATH"), true},
+		} {
+			s := &Suite{Suite: config.Suite{Name: "s", Root: ".", Command: "npx smates-only-tool"}}
+			if c.path != "" {
+				s.Env = map[string]string{"PATH": c.path}
+			}
+			if hard, err := LauncherProblem(repo.Root, s); hard != c.want {
+				t.Errorf("%s: hard %v (%v), want %v", c.name, hard, err, c.want)
+			}
 		}
 	}
 	repo := tempRepo(t, "pkg/node_modules/.bin/x")

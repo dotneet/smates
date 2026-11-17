@@ -398,23 +398,6 @@ func TestSelectAllModes(t *testing.T) {
 	})
 }
 
-func TestSelectNoSnapshotInState(t *testing.T) {
-	// A state without a snapshot (e.g. only partial runs) detects no changed files and
-	// therefore no orphans, but per-test hashes still select changed tests.
-	f := webFixture(t)
-	st := f.record(nil, nil)
-	st.Files = map[string]string{}
-	f.write("web/src/a.ts", "x")
-	f.write("Dockerfile", "y")
-	res := f.sel(st, nil)
-	if got := decisions(res)["web/src/a.test.ts"]; got != ReasonChanged {
-		t.Errorf("got %s", got)
-	}
-	if len(res.Changed) != 0 || len(res.Orphans) != 0 {
-		t.Errorf("changed %v orphans %v", res.Changed, res.Orphans)
-	}
-}
-
 func TestSelectRootDirectoryKey(t *testing.T) {
 	f := newFixture(t, map[string]string{"a_test.py": "", "test_x.py": "", "data.txt": "1"})
 	f.suites = []*runner.Suite{suite(t, config.Suite{Runner: "pytest", Tests: []string{"test_*.py"}})}

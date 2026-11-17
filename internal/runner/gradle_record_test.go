@@ -161,7 +161,7 @@ func TestGradleMapperRead(t *testing.T) {
 func TestGradleRecorded(t *testing.T) {
 	root, facts, m := gradleRecordRepo(t)
 	const store, other, third = "app/src/test/java/com/example/StoreTest.java", "app/src/test/java/com/example/OtherTest.java", "app/src/test/java/com/example/ThirdTest.java"
-	classes := map[string]string{"com.example.StoreTest": store, "com.example.OtherTest": other, "com.example.ThirdTest": third}
+	classes := newGradleClassMap(map[string]string{"com.example.StoreTest": store, "com.example.OtherTest": other, "com.example.ThirdTest": third})
 	ev := func(class, executor string) gradleEvent {
 		return gradleEvent{K: "test", Task: ":app:test", Class: class, Result: "SUCCESS", Executor: executor}
 	}

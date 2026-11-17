@@ -76,7 +76,7 @@ func TestExecDeps(t *testing.T) {
 
 		// Command substitutions.
 		{"$(pwd)", []string{`cat "$(pwd)/data.txt"`}, true, []string{"data.txt"}},
-		{"$(pwd) after cd", []string{`cd sub; cat "$(pwd)/data.txt"`}, true, []string{"sub/**"}},
+		{"$(pwd) after cd", []string{`cd sub; cat "$(pwd)/data.txt"`}, true, []string{"sub/data.txt"}},
 		{"$(cat list)", []string{`cat $(cat list.txt)`}, true, []string{"./**", "list.txt"}},
 		{"backticks", []string{"cat `cat list.txt`"}, true, []string{"./**", "list.txt"}},
 		{"$(basename) output", []string{`cat "$(basename data.txt)"`}, true, []string{"./**", "data.txt"}},

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -471,11 +472,7 @@ func (g gradle) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 	classes := gradleClasses(rc)
 	env := []string{"SMATES_GRADLE_RESULTS=" + results}
 	if !rc.All {
-		var names []string
-		for c := range classes {
-			names = append(names, c)
-		}
-		sort.Strings(names)
+		names := classes.names()
 		list := filepath.Join(dir, "gradle-classes.txt")
 		if err := os.WriteFile(list, []byte(strings.Join(names, "\n")+"\n"), 0o644); err != nil {
 			return nil, err
@@ -515,7 +512,7 @@ func (g gradle) Run(ctx context.Context, rc *RunContext) (*RunResult, error) {
 
 // record adds the recorded dependencies to the observations (see gradle_record.go). It
 // returns why units stay untraced, for the warning about them.
-func (gradle) record(ctx context.Context, rc *RunContext, dir string, obs map[string]*Observation, events []gradleEvent, classes map[string]string) string {
+func (gradle) record(ctx context.Context, rc *RunContext, dir string, obs map[string]*Observation, events []gradleEvent, classes *gradleClassMap) string {
 	facts, err := readGradleFacts(dir)
 	if err != nil {
 		return "the init script's facts could not be read: " + err.Error()
@@ -578,29 +575,135 @@ func untracedPasses(obs map[string]*Observation) int {
 	return n
 }
 
+// gradleClassMap tells which unit an event of the init script's listener is for: the
+// one declaring its top-level class. Projects of a build may declare classes of the
+// same qualified name (a test class in two modules): the event's task then tells them
+// apart, when the settings say which directory its project is in; otherwise the event
+// may be for any of them (ambiguous).
+type gradleClassMap struct {
+	units map[string][]string // qualified top-level class name -> units declaring it
+	// project returns the repo-relative directory of the project a task path belongs
+	// to, and those of the projects nested in it; ok is false when it cannot tell.
+	project func(task string) (dir string, nested []string, ok bool)
+}
+
+// newGradleClassMap maps classes to the one unit each (no task resolution).
+func newGradleClassMap(units map[string]string) *gradleClassMap {
+	m := &gradleClassMap{units: map[string][]string{}}
+	for c, u := range units {
+		m.add(c, u)
+	}
+	return m
+}
+
+func (m *gradleClassMap) add(class, unit string) {
+	if !slices.Contains(m.units[class], unit) {
+		m.units[class] = append(m.units[class], unit)
+		slices.Sort(m.units[class])
+	}
+}
+
+// names lists the classes, sorted (the selection the init script narrows tasks to).
+func (m *gradleClassMap) names() []string {
+	return slices.Sorted(maps.Keys(m.units))
+}
+
+// unitsOf returns the units an event for class (a nested class counts as its top-level
+// one) of task may be for: one when it is known; several when they declare the same
+// class and the task cannot tell them apart; none when no unit declares it, or the
+// task's project holds none of those that do (a class of the same name elsewhere in
+// the build, which the selection by name runs too).
+func (m *gradleClassMap) unitsOf(class, task string) []string {
+	if m == nil {
+		return nil
+	}
+	if i := strings.IndexByte(class, '$'); i >= 0 {
+		class = class[:i]
+	}
+	cands := m.units[class]
+	// Even a class one selected unit declares is narrowed to the task's project: the
+	// selection by name runs a class of the same name in another project too, whose
+	// pass is not the selected one's. A test source set that includes a directory of
+	// another project then leaves its units unobserved (run again), not passed.
+	if len(cands) == 0 || m.project == nil {
+		return cands
+	}
+	dir, nested, ok := m.project(task)
+	if !ok {
+		return cands
+	}
+	var in []string
+	for _, u := range cands {
+		if pathutil.Under(u, dir) && !slices.ContainsFunc(nested, func(n string) bool { return pathutil.Under(u, n) }) {
+			in = append(in, u)
+		}
+	}
+	return in
+}
+
 // gradleClasses maps the qualified names of the top-level classes the units declare to
-// their unit. A unit that cannot be read is passed by the class its path names.
-func gradleClasses(rc *RunContext) map[string]string {
-	out := map[string]string{}
+// their units. A unit that cannot be read is passed by the class its path names.
+func gradleClasses(rc *RunContext) *gradleClassMap {
+	m := &gradleClassMap{units: map[string][]string{}, project: gradleProjectOf(rc)}
 	for _, u := range rc.Units {
 		src, err := os.ReadFile(filepath.Join(rc.Repo.Root, filepath.FromSlash(u)))
 		if err != nil {
-			out[classFromPath(rc.Suite, u)] = u
+			m.add(classFromPath(rc.Suite, u), u)
 			continue
 		}
 		in := java.Describe(src)
 		n := 0
 		for _, d := range in.Decls {
 			if d.Kind == "class" {
-				out[qualifyJava(in.Package, d.Name)] = u
+				m.add(qualifyJava(in.Package, d.Name), u)
 				n++
 			}
 		}
 		if n == 0 {
-			out[qualifyJava(in.Package, strings.TrimSuffix(path.Base(u), ".java"))] = u
+			m.add(qualifyJava(in.Package, strings.TrimSuffix(path.Base(u), ".java")), u)
 		}
 	}
-	return out
+	return m
+}
+
+// gradleProjectOf returns how the projects of the suite's build are found from a task
+// path (":a:b:test" is a task of project ":a:b"): from the build's settings, when
+// smates can read every project of it (see GradleSettings.OK) and the build includes
+// no other build (whose task paths would look the same); nil otherwise.
+func gradleProjectOf(rc *RunContext) func(string) (string, []string, bool) {
+	if rc.Repo == nil {
+		return nil
+	}
+	build := gradleBuildRoot(rc.Repo.Root, rc.Suite.Root)
+	st := ReadGradleSettings(rc.Repo.Root, build)
+	if !st.OK || len(includedBuilds(rc.Repo.Root, build)) > 0 {
+		return nil
+	}
+	dirs := map[string]string{} // project path -> repo-relative directory
+	for _, p := range st.Projects {
+		dirs[p.Path] = pathutil.Join(build, p.Dir)
+	}
+	return func(task string) (string, []string, bool) {
+		i := strings.LastIndexByte(task, ':')
+		if i < 0 {
+			return "", nil, false
+		}
+		proj := task[:i]
+		if proj == "" {
+			proj = ":"
+		}
+		dir, ok := dirs[proj]
+		if !ok {
+			return "", nil, false
+		}
+		var nested []string
+		for p, d := range dirs {
+			if p != proj && d != dir && pathutil.Under(d, dir) {
+				nested = append(nested, d)
+			}
+		}
+		return dir, nested, true
+	}
 }
 
 // classFromPath derives a class name from a test file's path below src/<set>/java.
@@ -667,58 +770,59 @@ func readGradleEvents(dir string) ([]gradleEvent, error) {
 //
 // When recording, a pass is NoTrace until the recordings say what the unit used (see
 // gradleRecorded): it is recorded as unknown otherwise.
-func gradleObservations(units []string, classes map[string]string, events []gradleEvent, exitCode int, record bool) (map[string]*Observation, []string) {
+func gradleObservations(units []string, classes *gradleClassMap, events []gradleEvent, exitCode int, record bool) (map[string]*Observation, []string) {
 	obs := map[string]*Observation{}
-	unitOf := func(class string) string {
-		if i := strings.IndexByte(class, '$'); i >= 0 {
-			class = class[:i]
-		}
-		return classes[class]
-	}
 	type acc struct {
 		fail, unproven, any bool
-		classMs, testMs     int64
-		msg                 string
+		// ambiguous: an event may be another unit's (a class of the same name), so it
+		// proves nothing for this one; ambiguousFail: such an event failed.
+		ambiguous, ambiguousFail bool
+		classMs, testMs          int64
+		msg                      string
 		// The top-level classes (per task) that ran tests, and those that finished: a
 		// class whose JVM died mid-class has test events but never finishes.
 		started, finished map[string]bool
 	}
 	accs := map[string]*acc{}
 	for _, ev := range events {
-		u := unitOf(ev.Class)
-		if u == "" {
-			continue
-		}
-		a := accs[u]
-		if a == nil {
-			a = &acc{started: map[string]bool{}, finished: map[string]bool{}}
-			accs[u] = a
-		}
-		a.any = true
-		top, _, nested := strings.Cut(ev.Class, "$")
-		switch {
-		case ev.K == "test":
-			a.started[ev.Task+" "+top] = true
-		case ev.K == "class" && !nested:
-			a.finished[ev.Task+" "+top] = true
-		}
-		switch ev.Result {
-		case "FAILURE":
-			a.fail = true
-			label := ev.Name
-			if ev.K == "class" {
-				label = ev.Class
+		us := classes.unitsOf(ev.Class, ev.Task)
+		for _, u := range us {
+			a := accs[u]
+			if a == nil {
+				a = &acc{started: map[string]bool{}, finished: map[string]bool{}}
+				accs[u] = a
 			}
-			a.msg = trace.JoinMessage(a.msg, label+": "+ev.Msg)
-		case "SKIPPED":
-			if ev.Assumption == nil || *ev.Assumption {
-				a.unproven = true
+			a.any = true
+			a.ambiguous = a.ambiguous || len(us) > 1
+			top, _, nested := strings.Cut(ev.Class, "$")
+			switch {
+			case ev.K == "test":
+				a.started[ev.Task+" "+top] = true
+			case ev.K == "class" && !nested:
+				a.finished[ev.Task+" "+top] = true
 			}
-		}
-		if ev.K == "class" && !strings.Contains(ev.Class, "$") {
-			a.classMs += ev.Ms
-		} else if ev.K == "test" {
-			a.testMs += ev.Ms
+			switch ev.Result {
+			case "FAILURE":
+				if len(us) > 1 {
+					a.ambiguousFail = true
+				} else {
+					a.fail = true
+				}
+				label := ev.Name
+				if ev.K == "class" {
+					label = ev.Class
+				}
+				a.msg = trace.JoinMessage(a.msg, label+": "+ev.Msg)
+			case "SKIPPED":
+				if ev.Assumption == nil || *ev.Assumption {
+					a.unproven = true
+				}
+			}
+			if ev.K == "class" && !strings.Contains(ev.Class, "$") {
+				a.classMs += ev.Ms
+			} else if ev.K == "test" {
+				a.testMs += ev.Ms
+			}
 		}
 	}
 	var warnings []string
@@ -728,7 +832,7 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		}
 		return obs, nil
 	}
-	var silent, cut []string
+	var silent, cut, ambiguous []string
 	for _, u := range units {
 		a := accs[u]
 		if a == nil {
@@ -745,6 +849,14 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		switch {
 		case a.fail:
 			o.Status = state.Fail
+		case a.ambiguousFail:
+			// A test of a class it declares, or of another unit's class of the same
+			// name, failed.
+			o.Status, o.Inferred = state.Fail, true
+			ambiguous = append(ambiguous, u)
+		case a.ambiguous:
+			o.Status = state.Unknown
+			ambiguous = append(ambiguous, u)
 		case a.unproven:
 			o.Status = state.Unknown
 		case unfinished(a.started, a.finished):
@@ -762,6 +874,14 @@ func gradleObservations(units []string, classes map[string]string, events []grad
 		w := fmt.Sprintf("%d test class file(s) ran no test (the task's filters or tags exclude them, they declare none, or the command runs no Test task); they will run again next time", len(silent))
 		if len(silent) <= 3 {
 			w += ": " + strings.Join(silent, ", ")
+		}
+		warnings = append(warnings, w)
+	}
+	if len(ambiguous) > 0 {
+		sort.Strings(ambiguous)
+		w := fmt.Sprintf("%d test class file(s) declare a class another one of the build declares too, and smates could not tell their results apart (the build's settings do not say which project each task is in); they will run again next time", len(ambiguous))
+		if len(ambiguous) <= 3 {
+			w += ": " + strings.Join(ambiguous, ", ")
 		}
 		warnings = append(warnings, w)
 	}

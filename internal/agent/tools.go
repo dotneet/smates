@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -28,18 +29,20 @@ import (
 
 // Limits applied to tool output so a single call cannot flood the context window.
 const (
-	maxToolOutput     = 12000   // characters of tool output returned to the model
-	maxListFiles      = 500     // list_files results
-	maxGrepMatches    = 200     // grep matches
-	defaultGrepResult = 100     // grep matches when max_results is not given
-	maxGrepFileSize   = 1 << 20 // files larger than this are not searched
-	maxGrepLine       = 300     // characters of a matching line
-	defaultReadLines  = 300     // read_file lines when max_lines is not given
-	maxReadLines      = 2000    // read_file upper bound
-	maxReadLine       = 1000    // characters of one line returned by read_file
-	maxTestsForFile   = 200     // tests_for_file results
-	maxTestDeps       = 300     // test_deps results
-	maxSearchTests    = 200     // search_tests results
+	maxToolOutput     = 12000    // characters of tool output returned to the model
+	maxListFiles      = 500      // list_files results
+	maxGrepMatches    = 200      // grep matches
+	defaultGrepResult = 100      // grep matches when max_results is not given
+	maxGrepFileSize   = 1 << 20  // files larger than this are not searched
+	maxGrepLine       = 300      // characters of a matching line
+	defaultReadLines  = 300      // read_file lines when max_lines is not given
+	maxReadLines      = 2000     // read_file upper bound
+	maxReadLine       = 1000     // characters of one line returned by read_file
+	maxReadFileSize   = 32 << 20 // files larger than this are not read by read_file
+	maxDiffFileSize   = 1 << 20  // either side larger than this is not diffed
+	maxTestsForFile   = 200      // tests_for_file results
+	maxTestDeps       = 300      // test_deps results
+	maxSearchTests    = 200      // search_tests results
 )
 
 // Tool names.
@@ -115,6 +118,10 @@ type toolbox struct {
 	files     []string
 	fileSet   map[string]bool
 	filesErr  error
+
+	rootOnce sync.Once
+	realRoot string   // root with symbolic links resolved
+	dirs     sync.Map // absolute directory -> its path with symbolic links resolved
 }
 
 func newToolbox(req *Request) *toolbox {
@@ -326,8 +333,12 @@ func (tb *toolbox) grep(ctx context.Context, pattern, glob string, maxResults in
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		data, ok := tb.readText(f, maxGrepFileSize)
-		if !ok {
+		rf, err := tb.repoFile(f)
+		if err != nil {
+			continue
+		}
+		data, err := rf.read(maxGrepFileSize)
+		if err != nil || isBinary(data) {
 			continue
 		}
 		line := 0
@@ -356,18 +367,187 @@ func (tb *toolbox) grep(ctx context.Context, pattern, glob string, maxResults in
 	return b.String(), nil
 }
 
-// readText reads a regular, non-binary file of at most limit bytes.
-func (tb *toolbox) readText(rel string, limit int64) ([]byte, bool) {
+// repoFile is a working-tree file the tools may read, as repoFile found it.
+type repoFile struct {
+	rel string // clean repo-relative path
+	// link is the target of rel when it is a symbolic link: its content to git.
+	link string
+	// real is the absolute path of the file to read, symbolic links resolved, and size
+	// its size. err, when set, says why its content may not be read.
+	real string
+	size int64
+	err  error
+}
+
+// repoFile applies the tools' file-access policy to a path (model-supplied or listed)
+// and returns the file to read. Every tool reads working-tree files through it:
+//
+//   - the path is inside the repository and not under a .git directory, in any
+//     letter case (case-insensitive file systems) and at any depth (cleanRel);
+//   - git lists it: tracked, or untracked and not ignored. When the listing fails
+//     nothing is readable;
+//   - with symbolic links resolved (of the file or of a directory above it), the
+//     file it leads to passes the same checks: inside the repository, not under .git,
+//     listed;
+//   - it is a regular file; read and open refuse one larger than their limit.
+//
+// A file that exists but fails the checks on what it leads to is returned with err
+// set: its link text (rf.link) is still what git records for a symbolic link.
+func (tb *toolbox) repoFile(p string) (*repoFile, error) {
+	rel, err := tb.cleanRel(p)
+	if err != nil {
+		return nil, err
+	}
+	_, set, err := tb.fileList()
+	if err != nil {
+		return nil, toolErrorf("cannot list repository files, so none is readable: %v", err)
+	}
+	if !set[rel] {
+		return nil, toolErrorf("%s is not a repository file (missing, a directory, or git-ignored); use list_files", rel)
+	}
 	abs := filepath.Join(tb.root, filepath.FromSlash(rel))
 	fi, err := os.Lstat(abs)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > limit {
-		return nil, false
+	if err != nil {
+		return nil, toolErrorf("cannot read %s: %v", rel, err)
 	}
-	data, err := os.ReadFile(abs)
-	if err != nil || isBinary(data) {
-		return nil, false
+	rf := &repoFile{rel: rel}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		if rf.link, err = os.Readlink(abs); err != nil {
+			return nil, toolErrorf("cannot read %s: %v", rel, err)
+		}
+		rf.real, err = filepath.EvalSymlinks(abs)
+	} else {
+		var dir string
+		dir, err = tb.realDir(filepath.Dir(abs))
+		rf.real = filepath.Join(dir, filepath.Base(abs))
 	}
-	return data, true
+	if err != nil {
+		rf.err = toolErrorf("cannot read %s: %v", rel, err)
+		return rf, nil
+	}
+	target, err := filepath.Rel(tb.resolvedRoot(), rf.real)
+	if err != nil || target == ".." || strings.HasPrefix(target, ".."+string(filepath.Separator)) {
+		rf.err = toolErrorf("%s points outside the repository", rel)
+		return rf, nil
+	}
+	if target = filepath.ToSlash(target); target != rel {
+		// ...nor to an ignored file (.env) or into .git.
+		if hasGitSegment(target) || !set[target] {
+			rf.err = toolErrorf("%s points to a file that is not readable (ignored or internal)", rel)
+			return rf, nil
+		}
+	}
+	tfi, err := os.Stat(rf.real)
+	switch {
+	case err != nil:
+		rf.err = toolErrorf("cannot read %s: %v", rel, err)
+	case !tfi.Mode().IsRegular():
+		rf.err = toolErrorf("%s is not a regular file", rel)
+	default:
+		rf.size = tfi.Size()
+	}
+	return rf, nil
+}
+
+// tooLargeError is a file (or blob) larger than a tool reads.
+type tooLargeError struct {
+	what        string
+	size, limit int64
+}
+
+func (e *tooLargeError) Error() string {
+	return fmt.Sprintf("%s is too large (%d bytes; the limit is %d)", e.what, e.size, e.limit)
+}
+
+// open opens the file, refused when larger than limit.
+func (rf *repoFile) open(limit int64) (*os.File, error) {
+	if rf.err != nil {
+		return nil, rf.err
+	}
+	if rf.size > limit {
+		return nil, &tooLargeError{rf.rel, rf.size, limit}
+	}
+	f, err := os.Open(rf.real)
+	if err != nil {
+		return nil, toolErrorf("cannot read %s: %v", rf.rel, err)
+	}
+	return f, nil
+}
+
+// read returns the file's content, refused when larger than limit (also if it grew
+// since repoFile looked).
+func (rf *repoFile) read(limit int64) ([]byte, error) {
+	f, err := rf.open(limit)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, toolErrorf("cannot read %s: %v", rf.rel, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, &tooLargeError{rf.rel, int64(len(data)), limit}
+	}
+	return data, nil
+}
+
+// resolvedRoot returns the repository root with symbolic links resolved.
+func (tb *toolbox) resolvedRoot() string {
+	tb.rootOnce.Do(func() {
+		tb.realRoot = tb.root
+		if r, err := filepath.EvalSymlinks(tb.root); err == nil {
+			tb.realRoot = r
+		}
+	})
+	return tb.realRoot
+}
+
+// realDir returns the absolute directory dir with symbolic links resolved, cached.
+func (tb *toolbox) realDir(dir string) (string, error) {
+	if r, ok := tb.dirs.Load(dir); ok {
+		return r.(string), nil
+	}
+	r, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	tb.dirs.Store(dir, r)
+	return r, nil
+}
+
+// hasGitSegment reports whether a slash path has a .git segment, in any letter case:
+// on a case-insensitive file system .GIT/config is .git/config. Trailing dots and
+// spaces, which some file systems drop, are ignored.
+func hasGitSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if strings.EqualFold(strings.TrimRight(seg, ". "), ".git") {
+			return true
+		}
+	}
+	return false
+}
+
+// exists reports whether rel exists in the working tree (as a link, if it is one).
+func (tb *toolbox) exists(rel string) bool {
+	_, err := os.Lstat(filepath.Join(tb.root, filepath.FromSlash(rel)))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// readLine reads a line from r, line break included, keeping at most keep bytes of it:
+// the rest is read and dropped, so a file without line breaks takes no more memory
+// than one line shown.
+func readLine(r *bufio.Reader, keep int) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if room := keep - len(line); room > 0 {
+			line = append(line, chunk[:min(len(chunk), room)]...)
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return line, err
+		}
+	}
 }
 
 func isBinary(data []byte) bool {
@@ -386,7 +566,8 @@ func clip(s string, n int) string {
 }
 
 // cleanRel normalizes a model-supplied path to a clean repo-relative slash path,
-// rejecting anything that escapes the repository or points into .git.
+// rejecting anything that escapes the repository or points into a .git directory (see
+// hasGitSegment).
 func (tb *toolbox) cleanRel(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -403,49 +584,26 @@ func (tb *toolbox) cleanRel(p string) (string, error) {
 	if c == "." || c == ".." || strings.HasPrefix(c, "../") {
 		return "", toolErrorf("%s is outside the repository", p)
 	}
-	if c == ".git" || strings.HasPrefix(c, ".git/") {
+	if hasGitSegment(c) {
 		return "", toolErrorf("%s is not readable", p)
 	}
 	return c, nil
 }
 
 func (tb *toolbox) readFile(p string, start, maxLines int) (string, error) {
-	rel, err := tb.cleanRel(p)
+	rf, err := tb.repoFile(p)
 	if err != nil {
-		return "", err
-	}
-	_, set, err := tb.fileList()
-	if err != nil {
-		return "", err
-	}
-	if !set[rel] {
-		if _, ok := tb.orphans[rel]; ok {
-			return "", toolErrorf("%s does not exist in the working tree (deleted); use git_diff to see its old content", rel)
+		if rel, cerr := tb.cleanRel(p); cerr == nil {
+			if _, ok := tb.orphans[rel]; ok && !tb.exists(rel) {
+				return "", toolErrorf("%s does not exist in the working tree (deleted); use git_diff to see its old content", rel)
+			}
 		}
-		return "", toolErrorf("%s is not a repository file (missing, a directory, or git-ignored); use list_files", rel)
+		return "", err
 	}
-	abs := filepath.Join(tb.root, filepath.FromSlash(rel))
-	// A tracked symlink must not lead outside the repository.
-	real, err := filepath.EvalSymlinks(abs)
+	rel := rf.rel
+	f, err := rf.open(maxReadFileSize)
 	if err != nil {
-		return "", toolErrorf("cannot read %s: %v", rel, err)
-	}
-	root := tb.root
-	if rr, err := filepath.EvalSymlinks(root); err == nil {
-		root = rr
-	}
-	target, err := filepath.Rel(root, real)
-	if err != nil || target == ".." || strings.HasPrefix(target, ".."+string(filepath.Separator)) {
-		return "", toolErrorf("%s points outside the repository", rel)
-	}
-	// ...nor to an ignored file (.env) or into .git.
-	target = filepath.ToSlash(target)
-	if first, _, _ := strings.Cut(target, "/"); strings.EqualFold(first, ".git") || !set[target] {
-		return "", toolErrorf("%s points to a file that is not readable (ignored or internal)", rel)
-	}
-	f, err := os.Open(real)
-	if err != nil {
-		return "", toolErrorf("cannot read %s: %v", rel, err)
+		return "", err
 	}
 	defer f.Close()
 
@@ -460,15 +618,15 @@ func (tb *toolbox) readFile(p string, start, maxLines int) (string, error) {
 	r := bufio.NewReader(f)
 	head, _ := r.Peek(8000)
 	if bytes.IndexByte(head, 0) >= 0 {
-		fi, _ := f.Stat()
-		return fmt.Sprintf("%s is a binary file (%d bytes)", rel, fi.Size()), nil
+		return fmt.Sprintf("%s is a binary file (%d bytes)", rel, rf.size), nil
 	}
 	var b strings.Builder
 	line, shown := 0, 0
 	more := false
 	for {
-		l, err := r.ReadString('\n')
-		if l == "" && err != nil {
+		// Keep a little more than is shown, so that clip marks a cut line.
+		l, err := readLine(r, maxReadLine+utf8.UTFMax)
+		if len(l) == 0 && err != nil {
 			if !errors.Is(err, io.EOF) {
 				return "", toolErrorf("cannot read %s: %v", rel, err)
 			}
@@ -483,7 +641,7 @@ func (tb *toolbox) readFile(p string, start, maxLines int) (string, error) {
 			break
 		}
 		shown++
-		fmt.Fprintf(&b, "%6d\t%s\n", line, clip(strings.TrimRight(l, "\r\n"), maxReadLine))
+		fmt.Fprintf(&b, "%6d\t%s\n", line, clip(strings.TrimRight(string(l), "\r\n"), maxReadLine))
 	}
 	switch {
 	case line == 0:
@@ -503,10 +661,24 @@ func (tb *toolbox) gitDiff(ctx context.Context, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	old, oldDesc := tb.oldContent(ctx, rel)
 	cur, curExists, err := tb.workingContent(rel)
-	if err != nil {
+	var big *tooLargeError
+	if err != nil && !errors.As(err, &big) {
 		return "", err
+	}
+	old, oldDesc, oldErr := tb.oldContent(ctx, rel)
+	if big != nil || oldErr != nil {
+		sizes := func(e *tooLargeError, n int, exists bool) string {
+			switch {
+			case e != nil:
+				return fmt.Sprintf("%d bytes", e.size)
+			case !exists:
+				return "none"
+			}
+			return fmt.Sprintf("%d bytes", n)
+		}
+		return fmt.Sprintf("%s: too large to diff (%s against %s, working tree %s; the limit is %d bytes); use read_file or grep",
+			rel, sizes(oldErr, len(old), old != nil), oldDesc, sizes(big, len(cur), curExists), maxDiffFileSize), nil
 	}
 	if old == nil && !curExists {
 		return "", toolErrorf("%s exists neither in the old state nor in the working tree", rel)
@@ -534,30 +706,51 @@ func (tb *toolbox) gitDiff(ctx context.Context, p string) (string, error) {
 	return fmt.Sprintf("--- %s (%s)\n+++ %s (working tree)\n%s", from, oldDesc, to, body), nil
 }
 
-// oldContent returns the previous content of rel, or nil when there is none.
-func (tb *toolbox) oldContent(ctx context.Context, rel string) ([]byte, string) {
+// oldContent returns the previous content of rel (nil when there is none) and what it
+// is, or a *tooLargeError when it is larger than maxDiffFileSize.
+func (tb *toolbox) oldContent(ctx context.Context, rel string) ([]byte, string, *tooLargeError) {
 	o, isOrphan := tb.orphans[rel]
 	if isOrphan && o.OldBlob != "" {
 		// A recorded hash carries the executable marker after the blob SHA-1.
 		blob := gitx.Blob(o.OldBlob)
-		if data, err := gitOutput(ctx, tb.root, "cat-file", "blob", blob); err == nil {
-			return data, "recorded blob " + short(blob)
+		desc := "recorded blob " + short(blob)
+		if data, err := tb.catBlob(ctx, blob, maxDiffFileSize); err == nil {
+			return data, desc, nil
+		} else if big := (*tooLargeError)(nil); errors.As(err, &big) {
+			return nil, desc, big
 		}
 	}
-	base := tb.base
+	rev := "HEAD"
 	if isOrphan && o.Base != "" {
-		base = o.Base
+		rev = o.Base
+	} else if tb.base != "" {
+		rev = tb.base
 	}
-	revs := []string{"HEAD"}
-	if base != "" {
-		revs = []string{base}
+	data, err := tb.catBlob(ctx, rev+":"+rel, maxDiffFileSize)
+	if big := (*tooLargeError)(nil); errors.As(err, &big) {
+		return nil, rev, big
 	}
-	for _, rev := range revs {
-		if data, err := gitOutput(ctx, tb.root, "cat-file", "blob", rev+":"+rel); err == nil {
-			return data, rev
-		}
+	if err != nil {
+		return nil, "no previous version", nil
 	}
-	return nil, "no previous version"
+	return data, rev, nil
+}
+
+// catBlob returns the content of the blob git names obj, after checking its size
+// (git cat-file -s): one larger than limit is a *tooLargeError, never read.
+func (tb *toolbox) catBlob(ctx context.Context, obj string, limit int64) ([]byte, error) {
+	out, err := gitOutput(ctx, tb.root, "cat-file", "-s", obj)
+	if err != nil {
+		return nil, err
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("git cat-file -s %s: %q", obj, out)
+	}
+	if size > limit {
+		return nil, &tooLargeError{obj, size, limit}
+	}
+	return gitOutputLimit(ctx, tb.root, limit, "cat-file", "blob", obj)
 }
 
 // modeChange describes how the executable bit of rel changed between its recorded hash
@@ -574,7 +767,7 @@ func (tb *toolbox) modeChange(rel string) string {
 	if cur == "" || gitx.Blob(cur) != gitx.Blob(o.OldBlob) {
 		return ""
 	}
-	switch oldX, newX := o.OldBlob != gitx.Blob(o.OldBlob), cur != gitx.Blob(cur); {
+	switch oldX, newX := strings.HasSuffix(o.OldBlob, gitx.ExecSuffix), strings.HasSuffix(cur, gitx.ExecSuffix); {
 	case newX && !oldX:
 		return "mode changed (+x added)"
 	case oldX && !newX:
@@ -583,31 +776,23 @@ func (tb *toolbox) modeChange(rel string) string {
 	return ""
 }
 
+// workingContent returns the working-tree content of rel as git sees it (the target
+// text of a symbolic link), read through repoFile, and whether it exists; a
+// *tooLargeError when it is larger than maxDiffFileSize.
 func (tb *toolbox) workingContent(rel string) ([]byte, bool, error) {
-	abs := filepath.Join(tb.root, filepath.FromSlash(rel))
-	fi, err := os.Lstat(abs)
-	if errors.Is(err, os.ErrNotExist) {
+	if !tb.exists(rel) {
 		return nil, false, nil
 	}
+	rf, err := tb.repoFile(rel)
 	if err != nil {
-		return nil, false, toolErrorf("cannot read %s: %v", rel, err)
+		return nil, false, err
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(abs)
-		if err != nil {
-			return nil, false, toolErrorf("cannot read %s: %v", rel, err)
-		}
-		return []byte(target), true, nil
+	if rf.link != "" {
+		return []byte(rf.link), true, nil
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, toolErrorf("%s is not a regular file", rel)
-	}
-	if _, set, err := tb.fileList(); err == nil && !set[rel] {
-		return nil, false, toolErrorf("%s is git-ignored", rel)
-	}
-	data, err := os.ReadFile(abs)
+	data, err := rf.read(maxDiffFileSize)
 	if err != nil {
-		return nil, false, toolErrorf("cannot read %s: %v", rel, err)
+		return nil, false, err
 	}
 	return data, true, nil
 }
@@ -662,6 +847,39 @@ func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) 
 		return nil, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// gitOutputLimit is gitOutput keeping at most limit bytes of output: more is an error.
+func gitOutputLimit(ctx context.Context, dir string, limit int64, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	stdout := &cappedBuffer{limit: limit}
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	if err := cmd.Run(); err != nil && !stdout.over {
+		return nil, fmt.Errorf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	if stdout.over {
+		return nil, &tooLargeError{strings.Join(args, " "), stdout.n, limit}
+	}
+	return stdout.buf.Bytes(), nil
+}
+
+// cappedBuffer stores what is written to it up to limit bytes, then refuses the rest.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int64
+	n     int64 // bytes written, stored or not
+	over  bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	if c.n > c.limit {
+		c.over = true
+		return 0, errors.New("output too large")
+	}
+	return c.buf.Write(p)
 }
 
 func selectedMark(t *selector.Test) string {

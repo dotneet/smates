@@ -85,8 +85,8 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 	if err := runner.Preflight(p.repo.Root, sr.Suite); err != nil {
 		return 0, envError{fmt.Errorf("%s: %w", sr.Name, err)}
 	}
-	c.started[sr.Name] = append(c.started[sr.Name], b.units...)
-	stop := c.startHeartbeat(sr.Name, countUnits(c.started), c.total, c.start)
+	c.units.start(sr.Name, b.units)
+	stop := c.startHeartbeat(sr.Name, c.units.count(unitRunning, unitRan), c.total, c.start)
 	r, err := sr.Suite.Adapter.Run(ctx, rc)
 	stop()
 	if ctx.Err() != nil {
@@ -138,20 +138,25 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		}
 	}
 	selector.DropIgnoredEnv(p.cfg, sr.Suite, r)
-	if c.ran[sr.Name] == nil {
-		c.ran[sr.Name] = map[string]string{}
+	// The batch's units ran, unless the runner exited before any of them started.
+	ran := unitRan
+	if noResult {
+		ran = unitUnstarted
 	}
-	if c.inferred[sr.Name] == nil {
-		c.inferred[sr.Name] = map[string]bool{}
-	}
+	c.units.set(sr.Name, b.units, ran)
 	anyFail := false
 	for u, o := range r.Observations {
-		c.ran[sr.Name][u] = o.Status
-		c.inferred[sr.Name][u] = o.Inferred
+		ur := c.units.get(sr.Name, u)
+		if ur.state == unitPlanned {
+			ur.state = unitRan // a unit the runner ran besides those asked for (a full run)
+		}
+		ur.status, ur.inferred = o.Status, o.Inferred
 		anyFail = anyFail || o.Status == state.Fail
 	}
 	if r.ExitCode != 0 {
-		c.failedBatches = append(c.failedBatches, failedBatch{suite: sr.Name, units: b.units, anyFail: anyFail, noResult: noResult})
+		if !noResult {
+			c.failedBatches = append(c.failedBatches, failedBatch{suite: sr.Name, units: b.units, anyFail: anyFail})
+		}
 		if buf != nil {
 			c.printFailedBatch(sr, b, buf, r.Observations)
 		}
@@ -172,7 +177,7 @@ func (c *cycle) runBatch(ctx context.Context, i int, b *batch) (int, error) {
 		res := c.results[sr.Name]
 		if res == nil {
 			res = &suiteResult{obs: map[string]*runner.Observation{}, readsBy: map[string]map[string]bool{}, retried: map[string]*runner.Observation{}}
-			_, res.full = c.units(sr)
+			res.full = c.suiteRun(sr).full
 			c.results[sr.Name] = res
 		}
 		maps.Copy(res.obs, r.Observations)
@@ -194,8 +199,8 @@ func (c *cycle) interrupt(sr *selector.Suite, b *batch, buf *outputBuffer) {
 	if buf != nil {
 		c.printFailedBatch(sr, b, buf, nil)
 	}
-	c.interrupted, c.stopped = true, true
-	c.notRun[sr.Name] = append(c.notRun[sr.Name], b.units...)
+	c.stop = stopInterrupt
+	c.units.set(sr.Name, b.units, unitNotRun)
 }
 
 // untracedNote is what the run log adds for a batch of untraced units: how they run.

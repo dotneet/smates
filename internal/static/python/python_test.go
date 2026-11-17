@@ -388,6 +388,25 @@ __import__("c")
 			},
 		},
 		{
+			name: "__import__ with fromlist",
+			files: map[string]string{
+				"pkg/__init__.py":       "",
+				"pkg/mod.py":            "",
+				"pkg/other.py":          "",
+				"lib/__init__.py":       "",
+				"lib/a.py":              "",
+				"lib/b.py":              "",
+				"app/__init__.py":       "",
+				"app/sib.py":            "",
+				"app/main.py":           "m = __import__('pkg', fromlist=['mod'])\nl = __import__('lib', fromlist=names)\nr = __import__('', globals(), locals(), ['sib'], 1)\n",
+				"unrelated/__init__.py": "",
+			},
+			target: "app/main.py",
+			want: []string{
+				"app/__init__.py", "app/sib.py", "lib/__init__.py", "lib/a.py", "lib/b.py", "pkg/__init__.py", "pkg/mod.py",
+			},
+		},
+		{
 			name: "dynamic import with partial module name",
 			files: map[string]string{
 				"drivers/__init__.py":    "",

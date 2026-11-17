@@ -40,161 +40,179 @@ func refStrings(refs []ref) []string {
 	return out
 }
 
-func TestScanSource(t *testing.T) {
-	tests := []struct {
-		name string
-		src  string
-		want []string
-	}{
-		{"default import", `import a from "./a"`, []string{"m:./a"}},
-		{"named and namespace imports", "import { a, b as c } from './a';\nimport * as ns from './b'", []string{"m:./a", "m:./b"}},
-		{"multi-line import", "import {\n  a,\n  b,\n} from\n  './a'", []string{"m:./a"}},
-		{"side-effect import", `import "./polyfill"; import './styles.css'`, []string{"m:./polyfill", "m:./styles.css"}},
-		{"type import", `import type { T } from "./types"; import { type U } from "./u"`, []string{"m:./types (type)", "m:./u (type?)"}},
-		{"import attributes", `import data from "./d.json" with { type: "json" }`, []string{"m:./d.json"}},
-		{"export from", `export { a } from "./a"; export * from './b'; export * as c from "./c"; export type { T } from "./t"`,
-			[]string{"m:./a", "m:./b", "m:./c", "m:./t (type)"}},
-		{"minified export star", `export*from"./a";import{x}from"./b"`, []string{"m:./a", "m:./b"}},
-		{"dynamic import", `const m = await import("./lazy"); import('./other').then(f)`, []string{"m:./lazy", "m:./other"}},
-		{"dynamic import with options", `import("./x.json", { with: { type: "json" } })`, []string{"m:./x.json"}},
-		{"dynamic import magic comment", `import(/* webpackChunkName: "x" */ "./chunk")`, []string{"m:./chunk"}},
-		{"type-level import", `type T = typeof import("./types").T`, []string{"m:./types"}},
-		{"template without substitutions", "import(`./plain`)", []string{"m:./plain"}},
-		{"template with substitution", "import(`./plugins/${name}.ts`)", []string{"t:./plugins/|.ts"}},
-		{"template with several substitutions", "import(`./l/${a}/x/${b}.json`)", []string{"t:./l/|.json"}},
-		{"template with no static prefix", "import(`${base}/x.js`)", []string{"t:|/x.js"}},
-		{"dynamic import of variable", `import(name)`, []string{"d:"}},
-		{"require", `const a = require("./a"); const {b} = require('b')`, []string{"m:./a", "m:b"}},
-		{"require template", "require(`./locale/${l}`)", []string{"t:./locale/|"}},
-		{"concatenation", `require("./locale/" + lang); import("./p/" + a + "/" + b + ".js"); require("./x/" + f(a, b))`,
-			[]string{"t:./locale/|", "t:./p/|.js", "t:./x/|"}},
-		{"require.resolve", `require.resolve("./worker.js")`, []string{"m:./worker.js"}},
-		{"module.require", `module.require("./a")`, []string{"m:./a"}},
-		{"import equals require", `import fs = require("./fs-shim")`, []string{"m:./fs-shim"}},
-		{"new URL", `new Worker(new URL("./worker.ts", import.meta.url))`, []string{"f:./worker.ts"}},
-		{"new URL without import.meta.url", `new URL("/api", location.origin)`, nil},
-		{"import.meta.resolve", `import.meta.resolve("./x")`, []string{"m:./x"}},
-		{"import.meta.glob string", `import.meta.glob("./pages/*.tsx", { eager: true })`, []string{"g:./pages/*.tsx"}},
-		{"import.meta.glob array", `import.meta.glob(["./a/*.ts", "!./a/skip.ts"])`, []string{"g:./a/*.ts", "g:!./a/skip.ts"}},
-		{"require.context", `require.context("./icons", false, /\.svg$/); require.context('./c')`,
-			[]string{"c:./icons|n", "c:./c|r"}},
-		{"vitest mocks", `vi.mock("./db"); vi.doMock('./x'); await vi.importActual("./y"); vi.importMock("./z")`,
-			[]string{"m:./db", "m:./x", "m:./y", "m:./z"}},
-		{"jest mocks", `jest.mock("./db", () => ({})); jest.requireActual('./a'); jest.unmock("./b"); jest.setMock("./c", {})`,
-			[]string{"m:./db", "m:./a", "m:./b", "m:./c"}},
-		{"vi.mock with dynamic import", `vi.mock(import("./svc"))`, []string{"m:./svc"}},
-		{"other method named mock", `server.mock("./x"); vi.fn("./y")`, nil},
-		{"property named import", `loader.import("./x"); obj.from("./y")`, nil},
-		{"triple-slash references", "/// <reference path=\"globals.d.ts\" />\n/// <reference types=\"vite/client\" />\nlet x",
-			[]string{"f:globals.d.ts", "m:vite/client"}},
-		{"hashbang", "#!/usr/bin/env node\nrequire('./cli')", []string{"m:./cli"}},
-		{"string escapes", `import a from "./\x61b\u{63}"`, []string{"m:./abc"}},
+var scanSourceCases = []scanCase{
+	{"default import", `import a from "./a"`, []string{"m:./a"}},
+	{"named and namespace imports", "import { a, b as c } from './a';\nimport * as ns from './b'", []string{"m:./a", "m:./b"}},
+	{"multi-line import", "import {\n  a,\n  b,\n} from\n  './a'", []string{"m:./a"}},
+	{"side-effect import", `import "./polyfill"; import './styles.css'`, []string{"m:./polyfill", "m:./styles.css"}},
+	{"type import", `import type { T } from "./types"; import { type U } from "./u"`, []string{"m:./types (type)", "m:./u (type?)"}},
+	{"import attributes", `import data from "./d.json" with { type: "json" }`, []string{"m:./d.json"}},
+	{"export from", `export { a } from "./a"; export * from './b'; export * as c from "./c"; export type { T } from "./t"`,
+		[]string{"m:./a", "m:./b", "m:./c", "m:./t (type)"}},
+	{"minified export star", `export*from"./a";import{x}from"./b"`, []string{"m:./a", "m:./b"}},
+	{"dynamic import", `const m = await import("./lazy"); import('./other').then(f)`, []string{"m:./lazy", "m:./other"}},
+	{"dynamic import with options", `import("./x.json", { with: { type: "json" } })`, []string{"m:./x.json"}},
+	{"dynamic import magic comment", `import(/* webpackChunkName: "x" */ "./chunk")`, []string{"m:./chunk"}},
+	{"type-level import", `type T = typeof import("./types").T`, []string{"m:./types"}},
+	{"template without substitutions", "import(`./plain`)", []string{"m:./plain"}},
+	{"template with substitution", "import(`./plugins/${name}.ts`)", []string{"t:./plugins/|.ts"}},
+	{"template with several substitutions", "import(`./l/${a}/x/${b}.json`)", []string{"t:./l/|.json"}},
+	{"template with no static prefix", "import(`${base}/x.js`)", []string{"t:|/x.js"}},
+	{"dynamic import of variable", `import(name)`, []string{"d:"}},
+	{"require", `const a = require("./a"); const {b} = require('b')`, []string{"m:./a", "m:b"}},
+	{"require template", "require(`./locale/${l}`)", []string{"t:./locale/|"}},
+	{"concatenation", `require("./locale/" + lang); import("./p/" + a + "/" + b + ".js"); require("./x/" + f(a, b))`,
+		[]string{"t:./locale/|", "t:./p/|.js", "t:./x/|"}},
+	{"require.resolve", `require.resolve("./worker.js")`, []string{"m:./worker.js"}},
+	{"module.require", `module.require("./a")`, []string{"m:./a"}},
+	{"import equals require", `import fs = require("./fs-shim")`, []string{"m:./fs-shim"}},
+	{"new URL", `new Worker(new URL("./worker.ts", import.meta.url))`, []string{"f:./worker.ts"}},
+	{"new URL without import.meta.url", `new URL("/api", location.origin)`, nil},
+	{"import.meta.resolve", `import.meta.resolve("./x")`, []string{"m:./x"}},
+	{"import.meta.glob string", `import.meta.glob("./pages/*.tsx", { eager: true })`, []string{"g:./pages/*.tsx"}},
+	{"import.meta.glob array", `import.meta.glob(["./a/*.ts", "!./a/skip.ts"])`, []string{"g:./a/*.ts", "g:!./a/skip.ts"}},
+	{"require.context", `require.context("./icons", false, /\.svg$/); require.context('./c')`,
+		[]string{"c:./icons|n", "c:./c|r"}},
+	{"vitest mocks", `vi.mock("./db"); vi.doMock('./x'); await vi.importActual("./y"); vi.importMock("./z")`,
+		[]string{"m:./db", "m:./x", "m:./y", "m:./z"}},
+	{"jest mocks", `jest.mock("./db", () => ({})); jest.requireActual('./a'); jest.unmock("./b"); jest.setMock("./c", {})`,
+		[]string{"m:./db", "m:./a", "m:./b", "m:./c"}},
+	{"vi.mock with dynamic import", `vi.mock(import("./svc"))`, []string{"m:./svc"}},
+	{"other method named mock", `server.mock("./x"); vi.fn("./y")`, nil},
+	{"property named import", `loader.import("./x"); obj.from("./y")`, nil},
+	{"triple-slash references", "/// <reference path=\"globals.d.ts\" />\n/// <reference types=\"vite/client\" />\nlet x",
+		[]string{"f:globals.d.ts", "m:vite/client"}},
+	{"hashbang", "#!/usr/bin/env node\nrequire('./cli')", []string{"m:./cli"}},
+	{"string escapes", `import a from "./\x61b\u{63}"`, []string{"m:./abc"}},
 
-		// Lexer edge cases: references must not be taken from comments, strings,
-		// regular expressions or JSX text, nor hidden by them.
-		{"line comment", "// import a from './no'\nimport b from './yes'", []string{"m:./yes"}},
-		{"block comment", "/* require('./no')\n import './no2' */ require('./yes')", []string{"m:./yes"}},
-		{"comment inside import", `import /* from "./no" */ a from "./yes"`, []string{"m:./yes"}},
-		{"string containing require", `const s = "require('./no')"; const t = 'import "./no"'; require("./yes")`,
-			[]string{"m:./yes"}},
-		{"template containing import", "const s = `import x from './no'`; import y from './yes'", []string{"m:./yes"}},
-		{"string with escaped quote", `const s = "a\" require('./no') \""; require('./yes')`, []string{"m:./yes"}},
-		{"regex with quote", `const re = /"/; import a from "./yes"; const q = '"'`, []string{"m:./yes"}},
-		{"regex with comment-like body", `const re = /\/*/; import a from "./yes" // */`, []string{"m:./yes"}},
-		{"regex with slash in class", `const re = /[/"]/g; require("./yes")`, []string{"m:./yes"}},
-		{"regex after return", "function f(){ return /'/.test(s) }\nrequire('./yes')", []string{"m:./yes"}},
-		{"division is not regex", `const x = a / b; const y = (c) / 2; require("./yes"); const z = d / e`,
-			[]string{"m:./yes"}},
-		{"division then string", `const r = total / count + "/"; import "./yes"`, []string{"m:./yes"}},
-		{"nested templates", "const s = `a ${`b ${import('./inner')} ${\"x\"}`} c`; import('./after')",
-			[]string{"m:./inner", "m:./after"}},
-		{"template with braces in substitution", "const s = `${ {a: 1}.a } ${fn({b: `x`})}`; require('./yes')",
-			[]string{"m:./yes"}},
-		{"template with import in substitution", "const s = `${await import('./sub')}`", []string{"m:./sub"}},
-		{"jsx text with apostrophes", "const C = () => <p>Don't do it, it's bad</p>;\nimport x from './yes';",
-			[]string{"m:./yes"}},
-		{"jsx with expressions", "const C = () => (\n  <div className=\"a\" onClick={() => require('./h')}>\n    {items.map(i => <Item key={i} />)}\n  </div>\n);",
-			[]string{"m:./h"}},
-		{"typescript generics", "const m = new Map<string, Array<number>>();\nimport a from './yes'", []string{"m:./yes"}},
-		{"unterminated string stops at newline", "const s = 'oops\nimport a from './yes'", []string{"m:./yes"}},
-		{"unterminated block comment", "require('./yes') /* never closed", []string{"m:./yes"}},
-		{"identifier containing keyword", `myimport("./no"); requireX("./no"); fromage "./no"`, nil},
-		// A load of a computed name is a dynamic reference: what it loads is unknown.
-		{"import of a variable", `const m = await import(name)`, []string{"d:"}},
-		{"require of a variable", `const m = require(p)`, []string{"d:"}},
-		{"require of a call", `const m = require(resolveName("x"))`, []string{"d:"}},
-		{"require of path.join without a literal", `require(path.join(__dirname, name))`, []string{"d:"}},
-		{"import of a member", `import(mods[i])`, []string{"d:"}},
-		{"template without a prefix", "import(`${dir}/x.js`)", []string{"t:|/x.js"}},
-		{"concatenation from a variable", `require(base + "/x")`, []string{"d:"}},
-		// Not loads of a computed name.
-		{"import without an argument", `import()`, nil},
-		{"require without an argument", `require()`, nil},
-		{"method named require", `obj.require(x); module.require("./a")`, []string{"m:./a"}},
-		{"function named require", `function require(id) { return id }`, nil},
-		{"literal import stays a module", `import("./a"); require("./b")`, []string{"m:./a", "m:./b"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := refStrings(scanSource([]byte(tt.src)))
-			want := tt.want
-			if want == nil {
-				want = []string{}
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("scanSource(%q)\n got: %q\nwant: %q", tt.src, got, want)
-			}
-		})
-	}
+	// Lexer edge cases: references must not be taken from comments, strings,
+	// regular expressions or JSX text, nor hidden by them.
+	{"line comment", "// import a from './no'\nimport b from './yes'", []string{"m:./yes"}},
+	{"block comment", "/* require('./no')\n import './no2' */ require('./yes')", []string{"m:./yes"}},
+	{"comment inside import", `import /* from "./no" */ a from "./yes"`, []string{"m:./yes"}},
+	{"string containing require", `const s = "require('./no')"; const t = 'import "./no"'; require("./yes")`,
+		[]string{"m:./yes"}},
+	{"template containing import", "const s = `import x from './no'`; import y from './yes'", []string{"m:./yes"}},
+	{"string with escaped quote", `const s = "a\" require('./no') \""; require('./yes')`, []string{"m:./yes"}},
+	{"regex with quote", `const re = /"/; import a from "./yes"; const q = '"'`, []string{"m:./yes"}},
+	{"regex with comment-like body", `const re = /\/*/; import a from "./yes" // */`, []string{"m:./yes"}},
+	{"regex with slash in class", `const re = /[/"]/g; require("./yes")`, []string{"m:./yes"}},
+	{"regex after return", "function f(){ return /'/.test(s) }\nrequire('./yes')", []string{"m:./yes"}},
+	{"division is not regex", `const x = a / b; const y = (c) / 2; require("./yes"); const z = d / e`,
+		[]string{"m:./yes"}},
+	{"division then string", `const r = total / count + "/"; import "./yes"`, []string{"m:./yes"}},
+	{"nested templates", "const s = `a ${`b ${import('./inner')} ${\"x\"}`} c`; import('./after')",
+		[]string{"m:./inner", "m:./after"}},
+	{"template with braces in substitution", "const s = `${ {a: 1}.a } ${fn({b: `x`})}`; require('./yes')",
+		[]string{"m:./yes"}},
+	{"template with import in substitution", "const s = `${await import('./sub')}`", []string{"m:./sub"}},
+	{"jsx text with apostrophes", "const C = () => <p>Don't do it, it's bad</p>;\nimport x from './yes';",
+		[]string{"m:./yes"}},
+	{"jsx with expressions", "const C = () => (\n  <div className=\"a\" onClick={() => require('./h')}>\n    {items.map(i => <Item key={i} />)}\n  </div>\n);",
+		[]string{"m:./h"}},
+	{"typescript generics", "const m = new Map<string, Array<number>>();\nimport a from './yes'", []string{"m:./yes"}},
+	{"unterminated string stops at newline", "const s = 'oops\nimport a from './yes'", []string{"m:./yes"}},
+	{"unterminated block comment", "require('./yes') /* never closed", []string{"m:./yes"}},
+	{"identifier containing keyword", `myimport("./no"); requireX("./no"); fromage "./no"`, nil},
+	// A load of a computed name is a dynamic reference: what it loads is unknown.
+	{"import of a variable", `const m = await import(name)`, []string{"d:"}},
+	{"require of a variable", `const m = require(p)`, []string{"d:"}},
+	{"require of a call", `const m = require(resolveName("x"))`, []string{"d:"}},
+	{"require of path.join without a literal", `require(path.join(__dirname, name))`, []string{"d:"}},
+	{"import of a member", `import(mods[i])`, []string{"d:"}},
+	{"template without a prefix", "import(`${dir}/x.js`)", []string{"t:|/x.js"}},
+	{"concatenation from a variable", `require(base + "/x")`, []string{"d:"}},
+	// Not loads of a computed name.
+	{"import without an argument", `import()`, nil},
+	{"require without an argument", `require()`, nil},
+	{"method named require", `obj.require(x); module.require("./a")`, []string{"m:./a"}},
+	{"function named require", `function require(id) { return id }`, nil},
+	{"literal import stays a module", `import("./a"); require("./b")`, []string{"m:./a", "m:./b"}},
 }
 
-func TestScanSourceTypeOnly(t *testing.T) {
-	tests := []struct {
-		name string
-		src  string
-		want []string
-	}{
-		// Always erased.
-		{"import type default", `import type T from "./a"`, []string{"m:./a (type)"}},
-		{"import type named", "import type {\n  A,\n  B as C,\n} from './a'", []string{"m:./a (type)"}},
-		{"import type namespace", `import type * as N from "./a"`, []string{"m:./a (type)"}},
-		{"import type default named from", `import type from from "./a"`, []string{"m:./a (type)"}},
-		{"import type equals require", `import type A = require("./a")`, []string{"m:./a (type)"}},
-		{"export type named", `export type { A, B } from "./a"`, []string{"m:./a (type)"}},
-		{"export type star", `export type * from "./a"; export type * as N from "./b"`, []string{"m:./a (type)", "m:./b (type)"}},
-		{"minified", `import type{A}from"./a";export type*from"./b"`, []string{"m:./a (type)", "m:./b (type)"}},
-		{"with attributes", `import type { A } from "./a" with { "resolution-mode": "import" }`, []string{"m:./a (type)"}},
+func TestScanSource(t *testing.T) { runScanCases(t, scanSourceCases, scanSource) }
 
-		// Erased unless verbatimModuleSyntax (or the like) keeps them.
-		{"inline type specifiers", `import { type A, type B as C } from "./a"`, []string{"m:./a (type?)"}},
-		{"inline type export", `export { type A } from "./a"`, []string{"m:./a (type?)"}},
-		{"inline type trailing comma", `import { type A, } from "./a"`, []string{"m:./a (type?)"}},
-		{"type-only import named as", `import { type as } from "./a"; import { type as as X } from "./b"`, []string{"m:./a (type?)", "m:./b (type?)"}},
-		{"string name", `export { type "a-b" as C } from "./a"`, []string{"m:./a (type?)"}},
+var typeOnlyCases = []scanCase{
+	// Always erased.
+	{"import type default", `import type T from "./a"`, []string{"m:./a (type)"}},
+	{"import type named", "import type {\n  A,\n  B as C,\n} from './a'", []string{"m:./a (type)"}},
+	{"import type namespace", `import type * as N from "./a"`, []string{"m:./a (type)"}},
+	{"import type default named from", `import type from from "./a"`, []string{"m:./a (type)"}},
+	{"import type equals require", `import type A = require("./a")`, []string{"m:./a (type)"}},
+	{"export type named", `export type { A, B } from "./a"`, []string{"m:./a (type)"}},
+	{"export type star", `export type * from "./a"; export type * as N from "./b"`, []string{"m:./a (type)", "m:./b (type)"}},
+	{"minified", `import type{A}from"./a";export type*from"./b"`, []string{"m:./a (type)", "m:./b (type)"}},
+	{"with attributes", `import type { A } from "./a" with { "resolution-mode": "import" }`, []string{"m:./a (type)"}},
 
-		// Values.
-		{"default import named type", `import type from "./a"`, []string{"m:./a"}},
-		{"default import named type with named", `import type, { a } from "./a"`, []string{"m:./a"}},
-		{"mixed specifiers", `import { type A, b } from "./a"; export { a, type B } from "./b"`, []string{"m:./a", "m:./b"}},
-		{"binding named type", `import { type } from "./a"; import { type as T } from "./b"; import { type as as } from "./c"`,
-			[]string{"m:./a", "m:./b", "m:./c"}},
-		{"default beside inline types", `import D, { type A } from "./a"`, []string{"m:./a"}},
-		{"empty list", `import {} from "./a"; export {} from "./b"`, []string{"m:./a", "m:./b"}},
-		{"export type alias is no import", `export type A = string; import a from "./a"`, []string{"m:./a"}},
-		{"export type without from", `export type { A }; import "./a"`, []string{"m:./a"}},
-		{"typeof import stays", `type M = typeof import("./a"); let x: import("./b").T`, []string{"m:./a", "m:./b"}},
-		{"import equals require", `import A = require("./a")`, []string{"m:./a"}},
-		{"type-only then value of the same module", `import type { A } from "./a"; import { b } from "./a"`, []string{"m:./a (type)", "m:./a"}},
-		{"property named type", `obj.import; import { a } from "./a"; x.export; type.from`, []string{"m:./a"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := refStrings(scanSource([]byte(tt.src)))
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("scanSource(%q)\n got: %q\nwant: %q", tt.src, got, tt.want)
+	// Erased unless verbatimModuleSyntax (or the like) keeps them.
+	{"inline type specifiers", `import { type A, type B as C } from "./a"`, []string{"m:./a (type?)"}},
+	{"inline type export", `export { type A } from "./a"`, []string{"m:./a (type?)"}},
+	{"inline type trailing comma", `import { type A, } from "./a"`, []string{"m:./a (type?)"}},
+	{"type-only import named as", `import { type as } from "./a"; import { type as as X } from "./b"`, []string{"m:./a (type?)", "m:./b (type?)"}},
+	{"string name", `export { type "a-b" as C } from "./a"`, []string{"m:./a (type?)"}},
+
+	// Values.
+	{"default import named type", `import type from "./a"`, []string{"m:./a"}},
+	{"default import named type with named", `import type, { a } from "./a"`, []string{"m:./a"}},
+	{"mixed specifiers", `import { type A, b } from "./a"; export { a, type B } from "./b"`, []string{"m:./a", "m:./b"}},
+	{"binding named type", `import { type } from "./a"; import { type as T } from "./b"; import { type as as } from "./c"`,
+		[]string{"m:./a", "m:./b", "m:./c"}},
+	{"default beside inline types", `import D, { type A } from "./a"`, []string{"m:./a"}},
+	{"empty list", `import {} from "./a"; export {} from "./b"`, []string{"m:./a", "m:./b"}},
+	{"export type alias is no import", `export type A = string; import a from "./a"`, []string{"m:./a"}},
+	{"export type without from", `export type { A }; import "./a"`, []string{"m:./a"}},
+	{"typeof import stays", `type M = typeof import("./a"); let x: import("./b").T`, []string{"m:./a", "m:./b"}},
+	{"import equals require", `import A = require("./a")`, []string{"m:./a"}},
+	{"type-only then value of the same module", `import type { A } from "./a"; import { b } from "./a"`, []string{"m:./a (type)", "m:./a"}},
+	{"property named type", `obj.import; import { a } from "./a"; x.export; type.from`, []string{"m:./a"}},
+}
+
+func TestScanSourceTypeOnly(t *testing.T) { runScanCases(t, typeOnlyCases, scanSource) }
+
+// mockArgCases cover the specifier argument of the calls that take one: mock
+// functions, require.resolve, import.meta.resolve and new URL(..., import.meta.url).
+// The argument is read the same way everywhere: a literal, a template, a concatenation,
+// or one wrapped in import(), require(), require.resolve() or import.meta.resolve();
+// the wrapped call is not counted again.
+var mockArgCases = []scanCase{
+	{"mock of a string", `vi.mock("./util")`, []string{"m:./util (mock)"}},
+	{"mock of a template", "vi.mock(`./util`)", []string{"m:./util (mock)"}},
+	{"mock of import()", `vi.mock(import("./util"))`, []string{"m:./util (mock)"}},
+	{"mock of import() with factory", `vi.mock(import('./util'), () => ({ f: vi.fn() }))`, []string{"m:./util (mock)"}},
+	{"doMock of import()", `vi.doMock(import("./util"))`, []string{"m:./util (mock)"}},
+	{"mock of require.resolve()", `jest.mock(require.resolve("./util"))`, []string{"m:./util (mock)"}},
+	{"mock of require()", `jest.mock(require("./util"))`, []string{"m:./util (mock)"}},
+	{"mock of import.meta.resolve()", `vi.mock(import.meta.resolve("./util"))`, []string{"m:./util (mock)"}},
+	{"mock with type arguments of import()", `vi.mock<typeof import("./t")>(import("./util"))`, []string{"m:./util (mock)", "m:./t"}},
+	{"importActual of import() is no mock", `await vi.importActual(import("./util"))`, []string{"m:./util"}},
+	{"requireActual of require.resolve()", `jest.requireActual(require.resolve("./util"))`, []string{"m:./util"}},
+	{"mock of a concatenation", `jest.mock("./mods/" + name)`, []string{"t:./mods/|"}},
+	{"require.resolve of import.meta.resolve()", `require.resolve(import.meta.resolve("./x"))`, []string{"m:./x"}},
+	{"require.resolve of path.join", `require.resolve(path.join(__dirname, "w.js"))`, []string{"m:./w.js"}},
+	{"import.meta.resolve of a template", "import.meta.resolve(`./p/${n}.js`)", []string{"t:./p/|.js"}},
+	{"URL of a string", `new URL("./w.ts", import.meta.url)`, []string{"f:./w.ts"}},
+	{"URL of a bare name", `new URL("w.ts", import.meta.url)`, []string{"f:w.ts"}},
+	{"URL of a template", "new URL(`./workers/${n}.ts`, import.meta.url)", []string{"t:./workers/|.ts"}},
+	{"URL of a bare template", "new URL(`workers/${n}.js`, import.meta.url)", []string{"t:./workers/|.js"}},
+	{"URL of a concatenation", `new URL("./a/" + n + ".png", import.meta.url)`, []string{"t:./a/|.png"}},
+	{"URL of import.meta.resolve()", `new URL(import.meta.resolve("./x"), import.meta.url)`, []string{"f:./x"}},
+	{"URL against another base", `new URL("./x", location.href); new URL("/api", base)`, nil},
+	{"URL of a computed name", `new URL(name, import.meta.url)`, nil},
+	// Must keep: a wrapped load of a computed name is still a dynamic load.
+	{"mock of import() of a computed name", `vi.mock(import(name))`, []string{"d:"}},
+	{"mock of require() of a computed name", `jest.mock(require(name))`, []string{"d:"}},
+}
+
+func TestScanSourceSpecifierArguments(t *testing.T) {
+	runScanCases(t, mockArgCases, func(src []byte) []ref {
+		refs := scanSource(src)
+		for i := range refs {
+			if refs[i].mock {
+				refs[i].spec += " (mock)" // shown by refStrings
 			}
-		})
-	}
+		}
+		return refs
+	})
 }
 
 func TestScanSFC(t *testing.T) {
@@ -319,14 +337,16 @@ func TestLexerLinear(t *testing.T) {
 	}
 }
 
+var arrowRegexSrcs = []string{
+	"export const isFence = (l) => /^```/.test(l)\nexport async function load() { return import('./lazy') }\n",
+	"const g = (x: number): boolean => /`/.test(String(x))\nrequire('./a')",
+	"const z = x.return / 2; require('./a') / 3",
+}
+
 // TestArrowRegexBacktick checks that a regex after => may contain a backtick (it must
 // not open a template literal) and that `x.return / 2` is a division.
 func TestArrowRegexBacktick(t *testing.T) {
-	for _, src := range []string{
-		"export const isFence = (l) => /^```/.test(l)\nexport async function load() { return import('./lazy') }\n",
-		"const g = (x: number): boolean => /`/.test(String(x))\nrequire('./a')",
-		"const z = x.return / 2; require('./a') / 3",
-	} {
+	for _, src := range arrowRegexSrcs {
 		if got := refStrings(scanSource([]byte(src))); len(got) != 1 {
 			t.Errorf("%q: got %q", src, got)
 		}

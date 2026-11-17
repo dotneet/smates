@@ -2,6 +2,7 @@ package selector
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/dotneet/smates/internal/depkey"
@@ -11,11 +12,28 @@ import (
 
 // changes computes the changed files (Result.Changed): against the state's snapshot,
 // or against Base when the state has none. In ModeAll nothing is compared.
+//
+// A state with entries but no snapshot and no Base (a state started in diff mode, or
+// one only --suite runs wrote, where no base branch can be found: a shallow clone, no
+// upstream) has nothing to tell the changes no test depends on from: they would select
+// nothing, silently. The changes are then taken since the oldest commit the entries of
+// the selection's suites ran at (entryBase), and when none of those is in the clone
+// every test runs (ModeAll, which records a snapshot), with a note saying why.
 func (s *selection) changes() error {
 	if s.res.Mode == ModeAll {
 		return nil
 	}
-	changed, err := changedFiles(s.in)
+	base := s.in.Base
+	if len(s.in.State.Files) == 0 && base == "" {
+		if base = s.entryBase(); base == "" {
+			s.res.Mode = ModeAll
+			s.res.Notes = append(s.res.Notes, "the state holds no snapshot of the files and there is no base revision (none given, and no commit the recorded tests ran at is in this clone): running everything, since a change no test depends on could not be told (a full run records the snapshot; or pass --base)")
+			return nil
+		}
+		s.res.Notes = append(s.res.Notes, fmt.Sprintf("the state holds no snapshot of the files and there is no base revision: changes are taken since %s, the oldest commit the recorded tests ran at", shortSHA(base)))
+		s.res.ChangesSince = base
+	}
+	changed, err := changedFiles(s.in, base)
 	if err != nil {
 		return err
 	}
@@ -79,7 +97,7 @@ func (s *selection) markerFilter() {
 	for f := range s.changed {
 		v, _ := in.State.Snap(f)
 		h, ok := v.SeenHash()
-		if !ok || !gitx.SameHash(h, in.Snap[f]) {
+		if !ok || !gitx.ByContent.Same(h, in.Snap[f]) {
 			continue
 		}
 		switch {
@@ -118,15 +136,45 @@ func Snapshotted(st *state.State) func(name string) bool {
 	return func(name string) bool { return seen[name] }
 }
 
+// entryBase returns the commit the changes are taken since when the state has no
+// snapshot and there is no Base (see changes): the oldest commit of history HEAD shares
+// with the commits the entries of the selection's suites (Input.Suites and Others) ran
+// at that exist in the clone (gitx.Repo.OldestBase); "" when there is none.
+func (s *selection) entryBase() string {
+	in := s.in
+	if in.Repo == nil {
+		return ""
+	}
+	var commits []string
+	for _, su := range s.everySuite() {
+		if st := in.State.Suites[su.Name]; st != nil {
+			for _, e := range st.Tests {
+				commits = append(commits, e.Commit)
+			}
+		}
+	}
+	sort.Strings(commits)
+	return in.Repo.OldestBase(slices.Compact(commits))
+}
+
+// shortSHA abbreviates a commit SHA for a note.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
 // changedFiles returns the files that differ between the snapshot and the state's
-// snapshot (deleted ones included; a hash recorded without the executable marker
-// matches, see gitx.SameHash), or, when the state has none, the files changed since
-// Base (none without Base).
-func changedFiles(in *Input) (map[string]bool, error) {
+// snapshot (deleted ones included; compared as content, gitx.ByContent: a hash
+// recorded without the executable marker matches, and so does a skip-worktree file
+// not on disk), or, when the state has none, the files changed since base (none
+// without base).
+func changedFiles(in *Input, base string) (map[string]bool, error) {
 	out := map[string]bool{}
 	if len(in.State.Files) > 0 {
 		for f, h := range in.Snap {
-			if old, ok := in.State.Files[f]; !ok || !gitx.SameHash(old, h) {
+			if old, ok := in.State.Files[f]; !ok || !gitx.ByContent.Same(old, h) {
 				out[f] = true
 			}
 		}
@@ -137,12 +185,12 @@ func changedFiles(in *Input) (map[string]bool, error) {
 		}
 		return out, nil
 	}
-	if in.Base == "" {
+	if base == "" {
 		return out, nil
 	}
-	list, err := in.Repo.ChangedSince(in.Base)
+	list, err := in.Repo.ChangedSince(base)
 	if err != nil {
-		return nil, fmt.Errorf("diff against %s: %w", in.Base, err)
+		return nil, fmt.Errorf("diff against %s: %w", base, err)
 	}
 	for _, f := range list {
 		out[f] = true

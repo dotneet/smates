@@ -233,15 +233,35 @@ func (s *stateStore) Save(st *state.State) error {
 	return snap.Save(s.snapPath)
 }
 
+// Replace writes st as the state, in place of what the file holds (`smates state
+// pull` outside shared mode), under the lock Save takes: a concurrent Save then either
+// finishes first (and is replaced) or applies its own changes to st, never writes over
+// it with a state read before it. st becomes this process's base.
+func (s *stateStore) Replace(st *state.State) error {
+	lock, err := state.AcquireLock(s.lockPath(), state.LockWait, state.LockStale)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if err := st.Save(s.path); err != nil {
+		return err
+	}
+	if s.base, err = state.Load(s.path); err != nil {
+		s.base = nil
+	}
+	return nil
+}
+
 // Clear removes the state (in shared mode the shared entries of every worktree and
-// this worktree's snapshot) and keeps it from being seeded again.
+// this worktree's snapshot) and keeps it from being seeded again. It holds the lock
+// Save takes, so a run saving at the same time cannot write the old state back.
 func (s *stateStore) Clear() error {
+	lock, err := state.AcquireLock(s.lockPath(), state.LockWait, state.LockStale)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	if s.shared {
-		lock, err := state.AcquireLock(s.lockPath(), state.LockWait, state.LockStale)
-		if err != nil {
-			return err
-		}
-		defer lock.Release()
 		if err := os.Remove(s.snapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

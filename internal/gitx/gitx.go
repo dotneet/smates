@@ -77,29 +77,82 @@ type Snapshot map[string]string
 // a script fails differently once it cannot execute it.
 const ExecSuffix = "+x"
 
-// Blob returns the git blob SHA-1 a file hash (Snapshot, HashFile) holds, without the
-// executable marker.
-func Blob(hash string) string { return strings.TrimSuffix(hash, ExecSuffix) }
+// CommitPrefix starts the hash of a submodule (a gitlink, git mode 160000): its pinned
+// commit, which stands for its contents.
+const CommitPrefix = "commit:"
 
-// SameHash reports whether a recorded hash still matches the current one: they are
-// equal, or recorded has no executable marker and equals cur without its markers.
-// smates before the marker recorded executable files by their blob alone, and an
-// older smates may still be writing the state (on CI); counting those as changed would
-// make every executable file a change after each such recording. The price: a file
-// that only gains the executable bit is no change. Losing a recorded one is.
-func SameHash(recorded, cur string) bool {
+// IsGitlink reports whether a file hash (Snapshot) is a submodule's pinned commit.
+func IsGitlink(hash string) bool { return strings.HasPrefix(hash, CommitPrefix) }
+
+// OffDiskPrefix starts the hash of a file flagged skip-worktree that is not on disk (a
+// sparse checkout left it out of the working tree, or it was deleted): the index hash
+// follows. git counts such a file as unchanged, and so does the tree snapshot
+// (ByContent), but a test reading or probing it finds nothing there, so the hash of a
+// dependency key on it differs from the file's (ByKey): narrowing the cone selects
+// the tests that used it, and widening it again selects those that ran without it.
+const OffDiskPrefix = "offdisk:"
+
+// OffDisk returns the hash of a skip-worktree file that is not on disk, with index hash
+// h.
+func OffDisk(h string) string { return OffDiskPrefix + h }
+
+// IsOffDisk reports whether a file hash is that of a skip-worktree file not on disk.
+func IsOffDisk(hash string) bool { return strings.HasPrefix(hash, OffDiskPrefix) }
+
+// Blob returns the git blob SHA-1 a file hash (Snapshot, HashFile) holds, without the
+// executable marker and the off-disk prefix.
+func Blob(hash string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(hash, OffDiskPrefix), ExecSuffix)
+}
+
+// LegacyHash returns the hash a smates from before the executable marker recorded for
+// a file with hash h: h without ExecSuffix. The off-disk prefix stays: older versions
+// recorded an off-disk file by its index hash, which must not match it (it hid the
+// file's absence).
+func LegacyHash(h string) string { return strings.TrimSuffix(h, ExecSuffix) }
+
+// Compare is how a recorded hash is compared with the current one (Same). Every
+// comparison of a recorded file hash with a current one goes through it, so that the
+// compatibility rules below hold everywhere alike.
+//
+// Both levels accept a hash recorded without the executable marker: smates before the
+// marker recorded executable files by their blob alone, and an older smates may still
+// be writing the state (on CI); counting those as changed would make every executable
+// file a change after each such recording. The price: a file that only gains the
+// executable bit is no change. Losing a recorded one is.
+type Compare uint8
+
+const (
+	// ByKey compares the hash of a dependency key: what a test observed. A
+	// skip-worktree file not on disk (OffDisk) differs from the file on disk.
+	ByKey Compare = iota
+	// ByContent compares entries of the tree snapshot (the changed files, the markers
+	// of --suite runs): the content git tracks, so a skip-worktree file not on disk
+	// matches its index hash, as git status has it. The tests that read it are
+	// selected through their keys (ByKey).
+	ByContent
+)
+
+// Same reports whether recorded still matches cur at level c.
+func (c Compare) Same(recorded, cur string) bool {
+	if c == ByContent {
+		recorded, cur = strings.TrimPrefix(recorded, OffDiskPrefix), strings.TrimPrefix(cur, OffDiskPrefix)
+	}
 	return recorded == cur ||
 		strings.Contains(cur, ExecSuffix) && !strings.Contains(recorded, ExecSuffix) && recorded == strings.ReplaceAll(cur, ExecSuffix, "")
 }
+
+// SameHash compares entries of the tree snapshot: ByContent.Same.
+func SameHash(recorded, cur string) bool { return ByContent.Same(recorded, cur) }
 
 // Snapshot computes the current content hashes. Unmodified tracked files take their
 // hash from the index, so the cost is one `git ls-files` plus hashing of dirty files.
 //
 // Files flagged skip-worktree or assume-unchanged (git update-index) are hashed from
 // disk too: git status does not report edits to them, so their index hash would hide a
-// local edit a test reads. One that is not on disk keeps its index hash when it is
-// skip-worktree (a sparse checkout leaves it out of the working tree: git counts it as
-// unchanged) and is deleted otherwise.
+// local edit a test reads. One that is not on disk hashes as OffDisk of its index hash
+// when it is skip-worktree (a sparse checkout leaves it out of the working tree: git
+// counts it as unchanged, and so does ByContent) and is deleted otherwise.
 func (r *Repo) Snapshot() (Snapshot, error) {
 	idx, err := r.index()
 	if err != nil {
@@ -112,7 +165,7 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		case "160000":
 			// A submodule: its pinned commit stands for its contents, so bumping it is a
 			// change (tests reading files inside it are tracked through those files).
-			snap[e.path] = "commit:" + e.sha
+			snap[e.path] = CommitPrefix + e.sha
 		case "100755":
 			snap[e.path] = e.sha + ExecSuffix
 			indexExec[e.path] = true
@@ -143,7 +196,7 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		}
 	}
 	// Flagged files git status is blind to.
-	keep := map[string]bool{} // skip-worktree: absent from disk keeps the index hash
+	keep := map[string]bool{} // skip-worktree: absent from disk is OffDisk
 	for _, e := range idx {
 		if !e.flagged() || e.mode == "160000" {
 			continue
@@ -165,7 +218,7 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		case hashes[i] != "":
 			snap[p] = hashes[i]
 		case keep[p] && !r.onDisk(p):
-			// not checked out (sparse): the index hash stands
+			snap[p] = OffDisk(snap[p]) // not checked out (sparse)
 		default:
 			delete(snap, p) // deleted in the working tree
 		}
@@ -412,6 +465,90 @@ func (r *Repo) MergeBase(ref string) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// OldestBase returns the oldest commit of history that HEAD and every one of commits
+// that exists locally share: their merge base (git merge-base --octopus), so that the
+// changes since it (ChangedSince) include every change since each of them that HEAD
+// has. Commits that do not exist here (not fetched into a shallow clone, gone with a
+// rebase and gc) are left out; "" when none exists, HEAD does not, or git fails.
+func (r *Repo) OldestBase(commits []string) string {
+	var in strings.Builder
+	seen := map[string]bool{}
+	var cands []string
+	for _, c := range commits {
+		if c == "" || seen[c] || strings.ContainsAny(c, "\n\x00") {
+			continue
+		}
+		seen[c] = true
+		cands = append(cands, c)
+		in.WriteString(c + "^{commit}\n")
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	cmd := exec.Command("git", "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	cmd.Dir = r.Root
+	cmd.Stdin = strings.NewReader(in.String())
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	var found []string
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[1] == "commit" {
+			found = append(found, f[0])
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	// The merge base of all of them, folded over chunks so that a state recorded at
+	// thousands of commits does not make one huge command line: the octopus merge base
+	// of the previous result and the next chunk is that of everything so far.
+	base := "HEAD"
+	for len(found) > 0 {
+		n := min(len(found), oldestBaseChunk)
+		mb, err := r.Git(append([]string{"merge-base", "--octopus", base}, found[:n]...)...)
+		if err != nil {
+			return ""
+		}
+		if base = strings.TrimSpace(mb); base == "" {
+			return ""
+		}
+		found = found[n:]
+	}
+	return base
+}
+
+// oldestBaseChunk bounds the commits OldestBase passes to one git merge-base.
+const oldestBaseChunk = 200
+
+// TreeSnapshot returns the files of a commit's tree hashed as Snapshot hashes them
+// (blob SHA-1, ExecSuffix for an executable, CommitPrefix for a submodule): the
+// snapshot the working tree had at that commit, clean.
+func (r *Repo) TreeSnapshot(rev string) (Snapshot, error) {
+	out, err := r.Git("-c", "core.quotepath=off", "ls-tree", "-r", "-z", "--full-tree", rev)
+	if err != nil {
+		return nil, err
+	}
+	snap := Snapshot{}
+	for _, rec := range strings.Split(out, "\x00") {
+		meta, path, ok := strings.Cut(rec, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 {
+			continue
+		}
+		switch mode, sha := f[0], f[2]; mode {
+		case "160000":
+			snap[path] = CommitPrefix + sha
+		case "100755":
+			snap[path] = sha + ExecSuffix
+		default:
+			snap[path] = sha
+		}
+	}
+	return snap, nil
 }
 
 // RefExists reports whether ref resolves to a commit.

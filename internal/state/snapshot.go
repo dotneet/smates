@@ -146,10 +146,11 @@ func (v SnapValue) SeenByAll(suites []string) bool {
 }
 
 // MarkSeen returns the entry after suites saw the file with hash: the suites that
-// already saw that same hash (gitx.SameHash: also one an older smates recorded without
-// the executable marker) keep it, the others do not.
+// already saw that same content (gitx.ByContent: also a hash an older smates recorded
+// without the executable marker, or a skip-worktree file off disk) keep it, the others
+// do not.
 func (v SnapValue) MarkSeen(hash string, suites []string) SnapValue {
-	if h, ok := v.SeenHash(); ok && gitx.SameHash(h, hash) {
+	if h, ok := v.SeenHash(); ok && gitx.ByContent.Same(h, hash) {
 		return MarkerSnap(hash, append(slices.Clone(v.seen), suites...))
 	}
 	return MarkerSnap(hash, suites)

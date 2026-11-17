@@ -79,14 +79,17 @@ func TestVerboseFlags(t *testing.T) {
 }
 
 // go test output: a top-level skip is not proven, in any -count iteration; a subtest
-// skip stays a pass, and a test a package with no tests to run never ran (unknown).
+// skip stays a pass, a test a package with no tests to run never ran (unknown), and
+// one of a package go test found no test files in was not compiled (a skip, as for a
+// package unit: buildFailures.skipped), in plain output as in -json.
 func TestGoOutcomesSkip(t *testing.T) {
 	plain := &goOutcomes{}
 	feed(plain, "=== RUN   TestS\n--- SKIP: TestS (0.00s)\n=== RUN   TestS\n--- PASS: TestS (0.00s)\n"+
 		"=== RUN   TestP\n--- PASS: TestP (0.00s)\n=== RUN   TestP\n--- SKIP: TestP (0.00s)\n"+
 		"=== RUN   TestF\n--- SKIP: TestF (0.00s)\n=== RUN   TestF\n--- FAIL: TestF (0.00s)\n"+
 		"=== RUN   TestSub\n    --- SKIP: TestSub/a (0.00s)\n--- PASS: TestSub (0.00s)\nFAIL\nFAIL\tm/a\t0.01s\n"+
-		"testing: warning: no tests to run\nPASS\nok  \tm/none\t0.01s [no tests to run]\n")
+		"testing: warning: no tests to run\nPASS\nok  \tm/none\t0.01s [no tests to run]\n"+
+		"?   \tm/nofiles\t[no test files]\n")
 	js := &goOutcomes{}
 	feed(js, `{"Action":"skip","Package":"m/a","Test":"TestS"}
 {"Action":"pass","Package":"m/a","Test":"TestS"}
@@ -97,7 +100,9 @@ func TestGoOutcomesSkip(t *testing.T) {
 {"Action":"skip","Package":"m/a","Test":"TestSub/a"}
 {"Action":"pass","Package":"m/a","Test":"TestSub"}
 {"Action":"fail","Package":"m/a"}
-{"Action":"skip","Package":"m/none"}
+{"Action":"output","Package":"m/none","Output":"testing: warning: no tests to run\n"}
+{"Action":"pass","Package":"m/none"}
+{"Action":"skip","Package":"m/nofiles"}
 `)
 	for name, g := range map[string]*goOutcomes{"plain": plain, "json": js} {
 		for _, c := range []struct{ ip, test, want string }{
@@ -106,6 +111,8 @@ func TestGoOutcomesSkip(t *testing.T) {
 			{"m/a", "TestF", state.Fail},
 			{"m/a", "TestSub", state.Pass},
 			{"m/none", "TestN", state.Unknown},
+			// Must keep: its test files were not compiled (build tags of this run only).
+			{"m/nofiles", "TestN", state.Skip},
 		} {
 			if st, _, _ := g.status(c.ip, c.test); st != c.want {
 				t.Errorf("%s: %s %s: %q, want %q", name, c.ip, c.test, st, c.want)
@@ -123,6 +130,9 @@ func TestGoOutcomesWholePackageSkip(t *testing.T) {
 		{"-v", "=== RUN   TestS\n--- SKIP: TestS (0.00s)\nPASS\nok  \tm/q\t0.01s\n", state.Skip},
 		{"-json", `{"Action":"skip","Package":"m/q","Test":"TestS"}` + "\n" + `{"Action":"pass","Package":"m/q"}` + "\n", state.Skip},
 		{"plain", "ok  \tm/q\t0.01s\n", state.Pass},
+		// Must keep: without -v either, a package without test files tested nothing.
+		{"plain, no test files", "?   \tm/q\t[no test files]\n", state.Skip},
+		{"-json, no test files", `{"Action":"skip","Package":"m/q"}` + "\n", state.Skip},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			g := &goOutcomes{}

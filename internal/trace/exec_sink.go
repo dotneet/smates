@@ -28,13 +28,13 @@ func (a *execAnalysis) opaque(dir string) {
 	}
 }
 
-// unresolved records that a command run in cwd uses something the analysis does not
-// know (an unset variable, a command's output, a script it could not read, commands
-// read from standard input, a cut command line): like an opaque program it may read
-// anything below cwd, and outside the repository the unknown value may still name a
-// path in it, so the whole repository is recorded.
-func (a *execAnalysis) unresolved(cwd string) {
-	a.out = append(a.out, treeKey(cwd, a.root, a.rel, true))
+// unresolved records that a command uses something the analysis does not know (an
+// unset variable, a command's output, a script it could not read or parse, commands
+// read from standard input): the unknown value may name any path, "../x" or an absolute
+// one too, and unknown code may change directory first, so the whole repository is
+// recorded, wherever the command runs.
+func (a *execAnalysis) unresolved() {
+	a.out = append(a.out, depkey.Tree("."))
 }
 
 // treeKey is the key of everything below dir: its tree in the repository, the whole
@@ -83,7 +83,7 @@ func (a *execAnalysis) absoluteTrees(seg []string, cwd string, vars map[string][
 		prefix = literal(prefix)
 		if !filepath.IsAbs(prefix) {
 			if unknownVars(w, vars) {
-				a.unresolved(cwd)
+				a.unresolved()
 			}
 			continue
 		}

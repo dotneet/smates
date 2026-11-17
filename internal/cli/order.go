@@ -92,6 +92,9 @@ type batch struct {
 	sr    *selector.Suite
 	units []string
 	full  bool // the units are the whole suite (the runner may discover them itself)
+	// whole: the suite must run unfiltered (suiteRun.whole): the batch holds all of it
+	// and is never split, and unmet requirements defer all of it (deferUnmet).
+	whole bool
 	// untraced: the units are listed by the suite's untraced and the cycle records, so
 	// the batch runs without code coverage (runner.RunContext.Untraced) or, for a runner
 	// that cannot, without recording.
@@ -216,11 +219,13 @@ func (c *cycle) untracedGroups(sr *selector.Suite, units []string) []unitGroup {
 // --fail-fast a suite is split into one batch per priority, and batches run by
 // priority across suites, so the likeliest failures finish before the rest starts.
 // With --max-time the batches are cut further by recorded durations (splitByTime), so
-// that the run can stop between them.
+// that the run can stop between them. A suite that must run whole (suiteRun.whole) is
+// never split: it runs in one traced batch at its best priority.
 func (c *cycle) plan() []*batch {
 	var out []*batch
 	for si, sr := range c.sel.res.Suites {
-		units, full := c.units(sr)
+		run := c.suiteRun(sr)
+		units := run.units
 		if len(units) == 0 {
 			continue
 		}
@@ -245,19 +250,31 @@ func (c *cycle) plan() []*batch {
 			)
 		})
 		var parts []*batch
-		for _, g := range c.untracedGroups(sr, units) {
-			if !c.f.failFast {
-				parts = append(parts, &batch{si: si, sr: sr, units: g.units, prio: rank(byID[g.units[0]]), untraced: g.untraced})
-				continue
+		if run.whole {
+			// The suite cannot run in parts: when some of its units must run untraced
+			// (tracing would change what they assert, such as timings), all of it runs
+			// untraced, which records less (runs again) but never fails a test that
+			// passes without smates.
+			untraced := false
+			for _, g := range c.untracedGroups(sr, units) {
+				untraced = untraced || g.untraced
 			}
-			n0 := len(parts)
-			for _, u := range g.units {
-				p := rank(byID[u])
-				if n := len(parts); n == n0 || parts[n-1].prio != p {
-					parts = append(parts, &batch{si: si, sr: sr, prio: p, untraced: g.untraced})
+			parts = []*batch{{si: si, sr: sr, units: units, prio: rank(byID[units[0]]), whole: true, untraced: untraced}}
+		} else {
+			for _, g := range c.untracedGroups(sr, units) {
+				if !c.f.failFast {
+					parts = append(parts, &batch{si: si, sr: sr, units: g.units, prio: rank(byID[g.units[0]]), untraced: g.untraced})
+					continue
 				}
-				b := parts[len(parts)-1]
-				b.units = append(b.units, u)
+				n0 := len(parts)
+				for _, u := range g.units {
+					p := rank(byID[u])
+					if n := len(parts); n == n0 || parts[n-1].prio != p {
+						parts = append(parts, &batch{si: si, sr: sr, prio: p, untraced: g.untraced})
+					}
+					b := parts[len(parts)-1]
+					b.units = append(b.units, u)
+				}
 			}
 		}
 		if c.f.maxTime > 0 {
@@ -270,10 +287,6 @@ func (c *cycle) plan() []*batch {
 					}
 					return u
 				}
-			}
-			var split []*batch
-			for _, b := range parts {
-				split = append(split, splitByTime(b, est, c.f.maxTime/timeSlices, byID, pkgOf)...)
 			}
 			estOf := func(units []string) time.Duration {
 				var sum time.Duration
@@ -288,6 +301,20 @@ func (c *cycle) plan() []*batch {
 				}
 				return sum
 			}
+			var split []*batch
+			for _, b := range parts {
+				if b.whole {
+					// One batch whatever it takes: its estimate decides whether it starts.
+					if _, known := est(b.units[0]); known {
+						b.est = estOf(b.units)
+					} else {
+						b.unknown = true // the suite has no recorded duration
+					}
+					split = append(split, b)
+					continue
+				}
+				split = append(split, splitByTime(b, est, c.f.maxTime/timeSlices, byID, pkgOf)...)
+			}
 			for _, b := range split {
 				if !b.unknown {
 					b.estOf = estOf
@@ -297,7 +324,7 @@ func (c *cycle) plan() []*batch {
 		}
 		for i, b := range parts {
 			b.part, b.parts = i+1, len(parts)
-			b.full = full && len(parts) == 1
+			b.full = run.full && len(parts) == 1
 		}
 		out = append(out, parts...)
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -396,22 +395,29 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 		// result: a change there would pass unseen.
 		env = []string{"GOFLAGS=" + strings.TrimSpace(Getenv(suiteEnv(rc.Suite), "GOFLAGS")+" -count=1")}
 	}
+	sub := *rc
+	var warnings []string
 	if rc.Record {
 		exe, err := goExecWrapper(rc)
 		if err != nil {
 			return nil, err
 		}
+		gc := goCommandOf(rc)
 		orig := Getenv(suiteEnv(rc.Suite), "GOFLAGS")
-		// A user -exec program in GOFLAGS keeps running the test binaries, behind
-		// smates' wrapper.
-		var kept []string
-		userExec := ""
-		for _, f := range strings.Fields(orig) {
-			if v, ok := strings.CutPrefix(f, "-exec="); ok {
-				userExec = v
-				continue
+		// smates' wrapper runs the test binaries through GOFLAGS' -exec, which an -exec on
+		// the command line would replace: a user -exec program (in GOFLAGS, on the
+		// command line or among the arguments passed through, in any spelling) moves
+		// behind the wrapper, which runs the binaries through it.
+		userExec := gc.userExec()
+		kept := gc.goflags(func(a GoArg) bool { return a.Name == "exec" })
+		if gc.onCommandLine("exec") {
+			if gc.goTest {
+				sub.rewrite = gc.withoutExec
+			} else {
+				// A wrapper's command line cannot be changed: go test may get that -exec
+				// and run the test binaries without smates' wrapper, untraced.
+				warnings = append(warnings, "the suite command passes -exec, which replaces the -exec smates records Go tests with when it reaches go test (smates can move it behind its own only on a `go test ...` command): packages it runs are not recorded and run again next time; put the -exec program in GOFLAGS (env: in smates.yml) instead")
 			}
-			kept = append(kept, f)
 		}
 		// Re-executions of a test binary (the helper-process pattern) keep test logs of
 		// their own (see childSource).
@@ -431,7 +437,6 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	// Packages that fail to build never start a test binary; go test reports them as
 	// "FAIL <import path> [build failed]".
 	failed := &buildFailures{}
-	sub := *rc
 	sub.Stdout = io.MultiWriter(rc.Stdout, failed)
 	if out != nil {
 		sub.Stdout = io.MultiWriter(rc.Stdout, failed, out)
@@ -447,7 +452,7 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 	if err == nil && !all && failed.onlyExcluded(rc, units, code) {
 		code = 0
 	}
-	res := &RunResult{ExitCode: code, Duration: time.Since(start), excluded: failed.excludedUnits(rc, units)}
+	res := &RunResult{ExitCode: code, Duration: time.Since(start), excluded: failed.excludedUnits(rc, units), Warnings: warnings}
 	if err != nil {
 		return res, err
 	}
@@ -657,6 +662,58 @@ var excludedAllRe = regexp.MustCompile(`package ([^\s:"\\]+): build constraints 
 // goSummaryRe matches the line go test prints when a package finishes.
 var goSummaryRe = regexp.MustCompile(`^(ok|FAIL|\?)\s+(\S+)(\s|$)`)
 
+// goPackageResult is what go test says about a whole package: the summary line of its
+// plain output, or a package-level event of go test -json. Both readers of go test's
+// output (buildFailures for package units, goOutcomes for function units) take it from
+// here, so that they agree on what each means.
+type goPackageResult struct {
+	ip     string
+	status string // state.Pass or state.Fail
+	// noTests: "[no test files]" ("?" line, or a package-level "skip" event): go test
+	// compiled the package and tested nothing of it.
+	noTests bool
+	// noneRun: "[no tests to run]": its tests compiled and none matched.
+	noneRun bool
+	// setup: "[setup failed]": go test could not set the package up (see
+	// buildFailures.excluded).
+	setup bool
+}
+
+// parseGoSummary reads the summary line go test prints when a package finishes.
+func parseGoSummary(line string) (goPackageResult, bool) {
+	m := goSummaryRe.FindStringSubmatch(line)
+	if m == nil {
+		return goPackageResult{}, false
+	}
+	r := goPackageResult{ip: m[2], status: state.Pass}
+	tail := strings.TrimSpace(line)
+	switch m[1] {
+	case "?":
+		r.noTests = true
+	case "FAIL":
+		r.status = state.Fail
+		r.setup = strings.HasSuffix(tail, "[setup failed]")
+	}
+	r.noneRun = strings.HasSuffix(tail, "[no tests to run]")
+	return r, true
+}
+
+// goPackageEventResult reads a package-level event of go test -json (no Test): its result,
+// or ok false for an event that is none (output, start).
+func goPackageEventResult(action, ip string) (goPackageResult, bool) {
+	r := goPackageResult{ip: ip, status: state.Pass}
+	switch action {
+	case "pass":
+	case "skip":
+		r.noTests = true // go test -json's "[no test files]"
+	case "fail":
+		r.status = state.Fail
+	default:
+		return r, false
+	}
+	return r, ip != ""
+}
+
 // maxGoPending bounds the output kept for the package currently printing.
 const maxGoPending = 16 << 10
 
@@ -697,9 +754,10 @@ func (b *buildFailures) collect(line []byte) {
 	if bytes.HasPrefix(line, []byte("{")) {
 		var ev goPackageEvent
 		if json.Unmarshal(line, &ev) == nil && ev.Action != "" {
-			switch {
-			case ev.Action == "skip" && ev.Test == "" && ev.Package != "":
+			if r, ok := goPackageEventResult(ev.Action, ev.Package); ok && ev.Test == "" && r.noTests {
 				b.noTest(ev.Package)
+			}
+			switch {
 			case ev.Action == "output" && ev.Package != "":
 				for l := range strings.SplitSeq(strings.TrimSuffix(ev.Output, "\n"), "\n") {
 					b.plain([]byte(strings.TrimRight(l, "\r")))
@@ -713,37 +771,36 @@ func (b *buildFailures) collect(line []byte) {
 
 // plain accumulates one line of go test's plain output (see collect).
 func (b *buildFailures) plain(line []byte) {
-	if m := goSummaryRe.FindSubmatch(line); m != nil {
+	if r, ok := parseGoSummary(string(line)); ok {
 		if b.status == nil {
 			b.status = map[string]string{}
 		}
-		switch string(m[1]) {
-		case "?":
-			b.noTest(string(m[2]))
-		case "ok":
-			if b.status[string(m[2])] != state.Fail {
-				b.status[string(m[2])] = state.Pass
+		switch {
+		case r.noTests:
+			b.noTest(r.ip)
+		case r.status == state.Pass:
+			if b.status[r.ip] != state.Fail {
+				b.status[r.ip] = state.Pass
 			}
-		case "FAIL":
-			b.status[string(m[2])] = state.Fail
-			if bytes.HasSuffix(bytes.TrimSpace(line), []byte("[setup failed]")) {
-				if b.setups == nil {
-					b.setups = map[string]int{}
-				}
-				b.setups[string(m[2])]++
-			} else {
-				if b.failures == nil {
-					b.failures = map[string]bool{}
-				}
-				b.failures[string(m[2])] = true
+		case r.setup:
+			b.status[r.ip] = state.Fail
+			if b.setups == nil {
+				b.setups = map[string]int{}
 			}
+			b.setups[r.ip]++
+		default:
+			b.status[r.ip] = state.Fail
+			if b.failures == nil {
+				b.failures = map[string]bool{}
+			}
+			b.failures[r.ip] = true
 		}
-		if string(m[1]) == "FAIL" && len(bytes.TrimSpace(b.pending)) > 0 {
+		if r.status == state.Fail && len(bytes.TrimSpace(b.pending)) > 0 {
 			if b.output == nil {
 				b.output = map[string]string{}
 			}
 			out := lastMessage(b.pending) // the failures and panics are at the end
-			b.output[string(m[2])] = trace.JoinMessage(b.output[string(m[2])], string(out))
+			b.output[r.ip] = trace.JoinMessage(b.output[r.ip], string(out))
 		}
 		b.pending = b.pending[:0]
 		return
@@ -1021,7 +1078,7 @@ func runAll(ctx context.Context, rc *RunContext, extra, args []string, env []str
 	if err != nil {
 		return 1, err
 	}
-	return runChunks(ctx, rc, extra, chunk(base, args), env)
+	return runChunks(ctx, rc, extra, rc.chunk(base, args), env)
 }
 
 // goExecWrapper returns a path to the smates binary usable inside GOFLAGS (which is
@@ -1045,7 +1102,7 @@ func goExecWrapper(rc *RunContext) (string, error) {
 // the invocation: one that does not compile fails them all, whatever they import. That
 // holds for function units too: they run with the user's command when not recording.
 func addCoverPkgDeps(ctx context.Context, rc *RunContext, res *RunResult) {
-	pats := coverPkgs(rc)
+	pats := goCommandOf(rc).coverPkgs()
 	if len(pats) == 0 || res == nil || len(res.Observations) == 0 {
 		return
 	}
@@ -1060,83 +1117,21 @@ func addCoverPkgDeps(ctx context.Context, rc *RunContext, res *RunResult) {
 	}
 }
 
-// coverPkgs returns the package patterns of a -coverpkg flag on the suite command, the
-// arguments passed through or GOFLAGS (nil when there is none).
-func coverPkgs(rc *RunContext) []string {
-	words, _ := SplitWords(rc.Suite.Command)
-	words = append(words, rc.ExtraArgs...)
-	words = append(words, strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))...)
-	var pats []string
-	for i, w := range words {
-		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
-		if flag != "coverpkg" || w == flag {
-			continue
-		}
-		if !hasValue {
-			if i+1 >= len(words) {
-				continue
-			}
-			value = words[i+1]
-		}
-		for _, p := range strings.Split(value, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				pats = append(pats, p)
-			}
-		}
-	}
-	return pats
-}
-
-// Build flags that change which files go test compiles, forwarded to go list. Others
-// (test flags, -exec, -coverpkg, -count) are not go list's and are left out.
-var (
-	goListValueFlags = map[string]bool{"tags": true, "mod": true, "modfile": true, "overlay": true}
-	goListBoolFlags  = map[string]bool{"race": true, "msan": true, "asan": true}
-)
-
-// goListFlags returns the build flags of GOFLAGS, the suite command and the arguments
-// passed through (in that order: later ones win, as with go test) that go list needs to
-// see the files go test builds.
-func goListFlags(rc *RunContext) []string {
-	words := strings.Fields(Getenv(suiteEnv(rc.Suite), "GOFLAGS"))
-	cmd, _ := SplitWords(rc.Suite.Command)
-	words = append(append(words, cmd...), rc.ExtraArgs...)
-	var out []string
-	for i := 0; i < len(words); i++ {
-		w := words[i]
-		if w == "--" || w == "-args" || w == "--args" {
-			break // what follows goes to the test binary
-		}
-		if !strings.HasPrefix(w, "-") {
-			continue
-		}
-		flag, value, hasValue := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(w, "-"), "-"), "=")
-		switch {
-		case goListValueFlags[flag] && hasValue:
-			out = append(out, "-"+flag+"="+value)
-		case goListValueFlags[flag] && i+1 < len(words):
-			out = append(out, "-"+flag+"="+words[i+1])
-			i++
-		case goListBoolFlags[flag]:
-			out = append(out, w)
-		}
-	}
-	return out
-}
-
 // goPackageFiles lists the Go source files (repository-relative) of the packages
 // matching patterns, resolved in the suite directory. Files excluded by build
 // constraints count too (minus tests): go test may build them under tags or a platform
 // this listing cannot see, and listing too many only selects more tests.
 func goPackageFiles(ctx context.Context, rc *RunContext, patterns []string) ([]string, error) {
 	const format = "{{.Dir}}{{range .GoFiles}}|{{.}}{{end}}{{range .CgoFiles}}|{{.}}{{end}}{{range .IgnoredGoFiles}}|{{.}}{{end}}"
-	args := append(append([]string{"list", "-e", "-find"}, goListFlags(rc)...), "-f", format, "--")
-	args = append(args, patterns...)
-	cmd := exec.CommandContext(ctx, "go", args...)
-	cmd.Dir = rc.Dir()
+	gc := goCommandOf(rc)
+	argv := append(append([]string{gc.bin, "list", "-e", "-find"}, gc.listFlags()...), "-f", format, "--")
+	argv = append(argv, patterns...)
 	// The relevant GOFLAGS are on the command line; the rest (-exec, -coverpkg, test
 	// flags) must not reach go list.
-	cmd.Env = withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="}), cmd.Dir)
+	cmd, err := commandIn(ctx, rc.Dir(), argv, withPWD(MergeEnv(baseEnv(), suiteEnv(rc.Suite), []string{"GOFLAGS="}), rc.Dir()))
+	if err != nil {
+		return nil, fmt.Errorf("go list: %v", err)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

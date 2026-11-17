@@ -502,6 +502,11 @@ func (c *watchCycles) run(ctx context.Context, req cycleReq) {
 				return slices.Contains(last[su.Name], t.ID)
 			}, selector.ReasonRerun, "rerun")
 		}
+		if req.kind == cycleFailed || req.kind == cycleRerun {
+			// A rerun is a selection too: a suite with a project whose test files smates
+			// cannot list runs whole whenever one of its tests is selected.
+			s.res.Apply(s.res.WholeSuites())
+		}
 	}
 	start := time.Now()
 	code, err := runCycle(ctx, f, c.stdout, c.stderr, hooks)
@@ -647,7 +652,10 @@ func countUnits(m map[string][]string) int {
 	return n
 }
 
-// narrow replaces the selection with the tests keep accepts.
+// narrow replaces the selection with the tests keep accepts. It leaves exactly those
+// tests selected: a caller whose selection must still run suites whole (mustRunWhole)
+// applies Result.WholeSuites after it; --only does not, since it runs exactly the
+// tests it names.
 func narrow(res *selector.Result, keep func(*selector.Suite, *selector.Test) bool, reason, detail string) {
 	res.Mode = selector.ModeState
 	for _, s := range res.Suites {

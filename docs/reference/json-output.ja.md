@@ -196,7 +196,8 @@ smates がプログラムやコーディングエージェント向けに出力�
 | `flaky` | 配列 | この実行で見つかった反転。下表を参照してください。 |
 | `failure_hints` | 配列 | 失敗したテストごとのヒント。[失敗ヒント](#failure-hints) を参照してください。 |
 | `fail_fast` | 真偽値 | `--fail-fast` で実行しました。 |
-| `not_run` | オブジェクト | スイート → 実行されなかった選択済みユニット（`--fail-fast`、`--max-time`、中断、満たされない `requires`、起動できなかったランナー）。選択されたまま残ります。 |
+| `not_run` | オブジェクト | スイート → 実行されなかった選択済みユニット（`--fail-fast`、`--max-time`、中断、設定エラー、満たされない `requires`、起動できなかったランナーやテストが結果を報告する前に 126/127 で終了したランナー）。選択されたまま残ります。 |
+| `stopped_by` | 文字列 | すべてのバッチが始まる前に実行を止めたもの: `--fail-fast`、`--max-time`、`an interrupt`（中断）、`a configuration error`（設定エラー）。何も止めなかったときは `""`。 |
 | `interrupted` | 真偽値 | 実行が中断されました（Ctrl-C、SIGTERM、SIGHUP）。終わらなかったものは `not_run` に入ります。 |
 | `max_time_reached` | 真偽値 | `--max-time` で `not_run` のユニットが外れました（`unmet_requires` の分を除く）。[時間の上限](cli.md#time-limit) を参照してください。 |
 | `unmet_requires` | オブジェクト | スイート → 満たされなかった [`requires`](configuration.md#requires) のチェック。そのユニットは `not_run` に入ります。 |

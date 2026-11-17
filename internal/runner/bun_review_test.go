@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,76 @@ import (
 	"github.com/dotneet/smates/internal/testutil"
 	"github.com/dotneet/smates/internal/trace"
 )
+
+// A suite command that names its own bun config has that config copied for recording
+// (not the suite directory's bunfig.toml), and the command keeps only smates' --config:
+// every spelling, on the command or among the arguments passed through, before or
+// after `test`; the last one wins, as with bun. A wrapper's -c is left alone.
+func TestBunUserConfig(t *testing.T) {
+	const own = "--config=/trace/bunfig-1.toml"
+	cases := []struct {
+		name  string
+		cmd   string
+		extra []string
+		want  string // the config copied, relative to the suite directory
+		argv  []string
+	}{
+		{"none", "bun test", nil, "bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"--config=", "bun test --config=ci/bunfig.toml", nil, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"-c=", "bun test -c=ci/bunfig.toml", nil, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"--config X", "bun test --config ci/bunfig.toml", nil, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"-c X", "bun test -c ci/bunfig.toml", nil, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"before test", "bun --config=ci/bunfig.toml test", nil, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"passed through", "bun test", []string{"--config=ci/bunfig.toml"}, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"passed through wins", "bun test --config=a.toml {tests}", []string{"-c", "ci/bunfig.toml"}, "ci/bunfig.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		{"absolute", "bun test --config=/etc/bun.toml", nil, "/etc/bun.toml", []string{"bun", "test", own, "./a.test.ts"}},
+		// A bare --config is bun's default config; the next word stays a test filter.
+		{"bare --config", "bun test --config unit", nil, "bunfig.toml", []string{"bun", "test", "unit", own, "./a.test.ts"}},
+		{"wrapper", "sh -c 'bun test \"$@\"' sh", nil, "bunfig.toml", []string{"sh", "-c", "bun test \"$@\"", "sh", own, "./a.test.ts"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rc := &RunContext{Repo: &gitx.Repo{Root: dir}, Suite: &Suite{Suite: config.Suite{Root: ".", Command: c.cmd}}, ExtraArgs: c.extra}
+			want := c.want
+			if !filepath.IsAbs(want) {
+				want = filepath.Join(dir, want)
+			}
+			if got, _ := bunUserConfig(rc); got != want {
+				t.Errorf("config %q, want %q", got, want)
+			}
+			argv, err := rc.CommandLine([]string{own}, []string{"./a.test.ts"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := withoutBunConfig(argv, own); strings.Join(got, "\x00") != strings.Join(c.argv, "\x00") {
+				t.Errorf("argv %q, want %q", got, c.argv)
+			}
+		})
+	}
+
+	// The copy is made of the named config: its preloads (from the suite directory, as
+	// bun resolves them) follow the shim. A named config that does not exist is a
+	// configuration error, as it is for bun.
+	dir := t.TempDir()
+	testutil.Write(t, dir, "bunfig.toml", "[test]\npreload = [\"./default-setup.ts\"]\n")
+	testutil.Write(t, dir, "ci/bunfig.toml", "[test]\npreload = [\"./ci-setup.ts\"]\n")
+	rc := &RunContext{Repo: &gitx.Repo{Root: dir}, Suite: &Suite{Suite: config.Suite{Name: "b", Root: ".", Command: "bun test --config=ci/bunfig.toml"}}, TraceDir: t.TempDir()}
+	path, cleanup, err := bunConfigWithShim(rc, "/shim/node.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	data, _ := os.ReadFile(path)
+	if out := string(data); !strings.Contains(out, filepath.Join(dir, "ci-setup.ts")) || strings.Contains(out, "default-setup") {
+		t.Errorf("copied the wrong config:\n%s", out)
+	}
+	rc.Suite.Command = "bun test --config=missing.toml"
+	var ce *CommandError
+	if _, _, err := bunConfigWithShim(rc, "/shim/node.cjs"); !errors.As(err, &ce) {
+		t.Errorf("missing named config: %v, want a CommandError", err)
+	}
+}
 
 // The recording bunfig puts the shim first, keeps project preloads (absolute) and
 // disables coverage thresholds, which per-file coverage runs would otherwise fail.

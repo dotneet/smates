@@ -12,7 +12,7 @@ var readers = map[string]bool{
 	"cat": true, "head": true, "tail": true, "grep": true, "egrep": true, "fgrep": true, "rg": true,
 	"sed": true, "awk": true, "sort": true, "uniq": true, "wc": true, "cut": true, "tr": true,
 	"diff": true, "cmp": true, "jq": true, "yq": true, "ls": true, "find": true, "test": true,
-	"[": true, "echo": true, "printf": true, "true": true, "false": true, "md5sum": true,
+	"[": true, "[[": true, "echo": true, "printf": true, "true": true, "false": true, "md5sum": true,
 	"sha1sum": true, "sha256sum": true, "shasum": true, "base64": true, "stat": true, "file": true,
 	"basename": true, "dirname": true, "realpath": true, "readlink": true, "pwd": true,
 	"uname": true, "hostname": true, "whoami": true, "id": true, "nproc": true, "arch": true,
@@ -108,7 +108,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 	}
 	prog := filepath.Base(seg[0])
 	if strings.Contains(seg[0], "$") {
-		a.unresolved(cwd) // an unknown program
+		a.unresolved() // an unknown program
 		return
 	}
 	// A shell (running a -c string, a script file or stdin), or a script started
@@ -125,7 +125,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 	// itself only when it runs on Node or Python.
 	if cmd, dir, ok := launched(seg); ok {
 		if strings.Contains(dir, "$") {
-			a.unresolved(cwd)
+			a.unresolved()
 			return
 		}
 		if !filepath.IsAbs(dir) {
@@ -359,7 +359,7 @@ func (a *execAnalysis) command(seg []string, cwd string, depth int, shell bool) 
 	case readers[prog] && !unresolved && !scripted:
 		// Reads only what it names.
 	case unresolved:
-		a.unresolved(cwd)
+		a.unresolved()
 	default:
 		a.opaque(cwd)
 	}
@@ -439,7 +439,7 @@ func operands(prog string, args []string) (c cmdArgs) {
 			}
 		}
 		return c
-	case "test", "[":
+	case "test", "[", "[[":
 		// Only the operands of file operators are paths: [ -f x ], [ a -nt b ].
 		for i, w := range args {
 			if testFileOps[w] && i+1 < len(args) && args[i+1] != "]" && args[i+1] != "]]" {

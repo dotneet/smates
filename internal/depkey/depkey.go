@@ -292,9 +292,11 @@ func (k Kind) Cover() CoverKind {
 // disappearing but not edits: an edited file only listed or probed may still be read
 // by something tracing cannot see); a tree (a command smates cannot see into ran below
 // a directory containing f; a tree at the repository root explains nothing: it would
-// hide every change from the orphan check). A key below f counts as content: a
-// submodule, recorded as one entry for its commit, is explained by tests that read
-// files inside it.
+// hide every change from the orphan check). A key below f whose hash follows the
+// content there (ReflectsContent) counts as content: a submodule, recorded as one entry
+// for its commit, is explained by tests that read files inside it or depend on a tree
+// there (whose hash includes the commit); not by a listing or an existence check
+// inside it, which a new commit can leave as they were.
 func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
 	return covers(deps, f, existenceChanged, func(decl, sig, prefix string) (bool, bool) {
 		below := false
@@ -302,10 +304,24 @@ func Covers(deps map[string]bool, f string, existenceChanged bool) CoverKind {
 			if strings.HasPrefix(d, decl) || strings.HasPrefix(d, sig) {
 				return true, below
 			}
-			below = below || strings.HasPrefix(d, prefix)
+			below = below || strings.HasPrefix(d, prefix) && ReflectsContent(d)
 		}
 		return false, below
 	})
+}
+
+// ReflectsContent reports whether the hash of key follows the content of the files it
+// names: a file's content or its suite settings, a Go file's declarations or one of
+// them, a tree (whose hash includes the commit of a submodule at or above its
+// directory). A listing, an existence check, a Go package's shape or method sets
+// (hashed from the files git lists, which a submodule's are not), a variable or a set
+// key do not.
+func ReflectsContent(key string) bool {
+	switch KindOf(key) {
+	case KindContent, KindConfig, KindDecls, KindDecl, KindSig, KindTree:
+		return true
+	}
+	return false
 }
 
 // CoverIndex answers Covers for one dependency set, many times: the keys that start
@@ -331,8 +347,20 @@ func (x *CoverIndex) Len() int { return len(x.keys) }
 // Covers is Covers over the indexed set.
 func (x *CoverIndex) Covers(f string, existenceChanged bool) CoverKind {
 	return covers(x.deps, f, existenceChanged, func(decl, sig, prefix string) (bool, bool) {
-		return x.hasPrefix(decl) || x.hasPrefix(sig), x.hasPrefix(prefix)
+		return x.hasPrefix(decl) || x.hasPrefix(sig), x.anyBelow(prefix)
 	})
+}
+
+// anyBelow reports whether some key that starts with p reflects content
+// (ReflectsContent).
+func (x *CoverIndex) anyBelow(p string) bool {
+	i, _ := slices.BinarySearch(x.keys, p)
+	for ; i < len(x.keys) && strings.HasPrefix(x.keys[i], p); i++ {
+		if ReflectsContent(x.keys[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPrefix reports whether some key starts with p: the first key not before p does.

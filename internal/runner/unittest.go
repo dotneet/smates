@@ -13,6 +13,7 @@ import (
 
 	"github.com/dotneet/smates/internal/config"
 	"github.com/dotneet/smates/internal/gitx"
+	"github.com/dotneet/smates/internal/state"
 	"github.com/dotneet/smates/internal/trace"
 )
 
@@ -140,9 +141,8 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 		}
 		obs, warns, readsBy, err := observeAll(rc, res.ExitCode, traceOptions{})
 		for u, o := range obs {
-			if c, ok := codes[u]; ok && o.Inferred {
-				// No result from the wrapper (it failed to start): the exit code is the unit's own.
-				setUnitExit(o, c)
+			if c, ok := codes[u]; ok {
+				isolatedUnittestExit(rc, u, o, c)
 			}
 		}
 		res.Observations, res.ReadsBy = obs, readsBy
@@ -151,7 +151,7 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 	}
 	worst, done := 0, 0
 	rc.beginReport()
-	for _, b := range chunk(uc.argv(rc, rc.Record, nil), modules) {
+	for _, b := range rc.chunk(uc.argv(rc, rc.Record, nil), modules) {
 		batchUnits := moduleUnits[done : done+len(b)]
 		done += len(b)
 		code, err := rc.reportInvocation(func() (int, error) { return rc.Exec(ctx, uc.argv(rc, rc.Record, b), env) })
@@ -177,6 +177,26 @@ func (unittestRunner) Run(ctx context.Context, rc *RunContext) (*RunResult, erro
 	res.Observations, warns, res.ReadsBy, err = observeAll(rc, worst, traceOptions{})
 	res.Warnings = append(res.Warnings, warns...)
 	return res, err
+}
+
+// isolatedUnittestExit settles unit u, which ran in a process of its own, with that
+// process's exit code: a result the wrapper wrote does not outlive a process that then
+// failed (an atexit handler calling os._exit, a crash during shutdown), and a unit the
+// wrapper wrote nothing for gets its own outcome rather than the run's. Exit 5 ("no
+// tests ran") is no failure of a helper module matching the pattern (noTestsOutcome);
+// of a module written for pytest it is never a pass either.
+func isolatedUnittestExit(rc *RunContext, u string, o *Observation, code int) {
+	if code == unittestNoTests {
+		if c, _ := noTestsOutcome(rc, []string{u}); c == 0 {
+			code = 0
+		} else {
+			if o.Status == state.Pass {
+				o.Status, o.Inferred = state.Unknown, false
+			}
+			return
+		}
+	}
+	setUnitExit(o, code)
 }
 
 // noTestsOutcome decides a unittest run in which none of units (repo-relative) ran a

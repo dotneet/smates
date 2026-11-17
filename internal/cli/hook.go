@@ -88,6 +88,10 @@ func cmdHook(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err != nil {
 		return 2, err
 	}
+	// Only install takes arguments: the `smates run` flags of the hook.
+	if sub != "install" && len(runArgs) > 0 {
+		return 2, usageError{fmt.Errorf("unexpected arguments %v (only install takes `smates run` flags)", runArgs)}
+	}
 	if *claude && *codex {
 		return 2, usageError{errors.New("--claude and --codex cannot be combined (install each hook on its own)")}
 	}
@@ -554,7 +558,12 @@ func refreshHookState(repo *gitx.Repo, f *runFlags, log io.Writer) {
 	}
 	refs := stateRefs(repo)
 	if missing && !store.shared {
-		_ = pullState(repo, path, "origin", refs, log)
+		// Under the state lock, as Save writes: a run saving meanwhile is not overwritten.
+		if remote, err := fetchState(repo, "origin", refs, log); err == nil && remote != nil {
+			if err := store.Replace(remote); err != nil {
+				fmt.Fprintf(log, "smates: could not save the pulled state: %v\n", err)
+			}
+		}
 		return
 	}
 	// Same extension: state.Load picks the format from it.

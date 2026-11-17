@@ -320,7 +320,7 @@ func TestBuildCheckUnreported(t *testing.T) {
 // A Gradle test class passes only once it finished: tests that reported before its JVM
 // died do not prove the class.
 func TestGradleClassMustFinish(t *testing.T) {
-	classes := map[string]string{"p.ATest": "a", "p.BTest": "b"}
+	classes := newGradleClassMap(map[string]string{"p.ATest": "a", "p.BTest": "b"})
 	test := func(class, task, result string) gradleEvent {
 		return gradleEvent{K: "test", Task: task, Class: class, Name: "t", Result: result}
 	}

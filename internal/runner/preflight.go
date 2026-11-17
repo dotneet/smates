@@ -3,7 +3,6 @@ package runner
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -47,7 +46,8 @@ func LauncherProblem(repoRoot string, s *Suite) (hard bool, err error) {
 	if findBin(repoRoot, dir, name) != "" {
 		return false, nil
 	}
-	if _, lerr := exec.LookPath(name); lerr == nil { // node, a globally installed tool
+	path, _ := s.LookupEnv("PATH")                           // the suite's env: may set its own
+	if _, lerr := lookPathIn(name, path, dir); lerr == nil { // node, a globally installed tool
 		return false, nil
 	}
 	var install string

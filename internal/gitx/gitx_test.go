@@ -1,6 +1,8 @@
 package gitx
 
 import (
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -267,22 +269,61 @@ func TestSnapshotExecutableBit(t *testing.T) {
 	}
 }
 
-func TestSameHash(t *testing.T) {
+// TestCompare pins every rule of comparing a recorded hash with the current one, at
+// both levels: a dependency key (ByKey) and an entry of the tree snapshot (ByContent,
+// also SameHash).
+func TestCompare(t *testing.T) {
 	for _, tc := range []struct {
 		recorded, cur string
-		want          bool
+		key, content  bool
 	}{
-		{"ab", "ab", true},
-		{"ab+x", "ab+x", true},
-		{"ab", "ab+x", true},  // recorded without the marker
-		{"ab+x", "ab", false}, // lost the bit
-		{"ab", "cd+x", false},
-		{"ab+exists", "ab+x+exists", true},
-		{"", "ab+x", false},
-		{"", "", true},
+		{"ab", "ab", true, true},
+		{"ab+x", "ab+x", true, true},
+		{"ab", "ab+x", true, true},   // recorded without the marker (an older smates)
+		{"ab+x", "ab", false, false}, // lost the bit
+		{"ab", "cd+x", false, false},
+		{"ab+exists", "ab+x+exists", true, true},
+		{"", "ab+x", false, false},
+		{"", "", true, true},
+		{"commit:ab", "commit:ab", true, true},
+		{"commit:ab", "commit:cd", false, false},
+		// A skip-worktree file not on disk: the same content for git, not for a test
+		// that read it (must keep: narrowing or widening the sparse cone selects it).
+		{"ab", OffDisk("ab"), false, true},
+		{OffDisk("ab"), "ab", false, true},
+		{OffDisk("ab"), OffDisk("ab"), true, true},
+		{OffDisk("ab+x"), OffDisk("ab+x"), true, true},
+		{"ab+x", OffDisk("ab+x"), false, true},
+		{"ab", OffDisk("ab+x"), false, true},
+		{OffDisk("ab"), OffDisk("ab+x"), true, true}, // recorded without the marker
+		{OffDisk("ab"), OffDisk("cd"), false, false},
+		{OffDisk("ab"), "cd", false, false},
+		{"", OffDisk("ab"), false, false},
+		{OffDisk("ab"), "", false, false},
 	} {
-		if got := SameHash(tc.recorded, tc.cur); got != tc.want {
-			t.Errorf("SameHash(%q, %q) = %v, want %v", tc.recorded, tc.cur, got, tc.want)
+		if got := ByKey.Same(tc.recorded, tc.cur); got != tc.key {
+			t.Errorf("ByKey.Same(%q, %q) = %v, want %v", tc.recorded, tc.cur, got, tc.key)
+		}
+		if got := ByContent.Same(tc.recorded, tc.cur); got != tc.content {
+			t.Errorf("ByContent.Same(%q, %q) = %v, want %v", tc.recorded, tc.cur, got, tc.content)
+		}
+		if got := SameHash(tc.recorded, tc.cur); got != tc.content {
+			t.Errorf("SameHash(%q, %q) = %v, want %v", tc.recorded, tc.cur, got, tc.content)
+		}
+	}
+	// What the agent reads and what an older smates recorded.
+	for h, want := range map[string][2]string{
+		"ab":            {"ab", "ab"},
+		"ab+x":          {"ab", "ab"},
+		OffDisk("ab+x"): {"ab", OffDisk("ab")},
+		OffDisk("ab"):   {"ab", OffDisk("ab")},
+		"commit:ab":     {"commit:ab", "commit:ab"},
+	} {
+		if got := Blob(h); got != want[0] {
+			t.Errorf("Blob(%q) = %q, want %q", h, got, want[0])
+		}
+		if got := LegacyHash(h); got != want[1] {
+			t.Errorf("LegacyHash(%q) = %q, want %q", h, got, want[1])
 		}
 	}
 }
@@ -486,14 +527,16 @@ func TestFirstParentHistoryShallow(t *testing.T) {
 
 // TestSnapshotFlaggedFiles: git status does not report edits to files flagged
 // skip-worktree or assume-unchanged, so the snapshot hashes them from disk; one that is
-// not on disk keeps its index hash when skip-worktree (a sparse checkout) and is
+// not on disk hashes as OffDisk of its index hash when skip-worktree (a sparse
+// checkout: the same content for git, ByContent, but not for a test, ByKey) and is
 // deleted otherwise. ChangedSince reports the same edits.
 func TestSnapshotFlaggedFiles(t *testing.T) {
 	type row struct {
 		name  string
 		flags []string // update-index flags
 		edit  func(r *testRepo, f string)
-		// want: "disk" (hash-object of the file), "index" (HEAD's blob), "" (absent).
+		// want: "disk" (hash-object of the file), "index" (HEAD's blob), "offdisk"
+		// (HEAD's blob, off disk), "" (absent).
 		want string
 		exec bool // the expected hash carries ExecSuffix
 	}
@@ -507,7 +550,7 @@ func TestSnapshotFlaggedFiles(t *testing.T) {
 		{"skip-worktree unedited", []string{"--skip-worktree"}, nil, "index", false},
 		{"assume-unchanged unedited", []string{"--assume-unchanged"}, nil, "index", false},
 		// must keep: a sparse checkout leaves skip-worktree files off disk.
-		{"skip-worktree not on disk", []string{"--skip-worktree"}, remove, "index", false},
+		{"skip-worktree not on disk", []string{"--skip-worktree"}, remove, "offdisk", false},
 		{"assume-unchanged deleted", []string{"--assume-unchanged"}, remove, "", false},
 		{"unflagged edited", nil, write, "disk", false},
 	}
@@ -549,16 +592,22 @@ func TestSnapshotFlaggedFiles(t *testing.T) {
 			want = r.git("hash-object", "--no-filters", "--", f)
 		case "index":
 			want = head
+		case "offdisk":
+			want = OffDisk(head)
 		}
 		if c.exec {
 			want += ExecSuffix
+		}
+		if off := c.want == "offdisk"; IsOffDisk(got) != off || off && (!ByContent.Same(head, got) || ByKey.Same(head, got)) {
+			t.Errorf("%s: %s hashes %q: off disk %v, want %v (the same content as HEAD, not the same for a key)", c.name, f, got, IsOffDisk(got), off)
 		}
 		if c.want == "" && ok {
 			t.Errorf("%s: %s in the snapshot (%s), want absent", c.name, f, got)
 		} else if c.want != "" && got != want {
 			t.Errorf("%s: %s hashes %q, want %q", c.name, f, got, want)
 		}
-		if wantChanged := got != head; slices.Contains(changed, f) != wantChanged {
+		// Off disk is no edit for git.
+		if wantChanged := strings.TrimPrefix(got, OffDiskPrefix) != head; slices.Contains(changed, f) != wantChanged {
 			t.Errorf("%s: ChangedSince lists %s: %v, want %v (%v)", c.name, f, !wantChanged, wantChanged, changed)
 		}
 	}
@@ -580,5 +629,95 @@ func TestParseIndex(t *testing.T) {
 		if got[i].path != w.path || got[i].flagged() != w.flagged || got[i].skipWorktree() != w.skip {
 			t.Errorf("entry %d: %+v flagged=%v skip=%v, want %+v", i, got[i], got[i].flagged(), got[i].skipWorktree(), w)
 		}
+	}
+}
+
+// TestOldestBase: the commit changes are taken since when a state has no snapshot: the
+// merge base of HEAD and the recorded commits that exist in the clone.
+func TestOldestBase(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "a")
+	c1 := r.commit("one")
+	r.write("a.txt", "b")
+	c2 := r.commit("two")
+	r.git("checkout", "-q", "-b", "side", c1)
+	r.write("s.txt", "s")
+	side := r.commit("side")
+	r.git("checkout", "-q", "-")
+	r.write("a.txt", "c")
+	c3 := r.commit("three")
+	const missing = "0123456789abcdef0123456789abcdef01234567"
+	for _, tc := range []struct {
+		name    string
+		commits []string
+		want    string
+	}{
+		{"none", nil, ""},
+		{"empty", []string{""}, ""},
+		{"not in the clone", []string{missing}, ""},
+		{"not a commit name", []string{"no such ref\nHEAD"}, ""},
+		{"HEAD", []string{c3}, c3},
+		{"one older", []string{c2}, c2},
+		{"the oldest of several", []string{c3, c2, c1, c2}, c1},
+		{"a missing one is left out", []string{missing, c2}, c2},
+		{"a branch HEAD does not contain: where it forked", []string{side, c3}, c1},
+	} {
+		if got := r.repo.OldestBase(tc.commits); got != tc.want {
+			t.Errorf("%s: OldestBase(%v) = %q, want %q", tc.name, tc.commits, got, tc.want)
+		}
+	}
+}
+
+// OldestBase folds a long list of commits over chunks: the result is that of one
+// octopus merge base over all of them.
+func TestOldestBaseChunks(t *testing.T) {
+	r := newTestRepo(t)
+	var commits []string
+	for i := 0; i < oldestBaseChunk*2+3; i++ {
+		r.write("a.txt", fmt.Sprint(i))
+		commits = append(commits, r.commit(fmt.Sprint("c", i)))
+	}
+	for _, tc := range []struct {
+		name    string
+		commits []string
+		want    string
+	}{
+		{"oldest first", commits, commits[0]},
+		{"oldest last", append(slices.Clone(commits[1:]), commits[0]), commits[0]},
+		{"oldest in a later chunk", append(slices.Clone(commits[oldestBaseChunk+5:]), commits[3]), commits[3]},
+	} {
+		if got := r.repo.OldestBase(tc.commits); got != tc.want {
+			t.Errorf("%s: OldestBase = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TreeSnapshot hashes a commit's files as Snapshot hashes the clean working tree.
+func TestTreeSnapshot(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "a")
+	r.write("dir/b.txt", "b")
+	r.write("run.sh", "#!/bin/sh\n")
+	if err := os.Chmod(filepath.Join(r.repo.Root, "run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a.txt", filepath.Join(r.repo.Root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	c := r.commit("one")
+	want, err := r.repo.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.write("a.txt", "changed later")
+	got, err := r.repo.TreeSnapshot(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("TreeSnapshot = %v, want the clean snapshot %v", got, want)
+	}
+	if _, err := r.repo.TreeSnapshot("no-such-rev"); err == nil {
+		t.Error("TreeSnapshot of a missing revision: no error")
 	}
 }

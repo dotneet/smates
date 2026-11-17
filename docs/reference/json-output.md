@@ -200,7 +200,8 @@ output on stderr). It has every field of [`smates select`](#smates-select), in w
 | `flaky` | array | Flips seen in this run: see below. |
 | `failure_hints` | array | One hint per failing test: see [Failure hints](#failure-hints). |
 | `fail_fast` | boolean | The run used `--fail-fast`. |
-| `not_run` | object | Suite → selected units that did not run (`--fail-fast`, `--max-time`, an interrupt, unmet `requires`, a runner that could not start). They stay selected. |
+| `not_run` | object | Suite → selected units that did not run (`--fail-fast`, `--max-time`, an interrupt, a configuration error, unmet `requires`, a runner that could not start or exited 126/127 before any test reported a result). They stay selected. |
+| `stopped_by` | string | What stopped the run before every batch started: `--fail-fast`, `--max-time`, `an interrupt` or `a configuration error`; `""` when nothing did. |
 | `interrupted` | boolean | The run was cancelled (Ctrl-C, SIGTERM or SIGHUP). What did not finish is in `not_run`. |
 | `max_time_reached` | boolean | `--max-time` left out the units in `not_run` (except those of `unmet_requires`). See [Time limit](cli.md#time-limit). |
 | `unmet_requires` | object | Suite → the [`requires`](configuration.md#requires) checks that failed. Their units are in `not_run`. |

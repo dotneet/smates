@@ -107,7 +107,7 @@ type goPackage struct {
 func (fr *funcRecorder) listPackages(ctx context.Context, pkg string) (*goPackage, string) {
 	rc := fr.rc
 	const format = `{{if .Module}}{{if .Module.Main}}{{.ImportPath}}{{"\t"}}{{.Dir}}{{"\t"}}{{.Name}}{{end}}{{end}}`
-	argv := append(append([]string{"go", "list", "-deps", "-test", "-f", format}, fr.flags.build...), pkg)
+	argv := append(append([]string{fr.flags.bin, "list", "-deps", "-test", "-f", format}, fr.flags.build...), pkg)
 	var out, errb bytes.Buffer
 	code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &errb)
 	if err != nil || code != 0 {
@@ -180,7 +180,7 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	if err != nil {
 		return "", err
 	}
-	argv := append(append([]string{"go", "test"}, build...), "-c", "-cover", "-coverpkg="+strings.Join(ips, ","), "-o", bin, pkg)
+	argv := append(append([]string{fr.flags.bin, "test"}, build...), "-c", "-cover", "-coverpkg="+strings.Join(ips, ","), "-o", bin, pkg)
 	var out bytes.Buffer
 	code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &out)
 	if err != nil || code != 0 {
@@ -206,15 +206,11 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	var errMu sync.Mutex
 	for j, name := range names {
 		unit := FuncUnit(dir, name)
-		if run, built := runs[name]; !run {
-			// Compiled but never run (an example without output, on every platform), or
-			// not listed by a binary whose test files go list could not tell: a pass. A
-			// function of a file this configuration does not compile is not a unit of the
-			// suite (excludedTestFiles); one that still gets here (build flags passed only
-			// to this run) ran nothing and is not recorded.
-			if built || !known {
-				fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
-			}
+		switch funcPlan(runs, known, name) {
+		case funcCompiledOnly:
+			fr.add(unit, &Observation{Files: map[string]bool{}, Status: state.Pass})
+			continue
+		case funcUnconfirmed:
 			continue
 		}
 		wg.Add(1)
@@ -239,13 +235,40 @@ func (fr *funcRecorder) recordPackage(ctx context.Context, idx int, dir string, 
 	return "", firstErr
 }
 
+// What recording does with a selected test function (funcPlan).
+const (
+	funcRun          = iota // run it in a process of its own
+	funcCompiledOnly        // a pass without running it: go test only compiles it
+	funcUnconfirmed         // leave it unrecorded: nothing shows that it is built
+)
+
+// funcPlan decides what recording does with test function name of a package whose
+// functions runs lists, each with whether go test runs it: from the test files go list
+// says this configuration compiles (known), or else from the binary's -test.list (only
+// what it runs). A function go test runs is run. One known to be compiled but never run
+// (an example without output, on every platform) passed: go test does no more. Any
+// other is not shown to be built: a function of a file this configuration does not
+// compile (build flags passed only to this run; excludedTestFiles leaves the others out
+// of the suite), or one -test.list does not name, when the test files could not tell.
+// It ran nothing, so it is not recorded and runs again.
+func funcPlan(runs map[string]bool, known bool, name string) int {
+	run, built := runs[name]
+	switch {
+	case run:
+		return funcRun
+	case built && known:
+		return funcCompiledOnly
+	}
+	return funcUnconfirmed
+}
+
 // builtFuncs returns the test functions declared by the test files of package pkg
 // (repo-relative directory dir) that go list says this configuration compiles, each
 // with whether go test runs it (examples without output are only compiled); ok is
 // false when it cannot tell (go list fails, a test file does not parse).
 func (fr *funcRecorder) builtFuncs(ctx context.Context, pkg, dir string) (runs map[string]bool, ok bool) {
 	rc := fr.rc
-	argv := append(append([]string{"go", "list", "-f", `{{range .TestGoFiles}}{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{.}}{{"\n"}}{{end}}`}, fr.flags.build...), pkg)
+	argv := append(append([]string{fr.flags.bin, "list", "-f", `{{range .TestGoFiles}}{{.}}{{"\n"}}{{end}}{{range .XTestGoFiles}}{{.}}{{"\n"}}{{end}}`}, fr.flags.build...), pkg)
 	var out, errb bytes.Buffer
 	if code, err := rc.ExecIn(ctx, rc.Dir(), argv, nil, &out, &errb); err != nil || code != 0 {
 		return nil, false

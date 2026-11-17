@@ -81,7 +81,9 @@ with two differences.
   (`mergeConfig(...)`), so a package whose only tests are stories gets a suite. When
   the stories cannot be read, smates takes every `*.stories.*` file under the project
   and, because those are a guess, runs the whole suite whenever one of them is
-  selected; `smates list` and `smates doctor` say so.
+  selected, unfiltered and in one runner call: `--shard` gives it to one shard,
+  `--fail-fast` and `--max-time` do not split it, and unmet `requires` leave all of it
+  for later. `smates list` and `smates doctor` say so.
 - **Nothing in the browser is traced.** After every run such a test's outcome is
   unknown, so it runs again next time. Set `trust_browser_passes: true` on the suite
   to record its passes instead, with what smates knows statically: the test's import

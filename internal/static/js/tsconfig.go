@@ -174,58 +174,82 @@ func (a *Analyzer) dirConfigFiles(dir string) []string {
 	})
 }
 
-// tsconfig returns the config at p with its extends chain applied (nil if unreadable).
-func (a *Analyzer) tsconfig(p string) *tsConfig {
-	return a.tsByPath.get(p, func() *tsConfig {
-		c, ok := a.loadConfig(p, path.Dir(p), map[string]bool{p: true})
-		if !ok {
-			return nil
-		}
-		c.configDir = path.Dir(p)
-		return &c
-	})
+// chainLink is one config of an extends chain (see configChain): its path and parsed
+// content, nil when it cannot be read (an "extends" entry that resolves to no readable
+// config has path "").
+type chainLink struct {
+	path string
+	raw  *rawTSConfig
 }
 
-// loadConfig applies the extends chain of the config at p, loaded for a config in
-// leafDir (the expansion of ${configDir}). visited guards against cycles.
-func (a *Analyzer) loadConfig(p, leafDir string, visited map[string]bool) (tsConfig, bool) {
-	raw := a.rawConfig(p)
-	if raw == nil {
-		return tsConfig{}, false
+// maxChain bounds the length of an extends chain: past it the rest is unknown.
+const maxChain = 256
+
+// configChain returns the configs whose settings make up the config at p, in the
+// order they apply (a later one overrides an earlier one): the chain of each "extends"
+// entry, in order, then p itself. Like tsc, every entry is resolved on its own, so a
+// base two entries share (a diamond) appears in both of their chains and its settings
+// apply again where the second one starts. An entry already being resolved (a cycle)
+// is skipped. Entries are also looked up in node_modules: a shared config may declare
+// paths with ${configDir}, or set verbatimModuleSyntax.
+func (a *Analyzer) configChain(p string) []chainLink {
+	var out []chainLink
+	stack := map[string]bool{}
+	var walk func(p string)
+	walk = func(p string) {
+		if len(out) >= maxChain {
+			out = append(out, chainLink{})
+			return
+		}
+		raw := a.rawConfig(p)
+		if raw == nil {
+			out = append(out, chainLink{path: p})
+			return
+		}
+		stack[p] = true
+		for _, ext := range extendsList(raw.Extends) {
+			ep := a.extendsFile(path.Dir(p), ext)
+			switch {
+			case ep == "":
+				out = append(out, chainLink{})
+			case !stack[ep]:
+				walk(ep)
+			}
+		}
+		delete(stack, p)
+		out = append(out, chainLink{path: p, raw: raw})
 	}
-	dir := path.Dir(p)
-	var c tsConfig
-	for _, ext := range extendsList(raw.Extends) {
-		// Also a config installed in node_modules: a shared config may declare paths
-		// with ${configDir}, which stands for the directory of the config using it.
-		ep := a.extendsFile(dir, ext)
-		if ep == "" || visited[ep] {
-			continue
+	walk(p)
+	return out
+}
+
+// tsconfig returns the config at p with its extends chain applied (nil if unreadable).
+// An "extends" entry that cannot be read contributes nothing.
+func (a *Analyzer) tsconfig(p string) *tsConfig {
+	return a.tsByPath.get(p, func() *tsConfig {
+		if a.rawConfig(p) == nil {
+			return nil
 		}
-		visited[ep] = true
-		parent, ok := a.loadConfig(ep, leafDir, visited)
-		if !ok {
-			continue
+		c := tsConfig{configDir: path.Dir(p)}
+		for _, link := range a.configChain(p) {
+			if link.raw == nil {
+				continue
+			}
+			dir, co := path.Dir(link.path), link.raw.CompilerOptions
+			if b := co.BaseURL; b != nil {
+				if rest, ok := strings.CutPrefix(*b, configDirVar); ok {
+					c.baseURL = path.Join(c.configDir, rest)
+				} else {
+					c.baseURL = path.Join(dir, *b)
+				}
+				c.hasBase = true
+			}
+			if co.Paths != nil {
+				c.paths, c.pathsDir = compilePaths(co.Paths), dir
+			}
 		}
-		if parent.hasBase {
-			c.baseURL, c.hasBase = parent.baseURL, true
-		}
-		if parent.paths != nil {
-			c.paths, c.pathsDir = parent.paths, parent.pathsDir
-		}
-	}
-	if b := raw.CompilerOptions.BaseURL; b != nil {
-		if rest, ok := strings.CutPrefix(*b, configDirVar); ok {
-			c.baseURL = path.Join(leafDir, rest)
-		} else {
-			c.baseURL = path.Join(dir, *b)
-		}
-		c.hasBase = true
-	}
-	if raw.CompilerOptions.Paths != nil {
-		c.paths, c.pathsDir = compilePaths(raw.CompilerOptions.Paths), dir
-	}
-	return c, true
+		return &c
+	})
 }
 
 // rawConfig reads and parses one config file (nil if missing or invalid).
@@ -356,7 +380,7 @@ type typeImportOpts struct {
 	set  [3]bool // the option is set in the config or a config it extends
 	keep [3]bool // ... to a value that keeps the import
 	// known is false when the config cannot be read, or extends one that cannot be
-	// while it leaves some option unset.
+	// and some option is set by no config applied after it.
 	known bool
 }
 
@@ -385,60 +409,35 @@ func (a *Analyzer) elidesTypeImports(dir string) bool {
 }
 
 // typeImportOptions returns the type import options of the config at p with its
-// extends chain applied.
+// extends chain (see configChain) applied, later configs overriding earlier ones. A
+// config of the chain that cannot be read (or found) may set any option: an option no
+// later config sets is then unknown.
 func (a *Analyzer) typeImportOptions(p string) typeImportOpts {
 	return a.typeOpts.get(p, func() typeImportOpts {
-		return a.loadTypeImportOpts(p, map[string]bool{p: true})
-	})
-}
-
-// loadTypeImportOpts applies the extends chain of the config at p (later entries
-// override earlier ones, the config itself all of them). Configs extended from
-// installed packages (node_modules) are read too: they are not part of the working
-// tree, but some set verbatimModuleSyntax. visited guards against cycles.
-func (a *Analyzer) loadTypeImportOpts(p string, visited map[string]bool) typeImportOpts {
-	raw := a.rawConfig(p)
-	if raw == nil {
-		return typeImportOpts{}
-	}
-	dir := path.Dir(p)
-	out := typeImportOpts{known: true}
-	unknownParent := false
-	for _, ext := range extendsList(raw.Extends) {
-		ep := a.extendsFile(dir, ext)
-		if ep == "" {
-			unknownParent = true
-			continue
+		if a.rawConfig(p) == nil {
+			return typeImportOpts{}
 		}
-		if visited[ep] {
-			continue
-		}
-		visited[ep] = true
-		parent := a.loadTypeImportOpts(ep, visited)
-		if !parent.known {
-			unknownParent = true
-			continue
-		}
-		for i := range parent.set {
-			if parent.set[i] {
-				out.set[i], out.keep[i] = true, parent.keep[i]
+		var unknown [3]bool
+		var out typeImportOpts
+		for _, link := range a.configChain(p) {
+			if link.raw == nil {
+				unknown = [3]bool{true, true, true}
+				continue
+			}
+			co := link.raw.CompilerOptions
+			for i, v := range []json.RawMessage{co.VerbatimModuleSyntax, co.PreserveValueImports, co.ImportsNotUsedAsValues} {
+				if len(v) == 0 {
+					continue
+				}
+				// Only false (and "remove", importsNotUsedAsValues' default) is known
+				// not to keep the import; null resets the option to its default.
+				s := strings.TrimSpace(string(v))
+				out.set[i], out.keep[i], unknown[i] = true, s != "false" && s != "null" && s != `"remove"`, false
 			}
 		}
-	}
-	co := raw.CompilerOptions
-	for i, v := range []json.RawMessage{co.VerbatimModuleSyntax, co.PreserveValueImports, co.ImportsNotUsedAsValues} {
-		if len(v) == 0 {
-			continue
-		}
-		// Only false (and "remove", importsNotUsedAsValues' default) is known not to
-		// keep the import; null resets the option to its default.
-		s := strings.TrimSpace(string(v))
-		out.set[i], out.keep[i] = true, s != "false" && s != "null" && s != `"remove"`
-	}
-	if unknownParent && (!out.set[0] || !out.set[1] || !out.set[2]) {
-		out.known = false
-	}
-	return out
+		out.known = !unknown[0] && !unknown[1] && !unknown[2]
+		return out
+	})
 }
 
 // extendsFile resolves an "extends" entry of a config in dir to a readable file: a

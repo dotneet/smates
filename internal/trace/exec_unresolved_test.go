@@ -103,15 +103,16 @@ func TestExecDepsUnknownDirectory(t *testing.T) {
 	touch(t, root, "data.txt", "sub/data.txt", "~/x")
 	sub := filepath.Join(root, "sub")
 	runExecCases(t, root, []execCase{
-		{"cd to a variable", sub, []string{`cd "$X"; cat data.txt`}, true, []string{"./**", "sub/**"}},
-		{"pushd to a variable", sub, []string{`pushd "$X"; cat data.txt`}, true, []string{"./**", "sub/**"}},
-		{"cd -", sub, []string{"cd -; cat data.txt"}, true, []string{"./**", "sub/**"}},
+		{"cd to a variable", sub, []string{`cd "$X"; cat data.txt`}, true, []string{"./**"}},
+		{"pushd to a variable", sub, []string{`pushd "$X"; cat data.txt`}, true, []string{"./**"}},
+		{"cd -", sub, []string{"cd -; cat data.txt"}, true, []string{"./**"}},
 		{"cd ~", root, []string{"cd ~; cat x"}, true, []string{"./**"}},
 		// Must keep: a subshell confines the unknown directory; a quoted ~ is a name.
-		{"cd to a variable in a subshell", sub, []string{`(cd "$X"; make); cat data.txt`}, true, []string{"./**", "sub/**", "sub/data.txt"}},
+		{"cd to a variable in a subshell", sub, []string{`(cd "$X"; make); cat data.txt`}, true, []string{"./**", "sub/data.txt"}},
 		{"quoted ~", root, []string{`cd "~"; cat x`}, true, []string{"~/x"}},
 		{"~ inside a word", root, []string{"cat sub~ a~/x"}, true, []string{"a~/x?", "sub~?"}},
-		{"unresolved in a subdirectory", sub, []string{`cat "$X"`}, true, []string{"sub/**"}},
+		// An unknown value may name a path outside the working directory ($X=../x).
+		{"unresolved in a subdirectory", sub, []string{`cat "$X"`}, true, []string{"./**"}},
 	})
 }
 
@@ -195,7 +196,8 @@ func TestCollectTruncatedOutsideRepo(t *testing.T) {
 	}{
 		{"/definitely/outside", []string{"./**"}},
 		{filepath.Dir(root), []string{"./**"}},
-		{filepath.Join(root, "sub"), []string{"sub/**"}},
+		// The words cut off may name a path outside the working directory.
+		{filepath.Join(root, "sub"), []string{"./**"}},
 	} {
 		stream(t, td, 100, 0,
 			ev{"k": "start", "pid": 100, "ppid": 1, "cwd": root, "t": 1000, "lang": "python"},

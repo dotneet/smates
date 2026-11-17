@@ -166,13 +166,13 @@ func (c *cycle) failedUnits() []failedUnit {
 	for _, sr := range c.sel.res.Suites {
 		seen := map[string]bool{}
 		for _, t := range sr.Tests {
-			if c.ran[sr.Name][t.ID] == state.Fail {
-				out = append(out, failedUnit{suite: sr.Name, unit: t.ID, inferred: c.inferred[sr.Name][t.ID]})
+			if ur := c.units.lookup(sr.Name, t.ID); ur != nil && ur.status == state.Fail {
+				out = append(out, failedUnit{suite: sr.Name, unit: t.ID, inferred: ur.inferred})
 				seen[t.ID] = true
 			}
 		}
 		for _, fb := range c.failedBatches {
-			if fb.suite != sr.Name || fb.anyFail || fb.noResult {
+			if fb.suite != sr.Name || fb.anyFail {
 				continue
 			}
 			for _, u := range fb.units {
@@ -186,12 +186,12 @@ func (c *cycle) failedUnits() []failedUnit {
 	return out
 }
 
-// failedBatch is a batch that exited non-zero.
+// failedBatch is a batch whose tests ran and exited non-zero (not one whose runner
+// exited 126/127 before any test reported a result: its units are unitUnstarted).
 type failedBatch struct {
-	suite    string
-	units    []string
-	anyFail  bool // some unit of it was recorded as failed
-	noResult bool // the runner exited 126/127 before any test reported a result (notStarted)
+	suite   string
+	units   []string
+	anyFail bool // some unit of it was recorded as failed
 }
 
 // printAgentSummary is the end of a run in failures mode: one line when it passed;
@@ -200,13 +200,12 @@ type failedBatch struct {
 func (c *cycle) printAgentSummary(elapsedText string) {
 	w := c.stderr
 	selected, total := c.sel.res.Counts()
-	started := countUnits(c.started)
+	ran := c.units.count(unitRan)
 	failed := c.failedUnits()
-	noResult := c.noResultUnits()
-	if len(failed) == 0 && !c.interrupted && (len(c.unstarted) > 0 || noResult > 0) {
+	if len(failed) == 0 && !c.interrupted() && c.units.count(unitUnstarted, unitUnmet) > 0 {
 		// Not a pass: smates exits 4 (the runner's error follows).
 		fmt.Fprintf(w, "smates: NOT STARTED: %s left %d selected test unit(s) not started (they stay selected); %d of %d selected unit(s) ran in %s (%d in total)\n",
-			c.notStartedBy(), c.notStartedUnits(), started-noResult, selected, elapsedText, total)
+			c.notStartedBy(), c.notStartedUnits(), ran, selected, elapsedText, total)
 		if c.testsFailed {
 			fmt.Fprintf(w, "smates: FAILED (exit code %d), but no test unit is known to have failed (see the output above)\n", c.worst)
 		}
@@ -217,18 +216,18 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 		if n := c.notStartedUnits(); n > 0 {
 			note = fmt.Sprintf("; %s left %d selected unit(s) not started (they stay selected)", c.notStartedBy(), n)
 		}
-		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s%s%s\n", started, selected, total, elapsedText, note, c.skippedNote())
+		fmt.Fprintf(w, "smates: PASSED %d of %d selected test unit(s) (%d in total) in %s%s%s\n", ran, selected, total, elapsedText, note, c.skippedNote())
 		return
 	}
-	if len(failed) == 0 && c.interrupted {
-		fmt.Fprintf(w, "smates: INTERRUPTED after %s: %d selected test unit(s) not run (they stay selected)\n", elapsedText, countUnits(c.notRun))
+	if len(failed) == 0 && c.interrupted() {
+		fmt.Fprintf(w, "smates: INTERRUPTED after %s: %d selected test unit(s) not run (they stay selected)\n", elapsedText, c.notStartedUnits())
 		return
 	}
 	if len(failed) == 0 {
 		fmt.Fprintf(w, "smates: FAILED (exit code %d) in %s, but no test unit is known to have failed (see the output above)\n", c.worst, elapsedText)
 		return
 	}
-	fmt.Fprintf(w, "smates: FAILED %d of %d test unit(s) in %s%s:\n", len(failed), started, elapsedText, c.skippedNote())
+	fmt.Fprintf(w, "smates: FAILED %d of %d test unit(s) in %s%s:\n", len(failed), ran, elapsedText, c.skippedNote())
 	byTest := map[string]*hints.Hint{}
 	for _, h := range c.failures.all() {
 		byTest[h.Suite+"\x00"+h.Test] = h
@@ -269,7 +268,7 @@ func (c *cycle) printAgentSummary(elapsedText string) {
 			fmt.Fprintf(w, "    → %s\n", explanationLine(ex))
 		}
 	}
-	if n := countUnits(c.notRun); n > 0 && c.interrupted {
+	if n := c.notStartedUnits(); n > 0 && c.interrupted() {
 		fmt.Fprintf(w, "  (interrupted: %d selected test unit(s) not run)\n", n)
 	} else if n := c.notStartedUnits(); n > 0 {
 		fmt.Fprintf(w, "  (%s left %d selected test unit(s) not started)\n", c.notStartedBy(), n)

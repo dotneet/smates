@@ -70,6 +70,77 @@ func TestJestManualMock(t *testing.T) {
 	})
 }
 
+// TestManualMockSpecifierForms checks that every way of naming the mocked module
+// (string, template, import(), require(), require.resolve(), import.meta.resolve())
+// loads the adjacent manual mock, and that importActual of import() does not.
+func TestManualMockSpecifierForms(t *testing.T) {
+	for _, call := range []string{
+		`vi.mock("./util")`,
+		"vi.mock(`./util`)",
+		`vi.mock(import("./util"))`,
+		`vi.mock(import("./util"), () => ({}))`,
+		`vi.doMock(import('./util'))`,
+		`vi.mock<typeof import("./util")>(import("./util"))`,
+		`jest.mock(require.resolve("./util"))`,
+		`jest.mock(require("./util"))`,
+		`vi.mock(import.meta.resolve("./util"))`,
+		`vitest.mock(import("./util"))`,
+	} {
+		t.Run(call, func(t *testing.T) {
+			h := newHost(t, map[string]string{
+				"src/a.test.ts":         call + "\n",
+				"src/util.ts":           "",
+				"src/__mocks__/util.ts": "",
+			})
+			assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/__mocks__/util.ts", "src/util.ts"})
+		})
+	}
+	for _, call := range []string{`await vi.importActual(import("./util"))`, `jest.requireActual(require.resolve("./util"))`} {
+		t.Run(call, func(t *testing.T) {
+			h := newHost(t, map[string]string{
+				"src/a.test.ts":         call + "\n",
+				"src/util.ts":           "",
+				"src/__mocks__/util.ts": "",
+			})
+			assertDeps(t, deps(t, h, "src/a.test.ts"), []string{"src/util.ts"})
+		})
+	}
+}
+
+// TestExtensionMapping checks TypeScript's mapping of the extension a specifier ends
+// in to the files it may load (with allowJs and allowImportingTsExtensions): each
+// candidate alone is found.
+func TestExtensionMapping(t *testing.T) {
+	table := map[string][]string{
+		".js":   {".ts", ".tsx", ".d.ts", ".js", ".jsx"},
+		".jsx":  {".tsx", ".ts", ".d.ts", ".jsx", ".js"},
+		".ts":   {".ts", ".tsx", ".d.ts", ".js", ".jsx"},
+		".tsx":  {".tsx", ".ts", ".d.ts", ".jsx", ".js"},
+		".mjs":  {".mts", ".d.mts", ".mjs"},
+		".mts":  {".mts", ".d.mts", ".mjs"},
+		".cjs":  {".cts", ".d.cts", ".cjs"},
+		".cts":  {".cts", ".d.cts", ".cjs"},
+		".json": {".d.json.ts", ".json"},
+	}
+	for specExt, cands := range table {
+		for _, fileExt := range cands {
+			t.Run(specExt+"->"+fileExt, func(t *testing.T) {
+				h := newHost(t, map[string]string{
+					"src/a.test.tsx":       "import B from './Button" + specExt + "'\n",
+					"src/Button" + fileExt: "",
+				})
+				assertDeps(t, deps(t, h, "src/a.test.tsx"), []string{"src/Button" + fileExt})
+			})
+		}
+	}
+	// Every candidate present: all are kept (over-approximation).
+	h := newHost(t, map[string]string{
+		"src/a.js":      "import B from './Button.js'\n",
+		"src/Button.js": "", "src/Button.jsx": "", "src/Button.ts": "", "src/Button.tsx": "", "src/Button.d.ts": "",
+	})
+	assertDeps(t, deps(t, h, "src/a.js"), []string{"src/Button.d.ts", "src/Button.js", "src/Button.jsx", "src/Button.ts", "src/Button.tsx"})
+}
+
 func TestRequireActualSkipsManualMock(t *testing.T) {
 	// requireActual loads the real module, never the manual mock.
 	h := newHost(t, map[string]string{

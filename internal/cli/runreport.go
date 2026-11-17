@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -16,84 +15,77 @@ import (
 // unstartedSection lists, for the summary, the suites whose runner could not start or
 // whose requirements are not met.
 func (c *cycle) unstartedSection() (sec summary.Section, ok bool) {
-	if len(c.unstarted) == 0 {
+	n := c.units.count(unitUnstarted, unitUnmet)
+	if n == 0 {
 		return sec, false
 	}
 	var b strings.Builder
-	if countUnits(c.unstarted) > countUnits(c.unmet) {
+	if c.units.count(unitUnstarted) > 0 {
 		b.WriteString("The runner could not start (see the log); these units did not run and stay selected:\n")
 		for _, sr := range c.sel.res.Suites {
-			if n := len(c.unstarted[sr.Name]) - len(c.unmet[sr.Name]); n > 0 {
+			if n := c.units.countIn(sr.Name, unitUnstarted); n > 0 {
 				fmt.Fprintf(&b, "- `%s`: %d test unit(s)\n", sr.Name, n)
 			}
 		}
 	}
-	if len(c.unmet) > 0 {
+	if c.units.count(unitUnmet) > 0 {
 		b.WriteString("Requirements (`requires`) are not met here; these units did not run and stay selected:\n")
 		for _, sr := range c.sel.res.Suites {
-			if units := c.unmet[sr.Name]; len(units) > 0 {
-				fmt.Fprintf(&b, "- `%s`: %d test unit(s), need %s\n", sr.Name, len(units), strings.Join(c.unmetWhy[sr.Name], ", "))
+			if n := c.units.countIn(sr.Name, unitUnmet); n > 0 {
+				fmt.Fprintf(&b, "- `%s`: %d test unit(s), need %s\n", sr.Name, n, strings.Join(c.unmetWhy[sr.Name], ", "))
 			}
 		}
 	}
-	return summary.Section{Title: fmt.Sprintf(":warning: %d test unit(s) not run", countUnits(c.unstarted)), Body: b.String()}, true
+	return summary.Section{Title: fmt.Sprintf(":warning: %d test unit(s) not run", n), Body: b.String()}, true
 }
 
-// notStartedBy names what left the units of notStartedUnits not started (when the run
-// was not interrupted): --fail-fast or --max-time, unmet requirements, a runner that
-// could not start (or exited 126/127 before any test reported a result).
-func (c *cycle) notStartedBy() string {
-	var by []string
-	if countUnits(c.notRun) > countUnits(c.unstarted) {
-		if c.capped {
-			by = append(by, "--max-time")
-		} else {
-			by = append(by, "--fail-fast")
+// configStopSection lists, for the summary, the units a configuration error (a suite
+// command that cannot be parsed) left out by stopping the run. summary.Run.NotRun
+// would call them left out by --fail-fast.
+func (c *cycle) configStopSection() (sec summary.Section, ok bool) {
+	n := c.units.count(unitNotRun)
+	if c.stop != stopConfig || n == 0 {
+		return sec, false
+	}
+	var b strings.Builder
+	b.WriteString("A configuration error stopped the run (see the log); these units did not run and stay selected:\n")
+	for _, sr := range c.sel.res.Suites {
+		for _, u := range c.units.in(sr.Name, unitNotRun) {
+			fmt.Fprintf(&b, "- `%s: %s`\n", sr.Name, u)
 		}
 	}
-	if len(c.unmet) > 0 {
+	return summary.Section{Title: fmt.Sprintf(":x: %d test unit(s) not run after a configuration error", n), Body: b.String()}, true
+}
+
+// notStartedBy names what left the units of notStartedUnits not started: what stopped
+// the run (--fail-fast, --max-time, a configuration error, an interrupt), unmet
+// requirements, a runner that could not start (or exited 126/127 before any test
+// reported a result).
+func (c *cycle) notStartedBy() string {
+	var by []string
+	if c.units.count(unitNotRun) > 0 && c.stopped() {
+		by = append(by, c.stop.String())
+	}
+	if c.units.count(unitUnmet) > 0 {
 		by = append(by, "unmet requirements")
 	}
-	if countUnits(c.unstarted) > countUnits(c.unmet) || c.noResultUnits() > 0 {
+	if c.units.count(unitUnstarted) > 0 {
 		by = append(by, "a runner that could not start")
-	}
-	if len(by) == 0 {
-		return "--fail-fast"
 	}
 	return joinAnd(by)
 }
 
-// notStartedUnits counts the selected units that did not start: those of notRun and
-// those of the batches whose runner exited 126/127 before any test reported a result.
+// notStartedUnits counts the planned units that did not run: not run, not started,
+// left out by unmet requirements. They stay selected.
 func (c *cycle) notStartedUnits() int {
-	return countUnits(c.notRun) + c.noResultUnits()
-}
-
-// noResultUnits counts the units of the batches whose runner exited 126/127 before any
-// test reported a result (notStarted): they did not run, and are recorded with an
-// unknown outcome, so they stay selected.
-func (c *cycle) noResultUnits() int {
-	n := 0
-	for _, fb := range c.failedBatches {
-		if fb.noResult {
-			n += len(fb.units)
-		}
-	}
-	return n
+	return c.units.count(unitNotRun, unitUnstarted, unitUnmet)
 }
 
 // skippedNote is what the outcome line adds for the units that skipped themselves in
 // this run (state.Skip): they did not fail, but they are not proven to pass, so they
 // stay selected. "" when none did.
 func (c *cycle) skippedNote() string {
-	n := 0
-	for _, units := range c.ran {
-		for _, st := range units {
-			if st == state.Skip {
-				n++
-			}
-		}
-	}
+	n := c.units.countStatus(state.Skip)
 	if n == 0 {
 		return ""
 	}
@@ -131,7 +123,7 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 		if len(c.possible) > 0 {
 			p.logf("shadow: %d unselected test(s) are marked failed only because the run failed (the runner reports no per-file status): %s", len(c.possible), strings.Join(limit(c.possible, 10), ", "))
 		}
-	} else if n := countUnits(c.notRun); n > 0 && c.interrupted {
+	} else if n := c.notStartedUnits(); n > 0 && c.interrupted() {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; interrupted, %d selected unit(s) not run (they stay selected)", elapsed, selected-n, total, c.exit, n)
 	} else if n := c.notStartedUnits(); n > 0 {
 		p.logf("done in %s: ran %d of %d test unit(s), exit code %d; %s left %d selected unit(s) not started (they stay selected)%s", elapsed, selected-n, total, c.exit, c.notStartedBy(), n, c.skippedNote())
@@ -145,22 +137,25 @@ func (c *cycle) logOutcome(elapsed time.Duration) {
 func (c *cycle) writeSummaries(elapsed time.Duration) {
 	p, f := c.p, c.f
 	sum := summaryInput(c.sel, f.shardI, f.shardN)
-	sum.Run = &summary.Run{ExitCode: c.exit, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted}
-	if c.capped {
+	sum.Run = &summary.Run{ExitCode: c.exit, Elapsed: elapsed, Shadow: f.shadow, Escapes: c.escapes, Possible: c.possible, Interrupted: c.interrupted()}
+	if c.capped() {
 		sum.Run.MaxTime = f.maxTime
 	}
 	sum.Savings = cumulativeSavings(p.state.Runs)
 	for _, sr := range c.sel.res.Suites {
 		for _, t := range sr.Tests {
-			if c.ran[sr.Name][t.ID] == state.Fail {
+			if c.units.status(sr.Name, t.ID) == state.Fail {
 				sum.Run.Failed = append(sum.Run.Failed, sr.Name+": "+t.ID)
 			}
 		}
-		for _, u := range c.notRun[sr.Name] {
-			if !slices.Contains(c.unstarted[sr.Name], u) {
+		if c.stop != stopConfig { // a configuration error has its own section
+			for _, u := range c.units.in(sr.Name, unitNotRun) {
 				sum.Run.NotRun = append(sum.Run.NotRun, sr.Name+": "+u)
 			}
 		}
+	}
+	if sec, ok := c.configStopSection(); ok {
+		sum.Sections = append(sum.Sections, sec)
 	}
 	if sec, ok := c.unstartedSection(); ok {
 		sum.Sections = append(sum.Sections, sec)
@@ -192,14 +187,21 @@ func (c *cycle) writeReport() error {
 		Flaky    []flakeReport                `json:"flaky"`
 		Failures []*hints.Hint                `json:"failure_hints"`
 		FailFast bool                         `json:"fail_fast"`
-		NotRun   map[string][]string          `json:"not_run"` // --fail-fast, --max-time, interrupt, unmet requires: selected units not run
+		// NotRun: the selected units that did not run (they stay selected): left out when
+		// the run stopped (stopped_by), not started by their runner, or left out by unmet
+		// requires.
+		NotRun map[string][]string `json:"not_run"`
+		// StoppedBy: what stopped the run before every batch started ("" when nothing
+		// did): "--fail-fast", "--max-time", "an interrupt" or "a configuration error".
+		StoppedBy string `json:"stopped_by"`
 		// Interrupted: the run was cancelled (Ctrl-C); what did not finish is in not_run.
 		Interrupted bool `json:"interrupted"`
 		// MaxTimeReached: --max-time left the units of not_run out (except unmet_requires).
 		MaxTimeReached bool `json:"max_time_reached"`
 		// UnmetRequires: suite -> the requirements not met (the units are in not_run).
 		UnmetRequires map[string][]string `json:"unmet_requires"`
-	}{jsonSelection(c.sel), c.ran, c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast, c.notRun, c.interrupted, c.capped, c.unmetWhy}
+	}{jsonSelection(c.sel), c.units.statuses(), c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast,
+		c.units.bySuite(unitNotRun, unitUnstarted, unitUnmet), c.stop.String(), c.interrupted(), c.capped(), c.unmetWhy}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}

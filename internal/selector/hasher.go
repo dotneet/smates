@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -184,23 +185,28 @@ func (h *Hasher) isConfig(key string) bool {
 	return h.cfg != nil && h.cfg.Path != "" && key == depkey.Config(h.cfg.Path)
 }
 
-// legacyConfig reports whether key is the settings key of an entry an older smates
-// recorded, when every test depended on the configuration file's content: the entry
-// then holds the file's hash instead, and it counts as unchanged while the file is.
-func (h *Hasher) legacyConfig(key string, recorded map[string]string) bool {
-	if !h.isConfig(key) {
-		return false
+// DepUnchanged reports whether dependency key still hashes as an entry recorded it
+// (recorded: the entry's hashes, compared with Unchanged); it is the one comparison
+// selection makes per key. A key the entry did not record is changed, except the
+// settings key of an entry an older smates recorded, when every
+// test depended on the configuration file's content: the entry then holds the file's
+// hash instead, and the key counts as unchanged while the file is. A settings key an
+// older smates recorded over the suite with the adapter's defaults applied (the
+// command, the excludes and inputs, which depend on the machine: a virtualenv, GOWORK)
+// counts as unchanged while those settings are the same.
+func (h *Hasher) DepUnchanged(key string, recorded map[string]string) bool {
+	old, ok := recorded[key]
+	if !ok {
+		if !h.isConfig(key) {
+			return false
+		}
+		file, ok := recorded[h.cfg.Path]
+		return ok && file != "" && file == h.file(h.cfg.Path)
 	}
-	old, ok := recorded[h.cfg.Path]
-	return ok && old != "" && old == h.file(h.cfg.Path)
-}
-
-// legacySuite reports whether recorded is the hash an older smates recorded for the
-// settings key, over the suite with the adapter's defaults applied (the command, the
-// excludes and inputs, which depend on the machine: a virtualenv, GOWORK): it counts
-// as unchanged while those settings are the same.
-func (h *Hasher) legacySuite(key, recorded string) bool {
-	return h.isConfig(key) && h.suite != nil && recorded != "" && recorded == ConfigHash(h.cfg, &h.suite.Suite)
+	if h.Unchanged(key, old) {
+		return true
+	}
+	return h.isConfig(key) && h.suite != nil && old != "" && old == ConfigHash(h.cfg, &h.suite.Suite)
 }
 
 // configured is the suite's entry as smates.yml has it (runner.Suite.Configured), or
@@ -267,13 +273,13 @@ func (h *Hasher) set(key string) string {
 }
 
 // setSum hashes the files of a set; legacy leaves the executable marker out, as smates
-// before it did.
+// before it did (gitx.LegacyHash).
 func (h *Hasher) setSum(d *ServiceDeps, legacy bool) string {
 	sum := sha1.New()
 	for _, f := range d.Files { // sorted
 		v := h.file(f)
 		if legacy {
-			v = gitx.Blob(v)
+			v = gitx.LegacyHash(v)
 		}
 		sum.Write([]byte(f + "\x00" + v + "\n"))
 	}
@@ -343,9 +349,16 @@ func resolves(path string) bool {
 	return err == nil
 }
 
-// snapLink hashes an existence check of p, a file of the snapshot: "exists", or
-// Dangling for a symlink that does not resolve on disk (read from disk with a root).
+// snapLink hashes an existence check of p, a file of the snapshot: "exists", Dangling
+// for a symlink that does not resolve on disk (read from disk with a root), or "absent"
+// for a skip-worktree file not on disk (gitx.OffDisk: the sparse cone leaves it out).
+// A file the snapshot lists that is gone from disk was deleted after the snapshot was
+// taken, during the run being recorded: it is hashed as it was before the run, as its
+// content is, so that the next selection (which sees it absent) runs the test again.
 func (h *Hasher) snapLink(p string) string {
+	if gitx.IsOffDisk(h.snap[p]) {
+		return "absent"
+	}
 	if h.root == "" {
 		return "exists"
 	}
@@ -418,11 +431,16 @@ func (h *Hasher) Hash(key string) string {
 
 // snapEntries returns the entry names of directory key ("dir/") in the snapshot
 // (subdirectories with a trailing "/"), sorted; ok is false when no file of the
-// snapshot is below it.
+// snapshot is below it. Skip-worktree files not on disk (gitx.OffDisk) are no entries:
+// a test listing the directory does not find them, and a directory holding only such
+// files is not there.
 func (h *Hasher) snapEntries(key string) (names []string, ok bool) {
 	if h.dirs == nil {
 		h.dirs = map[string][]string{}
-		for f := range h.snap {
+		for f, v := range h.snap {
+			if gitx.IsOffDisk(v) {
+				continue
+			}
 			for d := path.Dir(f); ; d = path.Dir(d) {
 				child := f
 				if d != "." {
@@ -542,8 +560,12 @@ func (h *Hasher) readGoIn(p, blob string) ([]byte, bool) {
 }
 
 // readGo returns the content of Go file p as the snapshot has it (blob), or false when
-// it cannot be read so (absent, or changed on disk since the snapshot).
+// it cannot be read so (absent, off disk in the snapshot, or changed on disk since the
+// snapshot).
 func (h *Hasher) readGo(p, blob string) ([]byte, bool) {
+	if gitx.IsOffDisk(blob) {
+		return nil, false
+	}
 	src, err := os.ReadFile(filepath.Join(h.root, filepath.FromSlash(p)))
 	if err != nil || gitx.HashBytes(src) != gitx.Blob(blob) {
 		return nil, false
@@ -682,8 +704,11 @@ func (ph *goPackageHash) methodsOf(typ string) string {
 // tree hashes every file below dir ("." for the repository): a dependency recorded for
 // commands smates cannot see into. Files git ignores below a directory the snapshot
 // lists are left out (build output, caches). A directory the snapshot has no file below
-// (one git ignores entirely: a command ran in build/) is read from disk instead, as the
-// run left it (see diskTree).
+// (one git ignores entirely: a command ran in build/; a submodule or a directory inside
+// one) is read from disk instead, as the run left it (see diskTree). The pinned commit
+// of a submodule at or above dir counts too (gitlinks): the files inside a submodule
+// are not in the snapshot, and a new commit can leave their paths and sizes as they
+// were (VERSION 1.2.3 -> 1.2.4).
 func (h *Hasher) tree(dir string) string {
 	if v, ok := h.trees[dir]; ok {
 		return v
@@ -692,10 +717,32 @@ func (h *Hasher) tree(dir string) string {
 	if files, ok := h.treeFiles(dir); !ok {
 		v = h.diskTree(dir)
 	} else {
-		v = h.treeSum(files, false)
+		v = h.treeSum(dir, files, false)
 	}
 	h.trees[dir] = v
 	return v
+}
+
+// gitlinks returns the submodules of the snapshot at dir or above it, and not among
+// files (the files a tree of dir sums, which hold a submodule below dir already),
+// deepest first.
+func (h *Hasher) gitlinks(dir string, files []string) []string {
+	var out []string
+	for d := dir; d != "." && d != "/" && d != ""; d = path.Dir(d) {
+		if gitx.IsGitlink(h.snap[d]) {
+			if _, found := slices.BinarySearch(files, d); !found {
+				out = append(out, d)
+			}
+		}
+	}
+	return out
+}
+
+// sumGitlinks writes gitlinks (see gitlinks) into the sum of a tree.
+func (h *Hasher) sumGitlinks(sum io.Writer, links []string) {
+	for _, d := range links {
+		io.WriteString(sum, d+"\x00"+h.snap[d]+"\n")
+	}
 }
 
 // treeFiles lists the snapshot's files a tree of dir hashes, sorted; false when the
@@ -738,14 +785,16 @@ func (h *Hasher) under(dir string) []string {
 	return append(out, h.files[i:j]...)
 }
 
-// treeSum hashes files with their snapshot hashes; legacy leaves the executable marker
-// out, as smates before it did.
-func (h *Hasher) treeSum(files []string, legacy bool) string {
+// treeSum hashes the files of a tree of dir with their snapshot hashes, after the
+// gitlinks at or above dir; legacy leaves the executable marker out, as smates before
+// it did (gitx.LegacyHash).
+func (h *Hasher) treeSum(dir string, files []string, legacy bool) string {
 	sum := sha1.New()
+	h.sumGitlinks(sum, h.gitlinks(dir, files))
 	for _, f := range files {
 		v := h.snap[f]
 		if legacy {
-			v = gitx.Blob(v)
+			v = gitx.LegacyHash(v)
 		}
 		sum.Write([]byte(f + "\x00" + v + "\n"))
 	}
@@ -753,12 +802,12 @@ func (h *Hasher) treeSum(files []string, legacy bool) string {
 }
 
 // Unchanged reports whether the dependency key, recorded with hash recorded, still has
-// it (see gitx.SameHash for hashes recorded without the executable marker). A tree or
-// set recorded by a smates without the marker hashed its files' blobs alone: it is
-// unchanged while that hash is.
+// it (gitx.ByKey: also a hash recorded without the executable marker). A tree or set
+// recorded by a smates without the marker hashed its files' blobs alone: it is
+// unchanged while that hash is. DepUnchanged compares a key with an entry.
 func (h *Hasher) Unchanged(key, recorded string) bool {
 	cur := h.Hash(key)
-	if gitx.SameHash(recorded, cur) {
+	if gitx.ByKey.Same(recorded, cur) {
 		return true
 	}
 	if recorded == "" || cur == "" {
@@ -773,7 +822,7 @@ func (h *Hasher) Unchanged(key, recorded string) bool {
 		var ok bool
 		if v, ok = h.legacy[key]; !ok {
 			if files, listed := h.treeFiles(p); listed {
-				v = h.treeSum(files, true)
+				v = h.treeSum(p, files, true)
 			}
 			h.legacy[key] = v
 		}
@@ -797,8 +846,10 @@ var maxDiskTree = 20000
 // selection, and a build that is not reproducible would rerun the tests forever. A
 // tree of more than maxDiskTree entries hashes as a constant (it stays the same while
 // the tree is that large: its changes select nothing); it is remembered for
-// OversizedTrees, so the selection can say so.
+// OversizedTrees, so the selection can say so. The pinned commit of a submodule at or
+// above dir counts in both (see tree), so a new commit of the submodule is a change.
 func (h *Hasher) diskTree(dir string) string {
+	links := h.gitlinks(dir, nil)
 	type file struct {
 		p    string
 		size int64
@@ -834,9 +885,16 @@ func (h *Hasher) diskTree(dir string) string {
 	})
 	if n > maxDiskTree {
 		h.oversized[dir] = true
-		return "tree:over:" + strconv.Itoa(maxDiskTree)
+		v := "tree:over:" + strconv.Itoa(maxDiskTree)
+		if len(links) > 0 {
+			sum := sha1.New()
+			h.sumGitlinks(sum, links)
+			v += ":" + hex.EncodeToString(sum.Sum(nil))
+		}
+		return v
 	}
 	sum := sha1.New()
+	h.sumGitlinks(sum, links)
 	for _, f := range files { // WalkDir walks in lexical order
 		sum.Write([]byte(f.p + "\x00" + strconv.FormatInt(f.size, 10) + "\n"))
 	}
