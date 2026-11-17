@@ -171,3 +171,28 @@ func TestExecDepsUnset(t *testing.T) {
 		sh("function called", "cat() { :; }; cat x"),
 	})
 }
+
+// Names beyond ASCII (é, CJK letters) keep their bytes in every quoting form: a word
+// re-encoded byte by byte would name a file that does not exist, and a change to the
+// real file would select nothing. Must keep each read.
+func TestExecDepsNonASCIINames(t *testing.T) {
+	root := repoDir(t)
+	touch(t, root, "données.txt", "dé/x", "データ.txt", "répertoire/データ.txt")
+	sh := func(name, code string, want ...string) execCase {
+		return execCase{name, root, []string{code}, true, want}
+	}
+	runExecCases(t, root, []execCase{
+		sh("unquoted", `cat données.txt`, "données.txt"),
+		sh("single quotes", `cat 'données.txt'`, "données.txt"),
+		sh("double quotes", `cat "données.txt"`, "données.txt"),
+		sh("backslash before the character", `cat donn\ées.txt`, "données.txt"),
+		sh("ANSI-C quoting", `cat $'données.txt'`, "données.txt"),
+		sh("ANSI-C byte escapes", `cat $'donn\xc3\xa9es.txt'`, "données.txt"),
+		sh("ANSI-C octal escapes", `cat $'donn\303\251es.txt'`, "données.txt"),
+		sh("CJK in double quotes", `cat "データ.txt"`, "データ.txt"),
+		sh("CJK in ANSI-C quoting", `cat $'データ.txt'`, "データ.txt"),
+		sh("cd to a quoted directory", `cd "dé"; cat "x"`, "dé/x"),
+		sh("variable in double quotes", `D="répertoire"; cat "$D/データ.txt"`, "répertoire/データ.txt"),
+		sh("here-document word", "cat \"données.txt\" <<'É'\nbody\nÉ", "données.txt"),
+	})
+}

@@ -1020,12 +1020,14 @@ func (p *shParser) word() *shTok {
 	return &shTok{kind: tWord, text: b.String(), plain: plain}
 }
 
-// escaped writes the character c escaped by a backslash.
+// escaped writes the byte c escaped by a backslash (or quoted). It is written as the
+// byte itself: string(c) would encode a byte of a multibyte character (é, a CJK
+// letter) as the rune of that value, naming a file that does not exist.
 func (p *shParser) escaped(b *strings.Builder, c byte) {
 	if c == '$' {
 		b.WriteString(literalDollar)
 	} else {
-		b.WriteString(quoteMarks.Replace(string(c)))
+		b.WriteString(quoteMarks.Replace(string([]byte{c})))
 	}
 }
 
@@ -1077,7 +1079,7 @@ func (p *shParser) dquote(b *strings.Builder) {
 		case c == '`':
 			p.backquote(b)
 		default:
-			b.WriteString(quoteMarks.Replace(string(c)))
+			b.WriteString(quoteMarks.Replace(p.src[p.pos : p.pos+1])) // the byte, not a rune
 			p.pos++
 		}
 	}
