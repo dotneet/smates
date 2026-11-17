@@ -1381,9 +1381,10 @@ writer's copy. (Two reads without the lock could see two versions; a
 look changed by this process, and the save would put the older copy back.) Writes are
 load-merge-save under an exclusive lock file (`O_CREATE|O_EXCL`, portable to every OS
 and file system git runs on; a lock older than two minutes is stale, since a save takes
-seconds, and so is one whose holder is a process of this host, named in the lock file,
-that no longer runs: smates killed while saving, whose lock would otherwise make the
-next save wait out `LockWait` (one minute) and fail. A holder on another host, or one
+seconds, and so is one whose holder is a process of this host and PID namespace, named
+in the lock file, that no longer runs: smates killed while saving, whose lock would
+otherwise make the next save wait out `LockWait` (one minute) and fail. A holder on
+another host or in another PID namespace (a container sharing the host name), or one
 the platform cannot check (Windows), counts as alive.) The lock file holds a token unique to its holder. Two processes may find the
 same lock stale at once; were each to remove what it found, the slower one could remove
 the fresh lock the faster one just created, and both would hold it. So a stale lock is

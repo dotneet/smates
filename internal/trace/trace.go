@@ -526,16 +526,13 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 // whose environment the program or a wrapper replaced (env -i, a container, a minimal
 // env a launcher builds) records nothing, and is then analyzed as an opaque command.
 func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
-	children := map[string][]*Proc{}
 	byPid := map[int][]*Proc{}
 	for _, p := range procs {
-		if p.Tid == 0 && p.Anc != "" {
-			children[p.Anc] = append(children[p.Anc], p)
-		}
 		if p.Tid == 0 {
 			byPid[p.Pid] = append(byPid[p.Pid], p)
 		}
 	}
+	children := childrenOf(procs, byPid)
 	for _, p := range procs {
 		if len(p.execs) == 0 {
 			continue
@@ -556,6 +553,37 @@ func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
 		}
 		p.execs = nil
 	}
+}
+
+// childrenOf maps the key of each traced process to the traced processes it started:
+// by the traced ancestor a child names (SMATES_TRACE_PARENT, which reaches it through a
+// shell or launcher), and by its parent pid. The latter links children whose runtime
+// passes on the environment the process started with rather than the one its shim
+// changed (Bun.spawn without an env option): they name no ancestor. Of several
+// processes that had the parent pid, it is the last one started by the child's start.
+func childrenOf(procs []*Proc, byPid map[int][]*Proc) map[string][]*Proc {
+	children := map[string][]*Proc{}
+	for _, p := range procs {
+		if p.Tid != 0 {
+			continue
+		}
+		if p.Anc != "" {
+			children[p.Anc] = append(children[p.Anc], p)
+		}
+		if p.Ppid == 0 || p.Ppid == p.Pid {
+			continue
+		}
+		var parent *Proc
+		for _, q := range byPid[p.Ppid] {
+			if q != p && q.Start <= p.Start && (parent == nil || q.Start >= parent.Start) {
+				parent = q
+			}
+		}
+		if parent != nil && parent.Key() != p.Anc {
+			children[parent.Key()] = append(children[parent.Key()], p)
+		}
+	}
+	return children
 }
 
 // execRuntimes are the runtimes whose shims trace a process.

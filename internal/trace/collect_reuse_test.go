@@ -160,6 +160,7 @@ func TestCollectExecVerified(t *testing.T) {
 	type child struct {
 		anc  string
 		pid  int
+		ppid int // 1 when unset
 		lang string
 		argv []string
 		t    int64
@@ -184,6 +185,12 @@ func TestCollectExecVerified(t *testing.T) {
 		{name: "grandchild through npx", exec: ev{"args": []string{"npx", "vitest"}, "t": 1000}, kids: []child{{anc: "10-0", pid: 11, lang: "node", argv: []string{"/bin/node", "/x/npx-cli.js", "vitest"}, t: 1100}, {anc: "11-0", pid: 12, lang: "node", t: 1200}}},
 		{name: "older shim: no time", exec: ev{"args": []string{"node", "app.js"}}, kids: []child{nodeKid}},
 		{name: "environment without the shim", exec: ev{"args": []string{"node", "app.js"}, "t": 1000, "rt": []string{"python"}}, kids: []child{nodeKid}, opaque: true},
+		// Bun.spawn passes on the environment Bun started with: the child names no traced
+		// ancestor, only its parent pid.
+		{name: "bun child by parent pid", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}},
+		{name: "child of another parent pid (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}, "t": 1000}, kids: []child{{ppid: 99, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 1100}}, opaque: true},
+		{name: "parent pid of a process started later (must keep)", exec: ev{"args": []string{"bun", abs("app.js")}}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js")}, t: 800}}, opaque: true},
+		{name: "by parent pid, other arguments (must keep)", exec: ev{"args": []string{"bun", abs("app.js"), "1"}, "t": 1000}, kids: []child{{ppid: 10, pid: 11, lang: "bun", argv: []string{"/bin/bun", abs("app.js"), "2"}, t: 1100}}, opaque: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			td := t.TempDir()
@@ -193,7 +200,11 @@ func TestCollectExecVerified(t *testing.T) {
 			}
 			stream(t, td, 10, 0, ev{"k": "start", "pid": 10, "t": 900, "lang": "node"}, e)
 			for _, k := range tc.kids {
-				stream(t, td, k.pid, 0, ev{"k": "start", "pid": k.pid, "ppid": 1, "anc": k.anc, "argv": k.argv, "t": k.t, "lang": k.lang})
+				ppid := k.ppid
+				if ppid == 0 {
+					ppid = 1
+				}
+				stream(t, td, k.pid, 0, ev{"k": "start", "pid": k.pid, "ppid": ppid, "anc": k.anc, "argv": k.argv, "t": k.t, "lang": k.lang})
 			}
 			procs, err := Collect(td, root)
 			if err != nil {

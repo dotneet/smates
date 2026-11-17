@@ -26,16 +26,26 @@ func TestLockOfDeadHolder(t *testing.T) {
 		t.Skip(err)
 	}
 	dead := cmd.Process.Pid // exited and reaped
+	ns := ""
+	if id, ok := pidNamespace(); ok && id != "" {
+		ns = " pidns " + id
+	}
+	line := func(pid int, host, ns string) string {
+		return fmt.Sprintf("pid %d on %s at 2026-01-01T00:00:00Z (x)%s\n", pid, host, ns)
+	}
 	for _, c := range []struct {
 		name   string
 		holder string
 		broken bool
 	}{
-		{"dead process of this host", fmt.Sprintf("pid %d on %s at 2026-01-01T00:00:00Z (x)\n", dead, host), true},
-		{"must keep: a live process of this host", fmt.Sprintf("pid %d on %s at 2026-01-01T00:00:00Z (x)\n", os.Getppid(), host), false},
-		{"must keep: this process", fmt.Sprintf("pid %d on %s at 2026-01-01T00:00:00Z (x)\n", os.Getpid(), host), false},
-		{"must keep: a dead pid of another host", fmt.Sprintf("pid %d on other-%s at 2026-01-01T00:00:00Z (x)\n", dead, host), false},
+		{"dead process of this host", line(dead, host, ns), true},
+		{"must keep: a live process of this host", line(os.Getppid(), host, ns), false},
+		{"must keep: this process", line(os.Getpid(), host, ns), false},
+		{"must keep: a dead pid of another host", line(dead, "other-"+host, ns), false},
 		{"must keep: a holder it cannot parse", fmt.Sprintf("pid %d\n", dead), false},
+		// Containers that share the host name but not the PID namespace.
+		{"must keep: another PID namespace", line(dead, host, " pidns pid:[1]"), false},
+		{"must keep: no PID namespace where there are some", line(dead, host, ""), ns == ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.lock")

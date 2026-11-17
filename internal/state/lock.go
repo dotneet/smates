@@ -53,7 +53,11 @@ func AcquireLock(path string, wait, stale time.Duration) (*Lock, error) {
 		f, err := openLock(path)
 		if err == nil {
 			host, _ := os.Hostname()
-			token := fmt.Sprintf("pid %d on %s at %s (%s)\n", os.Getpid(), host, time.Now().UTC().Format(time.RFC3339), newToken())
+			ns := ""
+			if id, ok := pidNamespace(); ok && id != "" {
+				ns = " pidns " + id
+			}
+			token := fmt.Sprintf("pid %d on %s at %s (%s)%s\n", os.Getpid(), host, time.Now().UTC().Format(time.RFC3339), newToken(), ns)
 			_, werr := f.WriteString(token)
 			if cerr := f.Close(); werr == nil {
 				werr = cerr
@@ -142,11 +146,19 @@ func breakStale(path string, stale time.Duration) bool {
 	return err == nil || errors.Is(err, os.ErrNotExist)
 }
 
-// holderRe matches the holder a lock file names: "pid 123 on host at ...".
-var holderRe = regexp.MustCompile(`^pid (\d+) on (\S+) at `)
+// holderRe matches the holder a lock file names: "pid 123 on host at ...", and
+// holderNSRe the PID namespace it ran in (Linux: " pidns pid:[4026531836]").
+var (
+	holderRe   = regexp.MustCompile(`^pid (\d+) on (\S+) at `)
+	holderNSRe = regexp.MustCompile(` pidns (\S+)\s*$`)
+)
 
 // holderDead reports whether the lock file content data names a holder that is
-// certainly gone: a process of this host (by name) that no longer runs. A lock left
+// certainly gone: a process of this host (by name) and of this PID namespace that no
+// longer runs. A host name is shared by containers with their own PID namespace
+// (--uts=host, a host network, a fixed --hostname): a pid of another one may name a
+// live process there, so the namespace must match too (a lock file without one, from
+// a platform that has them, is another namespace's). A lock left
 // by smates killed while holding it (a second Ctrl-C, the OOM killer) is then broken
 // at once rather than after the stale timeout, which is longer than LockWait. Any
 // doubt (another host, a format it does not know, a platform that cannot tell) is a
@@ -161,6 +173,14 @@ func holderDead(data []byte) bool {
 		return false
 	}
 	if host, err := os.Hostname(); err != nil || host != string(m[2]) {
+		return false
+	}
+	ours, ok := pidNamespace()
+	theirs := ""
+	if n := holderNSRe.FindSubmatch(data); n != nil {
+		theirs = string(n[1])
+	}
+	if !ok || theirs != ours {
 		return false
 	}
 	return !processAlive(pid)
