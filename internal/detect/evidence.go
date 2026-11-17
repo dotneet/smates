@@ -65,7 +65,7 @@ func nodeTestSuites(repo *gitx.Repo, files []string, taken []config.Suite) []con
 		if i := slices.IndexFunc(out, func(s config.Suite) bool { return pathutil.Under(r, s.Root) }); i >= 0 {
 			// A root below another one: its files go to the outer suite.
 			for _, g := range globs[r] {
-				if g2 := pathutil.RelTo(path.Join(r, g), out[i].Root); !slices.Contains(out[i].Tests, g2) {
+				if g2 := path.Join(literalGlob(pathutil.RelTo(r, out[i].Root)), g); !slices.Contains(out[i].Tests, g2) {
 					out[i].Tests = append(out[i].Tests, g2)
 				}
 			}
@@ -118,11 +118,11 @@ func nodeTestGlob(rel string) string {
 	dir, name := path.Split(rel)
 	if segs := strings.Split(strings.TrimSuffix(dir, "/"), "/"); slices.Contains(segs, "test") {
 		i := slices.Index(segs, "test")
-		return path.Join(append(segs[:i+1], "**", "*"+path.Ext(name))...)
+		return path.Join(literalGlob(strings.Join(segs[:i+1], "/")), "**", "*"+literalGlob(path.Ext(name)))
 	}
 	m := nodeTestName.FindStringSubmatch(name)
 	if m == nil {
-		return rel
+		return literalGlob(rel)
 	}
 	ext := "." + m[4]
 	var g string
@@ -134,7 +134,29 @@ func nodeTestGlob(rel string) string {
 	default:
 		g = m[3] + ext
 	}
-	return path.Join(dir, g)
+	return path.Join(literalGlob(dir), g)
+}
+
+// literalGlob is a glob matching path p itself: the glob metacharacters of p are put in
+// bracket classes ("app/[id]" becomes "app/[[]id]"), so that a directory named like a
+// glob neither matches other paths nor makes the glob invalid (which config.Normalize
+// rejects). Brackets rather than backslashes: config rejects a backslash in suite
+// globs, where it is taken for a Windows separator. A "]" outside a class is literal.
+func literalGlob(p string) string {
+	if !strings.ContainsAny(p, "*?[{}") {
+		return p
+	}
+	var b strings.Builder
+	for _, r := range p {
+		if strings.ContainsRune("*?[{}", r) {
+			b.WriteByte('[')
+			b.WriteRune(r)
+			b.WriteByte(']')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // unittestSuites returns a unittest suite for each start directory that a CI or task

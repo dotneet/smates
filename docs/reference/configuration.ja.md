@@ -74,7 +74,7 @@ agent:
   # command: "my-agent --json"         # 組み込みの代わりに外部のエージェントを使う
 ```
 
-未知のキーはエラーです。smates がファイルの読み込み時に検証する値が不正な場合も同様です。たとえば、キーの選択肢にない値（`orphans`、`granularity`、未知の `runner`）、負の `record_jobs`、`max_age`、`explain_max`、0〜5 の範囲外の `flaky.retry`、[グロブ](#globs) で検証すると書いた箇所の不正なグロブ、形式の誤った `requires` のエントリです。このとき smates はキー名を示して終了コード 3 で終了します（[終了コード](exit-codes.md)）。検証しない値もあります。[グロブ](#globs) で検証しないと書いたグロブと、そのままプロバイダーに渡す `agent.model` と `agent.effort` です。`smates config set`、`smates config add-ignore`、`smates config add-input` はファイルを編集し、書き込む前に検証します（[コマンド](cli.md#smates-config)）。
+未知のキーはエラーです。smates がファイルの読み込み時に検証する値が不正な場合も同様です。たとえば、キーの選択肢にない値（`orphans`、`granularity`、未知の `runner`）、負の `record_jobs`、`max_age`、`explain_max`、0〜5 の範囲外の `flaky.retry`、不正なグロブ（[グロブ](#globs) を参照）、形式の誤った `requires` のエントリ、2 つ目の YAML ドキュメントです。このとき smates はキー名を示して終了コード 3 で終了します（[終了コード](exit-codes.md)）。検証しない値もあります。そのままプロバイダーに渡す `agent.model` と `agent.effort` です。`smates config set`、`smates config add-ignore`、`smates config add-input` はファイルを編集し、書き込む前に検証します（[コマンド](cli.md#smates-config)）。
 
 !!! note "編集で再実行されるもの"
     スイートのエントリを編集すると、そのスイートのテストが再実行されます。各テストは、書かれたとおりのスイートの設定（とトップレベルの `env_track`）に依存しているためです。スイートの `inputs`、`rules`、`depends_on`、`serves` もこれに含まれます。例外は、テストをいつ実行するかを決めるだけの `volatile` と `max_age`、実行をどう観測するかを決める `untraced`、どこで実行できるかを決める `requires` です。トップレベルの `inputs` にグロブを追加すると、それに一致するファイルがすべてのテストの新しい依存になるので、すべてのテストが 1 回実行されます。それ以外のトップレベルのキー（`ignore`、`orphans`、`agent` など）や別のスイートを編集しても、何も再実行されません。`smates.yml` 自体を読むテストは、通常どおりその内容に依存します。
@@ -83,7 +83,9 @@ agent:
 
 グロブは区切りに `/` を使い、`**` は任意の深さに一致します。キーが示すディレクトリ（リポジトリルートまたはスイートの `root`）からの相対で、先頭に `./` を付けずに書いてください。
 
-`rules`、`depends_on`、`serves`、`volatile`、`untraced`、`requires` の `tests` のグロブは、smates がファイルを読み込むときに検証します。不正なものは設定のエラー（終了コード 3）になり、先頭の `./` は取り除かれます。トップレベルの `ignore` と `inputs`、スイートの `tests`、`exclude`、`inputs` のグロブは書かれたとおりに使います。不正なものや `./` で始まるものは、エラーにならずに何にも一致しません（`smates config add-ignore` と `add-input` はそうしたグロブを受け付けません）。`requires` の `file` はグロブを含められるパスです。不正なグロブは設定のエラーになり、先頭に `./` があっても問題ありません。
+smates はファイルを読み込むときに、すべてのグロブのリストを検証します。トップレベルの `ignore` と `inputs`、スイートの `tests`、`exclude`、`inputs`、`volatile`、`untraced`、`serves`、そして `rules`、`depends_on`、`requires` の `tests` のグロブです。先頭の `./` は取り除かれ、不正なグロブは設定のエラー（終了コード 3）になります。リポジトリルートからの相対のリストで `/` や `..` から始まるグロブと、スイートの `inputs` で `../` から始まるグロブ（先頭に `/` を付けてリポジトリルートからの相対で書いてください）もエラーです。グロブではバックスラッシュが次の文字をエスケープするので、Windows のパス区切りとして書いたものは何にも一致しません。そのためエラーになります。ただし角括弧と波括弧のエスケープ（`[id]` という名前のディレクトリに一致させる `app/\[id\]/**` など）はどのリストでも使えます。トップレベルの `ignore` と `inputs` では、`smates orphans` が提案するとおり `*`、`?`、`\` のエスケープも使えます。それ以外のリストでは `src\**` は Windows のパス区切りとみなされ、エラーになります。スイートの `python_roots` はグロブではなくパスです。先頭の `./` は取り除かれ、バックスラッシュはエラーになります。`requires` の `file` はグロブを含められるパスです。不正なグロブは設定のエラーになり、先頭に `./` があっても問題ありません。
+
+ファイルに書ける YAML ドキュメントは 1 つです。2 つ目のドキュメント（`---` の後）は無視されず、設定のエラーになります。
 
 ## トップレベルのキー { #top-level-keys }
 

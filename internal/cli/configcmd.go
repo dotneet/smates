@@ -87,13 +87,35 @@ func editConfig(path, display string, dryRun bool, res *configEdit, edit func([]
 	return nil
 }
 
-// writeFileAtomic replaces path with data, keeping its mode.
+// writeFileAtomic replaces path with data, keeping its mode (0644 for a new file).
 func writeFileAtomic(path string, data []byte) error {
-	mode := os.FileMode(0o644)
+	return writeAtomic(path, data, 0o644, false)
+}
+
+// writeExecutableAtomic replaces path with data like writeFileAtomic, for a script git
+// runs (a hook): a new file is 0755, and an existing one gets the execute bits where it
+// has read bits (os.WriteFile would keep a non-executable mode, and git would skip the
+// hook with only a hint).
+func writeExecutableAtomic(path string, data []byte) error {
+	return writeAtomic(path, data, 0o755, true)
+}
+
+// writeAtomic writes data to a temporary file next to path and renames it over path,
+// so a reader (or a crash) never sees a partial file. A symbolic link is followed: the
+// file it points to is replaced, the link stays (a settings file kept in a dotfiles
+// repository).
+func writeAtomic(path string, data []byte, newMode os.FileMode, exec bool) error {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	mode := newMode
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
+		if exec {
+			mode |= (mode & 0o444) >> 2
+		}
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".smates-config-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".smates-tmp-*")
 	if err != nil {
 		return err
 	}

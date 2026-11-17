@@ -3,12 +3,14 @@
 //
 // Loaded into every Node process of a test run through NODE_OPTIONS=--require (Bun:
 // BUN_OPTIONS=--preload, and bun test --preload), it appends
-// one JSON object per line to $SMATES_TRACE_DIR/proc-<pid>-<threadId>.jsonl:
-//   {"k":"start", pid, ppid, tid, argv, cwd, t, lang}
+// one JSON object per line to $SMATES_TRACE_DIR/proc-<pid>-<threadId>-<nonce>.jsonl (the
+// nonce keeps a later process that gets a reused pid out of an earlier one's stream):
+//   {"k":"start", pid, ppid, tid, argv, cwd, t, lang, pctx}  (pctx: the SMATES_TRACE_CTX
+//                                  inherited, the context of a Python test that started it)
 //   {"k":"read","p":"/abs/path"}   a file under the repository was opened for reading
 //   {"k":"dir","p":"/abs/dir"}     a directory under the repository was listed
 //   {"k":"probe","p":"/abs/path"}  existence of a path was checked (exists/stat/realpath...)
-//   {"k":"exec","args":[...],"shell":true,"cwd":"/abs"}  a child process was started
+//   {"k":"exec","args":[...],"shell":true,"cwd":"/abs","t":ms}  a child process was started
 //                                  ("trunc":true: args cut short, see MAX_ARGV; "rt": the
 //                                  runtimes the child's environment traces, runtimesOf)
 //   {"k":"tree","p":"/abs/dir"}    everything below a directory may have been read
@@ -28,6 +30,9 @@
     NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE || '',
     PYTHONPATH: process.env.PYTHONPATH || '',
     PYTEST_PLUGINS: process.env.PYTEST_PLUGINS || '',
+    // The context of the (Python) test this process was started in, "<key>:<context>":
+    // the start event records it, and children inherit it unchanged.
+    SMATES_TRACE_CTX: process.env.SMATES_TRACE_CTX || '',
   };
 
   const fs = require('fs');
@@ -45,7 +50,8 @@
   const writeSync0 = fs.writeSync;
   const statSync0 = fs.statSync;
   const realpath0 = fs.realpathSync.native || fs.realpathSync;
-  const out = path.join(traceDir, `proc-${process.pid}-${threadId}.jsonl`);
+  const nonce = Date.now().toString(36) + Math.floor(Math.random() * 0x7fffffff).toString(36);
+  const out = path.join(traceDir, `proc-${process.pid}-${threadId}-${nonce}.jsonl`);
   let fd = -1;
   // mock-fs swaps the fs binding's functions for its fake file system's while it is
   // active (_mockedBinding), which would take the trace with them: the shim writes with
@@ -223,6 +229,7 @@
   for (const name of ['readFileSync', 'readFile']) wrap(fs, name, 'read');
   for (const name of ['openSync', 'open']) wrap(fs, name, 'read', true);
   wrap(fs, 'createReadStream', 'read');
+  wrap(fs, 'openAsBlob', 'read'); // Node 19.8+
   // A recursive listing (Node 18.17+/20.1+) lists everything below the directory.
   const recordDir = (p, opts) => record(opts && typeof opts === 'object' && opts.recursive ? 'tree' : 'dir', p);
   for (const name of ['readdirSync', 'readdir', 'opendirSync', 'opendir']) wrap(fs, name, recordDir);
@@ -276,7 +283,7 @@
   const execEv = (args, shell, opts) => {
     try {
       const [cut, trunc] = cutArgv(args.map(String));
-      const ev = { k: 'exec', args: cut, shell: Boolean(shell), cwd: cwdOf(opts), rt: runtimesOf(opts) };
+      const ev = { k: 'exec', args: cut, shell: Boolean(shell), cwd: cwdOf(opts), rt: runtimesOf(opts), t: Date.now() };
       if (trunc) ev.trunc = true;
       write(ev);
     } catch (_) {}
@@ -365,6 +372,7 @@
     set('SMATES_TRACE_DIR', traceDir);
     set('SMATES_REPO_ROOT', repoRoot);
     set('SMATES_TRACE_PARENT', `${process.pid}-${threadId}`);
+    set('SMATES_TRACE_CTX', env0.SMATES_TRACE_CTX);
     set('NODE_V8_COVERAGE', env0.NODE_V8_COVERAGE);
     const nodeOptions = keyOf('NODE_OPTIONS');
     const opts = get(nodeOptions);
@@ -508,6 +516,53 @@
     require('module').syncBuiltinESMExports();
   } catch (_) {}
 
+  // node:sqlite's DatabaseSync(path) opens a database file. Loading node:sqlite prints
+  // an ExperimentalWarning, so the shim patches it when the program loads it: with
+  // require or process.getBuiltinModule (an ESM import made before either is not seen).
+  const sqlitePatched = new WeakSet();
+  const patchSqlite = (exp) => {
+    try {
+      if (!exp || typeof exp !== 'object' || sqlitePatched.has(exp)) return exp;
+      sqlitePatched.add(exp);
+      const Orig = exp.DatabaseSync;
+      if (typeof Orig !== 'function' || Orig.__smates) return exp;
+      const DatabaseSync = class DatabaseSync extends Orig {
+        constructor(p) {
+          try {
+            if (toPath(p) !== ':memory:') record('read', p);
+          } catch (_) {}
+          super(...arguments);
+        }
+      };
+      Object.defineProperty(DatabaseSync, '__smates', { value: true });
+      Object.defineProperty(DatabaseSync, 'length', { value: Orig.length });
+      exp.DatabaseSync = DatabaseSync;
+      require('module').syncBuiltinESMExports();
+    } catch (_) {}
+    return exp;
+  };
+  try {
+    const Module = require('module');
+    const load = Module._load;
+    if (typeof load === 'function' && !load.__smatesSqlite) {
+      const patched = function (request) {
+        const exp = load.apply(this, arguments);
+        return request === 'node:sqlite' ? patchSqlite(exp) : exp;
+      };
+      Object.defineProperty(patched, '__smatesSqlite', { value: true });
+      Module._load = patched;
+    }
+    const getBuiltin = process.getBuiltinModule;
+    if (typeof getBuiltin === 'function' && !getBuiltin.__smates) {
+      const getBuiltinModule = function getBuiltinModule(id) {
+        const exp = getBuiltin.apply(this, arguments);
+        return id === 'node:sqlite' ? patchSqlite(exp) : exp;
+      };
+      Object.defineProperty(getBuiltinModule, '__smates', { value: true });
+      process.getBuiltinModule = getBuiltinModule;
+    }
+  } catch (_) {}
+
   // Bun's own file APIs.
   if (typeof Bun !== 'undefined') {
     try {
@@ -600,6 +655,7 @@
     cwd: process.cwd(),
     t: Date.now(),
     lang: typeof Bun !== 'undefined' ? 'bun' : 'node',
+    pctx: env0.SMATES_TRACE_CTX,
   });
 
   // Environment variables: process.env becomes a proxy that records the names of the
@@ -615,8 +671,35 @@
     const frameRe = /(file:\/\/[^\s)]+?|\/[^\s()]+?|[A-Za-z]:\\[^\s()]+?):\d+:\d+/g;
     const self = __filename;
     const runnerRe = /[\\/]node_modules[\\/](?:vitest|@vitest[\\/][^\\/]+|jest-[^\\/]+|@jest[\\/][^\\/]+|expect)[\\/]/;
-    const fromRepo = () => {
+    // The file names of the frames on the stack: V8's call sites (no stack text is
+    // formatted, nor a prepareStackTrace of the program's called), else the stack text.
+    const callSites = (_, sites) => sites;
+    const stackFiles = () => {
       const limit = Error.stackTraceLimit;
+      const prepare = Error.prepareStackTrace;
+      let sites = null;
+      try {
+        Error.stackTraceLimit = 64;
+        Error.prepareStackTrace = callSites;
+        const holder = {};
+        Error.captureStackTrace(holder, stackFiles);
+        sites = holder.stack;
+      } catch (_) {
+      } finally {
+        Error.prepareStackTrace = prepare;
+        Error.stackTraceLimit = limit;
+      }
+      if (Array.isArray(sites)) {
+        const out = [];
+        for (const s of sites) {
+          let f = null;
+          try {
+            f = s && typeof s.getFileName === 'function' ? s.getFileName() : null;
+          } catch (_) {}
+          if (typeof f === 'string' && f) out.push(f);
+        }
+        return out;
+      }
       let stack = '';
       try {
         Error.stackTraceLimit = 64;
@@ -624,10 +707,13 @@
       } finally {
         Error.stackTraceLimit = limit;
       }
+      return Array.from(stack.matchAll(frameRe), (m) => m[1]);
+    };
+    const fromRepo = () => {
       let first = true;
-      for (const m of stack.matchAll(frameRe)) {
-        const f = m[1].startsWith('file:') ? safeFileURL(m[1]) : m[1];
-        if (!f || f === self) continue;
+      for (const name of stackFiles()) {
+        const f = name.startsWith('file:') ? safeFileURL(name) : name;
+        if (!f || f === self || !path.isAbsolute(f)) continue;
         // The test framework itself, e.g. vi.stubEnv saving the value it restores later.
         if (first && runnerRe.test(f)) return false;
         first = false;
@@ -636,7 +722,6 @@
       return false;
     };
     const recorded = new Set(); // context + name
-    const tries = new Map(); // context + name -> reads without repository code on the stack
     // envProxy traces an environment object (initial: its values now).
     const envProxy = (target) => {
       const initial = Object.assign(Object.create(null), target);
@@ -648,9 +733,8 @@
           const key = ctx + '\0' + name;
           if (recorded.has(key)) return;
           if ((own ? env[name] : undefined) !== initial[name]) return; // set by this process
-          const n = tries.get(key) || 0;
-          if (n >= 32) return; // read over and over by code outside the repository
-          tries.set(key, n + 1);
+          // Every read is checked until one by repository code is seen: a library
+          // reading a variable over and over must not hide a later read by a test.
           if (!fromRepo()) return;
           recorded.add(key);
           write({ k: 'env', p: name });
@@ -848,5 +932,55 @@
         process.on(sig, handler);
       } catch (_) {}
     }
+  }
+
+  // Any other process stopped with a signal (a server global setup starts and teardown
+  // kills) leaves no coverage either (Bun: no loaded modules). Where the program handles
+  // the signal itself, the signal waits for the event loop anyway: a listener of the
+  // shim's own, put first, records what ran so far and changes nothing else. A process
+  // without a handler keeps the default action, which kills it at once even while it is
+  // busy; smates then takes its code for unknown (a Node or Bun process without exit
+  // event or coverage counts as running repository code).
+  // The shim's listener goes away with the program's last one, so the default action
+  // comes back (also after a once() handler ran).
+  if (isMainThread && !pooled) {
+    const ours = new Map(); // signal -> the shim's listener
+    const alone = (sig, f) => process.listeners(sig).every((l) => l === f);
+    const drop = (sig, f) => {
+      ours.delete(sig);
+      process.removeListener(sig, f);
+    };
+    const flushOn = (sig) => {
+      const f = () => {
+        loadedModules();
+        if (typeof Bun === 'undefined') {
+          try {
+            require('v8').takeCoverage();
+          } catch (_) {}
+        }
+        if (alone(sig, f)) {
+          drop(sig, f);
+          process.kill(process.pid, sig);
+        }
+      };
+      ours.set(sig, f);
+      process.prependListener(sig, f);
+    };
+    const signals = new Set(['SIGTERM', 'SIGINT', 'SIGHUP']);
+    try {
+      process.on('newListener', (name) => {
+        try {
+          if (signals.has(name) && !ours.has(name)) flushOn(name);
+        } catch (_) {}
+      });
+      process.on('removeListener', (name) => {
+        try {
+          const f = ours.get(name);
+          if (!f) return;
+          if (!process.listeners(name).includes(f)) ours.delete(name); // removeAllListeners
+          else if (alone(name, f)) drop(name, f);
+        } catch (_) {}
+      });
+    } catch (_) {}
   }
 })();

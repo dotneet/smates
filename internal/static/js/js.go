@@ -11,6 +11,7 @@
 package js
 
 import (
+	"hash/fnv"
 	"path"
 	"slices"
 	"sort"
@@ -46,8 +47,9 @@ type Analyzer struct {
 	mocks     memo[[]string]    // dir -> root __mocks__ dirs that apply there
 	tsPaths   memo[[]string]    // config dir -> config files that apply there
 	typeOpts  memo[typeImportOpts]
-	elides    memo[bool] // dir -> elidesTypeImports
-	installs  memo[bool] // dir + "\x00" + package -> installed
+	elides    memo[bool]        // dir -> elidesTypeImports
+	installs  memo[bool]        // dir + "\x00" + package -> installed
+	results   memo[*fileResult] // file -> its resolved references (see analyze)
 }
 
 // Options configure the analyzer.
@@ -112,26 +114,74 @@ var typeScriptExts = map[string]bool{".ts": true, ".tsx": true, ".mts": true, ".
 // A file a value reference also resolves to stays. Other sources have no types:
 // runtime is all.
 func (a *Analyzer) SplitDeps(p string, src []byte) (all, runtime []string) {
-	var refs []ref
+	r := a.analyze(p, src)
+	return r.all, r.runtime
+}
+
+// refsOf returns the references in the source of file p: the <script> blocks (and
+// the Astro frontmatter) of a component, else the whole source.
+func refsOf(p string, src []byte) []ref {
 	switch path.Ext(p) {
 	case ".vue", ".svelte":
-		refs = scanSFC(src, false)
+		return scanSFC(src, false)
 	case ".astro":
-		refs = scanSFC(src, true)
-	default:
-		refs = scanSource(src)
+		return scanSFC(src, true)
 	}
+	return scanSource(src)
+}
+
+// fileResult is what resolving the references of one file found.
+type fileResult struct {
+	// sum identifies the source the result is for (see analyze).
+	sum uint64
+	// all and runtime are the results of SplitDeps.
+	all, runtime []string
+	// unfound are the references that resolve to no file of the repository, for
+	// Unresolved.
+	unfound []ref
+}
+
+// analyze scans and resolves the references of file p once: SplitDeps and Unresolved
+// both use the result. It is memoized by path, and recomputed for a source that is
+// not the one memoized.
+func (a *Analyzer) analyze(p string, src []byte) *fileResult {
+	sum := sourceSum(src)
+	r := a.results.get(p, func() *fileResult { return a.resolveFile(p, src, sum) })
+	if r.sum != sum {
+		return a.resolveFile(p, src, sum)
+	}
+	return r
+}
+
+// sourceSum is a hash of a source (FNV-1a, 64 bits).
+func sourceSum(src []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(src)
+	return h.Sum64()
+}
+
+// resolveFile computes analyze(p, src): SplitDeps' results, and the references that
+// resolve to no repository file. References only type-only declarations make (see
+// typeOnlyDecl) are left out of runtime: import type and export type always, a
+// specifier list whose specifiers all carry the type modifier only when no tsconfig
+// that may govern the file keeps it as a side-effect import (see elidesTypeImports).
+// A file a value reference also resolves to stays. Other sources have no types:
+// runtime is all.
+func (a *Analyzer) resolveFile(p string, src []byte, sum uint64) *fileResult {
+	out := &fileResult{sum: sum}
+	refs := refsOf(p, src)
 	if len(refs) == 0 {
-		return nil, nil
+		return out
 	}
 	dir := path.Dir(p)
 	ts := typeScriptExts[path.Ext(p)]
 	// value says, for each file found, whether a reference that stays at run time
 	// resolves to it.
 	value := map[string]bool{p: true}
-	var cur bool
+	var cur, found bool
 	add := func(f string) {
 		if v, ok := value[f]; ok {
+			found = true
 			if cur && !v {
 				value[f] = true
 			}
@@ -140,25 +190,31 @@ func (a *Analyzer) SplitDeps(p string, src []byte) (all, runtime []string) {
 		if outside(f) || hasSegment(f, "node_modules") || !a.h.Has(f) {
 			return
 		}
+		found = true
 		value[f] = cur
-		all = append(all, f)
+		out.all = append(out.all, f)
 	}
 	erased := false
 	for _, r := range refs {
 		cur = !ts || r.erase == eraseNever || r.erase == eraseElided && !a.elidesTypeImports(dir)
 		erased = erased || !cur
+		found = false
 		a.resolveRef(dir, r, add)
-	}
-	sort.Strings(all)
-	if !erased {
-		return all, all
-	}
-	for _, f := range all {
-		if value[f] {
-			runtime = append(runtime, f)
+		if !found {
+			out.unfound = append(out.unfound, r)
 		}
 	}
-	return all, runtime
+	sort.Strings(out.all)
+	if !erased {
+		out.runtime = out.all
+		return out
+	}
+	for _, f := range out.all {
+		if value[f] {
+			out.runtime = append(out.runtime, f)
+		}
+	}
+	return out
 }
 
 // resolveRef resolves one reference made from a file in dir.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/dotneet/smates/internal/depkey"
 	"github.com/dotneet/smates/internal/runner"
+	"github.com/dotneet/smates/internal/static/host"
 	"github.com/dotneet/smates/internal/static/js"
 )
 
@@ -43,13 +44,25 @@ func (s *selection) untracedUntrusted(ss *suiteSel, u string, known []string, st
 			continue
 		}
 		if spec := s.in.Graph.Unresolved(f); len(spec) > 0 {
-			return fmt.Sprintf("%s imports %q, which smates cannot resolve", f, spec[0])
+			return unresolvedReason(f, spec[0])
 		}
 		if why := untracedBlind(f, s.in.Graph.Read(f)); why != "" {
 			return why
 		}
 	}
 	return ""
+}
+
+// unresolvedReason says why source f, one of whose imports (spec, as Graph.Unresolved
+// reports it) smates cannot follow, makes what depends on it unknown.
+func unresolvedReason(f, spec string) string {
+	switch spec {
+	case host.DynamicSpec:
+		return fmt.Sprintf("%s loads a module it names at run time", f)
+	case host.UnreadableSpec:
+		return fmt.Sprintf("smates could not read %s", f)
+	}
+	return fmt.Sprintf("%s imports %q, which smates cannot resolve", f, spec)
 }
 
 // blindBuiltins are the builtin modules through which code runs other code (child

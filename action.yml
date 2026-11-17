@@ -624,6 +624,8 @@ runs:
         SMATES_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         SMATES_ARGS: ${{ inputs.args }}
         SMATES_COMMENT_KEY: ${{ inputs.comment-key }}
+        # Whether the comment is posted with the job's own token (not the token itself).
+        SMATES_DEFAULT_TOKEN: ${{ inputs.github-token == github.token }}
       run: |
         set -uo pipefail
         skip() {
@@ -666,9 +668,27 @@ runs:
           fi
         } >"$body"
 
+        # Only a comment this token posted is updated: anyone can write the marker into a
+        # comment of their own, which must not be overwritten. The default token posts
+        # as github-actions[bot]; a personal token as its user. A GitHub App's
+        # installation token cannot name its bot account (`gh api user` fails), so
+        # then any comment an app posted as a bot qualifies.
+        if [ "$SMATES_DEFAULT_TOKEN" = true ]; then
+          author='github-actions[bot]'
+        elif ! author=$(gh api user --jq .login 2>/dev/null); then
+          author=''
+        fi
+        # A login is letters, digits, '-' and a '[bot]' suffix: nothing that could
+        # end the jq string below.
+        author=${author//[^A-Za-z0-9\[\]-]/}
+        if [ -n "$author" ]; then
+          mine=".user.login == \"$author\""
+        else
+          mine='.user.type == "Bot" and .performed_via_github_app != null'
+        fi
         api="repos/$GITHUB_REPOSITORY/issues"
         if ! ids=$(gh api --paginate "$api/$SMATES_PR/comments" \
-          --jq ".[] | select(.body | startswith(\"$marker\")) | .id" 2>"$err"); then
+          --jq ".[] | select(($mine) and (.body | startswith(\"$marker\"))) | .id" 2>"$err"); then
           skip "could not list the pull request's comments: $(head -c 300 "$err")"
         fi
         id=${ids%%$'\n'*}

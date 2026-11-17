@@ -9,8 +9,11 @@ unittest's own main, adding the contexts the pytest plugin uses:
                      teardowns, and the test methods themselves
 
 and per-file results ({"k": "result"}): a failure, an error (also in a fixture or while
-importing the module) or an unexpected success fails the file; skipped tests and
-expected failures pass. A module that loaded but ran no test at all is "unknown" (never
+importing the module) or an unexpected success fails the file; a test that skipped
+itself (self.skipTest, raise SkipTest in a test, a fixture or at import, a skipIf or
+skipUnless whose condition held) makes it "unknown", like a test an assumption aborted
+under Gradle; tests disabled by an unconditional @unittest.skip and expected failures
+pass. A module that loaded but ran no test at all is "unknown" (never
 "pass": it runs again next time) when it looks written for pytest (module-level test
 functions or `import pytest`, which unittest cannot run), and "pass" with a warning
 otherwise (a helper module matching the test pattern). Both are explained on stderr.
@@ -97,8 +100,51 @@ def _enter(f):
 def _result(f):
     r = _results.get(f)
     if r is None:
-        r = _results[f] = {"ms": 0, "failed": False, "msg": "", "ran": 0}
+        r = _results[f] = {"ms": 0, "failed": False, "msg": "", "ran": 0, "skipped": False}
     return r
+
+
+def _runtime_skip(test):
+    """Whether a skip is a test skipping itself (self.skipTest, raise SkipTest in a test,
+    a fixture or at import, a skipIf/skipUnless whose condition held) rather than a test
+    disabled by an unconditional @unittest.skip."""
+    case = getattr(test, "test_case", test)  # a subtest's case
+    if case is not test or type(case).__name__ == "ModuleSkipped":
+        # A subtest, or the test unittest makes of a module that raised SkipTest at
+        # import (through an unconditional skip of its own).
+        return True
+    method = getattr(case, getattr(case, "_testMethodName", "") or "", None)
+    for obj in (method, type(case)):
+        if obj is not None and getattr(obj, "__unittest_skip__", False):
+            return bool(getattr(obj, "__smates_conditional__", False))
+    return True
+
+
+def _conditional(orig):
+    """Wraps unittest.skipIf or skipUnless: the item a condition skips is marked
+    (__smates_conditional__) as one that skips itself."""
+
+    def decorator(condition, reason):
+        deco = orig(condition, reason)
+
+        def apply(item):
+            static = getattr(item, "__unittest_skip__", False)
+            out = deco(item)
+            if not static and getattr(out, "__unittest_skip__", False):
+                try:
+                    out.__smates_conditional__ = True
+                except Exception:
+                    pass
+            return out
+
+        return apply
+
+    for attr in ("__name__", "__qualname__", "__doc__", "__module__"):
+        try:
+            setattr(decorator, attr, getattr(orig, attr))
+        except (AttributeError, TypeError):
+            pass
+    return decorator
 
 
 _NO_TESTS = (
@@ -110,6 +156,10 @@ _NO_TESTS = (
 _STOPPED = (
     "smates: the run stopped (--failfast or an interrupt) before every test of this "
     "module ran; not recorded as passed."
+)
+_SKIPPED = (
+    "smates: a test of this module skipped itself (skipTest, SkipTest, skipIf/skipUnless); "
+    "not recorded as passed."
 )
 _NO_TESTS_HELPER = (
     "smates: unittest ran no test from this module (a helper matching the test pattern?); "
@@ -205,7 +255,10 @@ class _Result(unittest.TextTestResult):
         f = self._outcome_file(test)
         if f is not None:
             # A class skipped in setUpClass reports its skip without starting a test.
-            _result(f)["ran"] += 1
+            r = _result(f)
+            r["ran"] += 1
+            if _runtime_skip(test):
+                r["skipped"] = True
 
 
 class _Runner(unittest.TextTestRunner):
@@ -237,6 +290,9 @@ def _finish():
             # (or while they ran): nothing to pass, so the module runs again.
             status, r["msg"] = "unknown", _STOPPED
             sys.stderr.write("%s: %s\n" % (os.path.relpath(f), _STOPPED))
+        elif not r["failed"] and r["skipped"]:
+            # As a test an assumption aborted under Gradle: it proved nothing.
+            status, r["msg"] = "unknown", _SKIPPED
         elif not r["failed"] and r["ran"] == 0:
             if _pytest_style(f):
                 # Tests unittest cannot run: never a pass, so the module runs again.
@@ -284,6 +340,14 @@ def _loaded(loader, make, name, *exc):
 def _patch():
     loader = unittest.TestLoader
     suite = unittest.suite.TestSuite
+
+    # Before any test module is imported (from unittest import skipIf).
+    for name in ("skipIf", "skipUnless"):
+        orig = getattr(unittest.case, name, None)
+        if orig is not None:
+            wrapped = _conditional(orig)
+            setattr(unittest.case, name, wrapped)
+            setattr(unittest, name, wrapped)
 
     orig_name = loader.loadTestsFromName
 

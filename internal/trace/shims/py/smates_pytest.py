@@ -18,6 +18,10 @@ Results are per test file, keyed by the file of the item (a node id names files 
 the rootdir relative to the arguments, if at all). A file some of whose collected tests
 did not run (-x, --maxfail, pytest.exit(), an interrupt) did not pass: it is reported
 "unknown", also by a pytest-xdist controller (its workers each run some of the tests).
+So is a file a test of which skipped itself (pytest.skip() in the test or a fixture, a
+skipif condition, importorskip, also at module level): like a test an assumption aborted
+under Gradle, it proved nothing. Tests disabled by an unconditional skip mark and
+expected failures (xfail) do not keep a file from passing.
 """
 
 import json
@@ -57,6 +61,30 @@ _STOPPED = (
     "smates: the run stopped (-x, --maxfail, pytest.exit() or an interrupt) before every "
     "test of this file ran; not recorded as passed."
 )
+_SKIPPED = (
+    "smates: a test of this file skipped itself (pytest.skip(), a skipif condition, "
+    "importorskip); not recorded as passed."
+)
+_skipped = set()  # test files a test (or the module) of which skipped itself
+_item = [None]  # the test item running (outside nested sessions)
+
+
+def _runtime_skip(report, item):
+    """Whether a skipped report is a test skipping itself: pytest.skip() in the test or a
+    fixture, a skipif condition, importorskip, a unittest skip. An unconditional skip mark
+    (@pytest.mark.skip, also through pytestmark) is a disabled test, like an expected
+    failure (xfail); deselection (-k, -m) reports nothing."""
+    if not report.skipped or hasattr(report, "wasxfail"):
+        return False
+    if report.when != "setup":
+        return True
+    if item is not None:
+        try:
+            return item.get_closest_marker("skip") is None
+        except Exception:
+            return True
+    # A report from a pytest-xdist worker: its keywords name the item's markers.
+    return "skip" not in (getattr(report, "keywords", None) or {})
 
 
 def _nested():
@@ -168,6 +196,8 @@ if _tracer is not None or _results_dir:
             if rep.failed:
                 _noted[id(rep)] = rep
                 _note_failure(f, rep)
+            elif rep.skipped and isinstance(collector, pytest.File):
+                _skipped.add(f)  # pytest.skip(allow_module_level=True), importorskip
 
     def pytest_collection_finish(session):
         if _nested():
@@ -184,6 +214,7 @@ if _tracer is not None or _results_dir:
         f = _file_of(item)
         start = time.time()
         _running.append(f)
+        _item[0] = item
         _requested.clear()
         if _tracer is not None:
             _tracer.push("test:" + f)
@@ -192,6 +223,7 @@ if _tracer is not None or _results_dir:
             outcome = yield
         finally:
             _running.pop()
+            _item[0] = None
             r = _results.setdefault(f, {"ms": 0})
             r["ms"] += int((time.time() - start) * 1000)
             if outcome is not None and outcome.excinfo is None:
@@ -245,8 +277,10 @@ if _tracer is not None or _results_dir:
     def pytest_runtest_logreport(report):
         if _nested():
             return
+        item = None
         if _running:
             f = _running[-1]
+            item = _item[0]
         else:
             # On a pytest-xdist controller.
             f = _report_file(report)
@@ -258,12 +292,20 @@ if _tracer is not None or _results_dir:
                 _xdist_done[nodeid] = _xdist_done.get(nodeid, 0) + 1
         if report.failed:
             _note_failure(f, report)
+        elif _runtime_skip(report, item):
+            _skipped.add(f)
 
     def pytest_collectreport(report):
-        if report.failed and not _nested() and id(report) not in _noted:
+        if _nested() or id(report) in _noted:
+            return
+        if report.failed:
             f = _report_file(report)  # a pytest-xdist worker's
             if f is not None:
                 _note_failure(f, report)
+        elif report.skipped and report.nodeid and "::" not in report.nodeid:
+            f = _report_file(report)  # a pytest-xdist worker's: a module skipped itself
+            if f is not None and os.path.isfile(f):
+                _skipped.add(f)
 
     @pytest.hookimpl(hookwrapper=True, trylast=True)
     def pytest_runtestloop(session):
@@ -299,6 +341,7 @@ if _tracer is not None or _results_dir:
             return
         if not _outer:
             stopped = _stopped(session) - set(_failed)
+            skipped = _skipped - set(_failed) - stopped
             for f, r in _results.items():
                 ev = {"k": "result", "id": f, "status": "pass", "ms": r["ms"]}
                 if f in _failed:
@@ -307,15 +350,20 @@ if _tracer is not None or _results_dir:
                         ev["msg"] = _failed[f]
                 elif f in stopped:
                     ev["status"], ev["msg"] = "unknown", _STOPPED
+                elif f in skipped:
+                    # As a test an assumption aborted under Gradle: it proved nothing.
+                    ev["status"], ev["msg"] = "unknown", _SKIPPED
                 _write_result(ev, ev["status"] == "unknown")
             for f in sorted(stopped - set(_results)):
                 _write_result({"k": "result", "id": f, "status": "unknown", "ms": 0, "msg": _STOPPED}, True)
+            for f in sorted(skipped - set(_results)):
+                _write_result({"k": "result", "id": f, "status": "unknown", "ms": 0, "msg": _SKIPPED}, True)
             for f, msg in _failed.items():
                 if f not in _results:
                     ev = {"k": "result", "id": f, "status": "fail", "ms": 0}
                     if msg:
                         ev["msg"] = msg
                     _write_result(ev)
-        for m in (_results, _failed, _noted, _expected, _done, _xdist_ids, _xdist_done, _xdist_files):
+        for m in (_results, _failed, _noted, _expected, _done, _xdist_ids, _xdist_done, _xdist_files, _skipped):
             m.clear()
         del _sessions[:]

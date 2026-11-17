@@ -184,6 +184,7 @@ func TestReportedJUnitWithoutRecording(t *testing.T) {
 			return ""
 		},
 	}
+	rc.collectReport() // what the invocation wrote
 	obs, warns := reported(rc)
 	if a := obs["a_test.sh"]; a == nil || a.Status != state.Fail || !strings.Contains(a.Failure, "boom") {
 		t.Errorf("a: %+v", a)

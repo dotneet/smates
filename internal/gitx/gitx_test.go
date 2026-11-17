@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -480,5 +481,104 @@ func TestFirstParentHistoryShallow(t *testing.T) {
 	}
 	if ch, err := r.repo.ChangedInCommit(commits[1]); err == nil || !strings.Contains(err.Error(), "shallow") {
 		t.Errorf("boundary commit must not be diffed as a root: %v %v", ch, err)
+	}
+}
+
+// TestSnapshotFlaggedFiles: git status does not report edits to files flagged
+// skip-worktree or assume-unchanged, so the snapshot hashes them from disk; one that is
+// not on disk keeps its index hash when skip-worktree (a sparse checkout) and is
+// deleted otherwise. ChangedSince reports the same edits.
+func TestSnapshotFlaggedFiles(t *testing.T) {
+	type row struct {
+		name  string
+		flags []string // update-index flags
+		edit  func(r *testRepo, f string)
+		// want: "disk" (hash-object of the file), "index" (HEAD's blob), "" (absent).
+		want string
+		exec bool // the expected hash carries ExecSuffix
+	}
+	write := func(r *testRepo, f string) { r.write(f, "edited\n") }
+	remove := func(r *testRepo, f string) { os.Remove(filepath.Join(r.dir, f)) }
+	chmodX := func(r *testRepo, f string) { os.Chmod(filepath.Join(r.dir, f), 0o755) }
+	rows := []row{
+		{"skip-worktree edited", []string{"--skip-worktree"}, write, "disk", false},
+		{"assume-unchanged edited", []string{"--assume-unchanged"}, write, "disk", false},
+		{"both flags edited", []string{"--skip-worktree", "--assume-unchanged"}, write, "disk", false},
+		{"skip-worktree unedited", []string{"--skip-worktree"}, nil, "index", false},
+		{"assume-unchanged unedited", []string{"--assume-unchanged"}, nil, "index", false},
+		// must keep: a sparse checkout leaves skip-worktree files off disk.
+		{"skip-worktree not on disk", []string{"--skip-worktree"}, remove, "index", false},
+		{"assume-unchanged deleted", []string{"--assume-unchanged"}, remove, "", false},
+		{"unflagged edited", nil, write, "disk", false},
+	}
+	if runtime.GOOS != "windows" {
+		rows = append(rows,
+			row{"skip-worktree chmod +x", []string{"--skip-worktree"}, chmodX, "index", true},
+			row{"assume-unchanged chmod +x", []string{"--assume-unchanged"}, chmodX, "index", true},
+		)
+	}
+	r := newTestRepo(t)
+	file := func(i int) string { return "f" + strconv.Itoa(i) + ".txt" }
+	for i := range rows {
+		r.write(file(i), "original\n")
+	}
+	r.commit("init")
+	for i, c := range rows {
+		if len(c.flags) > 0 {
+			r.git(append(append([]string{"update-index"}, c.flags...), file(i))...)
+		}
+		if c.edit != nil {
+			c.edit(r, file(i))
+		}
+	}
+	snap, err := r.repo.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := r.repo.ChangedSince("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range rows {
+		f := file(i)
+		head := r.git("rev-parse", "HEAD:"+f)
+		got, ok := snap[f]
+		var want string
+		switch c.want {
+		case "disk":
+			want = r.git("hash-object", "--no-filters", "--", f)
+		case "index":
+			want = head
+		}
+		if c.exec {
+			want += ExecSuffix
+		}
+		if c.want == "" && ok {
+			t.Errorf("%s: %s in the snapshot (%s), want absent", c.name, f, got)
+		} else if c.want != "" && got != want {
+			t.Errorf("%s: %s hashes %q, want %q", c.name, f, got, want)
+		}
+		if wantChanged := got != head; slices.Contains(changed, f) != wantChanged {
+			t.Errorf("%s: ChangedSince lists %s: %v, want %v (%v)", c.name, f, !wantChanged, wantChanged, changed)
+		}
+	}
+}
+
+func TestParseIndex(t *testing.T) {
+	out := "H 100644 aaaa 0\ta.txt\x00S 100755 bbbb 0\tb c.sh\x00h 100644 cccc 0\td.txt\x00s 120000 dddd 0\tlink\x00H 160000 eeee 0\tsub\x00junk\x00"
+	got := parseIndex(out)
+	want := []struct {
+		path          string
+		flagged, skip bool
+	}{
+		{"a.txt", false, false}, {"b c.sh", true, true}, {"d.txt", true, false}, {"link", true, true}, {"sub", false, false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %+v", got)
+	}
+	for i, w := range want {
+		if got[i].path != w.path || got[i].flagged() != w.flagged || got[i].skipWorktree() != w.skip {
+			t.Errorf("entry %d: %+v flagged=%v skip=%v, want %+v", i, got[i], got[i].flagged(), got[i].skipWorktree(), w)
+		}
 	}
 }

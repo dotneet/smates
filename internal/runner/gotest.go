@@ -387,6 +387,9 @@ func runPackages(ctx context.Context, rc *RunContext, units []string, all bool, 
 		testArgs = pkgArgs(rc.Suite, units)
 	}
 	extra := runFlag(run)
+	if g, ok := out.(*goOutcomes); ok && g.verbose {
+		extra = append(extra, "-v") // a result line for every test that ran
+	}
 	var env []string
 	if rc.Fresh && !rc.Record {
 		// go test does not recheck files outside the module before reusing a cached
@@ -1014,23 +1017,11 @@ func modulePath(gomod string) string {
 // runAll runs go test without the "./..." expansion trick: go accepts many package
 // arguments, chunked if needed; extra flags go before them.
 func runAll(ctx context.Context, rc *RunContext, extra, args []string, env []string) (int, error) {
-	worst := 0
-	for i, b := range chunk(args) {
-		argv, err := rc.CommandLine(extra, b)
-		if err != nil {
-			return 1, err
-		}
-		env, err := trace.SeparateV8(env, rc.TraceDir, i)
-		if err != nil {
-			return 1, err
-		}
-		code, err := rc.Exec(ctx, argv, env)
-		if err != nil {
-			return code, err
-		}
-		worst = max(worst, code)
+	base, err := rc.CommandLine(extra, nil)
+	if err != nil {
+		return 1, err
 	}
-	return worst, nil
+	return runChunks(ctx, rc, extra, chunk(base, args), env)
 }
 
 // goExecWrapper returns a path to the smates binary usable inside GOFLAGS (which is

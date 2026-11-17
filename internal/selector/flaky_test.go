@@ -123,7 +123,7 @@ func TestRecordDetectsFlakes(t *testing.T) {
 			// A failing unit must still be selected next time, flaky or not.
 			if e.Status == state.Fail {
 				tt := &Test{ID: unit}
-				decide(tt, "state", e, []string{"src/a.ts", unit}, NewHasher(c.steps[len(c.steps)-1].snap), nil)
+				decide(tt, "state", e, []string{"src/a.ts", unit}, NewHasher(c.steps[len(c.steps)-1].snap), changeSet{})
 				if !tt.Selected || tt.Reason != ReasonFailed {
 					t.Errorf("failing unit not selected: %+v", tt)
 				}

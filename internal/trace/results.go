@@ -55,6 +55,11 @@ func addResult(m map[string]Result, file, status string, ms int64, msg string) {
 // JUnit reads a JUnit XML report and returns per-file results. Files are taken from the
 // "file" attribute of test cases or suites, falling back to the suite name and the
 // test case classname when they name an existing file under baseDir.
+//
+// A skipped test case (<skipped/>) makes its file unknown: a report cannot tell a test
+// that skipped itself at run time (an assumption, pytest.skip(), a skip condition) from
+// a disabled one, and a test that skipped itself proved nothing (as Gradle's assumption
+// skips; see runner.gradleObservations).
 func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -71,6 +76,7 @@ func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 		Time      float64   `xml:"time,attr"`
 		Failures  []problem `xml:"failure"`
 		Errors    []problem `xml:"error"`
+		Skipped   []problem `xml:"skipped"`
 	}
 	type suite struct {
 		Name   string     `xml:"name,attr"`
@@ -111,6 +117,9 @@ func JUnit(path, baseDir, repoRoot string) (map[string]Result, error) {
 				continue
 			}
 			st, msg := state.Pass, ""
+			if len(c.Skipped) > 0 {
+				st = state.Unknown
+			}
 			for _, pr := range append(c.Failures, c.Errors...) {
 				st = state.Fail
 				text := strings.TrimSpace(pr.Text)

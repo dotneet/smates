@@ -84,6 +84,9 @@ func worseOutcome(prev, cur string) string {
 // prints for failing tests (and, with -v, for every test), the per-package summary
 // lines, or the events of go test -json.
 type goOutcomes struct {
+	// verbose makes runPackages add -v, so that go test prints a result line for every
+	// test that ran: a test of a passing package it prints none for did not run.
+	verbose bool
 	mu      sync.Mutex
 	buf     []byte
 	pending map[string]string    // test -> status, for the package printing now
@@ -96,6 +99,9 @@ type goOutcomes struct {
 type goPkgRes struct {
 	status string // state.Pass / state.Fail ("" = not seen)
 	build  bool   // it did not build
+	// listed is set when the output names every test that ran: go test -json events,
+	// or a summary saying no test ran ("[no tests to run]").
+	listed bool
 	tests  map[string]string
 	fails  map[string]string // test -> failure output
 }
@@ -179,6 +185,7 @@ func (g *goOutcomes) line(l string) {
 		default:
 			p.status = state.Pass
 		}
+		p.listed = p.listed || strings.HasSuffix(strings.TrimSpace(l), "[no tests to run]")
 		for t, st := range g.pending {
 			p.tests[t] = st
 		}
@@ -213,6 +220,7 @@ func (g *goOutcomes) event(ev goTestEvent) {
 		return
 	}
 	p := g.pkg(ev.Package)
+	p.listed = true // -json reports every test that ran
 	if ev.Test == "" {
 		switch ev.Action {
 		case "pass", "skip":
@@ -258,8 +266,11 @@ func (g *goOutcomes) buildFailed(ip string) bool {
 }
 
 // status returns the outcome of test name in package ip: reported for the test
-// itself, or derived from the package (its passing summary covers every test; a failed
-// build fails them all; otherwise it is unknown and inferred). ran is false when the
+// itself, or derived from the package: a failed build fails them all; a failed package
+// makes it unknown and inferred; a passing summary covers every test only when the
+// output prints nothing for a test that passed (plain go test without -v). Otherwise a
+// test the output says nothing about did not run (a TestMain exiting before m.Run, -run
+// matching nothing, "[no tests to run]"): unknown, never a pass. ran is false when the
 // package was not seen at all.
 func (g *goOutcomes) status(ip, name string) (st string, inferred, ran bool) {
 	g.mu.Lock()
@@ -274,6 +285,8 @@ func (g *goOutcomes) status(ip, name string) (st string, inferred, ran bool) {
 	switch {
 	case p.build:
 		return state.Fail, false, true
+	case p.status == state.Pass && (g.verbose || p.listed):
+		return state.Unknown, false, true
 	case p.status == state.Pass:
 		return state.Pass, false, true
 	case p.status == state.Fail:

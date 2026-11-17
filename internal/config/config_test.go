@@ -88,6 +88,24 @@ suites:
 	}
 }
 
+// A root whose name starts with ".." is inside the repository, and an empty trailing
+// document is no second one.
+func TestParseAccepts(t *testing.T) {
+	for name, doc := range map[string]string{
+		"root named ..foo":      "suites:\n  - runner: go\n    root: ..foo\n",
+		"root below ..foo":      "suites:\n  - runner: go\n    root: ..foo/bar\n",
+		"root that cleans in":   "suites:\n  - runner: go\n    root: a/../b\n",
+		"trailing document end": "orphans: all\n---\n",
+		"trailing comment":      "orphans: all\n--- # end\n# nothing\n",
+		"leading document mark": "---\norphans: all\n",
+		"empty file":            "",
+	} {
+		if _, err := Parse([]byte(doc)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	cases := []struct{ name, doc, want string }{
 		{"unknown top-level field", "suites: []\nfoo: 1\n", "field foo not found"},
@@ -103,6 +121,15 @@ func TestParseErrors(t *testing.T) {
 		{"root outside", "suites:\n  - runner: go\n    root: ../x\n", "inside the repository"},
 		{"root escapes after clean", "suites:\n  - runner: go\n    root: a/../../x\n", "inside the repository"},
 		{"absolute root", "suites:\n  - runner: go\n    root: /abs\n", "inside the repository"},
+		{"parent root", "suites:\n  - runner: go\n    root: ..\n", "inside the repository"},
+		// Before the name is filled, a suite is named by its position.
+		{"unnamed suite outside", "suites:\n  - runner: go\n  - runner: pytest\n    root: ../x\n", "suites[1]: root"},
+		{"unnamed suite without runner", "suites:\n  - root: web\n", "suites[0]: runner is required"},
+		{"named suite outside", "suites:\n  - name: py\n    runner: pytest\n    root: ../x\n", `suite "py": root`},
+		// A later document would be ignored, with every key it sets.
+		{"second document", "orphans: all\n---\ninputs: [pnpm-lock.yaml]\n", "second YAML document"},
+		{"second document after an empty one", "---\n---\nsuites: []\n", "second YAML document"},
+		{"second document of a scalar", "orphans: all\n--- x\n", "second YAML document"},
 		{"custom needs command", "suites:\n  - runner: custom\n", "needs a command"},
 		{"bad timeout", "agent:\n  timeout: soon\n", ""},
 		{"negative flaky retry", "flaky:\n  retry: -1\n", "flaky.retry"},

@@ -22,6 +22,10 @@ const (
 	refGlob
 	// refContext is a require.context directory.
 	refContext
+	// refDynamic is an import() or require() of a computed name (import(name),
+	// require(path.join(dir, name))): what it loads is unknown. It resolves to nothing;
+	// Analyzer.Unresolved reports it as host.DynamicSpec.
+	refDynamic
 )
 
 // ref is a reference to another file found in source.
@@ -110,7 +114,7 @@ func scanSource(src []byte) []ref {
 			}
 			switch {
 			case p.punct(i+1, '('): // import("x"), typeof import("x")
-				refs = p.appendArg(refs, i+2)
+				refs = p.appendLoad(refs, i+2, p.appendArg)
 			case p.literal(i + 1): // import "x"
 				refs = p.appendArg(refs, i+1)
 			case p.punct(i+1, '.') && p.ident(i+2, "meta") && p.punct(i+3, '.'):
@@ -135,7 +139,13 @@ func scanSource(src []byte) []ref {
 		case "require":
 			switch {
 			case p.punct(i+1, '('):
-				refs = appendErasable(refs, i+2) // import type X = require("./x")
+				if p.punct(i-1, '.') || p.ident(i-1, "function") {
+					// module.require("./x") loads a module too, but a computed name
+					// there (obj.require(x), function require(id)) need not.
+					refs = appendErasable(refs, i+2)
+					continue
+				}
+				refs = p.appendLoad(refs, i+2, appendErasable) // import type X = require("./x")
 			case p.punct(i+1, '.') && p.ident(i+2, "resolve") && p.punct(i+3, '('):
 				refs = p.appendArg(refs, i+4)
 			case p.punct(i+1, '.') && p.ident(i+2, "context") && p.punct(i+3, '(') && p.literal(i+4):
@@ -338,6 +348,18 @@ func (p *parser) typeArgs(i int) int {
 func (p *parser) text(i int) string {
 	t := p.at(i)
 	return unescape(p.src[t.s:t.e])
+}
+
+// appendLoad appends, with appendArg, the argument at token i of a call that loads a
+// module (import(), require()), or a refDynamic when the argument is computed and
+// appendArg finds no specifier in it.
+func (p *parser) appendLoad(refs []ref, i int, appendArg func([]ref, int) []ref) []ref {
+	n := len(refs)
+	refs = appendArg(refs, i)
+	if len(refs) == n && !p.punct(i, ')') && i < len(p.toks) {
+		refs = append(refs, ref{kind: refDynamic})
+	}
+	return refs
 }
 
 // appendArg appends the specifier at token i, if it is a literal, a template literal

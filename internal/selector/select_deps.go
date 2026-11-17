@@ -1,7 +1,6 @@
 package selector
 
 import (
-	"fmt"
 	"path"
 	"regexp"
 	"slices"
@@ -29,8 +28,10 @@ type suiteSel struct {
 	// suite, against the state's snapshot (or Base) and since Base (DiffUnrecorded).
 	setChanged, setChangedBase map[*ServiceDeps][]string
 	// changed and baseChanged are the selection's changed files plus the keys of the
-	// declarations with changed files, so that diff mode sees a set key change.
-	changed, baseChanged map[string]bool
+	// declarations with changed files, so that diff mode sees a set key change;
+	// changeSet and baseChangeSet index them for decide.
+	changed, baseChanged     map[string]bool
+	changeSet, baseChangeSet changeSet
 	// eraseTypes is set when the suite's runner erases TypeScript types without
 	// checking them (runner.ErasesTypes): its static closures leave type-only imports
 	// out (see knownDeps).
@@ -81,6 +82,7 @@ func (s *selection) suiteDeps() {
 	if in.Repo != nil {
 		hasher.WithRoot(in.Repo.Root)
 	}
+	s.hasher = hasher
 	every := s.everySuite()
 	services := newServiceExpander(in.Config, every, s.files)
 	for i, su := range every {
@@ -101,6 +103,9 @@ func (s *selection) newSuiteSel(su *runner.Suite, selecting bool, hasher *Hasher
 	ss := &suiteSel{sr: sr, selecting: selecting, hasher: hasher.ForSuite(su).WithSets(sr.Services)}
 	ss.setChanged, ss.setChangedBase = changedSets(sr.Services, s.changed), changedSets(sr.Services, s.baseChanged)
 	ss.changed, ss.baseChanged = withSetKeys(s.changed, ss.setChanged), withSetKeys(s.baseChanged, ss.setChangedBase)
+	if selecting {
+		ss.changeSet, ss.baseChangeSet = newChangeSet(ss.changed), newChangeSet(ss.baseChanged)
+	}
 	return ss
 }
 
@@ -465,7 +470,7 @@ func (s *selection) untrusted(ss *suiteSel, u string, known []string, static boo
 	}
 	for _, f := range known {
 		if spec := s.in.Graph.Unresolved(f); len(spec) > 0 {
-			return fmt.Sprintf("%s imports %q, which smates cannot resolve", f, spec[0])
+			return unresolvedReason(f, spec[0])
 		}
 	}
 	return ""

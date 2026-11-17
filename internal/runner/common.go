@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -20,27 +22,78 @@ import (
 	"github.com/dotneet/smates/internal/trace"
 )
 
-// maxArgBytes bounds the size of test arguments per invocation; larger selections are
+// maxArgBytes bounds the size of a command line outside Windows; larger selections are
 // split into several invocations of the runner.
 const maxArgBytes = 96 * 1024
+
+// Windows limits a whole command line: CreateProcess takes at most 32767 UTF-16 code
+// units, and cmd.exe, which runs .cmd and .bat launchers (node_modules/.bin on
+// Windows), 8191 characters.
+const (
+	maxWindowsCmdLine = 32767
+	maxWindowsBatch   = 8191
+)
 
 // Shims returns the extracted shim locations.
 func (rc *RunContext) Shims() *trace.Shims {
 	return &trace.Shims{Dir: rc.ShimDir, Node: trace.NodeShim(rc.ShimDir), Python: filepath.Join(rc.ShimDir, "py")}
 }
 
-// chunk splits args into groups whose total length stays under maxArgBytes.
-func chunk(args []string) [][]string {
+// argLimit is the most bytes a command line starting with argv0 may take on goos.
+func argLimit(goos, argv0 string) int {
+	if goos != "windows" {
+		return maxArgBytes
+	}
+	name := argv0
+	if goos == runtime.GOOS {
+		if p, err := exec.LookPath(argv0); err == nil {
+			name = p
+		}
+	}
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".cmd", ".bat":
+		return maxWindowsBatch
+	}
+	return maxWindowsCmdLine
+}
+
+// argSize is what argument a takes on a command line on goos: the argument and a
+// separator, and on Windows the quotes and escapes it may need (a UTF-8 byte count is
+// never below the UTF-16 one).
+func argSize(goos, a string) int {
+	n := len(a) + 1
+	if goos == "windows" {
+		n += 2 + strings.Count(a, `"`) + strings.Count(a, `\`)
+	}
+	return n
+}
+
+// chunk splits args into groups each of which fits on one command line together with
+// the fixed words base (the command and the flags every invocation gets).
+func chunk(base, args []string) [][]string {
+	return chunkFor(runtime.GOOS, base, args)
+}
+
+func chunkFor(goos string, base, args []string) [][]string {
+	argv0 := ""
+	if len(base) > 0 {
+		argv0 = base[0]
+	}
+	room := argLimit(goos, argv0)
+	for _, w := range base {
+		room -= argSize(goos, w)
+	}
 	var out [][]string
 	var cur []string
 	size := 0
 	for _, a := range args {
-		if size+len(a)+1 > maxArgBytes && len(cur) > 0 {
+		n := argSize(goos, a)
+		if size+n > room && len(cur) > 0 {
 			out = append(out, cur)
 			cur, size = nil, 0
 		}
 		cur = append(cur, a)
-		size += len(a) + 1
+		size += n
 	}
 	if len(cur) > 0 || len(out) == 0 {
 		out = append(out, cur)
@@ -49,12 +102,23 @@ func chunk(args []string) [][]string {
 }
 
 // runBatches runs the runner once (all tests) or once per chunk of test arguments,
-// returning the worst exit code.
+// returning the worst exit code; okCodes count as 0.
 func runBatches(ctx context.Context, rc *RunContext, extra []string, testArgs []string, env []string, okCodes ...int) (int, error) {
-	batches := [][]string{nil}
-	if !rc.All {
-		batches = chunk(testArgs)
+	if rc.All {
+		return runChunks(ctx, rc, extra, [][]string{nil}, env, okCodes...)
 	}
+	base, err := rc.CommandLine(extra, nil)
+	if err != nil {
+		return 1, err
+	}
+	return runChunks(ctx, rc, extra, chunk(base, testArgs), env, okCodes...)
+}
+
+// runChunks runs the suite command once per batch of test arguments, returning the
+// worst exit code; okCodes count as 0. The suite's JUnit report is read after each
+// invocation (reportInvocation).
+func runChunks(ctx context.Context, rc *RunContext, extra []string, batches [][]string, env []string, okCodes ...int) (int, error) {
+	rc.beginReport()
 	worst := 0
 	for i, b := range batches {
 		argv, err := rc.CommandLine(extra, b)
@@ -67,20 +131,91 @@ func runBatches(ctx context.Context, rc *RunContext, extra []string, testArgs []
 		if err != nil {
 			return 1, err
 		}
-		code, err := rc.Exec(ctx, argv, env)
+		code, err := rc.reportInvocation(func() (int, error) { return rc.Exec(ctx, argv, env) })
 		if err != nil {
 			return code, err
 		}
-		for _, ok := range okCodes {
-			if code == ok {
-				code = 0
-			}
+		if slices.Contains(okCodes, code) {
+			code = 0
 		}
-		if code > worst {
-			worst = code
-		}
+		worst = max(worst, code)
 	}
 	return worst, nil
+}
+
+// junitReport holds what the suite's JUnit report (junit: in smates.yml) said after
+// the invocations of the current run.
+type junitReport struct {
+	results  map[string]trace.Result
+	warnings []string
+}
+
+// beginReport starts collecting the JUnit report of a run: what an earlier run with
+// rc (one a flaky retry repeats) collected no longer counts.
+func (rc *RunContext) beginReport() {
+	rc.report = nil
+	if rc.Suite.Junit != "" {
+		rc.report = &junitReport{results: map[string]trace.Result{}}
+	}
+}
+
+// reportPath is the absolute path of the suite's JUnit report ("" when none is set).
+func (rc *RunContext) reportPath() string {
+	if rc.Suite.Junit == "" {
+		return ""
+	}
+	return filepath.Join(rc.Dir(), filepath.FromSlash(rc.Suite.Junit))
+}
+
+// reportInvocation runs one invocation of the runner, which may write the suite's
+// JUnit report: the report is removed first, so that one an earlier run left, or an
+// earlier chunk of this run (each invocation overwrites it), is never read as this
+// invocation's; it is read after it. An invocation that writes none (it crashed) gives
+// its units no reported result: their trace or exit code decides.
+func (rc *RunContext) reportInvocation(run func() (int, error)) (int, error) {
+	p := rc.reportPath()
+	if p == "" {
+		return run()
+	}
+	if rc.report == nil {
+		rc.beginReport()
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		// What it holds afterwards may be an earlier run's: not used.
+		rc.report.warnings = append(rc.report.warnings, "could not remove the JUnit report before the run, so its results are not used: "+err.Error())
+		return run()
+	}
+	code, err := run()
+	if err == nil {
+		rc.collectReport()
+	}
+	return code, err
+}
+
+// collectReport adds the results of the JUnit report an invocation just wrote to the
+// run's.
+func (rc *RunContext) collectReport() {
+	p := rc.reportPath()
+	if p == "" {
+		return
+	}
+	if rc.report == nil {
+		rc.beginReport()
+	}
+	jr, err := trace.JUnit(p, rc.Dir(), rc.Repo.Root)
+	if err != nil {
+		if w := "could not read JUnit report: " + err.Error(); !slices.Contains(rc.report.warnings, w) {
+			rc.report.warnings = append(rc.report.warnings, w)
+		}
+		return
+	}
+	for f, r := range jr {
+		if prev, ok := rc.report.results[f]; ok {
+			// A file several invocations report keeps the worst result.
+			r = trace.Result{Status: trace.Worse(prev.Status, r.Status), Ms: prev.Ms + r.Ms, Message: trace.JoinMessage(prev.Message, r.Message)}
+		}
+		rc.report.results[f] = r
+	}
 }
 
 // traceOptions tune how trace data turns into observations.
@@ -167,16 +302,16 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 		for f := range attr.Global {
 			o.Files[f] = true
 		}
-		o.Status = overallStatus(u.Status, exitCode)
-		o.Inferred = u.Status == "" && exitCode != 0
+		o.ev = unitEvidence{traced: u.Status, exit: exitCode, hasTrace: true}
 		o.Failure = u.Message
 		if r, ok := results[id]; ok {
-			o.Status, o.Inferred = r.Status, false
+			o.ev.reported = r.Status
 			o.Failure = trace.JoinMessage(o.Failure, r.Message)
 			if r.Ms > 0 {
 				o.DurationMs = r.Ms
 			}
 		}
+		o.settle()
 		obs[id] = o
 	}
 	// A test file that failed before executing (an import error during collection)
@@ -202,9 +337,9 @@ func observeAll(rc *RunContext, exitCode int, opt traceOptions) (map[string]*Obs
 			obs[id] = o
 			continue
 		}
-		o := &Observation{Files: map[string]bool{}, Status: r.Status, DurationMs: r.Ms, Failure: r.Message, untraced: true}
-		if o.Status != state.Fail {
-			o.Status = state.Unknown
+		o := &Observation{Files: map[string]bool{}, DurationMs: r.Ms, Failure: r.Message}
+		o.ev = unitEvidence{reported: r.Status, exit: exitCode}
+		if o.settle(); o.Status != state.Fail {
 			if inBrowser {
 				browser++
 			} else {
@@ -243,19 +378,16 @@ const NoTraceCauses = "the suite command probably runs them through a wrapper th
 	"run the test runner directly (with root: set to its package) or pass that environment through"
 
 // reportedResults reads the per-file results runner reporters wrote into the trace
-// directory and the suite's JUnit report, which wins unless theirs is worse (fail beats
-// unknown beats pass).
+// directory and those of the suite's JUnit report, which win unless theirs are worse
+// (fail beats unknown beats pass). Only reports the invocations of this run wrote count
+// (reportInvocation): one an earlier run left is never read.
 func reportedResults(rc *RunContext) (map[string]trace.Result, []string) {
 	results := trace.Results(rc.TraceDir, rc.Repo.Root)
-	if rc.Suite.Junit == "" {
+	if rc.Suite.Junit == "" || rc.report == nil {
 		return results, nil
 	}
-	var warnings []string
-	jr, err := trace.JUnit(filepath.Join(rc.Dir(), filepath.FromSlash(rc.Suite.Junit)), rc.Dir(), rc.Repo.Root)
-	if err != nil {
-		warnings = append(warnings, "could not read JUnit report: "+err.Error())
-	}
-	for f, r := range jr {
+	warnings := slices.Clone(rc.report.warnings)
+	for f, r := range rc.report.results {
 		// A JUnit report lists only the tests that ran: a file a reporter saw the run
 		// stop in (unknown) or fail does not pass because the tests that ran passed.
 		if prev, ok := results[f]; ok {
@@ -339,6 +471,21 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 		}
 		cmds[i] = job{argv, env}
 	}
+	// The processes run at once: the suite's JUnit report holds what the last one wrote
+	// (the exit code of each decides its unit's failure).
+	rc.beginReport()
+	var codes map[string]int
+	_, err := rc.reportInvocation(func() (int, error) {
+		var err error
+		codes, err = runJobs(ctx, rc, units, jobs, func(i int) (argv, env []string) { return cmds[i].argv, cmds[i].env })
+		return 0, err
+	})
+	return codes, err
+}
+
+// runJobs runs the command of each unit, at most jobs at once, printing each one's
+// output after it ends.
+func runJobs(ctx context.Context, rc *RunContext, units []string, jobs int, cmdOf func(i int) (argv, env []string)) (map[string]int, error) {
 	codes := map[string]int{}
 	var mu sync.Mutex
 	var outMu sync.Mutex
@@ -346,7 +493,7 @@ func isolatedRun(ctx context.Context, rc *RunContext, units []string, jobs int, 
 	var wg sync.WaitGroup
 	var firstErr error
 	for i, u := range units {
-		argv, env := cmds[i].argv, cmds[i].env
+		argv, env := cmdOf(i)
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(u string, argv, env []string) {
@@ -394,15 +541,64 @@ func worstCode(codes map[string]int) int {
 	return worst
 }
 
-// setUnitExit sets the status of a unit that ran in its own process (isolatedRun) from
-// that process's exit code: the outcome is the unit's own, not inferred from the run.
-// A unit that passed without a trace keeps its unknown outcome: it runs again.
-func setUnitExit(o *Observation, code int) {
-	st := overallStatus("", code)
-	if o.untraced && st != state.Fail {
-		return
+// unitEvidence is what a run tells about the outcome of one unit (Observation.settle).
+type unitEvidence struct {
+	// reported is the status a runner reporter or the JUnit report of this run gave the
+	// unit ("" for none).
+	reported string
+	// traced is the status its trace gave: the exit code of a process that ran only it
+	// (traceOptions.trustProcStatus), a failure message ("" for none).
+	traced string
+	// exit is the exit code of the process that ran the unit: its own (own) or that of
+	// a run of several units.
+	exit int
+	own  bool
+	// hasTrace is set when the unit's process left a trace: what it used is known.
+	hasTrace bool
+}
+
+// settle sets the unit's status from its evidence. Only evidence that the unit itself
+// passed, from a process that left its trace, makes a pass; without a reliable result
+// a unit is not a pass. In order:
+//
+//   - a reported, traced or own-exit failure fails it;
+//   - a reported (else traced) status decides otherwise: a skip or unknown stays so;
+//   - with neither, the exit code decides: 0 passes, another fails, inferred when it
+//     is the exit code of several units;
+//   - a pass without a trace (its process was killed before writing it, or the
+//     command dropped smates' environment) is unknown: it runs again.
+func (o *Observation) settle() {
+	e := o.ev
+	o.Status, o.Inferred = settleStatus(e)
+}
+
+func settleStatus(e unitEvidence) (status string, inferred bool) {
+	switch {
+	case e.reported == state.Fail, e.traced == state.Fail, e.own && e.exit != 0:
+		return state.Fail, false
 	}
-	o.Status, o.Inferred = st, false
+	st := e.reported
+	if st == "" {
+		st = e.traced
+	}
+	if st == "" {
+		if e.exit != 0 {
+			return state.Fail, true // !e.own
+		}
+		st = state.Pass
+	}
+	if st == state.Pass && !e.hasTrace {
+		return state.Unknown, false
+	}
+	return st, false
+}
+
+// setUnitExit settles a unit that ran in a process of its own (isolatedRun) with that
+// process's exit code: the outcome is the unit's own, not inferred from the run. A unit
+// that left no trace does not pass: it runs again.
+func setUnitExit(o *Observation, code int) {
+	o.ev.exit, o.ev.own = code, true
+	o.settle()
 }
 
 // findBin looks for node_modules/.bin/<name> from dir up to the repository root and

@@ -1,14 +1,15 @@
 """smates trace shim for Python.
 
 Records which repository files a process executes or reads and appends JSON lines to
-$SMATES_TRACE_DIR/proc-<pid>-0.jsonl, using the same protocol as the Node shim:
+$SMATES_TRACE_DIR/proc-<pid>-0-<nonce>.jsonl (_stream_file), using the same protocol as
+the Node shim:
 
     {"k": "start", "pid", "ppid", "tid", "argv", "cwd", "t", "lang": "python", "pctx"}
     {"k": "code", "p": "/abs/file.py"}     a code object from this file started executing
     {"k": "read", "p": "/abs/file"}        a file was opened for reading
     {"k": "dir", "p": "/abs/dir"}          a directory was listed
     {"k": "probe", "p": "/abs/path"}       existence of a path was checked (stat/access)
-    {"k": "exec", "args": [...], "shell": false, "cwd": "/abs"}  a child process started
+    {"k": "exec", "args": [...], "shell": false, "cwd": "/abs", "t": ms}  a child started
                                            ("trunc": true: args cut short, see _MAX_ARGV;
                                            "rt": the runtimes the child's environment
                                            traces, _runtimes)
@@ -58,7 +59,11 @@ class _Tracer:
         self.trace_dir = trace_dir
         self.repo_root = repo_root
         self.root = os.path.join(os.path.realpath(repo_root), "")
-        self.out = os.path.join(trace_dir, "proc-%d-0.jsonl" % os.getpid())
+        # The repository root as given (it may be reached through a symlink, /tmp on
+        # macOS): paths below it that resolve outside went through a link of the
+        # repository.
+        self.given_root = os.path.join(os.path.abspath(repo_root), "")
+        self.out = _stream_file(trace_dir)
         # Re-entrant: write() raises audit events and a signal handler may record while
         # the lock is held.
         self.lock = threading.RLock()
@@ -137,14 +142,31 @@ class _Tracer:
             p = os.path.join(cwd, p)
         real = self._real.get(p)
         if real is None:
-            try:
-                real = os.path.realpath(p)
-            except (OSError, ValueError):
-                real = p
+            # A path below the repository is kept as given: smates resolves it and
+            # records the symlinks of the repository on the way (retargeting one
+            # changes what the test sees), also one pointing outside of it. Other paths
+            # (and ones going up with "..", which symlinks change the meaning of) are
+            # resolved here: they may reach the repository through a link outside.
+            # A vendored path (a workspace package linked into node_modules) counts by
+            # its target.
+            given = os.path.normpath(p)
+            if (
+                os.pardir not in p.split(os.sep)
+                and (given.startswith(self.root) or given.startswith(self.given_root))
+                and not _vendored(given)
+            ):
+                real = given
+            else:
+                try:
+                    real = os.path.realpath(p)
+                except (OSError, ValueError):
+                    real = p
             self._real[p] = real
-        if not real.startswith(self.root) and not (root and real == self.root[:-1]):
+        if not (real.startswith(self.root) or real.startswith(self.given_root)) and not (
+            root and real in (self.root[:-1], self.given_root[:-1])
+        ):
             return None
-        if "/site-packages/" in real or "/node_modules/" in real or "/__pycache__/" in real or "/.venv/" in real:
+        if _vendored(real):
             return None
         return real
 
@@ -336,7 +358,7 @@ class _Tracer:
         # first event other than executed code (see write).
         try:
             self.lock = threading.RLock()  # another thread may have held it
-            self.out = os.path.join(self.trace_dir, "proc-%d-0.jsonl" % os.getpid())
+            self.out = _stream_file(self.trace_dir)
             self.seen = set()
             self._seen_codes.clear()
             if self._shared is not None and self._shared is not False:
@@ -878,7 +900,7 @@ class _Tracer:
             # A forked child that execs (os.spawn* on POSIX, pty.fork) is that program;
             # a traced one records itself, with the same traced ancestor.
             self._begin(argv, own=False)
-        ev = {"k": "exec", "args": argv, "shell": shell, "cwd": cwd}
+        ev = {"k": "exec", "args": argv, "shell": shell, "cwd": cwd, "t": int(time.time() * 1000)}
         rt = self._runtimes(env)
         if rt is not None:
             ev["rt"] = rt
@@ -895,6 +917,18 @@ class _Tracer:
 # megabytes of arguments, to provoke E2BIG say), marked "trunc": smates then takes the
 # command for one that may read anything below its working directory.
 _MAX_ARGV = 256 * 1024
+
+
+def _vendored(p):
+    return "/site-packages/" in p or "/node_modules/" in p or "/__pycache__/" in p or "/.venv/" in p
+
+
+def _stream_file(trace_dir):
+    """The trace stream of this process: proc-<pid>-0-<nonce>.jsonl. The nonce keeps a
+    process that gets a reused pid (or the program an os.exec* replaced this one with)
+    out of an earlier process's stream."""
+    nonce = "%x%s" % (int(time.time() * 1000), os.urandom(4).hex())
+    return os.path.join(trace_dir, "proc-%d-0-%s.jsonl" % (os.getpid(), nonce))
 
 
 def _cut_argv(argv, limit):

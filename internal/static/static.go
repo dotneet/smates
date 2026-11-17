@@ -151,7 +151,11 @@ func (g *Graph) Analyzes(paths ...string) bool {
 // Unresolved returns the specifiers of p's imports that resolve to no repository file
 // nor to anything installed (see host.ResolveReporter; nil for languages whose
 // analyzer does not tell): an alias only a bundler's configuration knows, a virtual
-// module, a missing file. The static closure of p may then miss what they load.
+// module, a missing file, or host.DynamicSpec for an import of a computed name. The
+// static closure of p may then miss what they load. A source of any analyzed language
+// that could not be read (larger than maxRead, not a regular file) is reported as
+// host.UnreadableSpec: its imports are unknown, and its empty dependencies must not
+// pass for a complete closure.
 func (g *Graph) Unresolved(p string) []string {
 	g.mu.Lock()
 	u, ok := g.unresolved[p]
@@ -163,8 +167,12 @@ func (g *Graph) Unresolved(p string) []string {
 		if !l.Handles(p) {
 			continue
 		}
-		if rr, ok := l.(host.ResolveReporter); ok {
-			u = rr.Unresolved(p, g.Read(p))
+		src := g.Read(p)
+		switch rr, ok := l.(host.ResolveReporter); {
+		case src == nil && g.files[p]:
+			u = []string{host.UnreadableSpec}
+		case ok:
+			u = rr.Unresolved(p, src)
 		}
 		break
 	}

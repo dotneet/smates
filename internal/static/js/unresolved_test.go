@@ -29,6 +29,15 @@ func TestUnresolved(t *testing.T) {
 		{name: "type-only imports are erased", src: `import type { X } from "~types/x"; export type { Y } from "./missing"`},
 		{name: "dynamic import", src: `const m = await import("./gone")`, want: []string{"./gone"}},
 		{name: "patterns are not checked", src: "const m = import(`./pages/${name}.ts`); import.meta.glob('./nowhere/*.ts')"},
+		// A load of a computed name may load anything: reported once, as <dynamic>.
+		{name: "import of a variable", src: `const m = await import(name)`, want: []string{"<dynamic>"}},
+		{name: "require of a variable", src: `const m = require(p)`, want: []string{"<dynamic>"}},
+		{name: "template without a static prefix", src: "const m = import(`${dir}/x.js`)", want: []string{"<dynamic>"}},
+		{name: "concatenation from a variable", src: `require(base + "/x")`, want: []string{"<dynamic>"}},
+		{name: "empty literal concatenation", src: `require("" + name)`, want: []string{"<dynamic>"}},
+		{name: "path.join of __dirname and a variable", src: `require(path.join(__dirname, name))`, want: []string{"<dynamic>"}},
+		{name: "several dynamic loads and an alias", src: `import(a); require(b); import "@/x"`, want: []string{"@/x", "<dynamic>"}},
+		{name: "a method named require", src: `obj.require(x)`},
 	}
 	h := newHost(t, files)
 	for _, c := range cases {
@@ -89,5 +98,26 @@ export default {
 		if p != c.p || fromFile != c.fromFile || ok != c.ok {
 			t.Errorf("PathValue(%s) = %q, %v, %v; want %q, %v, %v", c.expr, p, fromFile, ok, c.p, c.fromFile, c.ok)
 		}
+	}
+}
+
+// Unresolved reuses what SplitDeps resolved for the same source, and resolves again a
+// source that is not the one it saw.
+func TestUnresolvedSharesResolution(t *testing.T) {
+	h := newHost(t, map[string]string{"src/a.ts": ``})
+	a := New(h, Options{})
+	src := []byte(`import a from "./a"; import b from "./missing"`)
+	all, _ := a.SplitDeps("src/main.ts", src)
+	if !reflect.DeepEqual(all, []string{"src/a.ts"}) {
+		t.Fatalf("SplitDeps = %q", all)
+	}
+	if got := a.Unresolved("src/main.ts", src); !reflect.DeepEqual(got, []string{"./missing"}) {
+		t.Errorf("Unresolved = %q", got)
+	}
+	if got := a.Unresolved("src/main.ts", []byte(`import x from "./other"`)); !reflect.DeepEqual(got, []string{"./other"}) {
+		t.Errorf("Unresolved of another source = %q", got)
+	}
+	if all, _ := a.SplitDeps("src/main.ts", src); !reflect.DeepEqual(all, []string{"src/a.ts"}) {
+		t.Errorf("SplitDeps after another source = %q", all)
 	}
 }

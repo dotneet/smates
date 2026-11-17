@@ -15,7 +15,7 @@ import (
 const vitestReporterDriver = `
 const { default: Reporter } = await import(process.env.REPORTER);
 const root = process.env.ROOT;
-const r = (name, mode, state) => ({ name, options: { mode }, result: () => ({ state }) });
+const r = (name, mode, state, task) => ({ name, options: { mode }, result: () => ({ state }), task });
 const mod = (file, state, tests) => ({
   moduleId: root + '/' + file,
   state: () => state,
@@ -40,10 +40,15 @@ new Reporter().onTestRunEnd([
   mod('done.test.ts', 'passed', [r('d1', 'run', 'passed'), r('dskip', 'skip', 'skipped'), r('dtodo', 'todo', 'skipped')]),
 ], [], 'interrupted');
 
-// Vitest 3+: a complete run; a test skipping itself (ctx.skip) keeps its collected mode.
+// Vitest 3+: a complete run; a test skipping itself (ctx.skip) keeps its collected mode,
+// and the runner marks its task pending.
 new Reporter().onTestRunEnd([
   mod('dynskip.test.ts', 'passed', [r('e1', 'run', 'skipped'), r('e2', 'run', 'passed')]),
+  mod('dynskip-all.test.ts', 'skipped', [r('g1', 'run', 'skipped')]),
+  mod('dynskip-pending.test.ts', 'passed', [r('h1', 'skip', 'skipped', { pending: true }), r('h2', 'run', 'passed')]),
+  mod('dynskip-result-pending.test.ts', 'passed', [r('i1', 'skip', 'skipped', { result: { state: 'skip', pending: true } })]),
   mod('allskip.test.ts', 'skipped', [r('f1', 'skip', 'skipped')]),
+  mod('declared.test.ts', 'passed', [r('j1', 'run', 'passed'), r('j2', 'skip', 'skipped', {}), r('j3', 'todo', 'skipped')]),
 ], [], 'passed');
 
 // Vitest 1/2 (onFinished).
@@ -54,12 +59,17 @@ new Reporter().onFinished([
   file('old-never-v1.test.ts', 'skip', []),
   file('old-done.test.ts', 'pass', [leaf('d1', 'run', 'pass'), leaf('dskip', 'skip'), { type: 'suite', name: 's', mode: 'skip', tasks: [leaf('in', 'skip')] }, leaf('dyn', 'skip', 'skip')]),
   file('old-allskip.test.ts', 'skip', [leaf('f1', 'skip'), leaf('f2', 'todo')]),
+  // A test that skipped itself is left pending.
+  file('old-dynskip.test.ts', 'pass', [leaf('d1', 'run', 'pass'), Object.assign(leaf('dyn', 'skip', 'skip'), { pending: true })]),
+  file('old-dynskip-result.test.ts', 'skip', [{ type: 'test', name: 'dyn', mode: 'skip', result: { state: 'skip', pending: true } }]),
   file('old-failed.test.ts', 'fail', [leaf('a1', 'run', 'fail'), leaf('a2', 'run')]),
 ]);
 `
 
 // A file Vitest did not run to the end (--bail, an interrupted run) is not a pass: the
-// tests it skipped would otherwise be recorded as passing.
+// tests it skipped would otherwise be recorded as passing. Nor is one a test of which
+// skipped itself (ctx.skip()), all or some of its tests; declared skips (it.skip, .todo)
+// are disabled tests and keep it passing.
 func TestVitestReporterUnfinishedFiles(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -83,7 +93,9 @@ func TestVitestReporterUnfinishedFiles(t *testing.T) {
 	want := map[string]string{
 		"v5-cancelled.test.ts": state.Unknown, "v3-cancelled.test.ts": state.Unknown, "never.test.ts": state.Unknown,
 		"queued.test.ts": state.Unknown, "failed.test.ts": state.Fail, "done.test.ts": state.Pass,
-		"dynskip.test.ts": state.Pass, "allskip.test.ts": state.Pass,
+		"dynskip.test.ts": state.Unknown, "dynskip-all.test.ts": state.Unknown, "dynskip-pending.test.ts": state.Unknown,
+		"dynskip-result-pending.test.ts": state.Unknown, "allskip.test.ts": state.Pass, "declared.test.ts": state.Pass,
+		"old-dynskip.test.ts": state.Unknown, "old-dynskip-result.test.ts": state.Unknown,
 		"old-cancelled.test.ts": state.Unknown, "old-never.test.ts": state.Unknown, "old-never-v1.test.ts": state.Unknown,
 		"old-done.test.ts": state.Pass, "old-allskip.test.ts": state.Pass, "old-failed.test.ts": state.Fail,
 	}

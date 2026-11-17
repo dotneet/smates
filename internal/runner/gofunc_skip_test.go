@@ -79,7 +79,7 @@ func TestVerboseFlags(t *testing.T) {
 }
 
 // go test output: a top-level skip is not proven, in any -count iteration; a subtest
-// skip and a package with no tests to run stay passes.
+// skip stays a pass, and a test a package with no tests to run never ran (unknown).
 func TestGoOutcomesSkip(t *testing.T) {
 	plain := &goOutcomes{}
 	feed(plain, "=== RUN   TestS\n--- SKIP: TestS (0.00s)\n=== RUN   TestS\n--- PASS: TestS (0.00s)\n"+
@@ -105,7 +105,7 @@ func TestGoOutcomesSkip(t *testing.T) {
 			{"m/a", "TestP", state.Skip},
 			{"m/a", "TestF", state.Fail},
 			{"m/a", "TestSub", state.Pass},
-			{"m/none", "TestN", state.Pass},
+			{"m/none", "TestN", state.Unknown},
 		} {
 			if st, _, _ := g.status(c.ip, c.test); st != c.want {
 				t.Errorf("%s: %s %s: %q, want %q", name, c.ip, c.test, st, c.want)

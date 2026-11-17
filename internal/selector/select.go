@@ -65,6 +65,8 @@ type selection struct {
 	globalInputs []string
 	// suites are the suites of Input.Suites then Input.Others, as suiteDeps saw them.
 	suites []*suiteSel
+	// hasher is the hasher the suites' hashers derive from (they share its caches).
+	hasher *Hasher
 }
 
 // newSelection starts a selection: its Mode (every test with All or with neither a

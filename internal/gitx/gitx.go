@@ -21,6 +21,13 @@ import (
 // Repo is a git working tree.
 type Repo struct {
 	Root string // absolute, symlinks resolved
+
+	// The cache of flaggedPaths: the index file, the signature it had when last read
+	// and the flagged files it listed.
+	flagMu    sync.Mutex
+	indexFile string
+	flagSig   *FileSig
+	flagged   []string
 }
 
 // Open finds the repository containing dir.
@@ -87,37 +94,33 @@ func SameHash(recorded, cur string) bool {
 
 // Snapshot computes the current content hashes. Unmodified tracked files take their
 // hash from the index, so the cost is one `git ls-files` plus hashing of dirty files.
+//
+// Files flagged skip-worktree or assume-unchanged (git update-index) are hashed from
+// disk too: git status does not report edits to them, so their index hash would hide a
+// local edit a test reads. One that is not on disk keeps its index hash when it is
+// skip-worktree (a sparse checkout leaves it out of the working tree: git counts it as
+// unchanged) and is deleted otherwise.
 func (r *Repo) Snapshot() (Snapshot, error) {
-	out, err := r.Git("-c", "core.quotepath=off", "ls-files", "-s", "-z")
+	idx, err := r.index()
 	if err != nil {
 		return nil, err
 	}
 	snap := Snapshot{}
 	indexExec := map[string]bool{} // regular files in the index: executable or not
-	for _, rec := range strings.Split(out, "\x00") {
-		// "<mode> <sha> <stage>\t<path>"
-		tab := strings.IndexByte(rec, '\t')
-		if tab < 0 {
-			continue
-		}
-		meta := strings.Fields(rec[:tab])
-		if len(meta) != 3 {
-			continue
-		}
-		p := rec[tab+1:]
-		switch meta[0] {
+	for _, e := range idx {
+		switch e.mode {
 		case "160000":
 			// A submodule: its pinned commit stands for its contents, so bumping it is a
 			// change (tests reading files inside it are tracked through those files).
-			snap[p] = "commit:" + meta[1]
+			snap[e.path] = "commit:" + e.sha
 		case "100755":
-			snap[p] = meta[1] + ExecSuffix
-			indexExec[p] = true
+			snap[e.path] = e.sha + ExecSuffix
+			indexExec[e.path] = true
 		case "100644":
-			snap[p] = meta[1]
-			indexExec[p] = false
+			snap[e.path] = e.sha
+			indexExec[e.path] = false
 		default:
-			snap[p] = meta[1]
+			snap[e.path] = e.sha
 		}
 	}
 	// Files whose working-tree content or executable bit differs from the index, plus
@@ -127,6 +130,7 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		return nil, err
 	}
 	var dirty []string
+	seen := map[string]bool{}
 	for _, rec := range strings.Split(st, "\x00") {
 		if len(rec) < 4 {
 			continue
@@ -135,27 +139,141 @@ func (r *Repo) Snapshot() (Snapshot, error) {
 		switch {
 		case x == '?' || y != ' ' || x != ' ':
 			dirty = append(dirty, p)
+			seen[p] = true
+		}
+	}
+	// Flagged files git status is blind to.
+	keep := map[string]bool{} // skip-worktree: absent from disk keeps the index hash
+	for _, e := range idx {
+		if !e.flagged() || e.mode == "160000" {
+			continue
+		}
+		if e.skipWorktree() {
+			keep[e.path] = true
+		}
+		if !seen[e.path] {
+			dirty = append(dirty, e.path)
+			seen[e.path] = true
 		}
 	}
 	if len(dirty) == 0 {
 		return snap, nil
 	}
-	// With core.fileMode false (Windows, file systems without an executable bit) git
-	// ignores the bit on disk: a tracked file keeps the index's mode, a new one is added
-	// as not executable. So does smates.
-	var modes map[string]bool
-	if v, err := r.Git("config", "--bool", "core.fileMode"); err == nil && strings.TrimSpace(v) == "false" {
-		modes = indexExec
-	}
-	hashes := hashFiles(r.Root, dirty, modes)
+	hashes := hashFiles(r.Root, dirty, r.indexModes(indexExec))
 	for i, p := range dirty {
-		if hashes[i] == "" {
-			delete(snap, p) // deleted in the working tree
-		} else {
+		switch {
+		case hashes[i] != "":
 			snap[p] = hashes[i]
+		case keep[p] && !r.onDisk(p):
+			// not checked out (sparse): the index hash stands
+		default:
+			delete(snap, p) // deleted in the working tree
 		}
 	}
 	return snap, nil
+}
+
+// onDisk reports whether a repo-relative path exists in the working tree (as itself,
+// not following a final symlink).
+func (r *Repo) onDisk(p string) bool {
+	_, err := os.Lstat(filepath.Join(r.Root, filepath.FromSlash(p)))
+	return err == nil
+}
+
+// indexModes returns, with core.fileMode false (Windows, file systems without an
+// executable bit), the executable bits of the index, which git then uses instead of
+// the bit on disk: a tracked file keeps the index's mode, a new one is added as not
+// executable. So does smates. nil otherwise (the file system's bit counts).
+func (r *Repo) indexModes(indexExec map[string]bool) map[string]bool {
+	if v, err := r.Git("config", "--bool", "core.fileMode"); err == nil && strings.TrimSpace(v) == "false" {
+		return indexExec
+	}
+	return nil
+}
+
+// indexEntry is one entry of the index as `git ls-files -s -v` lists it.
+type indexEntry struct {
+	tag  byte // H cached, S skip-worktree; lowercase: assume-unchanged (see git ls-files -v)
+	mode string
+	sha  string
+	path string
+}
+
+// flagged reports whether git status ignores the working-tree file of the entry:
+// skip-worktree (S, s) or assume-unchanged (any lowercase tag).
+func (e indexEntry) flagged() bool {
+	return e.tag == 'S' || 'a' <= e.tag && e.tag <= 'z'
+}
+
+// skipWorktree reports whether the entry is flagged skip-worktree.
+func (e indexEntry) skipWorktree() bool { return e.tag == 'S' || e.tag == 's' }
+
+// index lists the entries of the index.
+func (r *Repo) index() ([]indexEntry, error) {
+	out, err := r.Git("-c", "core.quotepath=off", "ls-files", "-s", "-v", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return parseIndex(out), nil
+}
+
+// parseIndex parses the output of `git ls-files -s -v -z`.
+func parseIndex(out string) []indexEntry {
+	var entries []indexEntry
+	for _, rec := range strings.Split(out, "\x00") {
+		// "<tag> <mode> <sha> <stage>\t<path>"
+		tab := strings.IndexByte(rec, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta := strings.Fields(rec[:tab])
+		if len(meta) != 4 || len(meta[0]) != 1 {
+			continue
+		}
+		entries = append(entries, indexEntry{tag: meta[0][0], mode: meta[1], sha: meta[2], path: rec[tab+1:]})
+	}
+	return entries
+}
+
+// FlaggedEdits lists the files flagged skip-worktree or assume-unchanged whose content
+// (or executable bit) on disk differs from the index: edits git status and git diff do
+// not report. A skip-worktree file absent from disk (a sparse checkout) is no edit; an
+// assume-unchanged one is (deleted).
+func (r *Repo) FlaggedEdits() ([]string, error) {
+	idx, err := r.index()
+	if err != nil {
+		return nil, err
+	}
+	var paths, want []string
+	var skip []bool
+	indexExec := map[string]bool{}
+	for _, e := range idx {
+		if e.mode == "100755" || e.mode == "100644" {
+			indexExec[e.path] = e.mode == "100755"
+		}
+		if !e.flagged() || e.mode == "160000" {
+			continue
+		}
+		h := e.sha
+		if e.mode == "100755" {
+			h += ExecSuffix
+		}
+		paths, want, skip = append(paths, e.path), append(want, h), append(skip, e.skipWorktree())
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	hashes := hashFiles(r.Root, paths, r.indexModes(indexExec))
+	var out []string
+	for i, p := range paths {
+		switch {
+		case hashes[i] == want[i]:
+		case hashes[i] == "" && skip[i] && !r.onDisk(p):
+		default:
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // HashFiles hashes repo-relative paths in parallel (see HashFile). Missing files hash
@@ -252,7 +370,8 @@ func HashBytes(data []byte) string {
 }
 
 // ChangedSince lists files that differ between base and the working tree
-// (committed, staged, unstaged and untracked), repo-relative.
+// (committed, staged, unstaged and untracked, and edits to files flagged
+// skip-worktree or assume-unchanged, see FlaggedEdits), repo-relative.
 func (r *Repo) ChangedSince(base string) ([]string, error) {
 	out, err := r.Git("-c", "core.quotepath=off", "diff", "--name-only", "-z", "--no-renames", base)
 	if err != nil {
@@ -270,8 +389,17 @@ func (r *Repo) ChangedSince(base string) ([]string, error) {
 	}
 	add(out)
 	un, err := r.Git("-c", "core.quotepath=off", "ls-files", "-o", "--exclude-standard", "-z")
-	if err == nil {
-		add(un)
+	if err != nil {
+		return nil, err // untracked files would go missing from the changes
+	}
+	add(un)
+	// Edits git diff does not report (skip-worktree, assume-unchanged).
+	flagged, err := r.FlaggedEdits()
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range flagged {
+		add(p)
 	}
 	return files, nil
 }

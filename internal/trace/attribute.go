@@ -56,21 +56,35 @@ type Options struct {
 func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribution {
 	res := &Attribution{Units: map[string]*Unit{}, Global: map[string]bool{}}
 	byKey := map[string]*Proc{}
-	byPid := map[int]*Proc{}
+	byPid := map[int][]*Proc{}
 	for _, p := range procs {
 		byKey[p.Key()] = p
-		if cur, ok := byPid[p.Pid]; !ok || p.Tid < cur.Tid {
-			byPid[p.Pid] = p
+		byPid[p.Pid] = append(byPid[p.Pid], p)
+	}
+	// pidAt returns the process (its main thread, the lowest thread id traced) that had
+	// pid at time t, other than self: pids are reused, so of several processes with it,
+	// the last one started by then (else the first).
+	pidAt := func(pid int, t int64, self *Proc) *Proc {
+		var out *Proc
+		for _, q := range byPid[pid] {
+			switch {
+			case q == self:
+			case out == nil || q.Tid < out.Tid:
+				out = q
+			case q.Tid == out.Tid && q.Start <= t && (out.Start > t || q.Start >= out.Start):
+				out = q
+			}
 		}
+		return out
 	}
 	parent := func(p *Proc) *Proc {
 		if p.Tid != 0 {
-			if m := byPid[p.Pid]; m != nil && m != p {
+			if m := pidAt(p.Pid, p.Start, p); m != nil && m.Tid < p.Tid {
 				return m
 			}
 		}
 		if p.Ppid != 0 && p.Ppid != p.Pid {
-			if a := byPid[p.Ppid]; a != nil {
+			if a := pidAt(p.Ppid, p.Start, nil); a != nil {
 				return a
 			}
 		}
@@ -159,6 +173,13 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			continue
 		}
 		files := p.allFiles()
+		unknownCode := codeUnknown(p)
+		if unknownCode {
+			// At least its script ran; what it loaded is unknown.
+			if s := scriptOf(p, opt.Rel); s != "" {
+				files[s] = true
+			}
+		}
 		var target *Proc
 		for a, n := parent(p), 0; a != nil && n < 64; a, n = parent(a), n+1 {
 			if owner(a) {
@@ -188,11 +209,12 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 			for f := range files {
 				extra[target][f] = true
 			}
-		case !infra[p] && (len(p.Code) > 0 || opt.WorkersOwnArgv):
+		case !infra[p] && (len(p.Code) > 0 || opt.WorkersOwnArgv || unknownCode):
 			// A helper that runs repository code (a server started by global setup) is
 			// something every test may talk to. Helpers that only read files (the
 			// runner's own crawlers and transformers) are not. Without coverage
-			// (WorkersOwnArgv) what a helper runs is unknown: it counts as such a helper.
+			// (WorkersOwnArgv) what a helper runs is unknown: it counts as such a helper,
+			// and so does one killed before it could say (codeUnknown).
 			for f := range files {
 				res.Global[f] = true
 			}
@@ -230,6 +252,7 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 		}
 		return u
 	}
+	unproven := map[string]bool{}
 	for _, p := range procs {
 		if helper[p] {
 			continue
@@ -270,10 +293,49 @@ func Attribute(procs []*Proc, unitOf func(string) string, opt Options) *Attribut
 					st = state.Fail
 				}
 				u.Status = worse(u.Status, st)
+			} else if p.Exit == nil {
+				// The process died without an exit code: it says nothing about the
+				// unit, and another one passing it does not prove it. (A process that
+				// failed running several units without naming one leaves them to the
+				// others: test/common.js passes in its own process.)
+				unproven[id] = true
 			}
 		}
 	}
+	// "" is unknown (left to the run's exit code), which a pass of the unit in another
+	// process must not hide.
+	for id := range unproven {
+		if u := res.Units[id]; u != nil && u.Status == state.Pass {
+			u.Status = ""
+		}
+	}
 	return res
+}
+
+// codeUnknown reports whether p may have run code its trace does not show: a Node or
+// Bun process (not a test runner's worker) that ended without recording its exit, and
+// left no coverage. Node writes V8 coverage only when it exits normally (or a signal
+// handler flushes it) and Bun's loaded modules are recorded at exit, so a helper killed
+// by its test or by global teardown (server.kill()) would otherwise look like one that
+// ran no repository code.
+func codeUnknown(p *Proc) bool {
+	return (p.Lang == "node" || p.Lang == "bun") && !p.Exited && !p.Coverage && !poolWorker(p)
+}
+
+// scriptOf returns the repo-relative script a Node or Bun process runs (argv[1]), ""
+// when there is none in the repository.
+func scriptOf(p *Proc, rel func(string) (string, bool)) string {
+	if rel == nil || len(p.Argv) < 2 || strings.HasPrefix(p.Argv[1], "-") {
+		return ""
+	}
+	a := p.Argv[1]
+	if !filepath.IsAbs(a) {
+		a = filepath.Join(p.Cwd, a)
+	}
+	if r, ok := rel(a); ok {
+		return r
+	}
+	return ""
 }
 
 // poolWorkerRe matches the entry scripts of the worker processes test runners start

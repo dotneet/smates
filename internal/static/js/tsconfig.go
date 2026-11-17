@@ -103,12 +103,14 @@ func (c *tsConfig) resolve(a *Analyzer, spec string, add func(string)) bool {
 	return c.hasBase && a.resolvePath(path.Join(c.baseURL, spec), add)
 }
 
-// configDirs returns the directories holding a tsconfig.json or jsconfig.json at or
-// above dir, nearest first.
+// configDirs returns the directories holding a tsconfig.json, jsconfig.json or
+// tsconfig.*.json at or above dir, nearest first. A directory with only per-target
+// configs (Vite's tsconfig.app.json and tsconfig.node.json, without a tsconfig.json
+// referencing them) is one too: their paths apply to the files below it.
 func (a *Analyzer) configDirs(dir string) []string {
 	return a.tsDirs.get(dir, func() []string {
 		var out []string
-		if a.h.Has(path.Join(dir, "tsconfig.json")) || a.h.Has(path.Join(dir, "jsconfig.json")) {
+		if len(a.dirConfigFiles(dir)) > 0 {
 			out = append(out, dir)
 		}
 		if dir != "." && dir != "" && dir != "/" {
@@ -194,7 +196,9 @@ func (a *Analyzer) loadConfig(p, leafDir string, visited map[string]bool) (tsCon
 	dir := path.Dir(p)
 	var c tsConfig
 	for _, ext := range extendsList(raw.Extends) {
-		ep := a.resolveExtends(dir, ext)
+		// Also a config installed in node_modules: a shared config may declare paths
+		// with ${configDir}, which stands for the directory of the config using it.
+		ep := a.extendsFile(dir, ext)
 		if ep == "" || visited[ep] {
 			continue
 		}
@@ -240,30 +244,67 @@ func (a *Analyzer) rawConfig(p string) *rawTSConfig {
 }
 
 // resolveExtends resolves an "extends" entry of a config in dir to a repo file. Bare
-// entries are looked up in workspace packages (configs in node_modules are not part
-// of the working tree and rarely declare paths).
+// entries are looked up in workspace packages; extendsFile also looks in node_modules.
 func (a *Analyzer) resolveExtends(dir, ext string) string {
-	var cands []string
 	if isRelative(ext) || strings.HasPrefix(ext, "/") {
 		p := path.Join(dir, ext)
-		cands = []string{p, p + ".json", path.Join(p, "tsconfig.json")}
-	} else {
-		name, sub := splitPackage(ext)
-		for _, d := range a.workspaces()[name] {
-			if sub == "" {
-				cands = append(cands, path.Join(d, "tsconfig.json"))
-				continue
-			}
-			p := path.Join(d, sub)
-			cands = append(cands, p, p+".json", path.Join(p, "tsconfig.json"))
-		}
+		return firstConfig(a.h.Has, p, p+".json", path.Join(p, "tsconfig.json"))
 	}
-	for _, c := range cands {
-		if !outside(c) && a.h.Has(c) {
+	name, sub := splitPackage(ext)
+	for _, d := range a.workspaces()[name] {
+		if c := firstConfig(a.h.Has, a.packageConfigs(d, sub)...); c != "" {
 			return c
 		}
 	}
 	return ""
+}
+
+// firstConfig returns the first of cands inside the repository that exists ("" when
+// none does).
+func firstConfig(exists func(string) bool, cands ...string) string {
+	for _, c := range cands {
+		if !outside(c) && exists(c) {
+			return c
+		}
+	}
+	return ""
+}
+
+// packageConfigs returns the files an "extends" of subpath sub ("" for the package
+// itself) of the package in dir may name, in the order TypeScript tries them: what the
+// package's "exports" maps the subpath (or the subpath with ".json") to, its "tsconfig"
+// field, then the subpath as a file, with ".json", or as a directory with a
+// tsconfig.json (the package's tsconfig.json for "").
+func (a *Analyzer) packageConfigs(dir, sub string) []string {
+	var out []string
+	file := func(p string) {
+		out = append(out, p, p+".json", path.Join(p, "tsconfig.json"))
+	}
+	var p *pkgJSON
+	if b := a.h.Read(path.Join(dir, "package.json")); b != nil {
+		p = parsePkgJSON(b)
+	}
+	if p != nil && p.hasExports {
+		keys := []string{"."}
+		if sub != "" {
+			keys = []string{"./" + sub, "./" + sub + ".json"}
+		}
+		for _, k := range keys {
+			for _, t := range subpathTargets(p.exports, k) {
+				if strings.HasPrefix(t.path, "./") {
+					file(path.Join(dir, t.path))
+				}
+			}
+		}
+	}
+	if sub == "" {
+		if p != nil && p.tsconfig != "" {
+			file(path.Join(dir, p.tsconfig))
+		}
+		return append(out, path.Join(dir, "tsconfig.json"))
+	}
+	file(path.Join(dir, sub))
+	return out
 }
 
 // extendsList decodes "extends", which is a string or (TypeScript 5) an array.
@@ -407,22 +448,17 @@ func (a *Analyzer) extendsFile(dir, ext string) string {
 	if p := a.resolveExtends(dir, ext); p != "" {
 		return p
 	}
-	try := func(p string) string {
-		for _, c := range []string{p, p + ".json", path.Join(p, "tsconfig.json")} {
-			if !outside(c) && a.h.Read(c) != nil {
-				return c
-			}
-		}
-		return ""
-	}
+	readable := func(p string) bool { return a.h.Read(p) != nil }
 	if isRelative(ext) {
-		return try(path.Join(dir, ext))
+		p := path.Join(dir, ext)
+		return firstConfig(readable, p, p+".json", path.Join(p, "tsconfig.json"))
 	}
 	if ext == "" || strings.HasPrefix(ext, "/") {
 		return ""
 	}
+	name, sub := splitPackage(ext)
 	for d := dir; ; d = parentDir(d) {
-		if p := try(path.Join(d, "node_modules", ext)); p != "" {
+		if p := firstConfig(readable, a.packageConfigs(path.Join(d, "node_modules", name), sub)...); p != "" {
 			return p
 		}
 		if d == "." || d == "" || d == "/" {

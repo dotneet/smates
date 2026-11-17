@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"slices"
@@ -97,7 +96,7 @@ func cmdWatch(ctx context.Context, args []string, stdin *os.File, stdout, stderr
 	if f.interval <= 0 || f.debounce < 0 {
 		return 2, usageError{errors.New("--interval must be positive and --debounce not negative")}
 	}
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := notifyOnce(ctx, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	// Stopping a run must stop everything the runner started.
 	ctx = runner.WithProcessGroup(ctx, 5*time.Second)
@@ -116,6 +115,12 @@ func cmdWatch(ctx context.Context, args []string, stdin *os.File, stdout, stderr
 	if stdin != nil {
 		if restore, perKey, ok := keyMode(stdin); ok {
 			defer restore()
+			// Stopping (Ctrl-C) restores the terminal at once: a second Ctrl-C while
+			// the run winds down terminates smates (notifyOnce) without the deferred call.
+			go func() {
+				<-ctx.Done()
+				restore()
+			}()
 			keys = readKeys(stdin, perKey)
 		}
 	}
@@ -169,7 +174,9 @@ func watchIgnore(p *project) func(string) bool {
 	for _, sp := range statePaths {
 		if rel, err := filepath.Rel(p.repo.Root, sp); err == nil && !strings.HasPrefix(rel, "..") {
 			rel = filepath.ToSlash(rel)
-			globs = append(globs, rel, path.Join(path.Dir(rel), ".state-*")) // and state.Save's temp file
+			// The state, state.Save's temp file, the lock a save holds (stateStore.Save)
+			// and the file that guards breaking a stale lock (state.breakStale).
+			globs = append(globs, rel, path.Join(path.Dir(rel), ".state-*"), rel+".lock", rel+".lock.break")
 		}
 	}
 	for _, s := range p.suites {

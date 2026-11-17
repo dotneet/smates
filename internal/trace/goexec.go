@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -341,15 +342,22 @@ func GoTestLogs(file, cwd, bin, childDir string) (files, env []string) {
 	}
 	binInfo, _ := os.Stat(absIn(bin, cwd))
 	var reexecs []goStart
+	selfTraced := map[string][]goStart{} // by runtime
 	classify := func(starts []goStart) {
 		for _, s := range starts {
 			fi, err := os.Stat(s.prog)
 			base := strings.TrimSuffix(filepath.Base(s.prog), ".exe")
+			rt := ""
+			if tracedPrograms[base] || strings.HasPrefix(base, "python3.") {
+				rt = runtimeOf(base)
+			} else {
+				rt = scriptRuntime(s.prog, false)
+			}
 			switch {
 			case err == nil && binInfo != nil && os.SameFile(fi, binInfo):
 				reexecs = append(reexecs, s) // see the children's markers
-			case tracedPrograms[base] || strings.HasPrefix(base, "python3.") || scriptRuntime(s.prog, false) != "":
-				// It traces itself.
+			case rt != "":
+				selfTraced[rt] = append(selfTraced[rt], s) // checked below
 			default:
 				opaque(s.prog, s.dirs...)
 			}
@@ -385,6 +393,22 @@ func GoTestLogs(file, cwd, bin, childDir string) (files, env []string) {
 	if unknown {
 		add([]string{filepath.Join(goModuleDir(cwd), "**")}, nil)
 	}
+	// A Node, Bun or Python child traces itself only when its environment carries the
+	// tracing variables, and a test often gives a command an environment of its own
+	// (cmd.Env = []string{"PATH=..."}): unless as many traced processes of that runtime
+	// as starts of it show this package's test binary as their traced ancestor, every
+	// start of it counts as an opaque program.
+	if len(selfTraced) > 0 {
+		traced := goTracedChildren(goTraceDir(childDir), GoParentPrefix+cwd)
+		for rt, ss := range selfTraced {
+			if traced[rt] >= len(ss) {
+				continue
+			}
+			for _, s := range ss {
+				opaque(s.prog, s.dirs...)
+			}
+		}
+	}
 	// Opens of the binary that no child accounts for: read, or run without smates' test
 	// file in its environment. Which ones is not known: they all count as programs.
 	if len(reexecs) > children {
@@ -393,6 +417,59 @@ func GoTestLogs(file, cwd, bin, childDir string) (files, env []string) {
 		}
 	}
 	return files, env
+}
+
+// goTraceDir is the trace directory of a Go test binary's run: the one holding the
+// directory its re-executions keep their test logs in (GoExec, runner's function
+// recording), "" when there is none.
+func goTraceDir(childDir string) string {
+	if childDir == "" {
+		return ""
+	}
+	return filepath.Dir(childDir)
+}
+
+// goTracedChildren counts, per runtime, the traced processes in traceDir whose nearest
+// traced ancestor is anc (main threads only; read from their start events).
+func goTracedChildren(traceDir, anc string) map[string]int {
+	out := map[string]int{}
+	if traceDir == "" {
+		return out
+	}
+	entries, err := os.ReadDir(traceDir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !procFileRe.MatchString(e.Name()) {
+			continue
+		}
+		if ev, ok := startEvent(filepath.Join(traceDir, e.Name())); ok && ev.Anc == anc && ev.Tid == 0 && ev.Lang != "" {
+			out[ev.Lang]++
+		}
+	}
+	return out
+}
+
+// startEvent returns the start event of a trace stream (among its first lines).
+func startEvent(file string) (event, bool) {
+	f, err := os.Open(file)
+	if err != nil {
+		return event{}, false
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	for range 16 {
+		line, err := br.ReadBytes('\n')
+		var ev event
+		if json.Unmarshal(line, &ev) == nil && ev.K == "start" {
+			return ev, true
+		}
+		if err != nil {
+			break
+		}
+	}
+	return event{}, false
 }
 
 // goModuleDir is the directory of the go.mod enclosing dir (the file system root when

@@ -17,6 +17,10 @@ type index struct {
 	// resolving an import only probes roots where its first component exists. This
 	// keeps resolution cheap in monorepos with dozens of roots.
 	tops map[string][]string
+	// anyTops maps a name to every directory that holds a module or package of that
+	// name (<dir>/<name>.py, <dir>/<name>/ with Python files), root or not: the
+	// fallback for an import no known root provides (resolver.module).
+	anyTops map[string][]string
 	// dirs holds every directory that contains a Python file at any depth ("" too).
 	dirs map[string]bool
 	// pyFiles are all Python sources, sorted (prefix queries for dynamic imports).
@@ -86,9 +90,17 @@ func buildIndex(h host.Host, extra []string) *index {
 				addRoot(dir, r)
 			}
 			addGlobs(pyprojectTestGlobs(doc))
+		case base == "setup.py":
+			for _, r := range setupPyRoots(string(h.Read(f))) {
+				addRoot(dir, r)
+			}
 		case pytestINIs[base]:
 			doc := string(h.Read(f))
-			for _, r := range iniRoots(doc, base) {
+			roots := iniRoots(doc, base)
+			if base == "setup.cfg" {
+				roots = append(roots, setupCfgRoots(doc)...)
+			}
+			for _, r := range roots {
 				addRoot(dir, r)
 			}
 			addGlobs(iniTestGlobs(doc, base))
@@ -98,6 +110,7 @@ func buildIndex(h host.Host, extra []string) *index {
 
 	idx := &index{
 		tops:    map[string][]string{},
+		anyTops: map[string][]string{},
 		dirs:    map[string]bool{"": true},
 		pyFiles: pyFiles,
 	}
@@ -109,9 +122,16 @@ func buildIndex(h host.Host, extra []string) *index {
 		idx.roots = append(idx.roots, r)
 	}
 	sort.Strings(idx.roots)
+	anyTop := func(dir, name string) {
+		if isIdent(name) && !contains(idx.anyTops[name], dir) {
+			idx.anyTops[name] = append(idx.anyTops[name], dir)
+		}
+	}
 	for _, f := range pyFiles {
+		anyTop(parentDir(f), strings.TrimSuffix(strings.TrimSuffix(path.Base(f), ".pyi"), ".py"))
 		for d := parentDir(f); !idx.dirs[d]; d = parentDir(d) {
 			idx.dirs[d] = true
+			anyTop(parentDir(d), path.Base(d))
 		}
 		for d := f; d != ""; {
 			d = parentDir(d)

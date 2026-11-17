@@ -15,7 +15,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/dotneet/smates/docs"
 	"github.com/dotneet/smates/internal/agent"
@@ -54,13 +56,14 @@ Usage:
 
 Exit codes:
   0  success
-  1  tests failed
+  1  tests failed (also an interrupted run, and a failing 'smates doctor' check)
   2  usage error (invalid command line)
   3  configuration error (invalid smates.yml, unknown runner, a suite or test it does not define)
   4  environment problem (git missing, not a git repository, a suite command that cannot start,
      an npx/bunx tool missing from node_modules, or, in a recorded run of any runner but
      custom, a runner exiting 126/127 before any test reported a result; with --no-record
-     or the custom runner such an exit is a test failure; a suite's requires not met)
+     or the custom runner such an exit is a test failure; a suite's requires not met;
+     a state or report that cannot be read or written; any other unexpected error)
 
 For agents: 'smates run --output failures' (or SMATES_OUTPUT=agent) prints only the output
 of failing tests, then a short summary with the command that reruns just those tests.
@@ -78,7 +81,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	// SIGTERM and SIGHUP (timeout(1), a cancelled CI job, a closed terminal) stop smates
 	// as Ctrl-C does: by cancelling, so that what runs in a process group of its own (an
 	// agent command, the tests of a watch run) is stopped with it.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := notifyOnce(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	cmd, rest := args[0], args[1:]
 	var err error
@@ -127,31 +130,83 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitOK
 		}
-		var ue usageError
-		if errors.As(err, &ue) {
+		// An error decides the exit code on its own, whatever code came with it.
+		code = exitCodeFor(err)
+		if code == ExitUsage {
 			fmt.Fprintf(stderr, "smates %s: %v\n", cmd, err)
-			return ExitUsage
-		}
-		fmt.Fprintf(stderr, "smates: %v\n", err)
-		var ce configError
-		var ee envError
-		switch {
-		case errors.As(err, &ce):
-			return ExitConfig
-		case errors.As(err, &ee):
-			return ExitEnv
-		}
-		if code == 0 {
-			code = ExitFailed
+		} else {
+			fmt.Fprintf(stderr, "smates: %v\n", err)
 		}
 	}
 	return code
 }
 
-// Exit codes of smates (see `smates help`).
+// notifyOnce is signal.NotifyContext for the first of sigs only: once ctx is done (the
+// first signal, or the parent's cancellation), a second signal terminates smates while
+// it still winds down (saving the state waits up to state.LockWait for the lock, a
+// runner may ignore the first signal). Before it does, it kills the process groups of
+// the tests still running: they are not in the terminal's foreground group, so the
+// second Ctrl-C does not reach them, and the SIGKILL their grace would send dies with
+// smates.
+func notifyOnce(parent context.Context, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, sigs...)
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		<-ctx.Done()
+		second := make(chan os.Signal, 1)
+		signal.Notify(second, sigs...) // before stop: no window with the default action
+		stop()
+		var sig os.Signal
+		select {
+		case sig = <-second:
+		case <-done: // the command returned
+			signal.Stop(second)
+			return
+		}
+		runner.KillProcessGroups()
+		signal.Reset(sigs...)
+		if p, err := os.FindProcess(os.Getpid()); err == nil && p.Signal(sig) == nil {
+			time.Sleep(time.Second) // the default action ends smates
+		}
+		os.Exit(ExitFailed)
+	}()
+	return ctx, func() {
+		stop()
+		once.Do(func() { close(done) })
+	}
+}
+
+// exitCodeFor is the exit code of an error a command returned (see the table in
+// usage). Only testsFailedError exits 1: an error nothing classified (a file that
+// cannot be written, an unexpected failure of git or the file system) is a problem of
+// the environment, never "tests failed", which would send the user (or an agent) to
+// fix code that is fine.
+func exitCodeFor(err error) int {
+	var ue usageError
+	var ce configError
+	var ee envError
+	var tf testsFailedError
+	switch {
+	case errors.As(err, &ue):
+		return ExitUsage
+	case errors.As(err, &ce):
+		return ExitConfig
+	case errors.As(err, &ee):
+		return ExitEnv
+	case errors.As(err, &tf):
+		return ExitFailed
+	}
+	return ExitEnv
+}
+
+// Exit codes of smates (see `smates help`). A command returns an exit code with a nil
+// error (tests failed: ExitFailed), or an error, whose type alone decides the code
+// (exitCodeFor): usageError, configError, envError, testsFailedError; any other error
+// exits ExitEnv.
 const (
 	ExitOK     = 0 // success
-	ExitFailed = 1 // tests failed (or an unexpected error)
+	ExitFailed = 1 // tests failed (or were interrupted); a failing `smates doctor` check
 	ExitUsage  = 2 // invalid command line
 	ExitConfig = 3 // invalid configuration: smates.yml, a suite or test the configuration does not define
 	ExitEnv    = 4 // environment problem: git, the repository, a runner or tool that cannot start
@@ -174,6 +229,12 @@ type envError struct{ error }
 
 func (e envError) Unwrap() error { return e.error }
 
+// testsFailedError ends a run whose tests failed or did not finish (an interrupted run
+// whose results were recorded): exit code 1. It is the only error that exits 1.
+type testsFailedError struct{ error }
+
+func (e testsFailedError) Unwrap() error { return e.error }
+
 // asConfigError marks err (nil stays nil) as a configuration error.
 func asConfigError(err error) error {
 	if err == nil {
@@ -186,6 +247,19 @@ func asConfigError(err error) error {
 func asEnvError(err error) error {
 	if err == nil {
 		return nil
+	}
+	return envError{err}
+}
+
+// orEnvError returns err unchanged when it already decides an exit code (usageError,
+// configError, envError, testsFailedError), else marks it as an environment error.
+func orEnvError(err error) error {
+	var ue usageError
+	var ce configError
+	var ee envError
+	var tf testsFailedError
+	if err == nil || errors.As(err, &ue) || errors.As(err, &ce) || errors.As(err, &ee) || errors.As(err, &tf) {
+		return err
 	}
 	return envError{err}
 }
@@ -301,11 +375,7 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	}
 	store := openStore(repo, cfg, cf.state, log)
 	statePath := store.path
-	st, err := store.Load()
-	if errors.Is(err, state.ErrUnreadable) {
-		fmt.Fprintf(log, "smates: ignoring unreadable state at %s (%v); starting cold\n", statePath, err)
-		st, err = state.New(), nil
-	}
+	st, err := loadStoreState(store, log)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +384,23 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose, dir: cf.dir,
 	}
 	return p, nil
+}
+
+// loadStoreState loads the store's state. A state whose content cannot be decoded (damaged,
+// or written by a newer smates) is ignored with a warning: the command starts cold
+// (selection then runs more, never less) and the next save replaces the file. A file
+// that cannot be read at all (permission denied, a directory in its place) is an
+// environment error: a save would fail the same way, after a cold run of every test.
+func loadStoreState(store *stateStore, log io.Writer) (*state.State, error) {
+	st, err := store.Load()
+	if errors.Is(err, state.ErrUnreadable) {
+		fmt.Fprintf(log, "smates: ignoring unreadable state at %s (%v); starting cold\n", store.path, err)
+		return state.New(), nil
+	}
+	if err != nil {
+		return nil, envError{fmt.Errorf("reading the state at %s: %w", store.path, err)}
+	}
+	return st, nil
 }
 
 func absPath(p string) string {

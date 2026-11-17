@@ -27,6 +27,8 @@ func refStrings(refs []ref) []string {
 				flag = "r"
 			}
 			out = append(out, "c:"+r.spec+"|"+flag)
+		case refDynamic:
+			out = append(out, "d:")
 		}
 		switch r.erase {
 		case eraseAlways:
@@ -61,7 +63,7 @@ func TestScanSource(t *testing.T) {
 		{"template with substitution", "import(`./plugins/${name}.ts`)", []string{"t:./plugins/|.ts"}},
 		{"template with several substitutions", "import(`./l/${a}/x/${b}.json`)", []string{"t:./l/|.json"}},
 		{"template with no static prefix", "import(`${base}/x.js`)", []string{"t:|/x.js"}},
-		{"dynamic import of variable", `import(name)`, nil},
+		{"dynamic import of variable", `import(name)`, []string{"d:"}},
 		{"require", `const a = require("./a"); const {b} = require('b')`, []string{"m:./a", "m:b"}},
 		{"require template", "require(`./locale/${l}`)", []string{"t:./locale/|"}},
 		{"concatenation", `require("./locale/" + lang); import("./p/" + a + "/" + b + ".js"); require("./x/" + f(a, b))`,
@@ -117,6 +119,20 @@ func TestScanSource(t *testing.T) {
 		{"unterminated string stops at newline", "const s = 'oops\nimport a from './yes'", []string{"m:./yes"}},
 		{"unterminated block comment", "require('./yes') /* never closed", []string{"m:./yes"}},
 		{"identifier containing keyword", `myimport("./no"); requireX("./no"); fromage "./no"`, nil},
+		// A load of a computed name is a dynamic reference: what it loads is unknown.
+		{"import of a variable", `const m = await import(name)`, []string{"d:"}},
+		{"require of a variable", `const m = require(p)`, []string{"d:"}},
+		{"require of a call", `const m = require(resolveName("x"))`, []string{"d:"}},
+		{"require of path.join without a literal", `require(path.join(__dirname, name))`, []string{"d:"}},
+		{"import of a member", `import(mods[i])`, []string{"d:"}},
+		{"template without a prefix", "import(`${dir}/x.js`)", []string{"t:|/x.js"}},
+		{"concatenation from a variable", `require(base + "/x")`, []string{"d:"}},
+		// Not loads of a computed name.
+		{"import without an argument", `import()`, nil},
+		{"require without an argument", `require()`, nil},
+		{"method named require", `obj.require(x); module.require("./a")`, []string{"m:./a"}},
+		{"function named require", `function require(id) { return id }`, nil},
+		{"literal import stays a module", `import("./a"); require("./b")`, []string{"m:./a", "m:./b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

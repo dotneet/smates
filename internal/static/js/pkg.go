@@ -13,6 +13,8 @@ type pkgJSON struct {
 	exports    any
 	hasExports bool
 	imports    any
+	// tsconfig is the "tsconfig" field, which a bare "extends" of the package names.
+	tsconfig string
 }
 
 // entryFields are package.json fields naming an entry point, in preference order.
@@ -53,6 +55,7 @@ func parsePkgJSON(b []byte) *pkgJSON {
 	if raw, ok := m["imports"]; ok {
 		_ = json.Unmarshal(raw, &p.imports)
 	}
+	_ = json.Unmarshal(m["tsconfig"], &p.tsconfig)
 	return p
 }
 

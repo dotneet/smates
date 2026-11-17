@@ -215,6 +215,14 @@ type Proc struct {
 	Results map[string]Result
 	// Coverage reports whether code coverage was collected for this process.
 	Coverage bool
+	// Exited reports whether the process recorded its end (an exit event). A Node or Bun
+	// process killed without one may have run code its trace does not show (codeUnknown).
+	Exited bool
+	// Inst tells apart processes of one trace that had the same pid and thread id (pids
+	// are reused; each process writes a stream of its own): 0 for the first to start.
+	// Key includes it for the others, and Collect makes references to "pid-tid" (Anc,
+	// SpawnKey) name the instance that was running when the referring process started.
+	Inst int
 	// SpawnKey is the process ("pid-tid") that exported SpawnCtx, its attribution context
 	// when it started this process (or a traced ancestor of it), through the environment
 	// (SMATES_TRACE_CTX="<key>:<context>").
@@ -222,6 +230,20 @@ type Proc struct {
 	// SpawnFiles maps contexts of SpawnKey to the keys this process recorded while
 	// SpawnKey was in them: SpawnCtx first, then those a forked child followed ("pctx").
 	SpawnFiles map[string]map[string]bool
+
+	// execs are the exec events read, whose dependencies are added once every stream is
+	// read (resolveExecs): whether the child traced itself is known only then.
+	execs []pendingExec
+}
+
+// pendingExec is an exec event and the contexts it happened in.
+type pendingExec struct {
+	args       []string
+	shell      bool
+	cwd        string
+	t          int64
+	rt         map[string]bool // nil: every runtime (older shims)
+	ctx, spawn string
 }
 
 // Span is a context switch.
@@ -262,7 +284,12 @@ func JoinMessage(a, b string) string {
 }
 
 // Key identifies a process or thread.
-func (p *Proc) Key() string { return fmt.Sprintf("%d-%d", p.Pid, p.Tid) }
+func (p *Proc) Key() string {
+	if p.Inst > 0 {
+		return fmt.Sprintf("%d-%d.%d", p.Pid, p.Tid, p.Inst)
+	}
+	return fmt.Sprintf("%d-%d", p.Pid, p.Tid)
+}
 
 // GlobalContext marks activity that affects every test of a run (global setup).
 const GlobalContext = "global:"
@@ -308,6 +335,22 @@ func (p *Proc) add(ctx, kind, rel string) string {
 	return rel
 }
 
+// addIn is add for an event recorded in context ctx while the process that started this
+// one was in context spawn (see SpawnFiles).
+func (p *Proc) addIn(ctx, spawn, kind, rel string) string {
+	key := p.add(ctx, kind, rel)
+	if p.SpawnKey != "" {
+		if p.SpawnFiles == nil {
+			p.SpawnFiles = map[string]map[string]bool{}
+		}
+		if p.SpawnFiles[spawn] == nil {
+			p.SpawnFiles[spawn] = map[string]bool{}
+		}
+		p.SpawnFiles[spawn][key] = true
+	}
+	return key
+}
+
 func newProc(pid, tid int) *Proc {
 	return &Proc{Pid: pid, Tid: tid, Code: map[string]bool{}, Reads: map[string]bool{}, Ctx: map[string]map[string]bool{}, Uses: map[string][]string{}, Results: map[string]Result{}, ReadsBy: map[string]map[string]bool{}}
 }
@@ -340,22 +383,51 @@ type event struct {
 }
 
 var (
-	procFileRe = regexp.MustCompile(`^proc-(\d+)-(\d+)\.jsonl$`)
+	// Streams are named proc-<pid>-<tid>-<nonce>.jsonl: a process whose pid an earlier
+	// one of the run had writes a file of its own (older shims leave out the nonce).
+	procFileRe = regexp.MustCompile(`^proc-(\d+)-(\d+)(?:-[0-9A-Za-z]+)?\.jsonl$`)
 	v8FileRe   = regexp.MustCompile(`^coverage-(\d+)-(\d+)-(\d+)\.json$`)
 )
 
+// instances groups the processes of a trace by pid and thread id ("pid-tid"), in the
+// order they started.
+type instances map[string][]*Proc
+
+func (in instances) add(p *Proc) {
+	k := fmt.Sprintf("%d-%d", p.Pid, p.Tid)
+	in[k] = append(in[k], p)
+}
+
+// at returns the instance of "pid-tid" ref running at time t (the last one started by
+// then, else the first), other than self; nil when there is none.
+func (in instances) at(ref string, t int64, self *Proc) *Proc {
+	var out *Proc
+	for _, p := range in[ref] {
+		if p == self {
+			continue
+		}
+		if out == nil || p.Start <= t {
+			out = p
+		}
+	}
+	return out
+}
+
+// resolve rewrites a "pid-tid" reference made by a process started at t to the key of
+// the instance it names (see Proc.Inst).
+func (in instances) resolve(ref string, t int64, self *Proc) string {
+	if len(in[ref]) < 2 {
+		return ref
+	}
+	if p := in.at(ref, t, self); p != nil {
+		return p.Key()
+	}
+	return ref
+}
+
 // Collect reads a trace directory. repoRoot must be absolute with symlinks resolved.
 func Collect(traceDir, repoRoot string) ([]*Proc, error) {
-	procs := map[string]*Proc{}
-	get := func(pid, tid int) *Proc {
-		k := fmt.Sprintf("%d-%d", pid, tid)
-		p := procs[k]
-		if p == nil {
-			p = newProc(pid, tid)
-			procs[k] = p
-		}
-		return p
-	}
+	byID := instances{}
 	rel, links := relCache(repoRoot), linksCache(repoRoot)
 
 	entries, err := os.ReadDir(traceDir)
@@ -369,9 +441,27 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 		pid, _ := strconv.Atoi(m[1])
 		tid, _ := strconv.Atoi(m[2])
-		if err := readStream(filepath.Join(traceDir, e.Name()), get(pid, tid), rel, links, repoRoot); err != nil {
+		p := newProc(pid, tid)
+		if err := readStream(filepath.Join(traceDir, e.Name()), p, rel, links, repoRoot); err != nil {
 			return nil, err
 		}
+		byID.add(p)
+	}
+	for _, ps := range byID {
+		sort.SliceStable(ps, func(i, j int) bool { return ps[i].Start < ps[j].Start })
+		for i, p := range ps {
+			p.Inst = i
+		}
+	}
+	// A coverage file belongs to the instance running when it was written.
+	get := func(pid, tid int, t int64) *Proc {
+		k := fmt.Sprintf("%d-%d", pid, tid)
+		if p := byID.at(k, t, nil); p != nil {
+			return p
+		}
+		p := newProc(pid, tid)
+		byID.add(p)
+		return p
 	}
 
 	var v8 []*v8Job
@@ -388,8 +478,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 			pid, _ := strconv.Atoi(m[1])
 			ts, _ := strconv.ParseInt(m[2], 10, 64)
 			tid, _ := strconv.Atoi(m[3])
-			p := get(pid, tid)
-			p.Coverage = true
+			p := get(pid, tid, ts)
 			if ts > p.End {
 				p.End = ts
 			}
@@ -401,6 +490,7 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		if f.err != nil {
 			return // a truncated file from a killed process: skip it
 		}
+		f.p.Coverage = true
 		for _, u := range f.urls {
 			if r, ok := rel(u); ok {
 				f.p.add("", "code", r)
@@ -408,17 +498,176 @@ func Collect(traceDir, repoRoot string) ([]*Proc, error) {
 		}
 	})
 
-	out := make([]*Proc, 0, len(procs))
-	for _, p := range procs {
-		out = append(out, p)
+	var out []*Proc
+	for _, ps := range byID {
+		out = append(out, ps...)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Pid != out[j].Pid {
 			return out[i].Pid < out[j].Pid
 		}
-		return out[i].Tid < out[j].Tid
+		if out[i].Tid != out[j].Tid {
+			return out[i].Tid < out[j].Tid
+		}
+		return out[i].Inst < out[j].Inst
 	})
+	// References name the instance running when the referring process started.
+	for _, p := range out {
+		p.Anc = byID.resolve(p.Anc, p.Start, p)
+		p.SpawnKey = byID.resolve(p.SpawnKey, p.Start, p)
+	}
+	resolveExecs(out, repoRoot, rel)
 	return out, nil
+}
+
+// resolveExecs adds the dependencies of the exec events of procs (see execDepsIn). A
+// Node, Bun or Python program counts as tracing itself only when a traced process of
+// that runtime started under the event's process after it (verifiedRuntimes): a child
+// whose environment the program or a wrapper replaced (env -i, a container, a minimal
+// env a launcher builds) records nothing, and is then analyzed as an opaque command.
+func resolveExecs(procs []*Proc, root string, rel func(string) (string, bool)) {
+	byPid := map[int][]*Proc{}
+	for _, p := range procs {
+		if p.Tid == 0 {
+			byPid[p.Pid] = append(byPid[p.Pid], p)
+		}
+	}
+	children := childrenOf(procs, byPid)
+	for _, p := range procs {
+		if len(p.execs) == 0 {
+			continue
+		}
+		// The program an os.exec* replaces the process with (also in a forked child,
+		// whose traced ancestor its program does not become) has its pid.
+		kids := children[p.Key()]
+		for _, q := range byPid[p.Pid] {
+			if q != p && q.Start >= p.Start && !slices.Contains(kids, q) {
+				kids = append(kids, q)
+			}
+		}
+		for _, e := range p.execs {
+			rt := verifiedRuntimes(e, kids, children)
+			for _, k := range execDepsIn(e.args, e.shell, e.cwd, root, rel, rt) {
+				p.addIn(e.ctx, e.spawn, "key", k)
+			}
+		}
+		p.execs = nil
+	}
+}
+
+// childrenOf maps the key of each traced process to the traced processes it started:
+// by the traced ancestor a child names (SMATES_TRACE_PARENT, which reaches it through a
+// shell or launcher), and by its parent pid. The latter links children whose runtime
+// passes on the environment the process started with rather than the one its shim
+// changed (Bun.spawn without an env option): they name no ancestor. Of several
+// processes that had the parent pid, it is the last one started by the child's start.
+func childrenOf(procs []*Proc, byPid map[int][]*Proc) map[string][]*Proc {
+	children := map[string][]*Proc{}
+	for _, p := range procs {
+		if p.Tid != 0 {
+			continue
+		}
+		if p.Anc != "" {
+			children[p.Anc] = append(children[p.Anc], p)
+		}
+		if p.Ppid == 0 || p.Ppid == p.Pid {
+			continue
+		}
+		var parent *Proc
+		for _, q := range byPid[p.Ppid] {
+			if q != p && q.Start <= p.Start && (parent == nil || q.Start >= parent.Start) {
+				parent = q
+			}
+		}
+		if parent != nil && parent.Key() != p.Anc {
+			children[parent.Key()] = append(children[parent.Key()], p)
+		}
+	}
+	return children
+}
+
+// execRuntimes are the runtimes whose shims trace a process.
+var execRuntimes = []string{"node", "bun", "python"}
+
+// verifiedRuntimes returns the runtimes of e.rt (all when nil) that a traced process
+// of the run shows started for e: one of kids (the processes whose traced ancestor is
+// the event's process, and the programs it exec'd) started no earlier than the event
+// (when it has a time), or a descendant of one (through children, by traced ancestor),
+// of that runtime. A command that runs a runtime itself (node app.js, not through a
+// shell) must also match the process's arguments: those after its script (Node and
+// Bun) or after sys.argv[0] (Python) are words of the command. A process seen at any
+// depth counts (npx, a forked Python child that execs): the check catches children
+// that left no trace at all, not one of two alike that did.
+func verifiedRuntimes(e pendingExec, kids []*Proc, children map[string][]*Proc) map[string]bool {
+	direct := ""
+	if !e.shell && len(e.args) > 0 {
+		if prog := progName(e.args[0]); tracedPrograms[prog] || strings.HasPrefix(prog, "python3.") {
+			direct = runtimeOf(prog)
+		}
+	}
+	out := map[string]bool{}
+	type item struct {
+		p     *Proc
+		depth int
+	}
+	var queue []item
+	for _, c := range kids {
+		if e.t == 0 || c.Start == 0 || c.Start >= e.t-startSlack {
+			queue = append(queue, item{c, 0})
+		}
+	}
+	seen := map[*Proc]bool{}
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		if seen[it.p] {
+			continue
+		}
+		seen[it.p] = true
+		lang := it.p.Lang
+		if lang != "" && (e.rt == nil || e.rt[lang]) && (lang != direct || argsMatch(it.p, e.args)) {
+			out[lang] = true
+		}
+		if it.depth < 4 {
+			for _, c := range children[it.p.Key()] {
+				queue = append(queue, item{c, it.depth + 1})
+			}
+		}
+	}
+	return out
+}
+
+// startSlack is how much earlier than the exec event a child's start may be recorded
+// (the clocks of two processes).
+const startSlack = 1000
+
+// progName is the program name of a command word (its base name without .exe).
+func progName(w string) string {
+	return strings.TrimSuffix(filepath.Base(w), ".exe")
+}
+
+// argsMatch reports whether the arguments a traced process p received (after its
+// script) are all words of the command args.
+func argsMatch(p *Proc, args []string) bool {
+	user := p.Argv
+	switch {
+	case p.Lang == "python" && len(user) > 0:
+		user = user[1:]
+	case p.Lang != "python" && len(user) > 1:
+		user = user[2:]
+	default:
+		user = nil
+	}
+	words := map[string]bool{}
+	for _, a := range args {
+		words[a] = true
+	}
+	for _, a := range user {
+		if !words[a] {
+			return false
+		}
+	}
+	return true
 }
 
 // RelFunc returns a memoized converter from absolute paths to repo-relative ones that
@@ -466,19 +715,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 	}
 	defer f.Close()
 	ctx, spawn := "", ""
-	add := func(kind, r string) string {
-		key := p.add(ctx, kind, r)
-		if p.SpawnKey != "" {
-			if p.SpawnFiles == nil {
-				p.SpawnFiles = map[string]map[string]bool{}
-			}
-			if p.SpawnFiles[spawn] == nil {
-				p.SpawnFiles[spawn] = map[string]bool{}
-			}
-			p.SpawnFiles[spawn][key] = true
-		}
-		return key
-	}
+	add := func(kind, r string) string { return p.addIn(ctx, spawn, kind, r) }
 	return eachLine(f, maxLine, func(line []byte) {
 		var ev event
 		if json.Unmarshal(line, &ev) != nil {
@@ -499,13 +736,16 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 			var keys []string
 			if r, ok := rel(ev.P); ok {
 				keys = append(keys, add(ev.K, r))
-				// The symlinks the path went through are read too: retargeting one
-				// changes what the test sees.
+			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
+				keys = append(keys, add(ev.K, "."))
+			}
+			// The symlinks of the repository the path went through are read too:
+			// retargeting one changes what the test sees, also when it points
+			// outside the repository (whose files are not recorded themselves).
+			if filepath.IsAbs(ev.P) {
 				for _, l := range links(ev.P) {
 					keys = append(keys, add("read", l))
 				}
-			} else if (ev.K == "dir" || ev.K == "tree") && isRoot(ev.P, root) {
-				keys = append(keys, add(ev.K, "."))
 			}
 			if by, ok := rel(ev.By); ok && len(keys) > 0 && ev.By != "" {
 				m := p.ReadsBy[by]
@@ -538,7 +778,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 			if ev.Trunc {
 				// The shim cut a huge command line short: nothing can be told from what
 				// is left, so the command may read anything below its working directory.
-				if k := opaqueKey(cwd, root, rel); k != "" {
+				if k := treeKey(cwd, root, rel, true); k != "" {
 					add("key", k)
 				}
 				break
@@ -550,9 +790,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 					rt[r] = true
 				}
 			}
-			for _, k := range execDepsIn(ev.Args, ev.Shell, cwd, root, rel, rt) {
-				add("key", k)
-			}
+			p.execs = append(p.execs, pendingExec{args: ev.Args, shell: ev.Shell, cwd: cwd, t: ev.T, rt: rt, ctx: ctx, spawn: spawn})
 		case "ctx":
 			ctx = relCtx(ev.ID, rel)
 			p.CtxSpans = append(p.CtxSpans, Span{At: ev.T, ID: ctx})
@@ -567,6 +805,7 @@ func readStream(file string, p *Proc, rel func(string) (string, bool), links fun
 				addResult(p.Results, r, ev.Status, ev.Ms, ev.Msg)
 			}
 		case "exit":
+			p.Exited = true
 			if ev.Code != nil {
 				c := *ev.Code
 				p.Exit = &c
@@ -619,18 +858,6 @@ func eachLine(r io.Reader, limit int, fn func([]byte)) error {
 			return err
 		}
 	}
-}
-
-// opaqueKey is the key of everything below dir, a command's working directory ("" when
-// dir is outside the repository).
-func opaqueKey(dir, root string, rel func(string) (string, bool)) string {
-	if r, ok := rel(dir); ok {
-		return depkey.Tree(r)
-	}
-	if isRoot(dir, root) {
-		return depkey.Tree(".")
-	}
-	return ""
 }
 
 // relCtx converts "kind:/abs/path" contexts to "kind:repo/rel"; other forms are kept.

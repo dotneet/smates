@@ -623,7 +623,15 @@ const stateCommands = `usage: smates state show [--format json]          print t
        smates state merge <file>... [-o file]   merge other state files into the state
        smates state clear                       delete the state`
 
+// cmdState is `smates state`. Every error it returns decides the exit code: anything
+// not classified as a usage or configuration error (git failing to fetch or push, a
+// file that cannot be read or written, the shared state's lock held too long) is an
+// environment error.
 func cmdState(args []string, stdout, stderr io.Writer) error {
+	return orEnvError(stateCommand(args, stdout, stderr))
+}
+
+func stateCommand(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return usageError{errors.New("usage: smates state show|path|pull|push|merge|clear")}
 	}
@@ -655,20 +663,29 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 	case "clear":
 		return store.Clear()
 	case "show":
-		st, err := store.Load()
+		// A state that cannot be decoded is shown as none, as a run starts cold then.
+		st, err := loadStoreState(store, stderr)
 		if err != nil {
 			return err
 		}
 		return showState(st, store, c.asJSON(), stdout)
 	case "merge":
-		st, err := store.Load()
+		// The named files first: state.Load reads a missing file as an empty state,
+		// which would make a mistyped name (or a shard's state that was never
+		// downloaded) merge nothing without a word.
+		for _, f := range files {
+			if err := checkStateFile(f); err != nil {
+				return err
+			}
+		}
+		st, err := loadStoreState(store, stderr)
 		if err != nil {
 			return err
 		}
 		for _, f := range files {
 			o, err := state.Load(f)
 			if err != nil {
-				return fmt.Errorf("%s: %w", f, err)
+				return envError{fmt.Errorf("%s: %w", f, err)}
 			}
 			st.Merge(o)
 		}
@@ -694,7 +711,7 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if r == "" {
 			b := branchName(repo)
 			if b == "" {
-				return fmt.Errorf("cannot determine the branch (detached HEAD): pass --ref or set SMATES_BRANCH")
+				return usageError{fmt.Errorf("cannot determine the branch (detached HEAD): pass --ref or set SMATES_BRANCH")}
 			}
 			r = stateRefPrefix + b
 		}
@@ -720,7 +737,7 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		st, err := store.Load()
+		st, err := loadStoreState(store, stderr)
 		if err != nil {
 			return err
 		}
@@ -728,6 +745,21 @@ func cmdState(args []string, stdout, stderr io.Writer) error {
 		return store.Save(st)
 	default:
 		return usageError{fmt.Errorf("unknown state command %q\n%s", sub, stateCommands)}
+	}
+	return nil
+}
+
+// checkStateFile checks that a state file named on the command line exists: a missing
+// one is a usage error, one that cannot be looked at an environment error.
+func checkStateFile(path string) error {
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return usageError{fmt.Errorf("%s: no such state file", path)}
+	case err != nil:
+		return envError{err}
+	case fi.IsDir():
+		return usageError{fmt.Errorf("%s is a directory, not a state file", path)}
 	}
 	return nil
 }
