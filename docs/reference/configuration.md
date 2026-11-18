@@ -186,11 +186,10 @@ suites:
 ```
 
 Use the same inputs when recording and selecting. smates records a hash of each
-value with each test result, including when `env_ignore` matches the name. If a value
-is empty or missing, or any test lacks a matching record, the entire suite is
-selected with a reason naming the first input that triggered the fallback. This
-also applies to a first run in diff mode. In a sharded run, all shards together
-cover the suite.
+value with each test result, including when `env_ignore` matches the name. A test
+is selected if its recording lacks a matching hash. If an input is missing or
+blank, or selection runs in diff mode without recorded state, smates selects the
+entire suite and explains why. In a sharded run, all shards together cover the suite.
 
 ### Default inputs
 

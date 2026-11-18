@@ -35,27 +35,22 @@ func (s *selection) decideTests() {
 	s.noteOversizedTrees()
 }
 
-// envInputFallback reports the first external revision the suite cannot compare
-// with every test's last run. A git diff cannot attest to an external revision.
+// envInputFallback reports when every test has to run: the current value is
+// unknown, or diff mode has no recordings to compare it with. In state mode
+// with known values, decide compares each test's recorded input hashes.
 func (ss *suiteSel) envInputFallback(mode Mode) (key, reason string) {
-	if mode == ModeAll || len(ss.units) == 0 {
+	names := ss.sr.Suite.EnvInputs
+	if mode == ModeAll || len(ss.units) == 0 || len(names) == 0 {
 		return "", ""
 	}
-	for _, name := range ss.sr.Suite.EnvInputs {
-		key := depkey.Env(name)
+	for _, name := range names {
 		value, ok := ss.sr.Suite.LookupEnv(name)
 		if !ok || strings.TrimSpace(value) == "" {
-			return key, "is missing or empty"
+			return depkey.Env(name), "is missing or empty"
 		}
-		hash := EnvHash(value, true)
-		for _, u := range ss.units {
-			if u.entry == nil || u.entry.Deps[key] == "" {
-				return key, "has no recorded value for at least one test"
-			}
-			if u.entry.Deps[key] != hash {
-				return key, "differs from the value recorded for at least one test"
-			}
-		}
+	}
+	if mode == ModeDiff {
+		return depkey.Env(names[0]), "has no recorded value to compare in diff mode"
 	}
 	return "", ""
 }
@@ -127,10 +122,11 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 }
 
 // decideUnit decides one unit against its D(T): in a DiffUnrecorded selection a unit
-// with no recorded entry is decided by static analysis against Base, and selected when
-// tests read a file of its suite that changed since Base and that diff mode would find
-// an orphan (findUnrecordedReads); any other in the selection's mode against its entry
-// (see decide).
+// with no recorded entry is decided by static analysis against Base, except that a
+// test with external inputs needs a recording to compare them. The diff also selects
+// the unit when tests read a file of its suite that changed since Base and that diff
+// mode would find an orphan (findUnrecordedReads). Other units are decided in the
+// selection's mode against their entries (see decide).
 func (s *selection) decideUnit(ss *suiteSel, u *unitSel, envKey, envReason string) *Test {
 	t := &Test{ID: u.id}
 	if u.entry != nil {
@@ -138,7 +134,7 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel, envKey, envReason strin
 	}
 	deps := ss.sr.Deps[u.id]
 	sets := ss.setChanged
-	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil {
+	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil && len(ss.sr.Suite.EnvInputs) == 0 {
 		decide(t, ModeDiff, nil, deps, ss.hasher, ss.baseChangeSet)
 		sets = ss.setChangedBase
 		if reads := s.unrecordedReads[ss.sr.Name]; !t.Selected && len(reads) > 0 {
