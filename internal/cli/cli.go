@@ -318,12 +318,15 @@ type project struct {
 	log       io.Writer
 	verbose   bool
 	dir       string // -C
+	discovery time.Duration
+	stateLoad time.Duration
 	// others are the suites --suite left out (they still explain changes, see
 	// selector.Input.Others).
 	others []*runner.Suite
 }
 
 func load(cf *commonFlags, log io.Writer) (*project, error) {
+	start := time.Now()
 	dir := cf.dir
 	if dir == "" {
 		dir = "."
@@ -397,14 +400,18 @@ func load(cf *commonFlags, log io.Writer) (*project, error) {
 	}
 	store := openStore(repo, cfg, cf.state, log)
 	statePath := store.path
+	stateStart := time.Now()
 	st, err := loadStoreState(store, log)
 	if err != nil {
 		return nil, err
 	}
+	stateLoad := time.Since(stateStart)
 	p := &project{
 		repo: repo, cfg: cfg, suites: suites, others: others, statePath: statePath, store: store, state: st, snap: snap, files: files,
 		graph: static.New(repo.Root, files, static.Options{PythonRoots: roots}), ci: detectCI(), log: log, verbose: cf.verbose, dir: cf.dir,
+		stateLoad: stateLoad,
 	}
+	p.discovery = time.Since(start) - stateLoad
 	return p, nil
 }
 

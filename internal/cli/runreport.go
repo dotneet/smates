@@ -175,6 +175,15 @@ func (c *cycle) writeSummaries(elapsed time.Duration) {
 	}
 }
 
+type runTimings struct {
+	Discovery int64 `json:"discovery"`
+	StateLoad int64 `json:"state_load"`
+	Selection int64 `json:"selection"`
+	Execution int64 `json:"execution"`
+	Record    int64 `json:"record"`
+	StateSave int64 `json:"state_save"`
+}
+
 // writeReport writes the JSON report (--report).
 func (c *cycle) writeReport() error {
 	rep := struct {
@@ -200,8 +209,9 @@ func (c *cycle) writeReport() error {
 		MaxTimeReached bool `json:"max_time_reached"`
 		// UnmetRequires: suite -> the requirements not met (the units are in not_run).
 		UnmetRequires map[string][]string `json:"unmet_requires"`
+		Timings       runTimings          `json:"timings_ms"`
 	}{jsonSelection(c.sel), c.units.statuses(), c.escapes, c.possible, c.exit, c.f.shadow, c.flakes, c.failures.all(), c.f.failFast,
-		c.units.bySuite(unitNotRun, unitUnstarted, unitUnmet), c.stop.String(), c.interrupted(), c.capped(), c.unmetWhy}
+		c.units.bySuite(unitNotRun, unitUnstarted, unitUnmet), c.stop.String(), c.interrupted(), c.capped(), c.unmetWhy, c.timings}
 	if rep.Flaky == nil {
 		rep.Flaky = []flakeReport{}
 	}

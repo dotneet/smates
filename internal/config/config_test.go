@@ -262,6 +262,33 @@ func TestBool(t *testing.T) {
 	}
 }
 
+func TestParseEnvInputs(t *testing.T) {
+	for _, c := range []struct {
+		input string
+		want  []string
+	}{
+		{`[DB_IMAGE_DIGEST, _SCHEMA_V2]`, []string{"DB_IMAGE_DIGEST", "_SCHEMA_V2"}},
+		{`[""]`, nil},
+		{`["$DB_IMAGE_DIGEST"]`, nil},
+		{`["DB_*"]`, nil},
+		{`["DB_IMAGE_DIGEST=value"]`, nil},
+		{`["1DB"]`, nil},
+	} {
+		t.Run(c.input, func(t *testing.T) {
+			cfg, err := Parse([]byte("suites:\n  - runner: go\n    env_inputs: " + c.input + "\n"))
+			if c.want == nil {
+				if err == nil || !strings.Contains(err.Error(), "env_inputs") {
+					t.Fatalf("want an env_inputs error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if got := cfg.Suites[0].EnvInputs; !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestParseRequires(t *testing.T) {
 	c, err := Parse([]byte(`
 suites:

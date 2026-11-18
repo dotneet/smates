@@ -23,12 +23,36 @@ func (s *selection) decideTests() {
 		if !ss.selecting {
 			continue
 		}
+		envKey, reason := ss.envInputFallback(s.res.Mode)
+		if envKey != "" {
+			s.res.Notes = append(s.res.Notes, fmt.Sprintf("suite %q: selecting every test because env_inputs %s %s", ss.sr.Name, envKey, reason))
+		}
 		for _, u := range ss.units {
-			ss.sr.Tests = append(ss.sr.Tests, s.decideUnit(ss, u))
+			ss.sr.Tests = append(ss.sr.Tests, s.decideUnit(ss, u, envKey, reason))
 		}
 		ss.sr.All = allSelected(ss.sr)
 	}
 	s.noteOversizedTrees()
+}
+
+// envInputFallback reports when every test has to run: the current value is
+// unknown, or diff mode has no recordings to compare it with. In state mode
+// with known values, decide compares each test's recorded input hashes.
+func (ss *suiteSel) envInputFallback(mode Mode) (key, reason string) {
+	names := ss.sr.Suite.EnvInputs
+	if mode == ModeAll || len(ss.units) == 0 || len(names) == 0 {
+		return "", ""
+	}
+	for _, name := range names {
+		value, ok := ss.sr.Suite.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			return depkey.Env(name), "is missing or empty"
+		}
+	}
+	if mode == ModeDiff {
+		return depkey.Env(names[0]), "has no recorded value to compare in diff mode"
+	}
+	return "", ""
 }
 
 // noteOversizedTrees notes the directories outside the snapshot that tests depend on
@@ -98,18 +122,19 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 }
 
 // decideUnit decides one unit against its D(T): in a DiffUnrecorded selection a unit
-// with no recorded entry is decided by static analysis against Base, and selected when
-// tests read a file of its suite that changed since Base and that diff mode would find
-// an orphan (findUnrecordedReads); any other in the selection's mode against its entry
-// (see decide).
-func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
+// with no recorded entry is decided by static analysis against Base, except that a
+// test with external inputs needs a recording to compare them. The diff also selects
+// the unit when tests read a file of its suite that changed since Base and that diff
+// mode would find an orphan (findUnrecordedReads). Other units are decided in the
+// selection's mode against their entries (see decide).
+func (s *selection) decideUnit(ss *suiteSel, u *unitSel, envKey, envReason string) *Test {
 	t := &Test{ID: u.id}
 	if u.entry != nil {
 		t.Duration = u.entry.DurationMs
 	}
 	deps := ss.sr.Deps[u.id]
 	sets := ss.setChanged
-	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil {
+	if u.entry == nil && s.res.Mode == ModeState && s.baseChanged != nil && len(ss.sr.Suite.EnvInputs) == 0 {
 		decide(t, ModeDiff, nil, deps, ss.hasher, ss.baseChangeSet)
 		sets = ss.setChangedBase
 		if reads := s.unrecordedReads[ss.sr.Name]; !t.Selected && len(reads) > 0 {
@@ -121,6 +146,13 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 		}
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changeSet)
+	}
+	if envKey != "" {
+		t.Selected, t.Reason = true, ReasonChanged
+		t.Detail = "env_inputs " + envKey + " " + envReason
+		if !slices.Contains(t.Changed, envKey) {
+			t.Changed = append(t.Changed, envKey)
+		}
 	}
 	s.runAnyway(t, ss, u)
 	s.reportConfig(t, u.known)

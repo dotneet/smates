@@ -122,13 +122,27 @@ func withCoarse(refs []ref, src []byte, jsx [][2]int) []ref {
 	// seen maps the references found so far to their index in refs, -1 for the
 	// lexer's.
 	seen := map[key]int{}
+	// A type-only declaration can account for only its own occurrence. A match
+	// elsewhere may be a runtime load the lexer missed, even for the same specifier.
+	var erased map[int]key
 	dynamic := false
 	for _, r := range refs {
-		seen[key{r.kind, r.spec, r.mock}] = -1
+		k := key{r.kind, r.spec, r.mock}
+		if r.erase == eraseNever {
+			seen[k] = -1
+		} else {
+			if erased == nil {
+				erased = map[int]key{}
+			}
+			erased[r.erasePos] = k
+		}
 		dynamic = dynamic || r.kind == refDynamic
 	}
 	for _, c := range coarseRefs(src) {
 		k := key{c.kind, c.spec, c.mock}
+		if old, ok := erased[c.pos]; ok && old == k {
+			continue
+		}
 		c.coarse = !inJSX(c.pos)
 		if i, ok := seen[k]; ok {
 			if i >= 0 && !c.coarse {

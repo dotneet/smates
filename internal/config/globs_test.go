@@ -149,7 +149,7 @@ func TestGlobFields(t *testing.T) {
 // entries) is in globFields or listed here as not a glob, so that a list added later
 // cannot skip the checks.
 func TestGlobFieldsListed(t *testing.T) {
-	notGlobs := map[string]bool{"full_run_branches": true}
+	notGlobs := map[string]bool{"full_run_branches": true, "env_inputs": true}
 	c, err := Parse([]byte(suiteDoc("    rules: [{tests: [a], reaches: [b], deps: [c]}]\n    requires: [{env: A}]\n    depends_on: [api]\n")))
 	if err != nil {
 		t.Fatal(err)

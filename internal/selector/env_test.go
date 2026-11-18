@@ -77,6 +77,109 @@ func TestSelectEnvChanged(t *testing.T) {
 	}
 }
 
+func TestSelectEnvInputs(t *testing.T) {
+	const name, key = "DB_IMAGE_DIGEST", "$DB_IMAGE_DIGEST"
+	const plain, region = "test/plain.test.js", "test/region.test.js"
+	allChanged := map[string]string{plain: ReasonChanged, region: ReasonChanged}
+	cases := []struct {
+		name, value, recorded string
+		edit                  func(*fixture, *state.State)
+		want                  map[string]string
+		unset, override       bool
+		diffUnrecorded        bool
+		wantMissingNote       bool
+	}{
+		{name: "unchanged", value: "revision-a"},
+		{name: "suite override", value: "revision-b", override: true},
+		{name: "changed for every test", value: "revision-b", want: allChanged},
+		{name: "unset", unset: true, want: allChanged, wantMissingNote: true},
+		{name: "empty", want: allChanged, wantMissingNote: true},
+		{name: "must keep tests even when the blank value matches the recording", value: " \t", recorded: " \t", want: allChanged, wantMissingNote: true},
+		{name: "one test has an old hash", value: "revision-a", want: map[string]string{plain: ReasonChanged}, edit: func(_ *fixture, st *state.State) {
+			st.Suites["node"].Tests[plain].Deps[key] = EnvHash("revision-old", true)
+		}},
+		{name: "one entry predates env_inputs", value: "revision-a", want: map[string]string{plain: ReasonChanged}, edit: func(_ *fixture, st *state.State) {
+			delete(st.Suites["node"].Tests[plain].Deps, key)
+		}},
+		{name: "one new test", value: "revision-a", want: map[string]string{"test/new.test.js": ReasonNew}, edit: func(f *fixture, _ *state.State) {
+			f.write("test/new.test.js", "1")
+		}},
+		{name: "must keep an unrecorded test even with diff_unrecorded and no git changes", value: "revision-a", diffUnrecorded: true, want: map[string]string{plain: ReasonNew}, edit: func(_ *fixture, st *state.State) {
+			delete(st.Suites["node"].Tests, plain)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := envFixture(t)
+			f.suites[0].EnvInputs = []string{name}
+			f.cfg.EnvIgnore = []string{"*"} // explicit inputs still apply
+			f.write("other/example.test.js", "1")
+			f.suites = append(f.suites, suite(t, config.Suite{Name: "other", Runner: "node", Root: "other", Tests: []string{"*.test.js"}}))
+			recorded := c.recorded
+			if recorded == "" {
+				recorded = "revision-a"
+			}
+			t.Setenv(name, recorded)
+			if c.override {
+				f.suites[0].Env = map[string]string{name: "revision-a"}
+			}
+			st := f.record(nil, nil)
+			for id, entry := range st.Suites["node"].Tests {
+				if got := entry.Deps[key]; got != EnvHash(recorded, true) {
+					t.Errorf("%s: recorded %q, want the hash of the declared input", id, got)
+				}
+			}
+			if c.edit != nil {
+				c.edit(f, st)
+			}
+			if c.unset {
+				unsetenv(t, name)
+			} else {
+				t.Setenv(name, c.value)
+			}
+			var options func(*Input)
+			if c.diffUnrecorded {
+				repo, base := gitFixture(t, f)
+				options = func(in *Input) { in.Repo, in.Base, in.DiffUnrecorded = repo, base, true }
+			}
+			res := f.sel(st, options)
+			got := map[string]string{}
+			for _, unit := range res.Suites[0].Tests {
+				if unit.Selected {
+					got[unit.ID] = unit.Reason
+				}
+				if c.want[unit.ID] == ReasonChanged && unit.Via[key] != ViaInput {
+					t.Errorf("%s: %+v, want %s as an input", unit.ID, unit, key)
+				}
+			}
+			if !maps.Equal(got, c.want) {
+				t.Errorf("selected %v, want %v", got, c.want)
+			}
+			if d := decisions(res)["other/example.test.js"]; d != "-unaffected" {
+				t.Errorf("other suite: %s, want unaffected", d)
+			}
+			missingNote := strings.Contains(strings.Join(res.Notes, "\n"), key+" is missing or empty")
+			if missingNote != c.wantMissingNote {
+				t.Errorf("notes %v: want missing input note = %v", res.Notes, c.wantMissingNote)
+			}
+			if slices.Contains(res.Changed, key) || len(res.Orphans) != 0 {
+				t.Errorf("changed files %v, orphans %v", res.Changed, res.Orphans)
+			}
+		})
+	}
+}
+
+func TestSelectEnvInputsWithoutState(t *testing.T) {
+	f := envFixture(t)
+	f.suites[0].EnvInputs = []string{"DB_IMAGE_DIGEST"}
+	t.Setenv("DB_IMAGE_DIGEST", "revision-a")
+	repo, base := gitFixture(t, f)
+	res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+	if res.Mode != ModeDiff || !res.Suites[0].All {
+		t.Fatalf("want the whole suite with no recorded value in diff mode: %+v", res)
+	}
+}
+
 func TestSelectEnvIgnore(t *testing.T) {
 	f := envFixture(t)
 	t.Setenv("APP_REGION", "eu")

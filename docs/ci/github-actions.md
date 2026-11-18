@@ -534,6 +534,23 @@ share that the selection (of the whole run) would have skipped. Together the sha
 every test once, and an escape is reported only by the shard that owns the test.
 `smates stats` counts the shards as one shadow run and adds up their escapes.
 
+For a Vitest suite with plugins or dynamic configuration, check the file inventory
+before interpreting escapes. Run `smates list --suite app --format json` from the
+repository root and [`vitest list --filesOnly`](https://vitest.dev/guide/cli#vitest-list)
+from the runner's working directory with its usual config and environment. For a
+multi-project suite, collect each project's files with `--project` and compare the
+union of repository-relative paths with `suites[].units`. Keep the per-project lists
+to identify which project produced a file. If the listing fails or the inventories
+differ, run the original full test command. Review
+[browser tracing limits](../reference/limitations.md) before enabling
+`trust_browser_passes`.
+
+To compare selected and full runs on the same commit, collect
+[`run --report`](../reference/json-output.md#smates-run-report) for both runs.
+Use `timings_ms` for local phases and measure installation and Actions cache
+restore/save at the CI step level. Record the existing result cache's hit or miss
+with each measurement.
+
 ### Seed the state { #seed-the-state }
 
 A pull request starts from the state of its branch, else of its base branch, else of
@@ -577,6 +594,26 @@ jobs:
 - `smates stats --since 30d` on the state restored from the default branch shows the
   shadow runs and escapes of the nightly runs. Pull request runs save their state in the
   pull request's own cache scope, so their records never reach it.
+
+### Use an existing test-result cache { #existing-test-result-cache }
+
+For a package job that already restores a full-suite result with a step called
+`full-result`, run smates when the exact result key misses. This example assumes
+the result key covers the test scope, toolchain and inputs, including any external
+service revisions. If the inputs cannot be resolved, use the test step.
+
+```yaml
+      - uses: dotneet/smates@vX.Y.Z
+        if: steps.full-result.outputs.cache-hit != 'true'
+        with:
+          args: --suite app
+          cache-key: app
+```
+
+Save a full-suite success entry only from a verified full run. Seed smates state
+on the default branch using `args: --all --suite app` with the same test setup
+and `cache-key`. Let the seeding run execute even on a result-cache hit so it can
+record the dependencies.
 
 ### Pull request comment { #pull-request-comment }
 

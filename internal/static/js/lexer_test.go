@@ -340,6 +340,40 @@ func TestJSXSpansKeepUnresolved(t *testing.T) {
 	}
 }
 
+func TestCoarseTypeReferenceOccurrences(t *testing.T) {
+	const skipped = "type Identity = <T /* comment */>(value: T) => T\n"
+	for _, c := range []struct {
+		name, file, src string
+		refs, missing   []string
+	}{
+		{"type only in a script block", "a.vue",
+			"<script lang=\"ts\">\nimport type { T } from './dep'\n</script>",
+			[]string{"m:./dep (type)"}, nil},
+		{"type only in frontmatter", "a.astro",
+			"\n---\nexport type { T } from './dep'\n---\n<p>text</p>",
+			[]string{"m:./dep (type)"}, nil},
+		{"type only with repeated declarations", "a.ts",
+			"import type { A } from './dep'\nexport type { B } from './dep'\n",
+			[]string{"m:./dep (type)", "m:./dep (type)"}, nil},
+		{"must keep a runtime reference skipped as JSX", "a.tsx",
+			"import type { T } from 'virtual:dep'\n" + skipped + "import('virtual:dep')",
+			[]string{"m:virtual:dep (type)", "m:virtual:dep"}, []string{"virtual:dep"}},
+		{"must keep a coarse-only reference outside JSX", "a.ts",
+			"import type { T } from 'virtual:dep'\n// import('virtual:dep')",
+			[]string{"m:virtual:dep (type)", "m:virtual:dep"}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := refStrings(refsOf(c.file, []byte(c.src))); !reflect.DeepEqual(got, c.refs) {
+				t.Errorf("references = %q, want %q", got, c.refs)
+			}
+			h := newHost(t, map[string]string{c.file: c.src})
+			if got := New(h, Options{}).Unresolved(c.file, h.Read(c.file)); !reflect.DeepEqual(got, c.missing) {
+				t.Errorf("unresolved = %q, want %q", got, c.missing)
+			}
+		})
+	}
+}
+
 // TestTypeParametersAreNotJSX: a type parameter list before a parameter list (a
 // generic arrow function or call signature, in TypeScript or Flow) and a type
 // assertion in a script that is not JSX do not open a JSX element, so the code after
