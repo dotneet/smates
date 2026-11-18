@@ -166,10 +166,31 @@ One entry of `suites:`.
 | `python_roots` | list of paths (relative to `root`) | `[]` | Extra import roots for Python static analysis (for example `src` in a src layout). |
 | `env_ignore` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
 | `env_track` | list of names or globs | `[]` | Like the top-level key, for this suite only (added to it). |
+| `env_inputs` | list of variable names | `[]` | External revisions required to skip any test in this suite. The values are tracked even when the tests never read them. See [External inputs](#external-inputs). |
 | `volatile` | list of globs (relative to `root`) | `[]` | Test units that run every time, whatever changed (reason `volatile`): tests that depend on something smates cannot track, such as the date. Matched like a rule's `tests`: a unit ID, and for a Go test function (`pkg#TestName`) also its package directory and its test file. Not for compile checks. |
 | `untraced` | list of globs (relative to `root`) | `[]` | Test units that must run without code coverage while recording, because tracing changes what they measure (timing and ratio assertions). They run in a batch of their own; a pass is recorded with the files they read and their static import closure, or stays unknown (and runs again) when smates cannot tell all the code they run. vitest, jest, node and bun only; in other suites they run without tracing and run every time. Matched like `volatile`. See [Tests that measure time](../guides/runners.md#tests-that-measure-time). |
 | `max_age` | duration (`168h`, `30m`) | `0` (never) | A test unit whose last recorded run is older than this runs again, whatever changed (reason `expired`). |
 | `requires` | list of [requirements](#requires) | `[]` | What the environment must provide for the tests to run (a database, a browser). Tests whose requirements are not met do not run and stay selected. |
+
+### External inputs { #external-inputs }
+
+Use `env_inputs` when the result depends on a service or artifact outside the
+repository. For example, supply the digest of the database image actually used by CI
+and the revision of its seed data:
+
+```yaml
+suites:
+  - name: integration
+    runner: go
+    env_inputs: [DB_IMAGE_DIGEST, DB_SEED_REVISION]
+```
+
+Use the same inputs when recording and selecting. smates records a hash of each
+value with each test result, including when `env_ignore` matches the name. If a value
+is empty or missing, or any test lacks a matching record, the entire suite is
+selected with a reason naming the first input that triggered the fallback. This
+also applies to a first run in diff mode. In a sharded run, all shards together
+cover the suite.
 
 ### Default inputs
 

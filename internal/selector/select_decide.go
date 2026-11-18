@@ -23,12 +23,41 @@ func (s *selection) decideTests() {
 		if !ss.selecting {
 			continue
 		}
+		envKey, reason := ss.envInputFallback(s.res.Mode)
+		if envKey != "" {
+			s.res.Notes = append(s.res.Notes, fmt.Sprintf("suite %q: selecting every test because env_inputs %s %s", ss.sr.Name, envKey, reason))
+		}
 		for _, u := range ss.units {
-			ss.sr.Tests = append(ss.sr.Tests, s.decideUnit(ss, u))
+			ss.sr.Tests = append(ss.sr.Tests, s.decideUnit(ss, u, envKey, reason))
 		}
 		ss.sr.All = allSelected(ss.sr)
 	}
 	s.noteOversizedTrees()
+}
+
+// envInputFallback reports the first external revision the suite cannot compare
+// with every test's last run. A git diff cannot attest to an external revision.
+func (ss *suiteSel) envInputFallback(mode Mode) (key, reason string) {
+	if mode == ModeAll || len(ss.units) == 0 {
+		return "", ""
+	}
+	for _, name := range ss.sr.Suite.EnvInputs {
+		key := depkey.Env(name)
+		value, ok := ss.sr.Suite.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			return key, "is missing or empty"
+		}
+		hash := EnvHash(value, true)
+		for _, u := range ss.units {
+			if u.entry == nil || u.entry.Deps[key] == "" {
+				return key, "has no recorded value for at least one test"
+			}
+			if u.entry.Deps[key] != hash {
+				return key, "differs from the value recorded for at least one test"
+			}
+		}
+	}
+	return "", ""
 }
 
 // noteOversizedTrees notes the directories outside the snapshot that tests depend on
@@ -102,7 +131,7 @@ func (s *selection) findUnrecordedReads() map[string][]string {
 // tests read a file of its suite that changed since Base and that diff mode would find
 // an orphan (findUnrecordedReads); any other in the selection's mode against its entry
 // (see decide).
-func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
+func (s *selection) decideUnit(ss *suiteSel, u *unitSel, envKey, envReason string) *Test {
 	t := &Test{ID: u.id}
 	if u.entry != nil {
 		t.Duration = u.entry.DurationMs
@@ -121,6 +150,13 @@ func (s *selection) decideUnit(ss *suiteSel, u *unitSel) *Test {
 		}
 	} else {
 		decide(t, s.res.Mode, u.entry, deps, ss.hasher, ss.changeSet)
+	}
+	if envKey != "" {
+		t.Selected, t.Reason = true, ReasonChanged
+		t.Detail = "env_inputs " + envKey + " " + envReason
+		if !slices.Contains(t.Changed, envKey) {
+			t.Changed = append(t.Changed, envKey)
+		}
 	}
 	s.runAnyway(t, ss, u)
 	s.reportConfig(t, u.known)

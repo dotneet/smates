@@ -205,6 +205,18 @@ output on stderr). It has every field of [`smates select`](#smates-select), in w
 | `interrupted` | boolean | The run was cancelled (Ctrl-C, SIGTERM or SIGHUP). What did not finish is in `not_run`. |
 | `max_time_reached` | boolean | `--max-time` left out the units in `not_run` (except those of `unmet_requires`). See [Time limit](cli.md#time-limit). |
 | `unmet_requires` | object | Suite → the [`requires`](configuration.md#requires) checks that failed. Their units are in `not_run`. |
+| `timings_ms` | object | Wall-clock milliseconds for the local phases below. |
+
+`timings_ms` contains six integer durations.
+
+| Phase | What it measures |
+|---|---|
+| `discovery` | Repository snapshot, configuration and runner discovery, and project setup. |
+| `state_load` | Loading the local state, including worktree seeding when needed. |
+| `selection` | Dependency analysis, orphan handling, selection and shard assignment. |
+| `execution` | Batch admission and execution, including requirement checks, runner startup, and collection of test results. |
+| `record` | Building the updated state from the results. Zero with `--no-record`. |
+| `state_save` | Updating the repository snapshot and writing the state. Zero with `--no-record`. |
 
 Each entry of `flaky`:
 

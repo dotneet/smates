@@ -119,6 +119,9 @@ type Suite struct {
 	// EnvIgnore and EnvTrack add to the top-level lists for this suite only.
 	EnvIgnore []string `yaml:"env_ignore"`
 	EnvTrack  []string `yaml:"env_track"`
+	// EnvInputs names external revisions that every test of the suite depends on,
+	// even if none reads the corresponding environment variables.
+	EnvInputs []string `yaml:"env_inputs" json:",omitempty"`
 	// Volatile: globs (relative to Root, matched like the tests of a rule) of the test
 	// units that run every time, whatever changed: tests that depend on something
 	// smates cannot track, such as the date.
@@ -756,6 +759,11 @@ func (c *Config) Normalize() error {
 		}
 		if err := checkRequires(s); err != nil {
 			return err
+		}
+		for _, name := range s.EnvInputs {
+			if !envNameRe.MatchString(name) {
+				return fmt.Errorf("suite %q: env_inputs: %q is not a variable name", s.Name, name)
+			}
 		}
 		if Bool(s.TrustBrowserPasses, false) && s.Runner != "vitest" {
 			return fmt.Errorf("suite %q: trust_browser_passes is only supported by the vitest runner", s.Name)

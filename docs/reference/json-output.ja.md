@@ -201,6 +201,18 @@ smates がプログラムやコーディングエージェント向けに出力�
 | `interrupted` | 真偽値 | 実行が中断されました（Ctrl-C、SIGTERM、SIGHUP）。終わらなかったものは `not_run` に入ります。 |
 | `max_time_reached` | 真偽値 | `--max-time` で `not_run` のユニットが外れました（`unmet_requires` の分を除く）。[時間の上限](cli.md#time-limit) を参照してください。 |
 | `unmet_requires` | オブジェクト | スイート → 満たされなかった [`requires`](configuration.md#requires) のチェック。そのユニットは `not_run` に入ります。 |
+| `timings_ms` | オブジェクト | 下表の各工程にかかった時間。単位はミリ秒です。 |
+
+`timings_ms` には次の整数値が入ります。
+
+| 工程 | 計測範囲 |
+|---|---|
+| `discovery` | リポジトリのスナップショット取得、設定とランナーの検出、プロジェクトの準備。 |
+| `state_load` | ローカルのステートの読み込み。必要に応じてワークツリーの初期ステートを用意する時間も含みます。 |
+| `selection` | 依存解析、オーファンの処理、テスト選択、シャード割り当て。 |
+| `execution` | 前提条件の確認、ランナーの起動、テスト実行、結果の収集。 |
+| `record` | 実行結果から更新後のステートを組み立てる時間。`--no-record` では 0。 |
+| `state_save` | リポジトリのスナップショット更新とステートの書き込み。`--no-record` では 0。 |
 
 `flaky` の各要素:
 

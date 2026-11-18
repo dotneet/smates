@@ -77,6 +77,85 @@ func TestSelectEnvChanged(t *testing.T) {
 	}
 }
 
+func TestSelectEnvInputs(t *testing.T) {
+	const name, key = "DB_IMAGE_DIGEST", "$DB_IMAGE_DIGEST"
+	cases := []struct {
+		name, value, want string
+		editState         func(*state.State)
+		unset, override   bool
+	}{
+		{name: "unchanged", value: "revision-a"},
+		{name: "suite override", value: "revision-b", override: true},
+		{name: "changed", value: "revision-b", want: "differs from the value recorded"},
+		{name: "unset", unset: true, want: "is missing or empty"},
+		{name: "empty", want: "is missing or empty"},
+		{name: "blank", value: " \t", want: "is missing or empty"},
+		{name: "one entry predates env_inputs", value: "revision-a", want: "has no recorded value", editState: func(st *state.State) {
+			delete(st.Suites["node"].Tests["test/plain.test.js"].Deps, key)
+		}},
+		{name: "one test was never recorded", value: "revision-a", want: "has no recorded value", editState: func(st *state.State) {
+			delete(st.Suites["node"].Tests, "test/plain.test.js")
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := envFixture(t)
+			f.suites[0].EnvInputs = []string{name}
+			f.cfg.EnvIgnore = []string{"*"} // explicit inputs still apply
+			f.write("other/example.test.js", "1")
+			f.suites = append(f.suites, suite(t, config.Suite{Name: "other", Runner: "node", Root: "other", Tests: []string{"*.test.js"}}))
+			t.Setenv(name, "revision-a")
+			if c.override {
+				f.suites[0].Env = map[string]string{name: "revision-a"}
+			}
+			st := f.record(nil, nil)
+			for id, entry := range st.Suites["node"].Tests {
+				if got := entry.Deps[key]; got != EnvHash("revision-a", true) {
+					t.Errorf("%s: recorded %q, want the hash of the declared input", id, got)
+				}
+			}
+			if c.editState != nil {
+				c.editState(st)
+			}
+			if c.unset {
+				unsetenv(t, name)
+			} else {
+				t.Setenv(name, c.value)
+			}
+			res := f.sel(st, nil)
+			for _, unit := range res.Suites[0].Tests {
+				if c.want == "" {
+					if unit.Selected {
+						t.Errorf("%s: unexpectedly selected: %+v", unit.ID, unit)
+					}
+				} else if !unit.Selected || unit.Via[key] != ViaInput || !strings.Contains(unit.Detail, c.want) {
+					t.Errorf("%s: %+v, want selection because %s %s", unit.ID, unit, key, c.want)
+				}
+			}
+			if d := decisions(res)["other/example.test.js"]; d != "-unaffected" {
+				t.Errorf("other suite: %s, want unaffected", d)
+			}
+			if c.want != "" && (!res.Suites[0].All || !strings.Contains(strings.Join(res.Notes, "\n"), c.want)) {
+				t.Errorf("want whole suite and a note: %+v", res)
+			}
+			if len(res.Changed) != 0 || len(res.Orphans) != 0 {
+				t.Errorf("an external revision is not a changed file: %v %v", res.Changed, res.Orphans)
+			}
+		})
+	}
+}
+
+func TestSelectEnvInputsWithoutState(t *testing.T) {
+	f := envFixture(t)
+	f.suites[0].EnvInputs = []string{"DB_IMAGE_DIGEST"}
+	t.Setenv("DB_IMAGE_DIGEST", "revision-a")
+	repo, base := gitFixture(t, f)
+	res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+	if res.Mode != ModeDiff || !res.Suites[0].All {
+		t.Fatalf("want the whole suite with no recorded value in diff mode: %+v", res)
+	}
+}
+
 func TestSelectEnvIgnore(t *testing.T) {
 	f := envFixture(t)
 	t.Setenv("APP_REGION", "eu")

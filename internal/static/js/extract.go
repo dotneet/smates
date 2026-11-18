@@ -41,6 +41,8 @@ type ref struct {
 	mock bool
 	// erase says whether TypeScript removes the reference before the code runs.
 	erase eraseKind
+	// erasePos is the byte offset of the specifier's contents when erase is set.
+	erasePos int
 	// coarse marks a reference only the coarse scan found (see withCoarse): it may
 	// come from a comment or a string, so it adds dependencies but is not reported
 	// as unresolved.
@@ -121,6 +123,7 @@ func scanCodeSpans(src []byte, jsx bool) ([]ref, [][2]int) {
 		refs = p.appendArg(refs, i)
 		if k := erase[i]; k != eraseNever && len(refs) > n {
 			refs[n].erase = k
+			refs[n].erasePos = p.at(i).s
 		}
 		return refs
 	}
@@ -695,10 +698,18 @@ func scanSFC(src []byte, astro bool) []ref {
 func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 	lower := asciiLower(src)
 	i := 0
+	add := func(found []ref, start int) {
+		for j := range found {
+			if found[j].erase != eraseNever {
+				found[j].erasePos += start
+			}
+		}
+		refs = append(refs, found...)
+	}
 	if astro {
-		if body, end := frontmatter(src); end > 0 {
-			refs = append(refs, scanCode(body, false)...) // TypeScript
-			i = end
+		if start, end := frontmatter(src); end > 0 {
+			add(scanCode(src[start:end], false), start) // TypeScript
+			i = end + len("\n---")
 		}
 	}
 	markup := i
@@ -711,10 +722,10 @@ func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 		if bytes.HasPrefix(src[j:], []byte("<!--")) {
 			end := bytes.Index(src[j+4:], []byte("-->"))
 			if end < 0 {
-				refs = append(refs, scanMarkup(src[markup:j])...)
+				add(scanMarkup(src[markup:j]), markup)
 				return refs, skipped
 			}
-			refs = append(refs, scanMarkup(src[markup:j])...)
+			add(scanMarkup(src[markup:j]), markup)
 			i = j + 4 + end + 3
 			markup = i
 			continue
@@ -729,7 +740,7 @@ func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 			i = j + 1
 			continue
 		}
-		refs = append(refs, scanMarkup(src[markup:j])...)
+		add(scanMarkup(src[markup:j]), markup)
 		tagEnd := tagClose(src, j)
 		attrs := src[j+1+len(name) : tagEnd]
 		if v, ok := attrValue(attrs, "src"); ok && v != "" {
@@ -754,7 +765,7 @@ func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 			lang, _ := attrValue(attrs, "lang")
 			jsx := strings.EqualFold(lang, "jsx") || strings.EqualFold(lang, "tsx")
 			r, spans := scanCodeSpans(src[bodyStart:end], jsx)
-			refs = append(refs, r...)
+			add(r, bodyStart)
 			for _, s := range spans {
 				skipped = append(skipped, [2]int{bodyStart + s[0], bodyStart + s[1]})
 			}
@@ -766,7 +777,7 @@ func scanSFCSpans(src []byte, astro bool) (refs []ref, skipped [][2]int) {
 		markup = i
 	}
 	if markup < len(src) {
-		refs = append(refs, scanMarkup(src[markup:])...)
+		add(scanMarkup(src[markup:]), markup)
 	}
 	return refs, skipped
 }
@@ -802,19 +813,18 @@ func scanMarkup(b []byte) []ref {
 	return refs
 }
 
-// frontmatter returns the body of a leading --- fence and the offset after it.
-func frontmatter(src []byte) ([]byte, int) {
+// frontmatter returns the start and end offsets of the body of a leading --- fence.
+func frontmatter(src []byte) (int, int) {
 	start := len(src) - len(bytes.TrimLeft(src, " \t\r\n\xef\xbb\xbf"))
 	if !bytes.HasPrefix(src[start:], []byte("---")) {
-		return nil, 0
+		return 0, 0
 	}
 	bodyStart := start + 3
 	k := bytes.Index(src[bodyStart:], []byte("\n---"))
 	if k < 0 {
-		return nil, 0
+		return 0, 0
 	}
-	end := bodyStart + k
-	return src[bodyStart:end], end + 4
+	return bodyStart, bodyStart + k
 }
 
 // isTagAt reports whether lower[j:] opens the tag name (lower must be lower-cased).

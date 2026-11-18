@@ -126,6 +126,9 @@ func (s *selection) unitDeps(ss *suiteSel) {
 	for _, f := range inputs {
 		sr.Inputs[f] = true
 	}
+	for _, name := range su.EnvInputs {
+		inputs = append(inputs, depkey.Env(name))
+	}
 	static := config.Bool(su.Static, true) && in.Graph != nil
 	var starts []string
 	if static {

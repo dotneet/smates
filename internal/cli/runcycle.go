@@ -52,6 +52,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			all = true
 		}
 	}
+	selectStart := time.Now()
 	sel, err := p.selectTests(ctx, selectOptions{all: all, base: f.base, noAgent: f.noAgent, orphanScope: hooks.scope(), noOrphans: len(f.onlySpecs) > 0, orphans: f.orphans, adds: f.adds, sharded: f.shardN > 1})
 	if err != nil {
 		return 1, err
@@ -70,10 +71,12 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 		preShard = selectedUnits(sel.res)
 	}
 	applyShard(sel.res, f.shardI, f.shardN, f.shadow)
+	selectTime := time.Since(selectStart)
 	printSelection(p, sel, stderr, f.explain)
 
 	c := &cycle{p: p, f: f, sel: sel, preShard: preShard, stdout: stdout, stderr: stderr, reportOut: reportOut, record: !f.noRecord, self: selfPath(),
 		quiet: f.output == outputFailures, heartbeat: f.heartbeat,
+		timings: runTimings{Discovery: p.discovery.Milliseconds(), StateLoad: p.stateLoad.Milliseconds(), Selection: selectTime.Milliseconds()},
 		results: map[string]*suiteResult{}, unmetWhy: map[string][]string{}, checked: map[string]error{}}
 	// In shadow mode the selection is only evaluated: everything runs. A full run that is
 	// sharded runs only this shard's share (applyShard narrowed the selection), and so
@@ -120,6 +123,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	// last batch, or the recorded hashes would depend on whether an earlier batch failed.
 	c.hasher = p.runHasher(sel.res, start)
 	c.failures = newFailureHints(ctx, p, sel.res, p.runHasher(sel.res, start), f.base, f.noAgent)
+	executeStart := time.Now()
 	for i, b := range batches {
 		if !c.admit(ctx, b, batches[i:]) {
 			continue
@@ -153,6 +157,7 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 			}
 		}
 	}
+	c.timings.Execution = time.Since(executeStart).Milliseconds()
 	if c.interrupted() {
 		// What ran is recorded and reported; the run itself failed.
 		c.worst = max(c.worst, ExitFailed)
@@ -166,11 +171,15 @@ func runCycle(ctx context.Context, f *runFlags, stdout, stderr io.Writer, hooks 
 	// reported after the run's summary so that the test results are not lost.
 	end := c.end()
 	if c.record {
+		recordStart := time.Now()
 		c.recordSuites() // before runRecord: it counts the flakes recording found
 		p.state.AddRun(c.runRecord(elapsed, hooks != nil))
+		saveStart := time.Now()
+		c.timings.Record = saveStart.Sub(recordStart).Milliseconds()
 		if err := c.saveState(); err != nil {
 			end.saveErr = envError{err}
 		}
+		c.timings.StateSave = time.Since(saveStart).Milliseconds()
 	}
 	c.exit = reportedExit(end)
 	if f.report != "" {
@@ -319,6 +328,7 @@ type cycle struct {
 	stderr   io.Writer
 	// reportOut is the real stdout, where --report - writes.
 	reportOut io.Writer
+	timings   runTimings
 	// quiet is --output failures: runner output is buffered per batch and printed only
 	// when the batch fails, and smates logs only the essentials.
 	quiet bool

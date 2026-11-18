@@ -110,6 +110,44 @@ func TestSelectTypeOnlyDiffMode(t *testing.T) {
 	}
 }
 
+func TestSelectTypeAndRuntimeReferencesDiffMode(t *testing.T) {
+	const skipped = "type Identity = <T /* type parameter */>(value: T) => T\n"
+	cases := []struct {
+		name, src string
+		want      string
+	}{
+		{"type declaration only", "import type { Example } from './dependency'", "-unaffected"},
+		{"dynamic import", "import type { Example } from './dependency'\n" + skipped + "import('./dependency')", ReasonDiff},
+		{"side-effect import", "import type { Example } from './dependency'\n" + skipped + "import './dependency'", ReasonDiff},
+		{"value import", "import { type Example } from './dependency'\n" + skipped + "import { value } from './dependency'", ReasonDiff},
+		{"runtime re-export", "export type { Example } from './dependency'\n" + skipped + "export { value } from './dependency'", ReasonDiff},
+		{"require after type import assignment", "import type X = require('./dependency')\n" + skipped + "require('./dependency')", ReasonDiff},
+		{"runtime reference before type declaration", "import('./dependency')\nimport type { Example } from './dependency'", ReasonDiff},
+		{"must keep a coarse-only match", "import type { Example } from './dependency'\n// import('./dependency')", ReasonDiff},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			const test = "web/src/example.test.tsx"
+			f := newFixture(t, map[string]string{
+				test:                    c.src,
+				"web/src/dependency.ts": "export type Example = string; export const value = 1",
+			})
+			f.suites = []*runner.Suite{suite(t, config.Suite{
+				Name: "web", Root: "web", Runner: "vitest", Command: "vitest run", Tests: []string{"src/**/*.test.tsx"},
+			})}
+			repo, base := gitFixture(t, f)
+			f.write("web/src/dependency.ts", "export type Example = string; export const value = 2")
+			res := f.sel(state.New(), func(in *Input) { in.Repo, in.Base = repo, base })
+			if res.Mode != ModeDiff {
+				t.Fatalf("mode %s, want diff", res.Mode)
+			}
+			if got := decisions(res)[test]; got != c.want {
+				t.Errorf("decision %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // TestSelectTypeOnlyThroughProjects: a package whose vitest configuration lists a unit
 // project and a Storybook project (with Tailwind's plugin) still erases type-only
 // imports, as long as smates sees every configuration in full.

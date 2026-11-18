@@ -157,9 +157,15 @@ assert os.environ.get("SMATES_TEST_MODE") != "broken"
 		Orphans  []string                     `json:"orphans"`
 		Results  map[string]map[string]string `json:"results"`
 		Shadow   bool                         `json:"shadow"`
+		Timings  map[string]int64             `json:"timings_ms"`
 	}
 	if err := json.Unmarshal(data, &rep); err != nil {
 		t.Fatal(err)
+	}
+	for _, phase := range []string{"discovery", "state_load", "selection", "execution", "record", "state_save"} {
+		if ms, ok := rep.Timings[phase]; !ok || ms < 0 {
+			t.Errorf("want a nonnegative duration for %s, got %v", phase, rep.Timings)
+		}
 	}
 	sort.Strings(rep.Escapes)
 	// The custom runner has no per-file status: a failing run marks every unit failed by
